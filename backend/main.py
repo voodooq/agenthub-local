@@ -53,8 +53,11 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
         if not path.startswith("/api/"):
             return await call_next(request)
 
-        # 健康检查与 OAuth 回调路由直接放行
-        if path in ("/api/v1/health", "/api/v1/accounts/oauth/callback"):
+        # 健康检查、OAuth 回调以及本地上传附件静态预览直接放行（供 <img> 标签与浏览器无损直接渲染）
+        if (
+            path in ("/api/v1/health", "/api/v1/accounts/oauth/callback")
+            or path.startswith("/api/v1/chat/uploads/")
+        ):
             return await call_next(request)
 
         # 2. 防 DNS 重绑定：Host 只能是 localhost / 127.0.0.1 / backend
@@ -83,8 +86,8 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
                 )
             return Response(content="Forbidden: 仅允许本机客户端读取令牌", status_code=403)
 
-        # 4. 访问令牌校验：X-Access-Token 必须与启动令牌一致
-        token = request.headers.get("x-access-token", "")
+        # 4. 访问令牌校验：X-Access-Token 或 URL query token 必须与启动令牌一致
+        token = request.headers.get("x-access-token", "") or request.query_params.get("token", "")
         if not token or token != settings.access_token:
             return Response(
                 content="Forbidden: X-Access-Token 无效或缺失",

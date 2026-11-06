@@ -52,9 +52,10 @@ async def upload_attachment(file: UploadFile = File(...)):
 
 @router.get("/uploads/{filename}")
 async def get_uploaded_attachment(filename: str):
-    """提供本地上传图片的静态预览服务"""
-    file_path = UPLOADS_DIR / filename
-    if not file_path.exists():
+    """提供本地上传图片的静态预览服务（带防目录穿越安全校验）"""
+    safe_filename = Path(filename).name
+    file_path = UPLOADS_DIR / safe_filename
+    if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="附件不存在")
     return FileResponse(file_path)
 

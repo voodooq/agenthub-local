@@ -273,27 +273,31 @@ async def _build_active_models_response() -> ActiveModelsResponse:
         active_models = [m.model_copy(deep=True) for m in candidates]
         valid_verified_ids = [m.id for m in active_models]
 
-    # 追加用户已启用的自定义多协议大模型供应商 (OpenAI / DeepSeek / Ollama / Anthropic)
+    # 追加用户已启用的第三方自定义大模型供应商 (OpenAI / DeepSeek / Ollama / Anthropic)
     try:
         from ...core.provider_adapter import provider_adapter
         custom_provs = await provider_adapter.get_enabled_providers_for_role("primary")
+        candidate_ids = {m.id for m in candidates}
         existing_ids = {m.id for m in active_models}
         for cp in custom_provs:
-            if cp.get("provider_type") == "google_pool":
+            ptype = cp.get("provider_type")
+            # Google 官方 OAuth、API Key 及算力池账号由官方模型库管理与测试，严禁作为第三方通道重复注入
+            if ptype in ("google_pool", "google_oauth", "gemini_api"):
                 continue
             prov_name = cp.get("name", "Custom API")
             for mid in (cp.get("models") or []):
-                if mid and mid not in existing_ids:
+                # 仅追加非官方候选集合且尚未加入的第三方模型，避免被测为不可用/隐藏的官方模型被复活
+                if mid and mid not in existing_ids and mid not in candidate_ids:
                     active_models.append(
                         ModelMeta(
                             id=mid,
                             name=f"{mid} ({prov_name})",
                             provider=prov_name,
-                            description=f"自定义多协议算力通道 [{prov_name}] ({cp.get('provider_type')})",
+                            description=f"自定义多协议算力通道 [{prov_name}] ({ptype})",
                             badge="自定义 API",
                             has_thinking=False,
                             is_default=False,
-                            supported_auth_types=[cp.get("provider_type", "openai_compat")],
+                            supported_auth_types=[ptype or "openai_compat"],
                         )
                     )
                     existing_ids.add(mid)

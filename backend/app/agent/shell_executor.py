@@ -240,6 +240,13 @@ class LocalShellExecutor:
             wrapped_cmd = f"{command} ; echo \"\n{self._CWD_MARKER}$(pwd)\""
             exec_args = ["/bin/bash", "-c", wrapped_cmd]
 
+        # 强制将当前 Python 虚拟环境的 Scripts 目录与 bin 目录优先注入子进程 PATH，杜绝 WindowsApps 假 Python 劫持
+        child_env = os.environ.copy()
+        venv_scripts = os.path.dirname(sys.executable)
+        child_env["PATH"] = venv_scripts + os.pathsep + child_env.get("PATH", "")
+        child_env["PYTHONIOENCODING"] = "utf-8"
+        child_env["PYTHONUNBUFFERED"] = "1"
+
         def _sync_exec() -> tuple[bytes, bytes, int, bool]:
             proc = subprocess.Popen(
                 exec_args,
@@ -247,6 +254,7 @@ class LocalShellExecutor:
                 stdin=subprocess.DEVNULL,  # 强制关闭标准输入，防交互式挂起
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=child_env,
                 start_new_session=(sys.platform != "win32"),
             )
             if session_id:

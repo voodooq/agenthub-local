@@ -6,8 +6,10 @@
 """
 import asyncio
 import json
+import os
 import re
 import uuid
+from pathlib import Path
 from typing import Any, AsyncGenerator
 
 from ..core.logging_config import logger
@@ -437,6 +439,136 @@ class AgentRuntime:
                         "name": func_name,
                         "command": f"load_skill_detail({skill_name})",
                         "reason": f"读取技能包 {skill_name} 详细指南",
+                        "status": "completed",
+                        "output": tool_output,
+                        "compressed": compressed,
+                    }
+
+                # ── 工具: 物理写入本地文件 (write_local_file - 绝不幻觉) ──
+                elif func_name == "write_local_file":
+                    raw_path = str(args.get("file_path", "")).strip()
+                    file_content = str(args.get("content", ""))
+                    overwrite = bool(args.get("overwrite", True))
+                    current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
+
+                    target_file = Path(raw_path)
+                    if not target_file.is_absolute():
+                        target_file = (current_work_dir / target_file).resolve()
+
+                    rel_display = str(target_file)
+                    try:
+                        rel_display = str(target_file.relative_to(current_work_dir))
+                    except Exception:
+                        pass
+
+                    # 触发前端灰名单审批卡片
+                    yield {
+                        "type": "require_approval",
+                        "call_id": call_id,
+                        "name": func_name,
+                        "command": f"write_file -> {rel_display} ({len(file_content)} 字符)",
+                        "reason": f"在本地磁盘物理创建/更新文件: {rel_display}",
+                        "cwd": str(current_work_dir),
+                    }
+                    approved = await shell_executor.wait_for_user_approval(call_id, timeout=180.0)
+                    await audit_service.log(
+                        event_type="file_write_approval",
+                        actor="user",
+                        detail={"file": str(target_file), "size": len(file_content), "call_id": call_id},
+                        approved=approved,
+                    )
+
+                    if not approved:
+                        tool_output = f"Denied: 用户拒绝了写入文件 `{rel_display}`。"
+                        compressed = f"[用户拒绝写入文件 `{rel_display}`]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"write_file({rel_display})",
+                            "reason": f"写入本地文件 {rel_display}",
+                            "status": "denied",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+                    else:
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"write_file({rel_display})",
+                            "reason": f"真实落盘本地文件 {rel_display}",
+                            "security": "SAFE",
+                        }
+                        try:
+                            if target_file.exists() and not overwrite:
+                                tool_output = f"Error: 文件 `{rel_display}` 已存在且 overwrite=False，取消写入。"
+                                compressed = f"[写入取消: 文件已存在 `{rel_display}`]"
+                            else:
+                                target_file.parent.mkdir(parents=True, exist_ok=True)
+                                target_file.write_text(file_content, encoding="utf-8")
+                                tool_output = (
+                                    f"✅ 成功物理落盘文件: `{target_file}`\n"
+                                    f"文件大小: {len(file_content.encode('utf-8'))} 字节\n"
+                                    f"状态: 真实写入磁盘已验证完成。"
+                                )
+                                compressed = f"[已真实物理落盘文件 `{rel_display}` ({len(file_content)} 字符)]"
+                        except Exception as write_err:
+                            tool_output = f"Error: 写入文件 `{target_file}` 失败: {write_err}"
+                            compressed = f"[写入文件异常: {str(write_err)[:40]}]"
+
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"write_file({rel_display})",
+                            "reason": f"写入本地文件 {rel_display}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                            "cwd": str(current_work_dir),
+                        }
+
+                # ── 工具: 物理读取本地文件 (read_local_file) ──
+                elif func_name == "read_local_file":
+                    raw_path = str(args.get("file_path", "")).strip()
+                    current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
+                    target_file = Path(raw_path)
+                    if not target_file.is_absolute():
+                        target_file = (current_work_dir / target_file).resolve()
+
+                    rel_display = str(target_file)
+                    try:
+                        rel_display = str(target_file.relative_to(current_work_dir))
+                    except Exception:
+                        pass
+
+                    yield {
+                        "type": "tool_start",
+                        "call_id": call_id,
+                        "name": func_name,
+                        "command": f"read_file({rel_display})",
+                        "reason": f"读取本地文件内容: {rel_display}",
+                        "security": "SAFE",
+                    }
+                    if not target_file.exists() or not target_file.is_file():
+                        tool_output = f"Error: 目标文件不存在: `{target_file}`"
+                        compressed = f"[读取失败: 文件不存在 `{rel_display}`]"
+                    else:
+                        try:
+                            content_text = target_file.read_text(encoding="utf-8", errors="replace")
+                            tool_output = content_text
+                            compressed = f"[成功读取文件 `{rel_display}`: 共 {len(content_text)} 字符]"
+                        except Exception as read_err:
+                            tool_output = f"Error: 读取文件失败: {read_err}"
+                            compressed = f"[读取文件异常: {str(read_err)[:40]}]"
+
+                    yield {
+                        "type": "tool_end",
+                        "call_id": call_id,
+                        "name": func_name,
+                        "command": f"read_file({rel_display})",
+                        "reason": f"读取本地文件 {rel_display}",
                         "status": "completed",
                         "output": tool_output,
                         "compressed": compressed,

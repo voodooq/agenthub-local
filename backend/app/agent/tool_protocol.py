@@ -79,6 +79,42 @@ class ToolProtocolAdapter:
                     "required": ["skill_name"],
                 },
             },
+            {
+                "name": "write_local_file",
+                "description": "在用户本地磁盘安全创建或写入文件（自动递归创建父目录）。所有写操作均真实落盘物理文件，拒绝幻觉。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "目标文件相对路径或绝对路径（如 skills/my-skill/SKILL.md 或 src/main.py）",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "要写入的文件完整文本内容",
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "若目标文件已存在是否覆盖（默认 true）",
+                        },
+                    },
+                    "required": ["file_path", "content"],
+                },
+            },
+            {
+                "name": "read_local_file",
+                "description": "安全读取本地磁盘指定文本文件的内容。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "要读取的文件相对路径或绝对路径",
+                        },
+                    },
+                    "required": ["file_path"],
+                },
+            },
         ]
 
     @classmethod

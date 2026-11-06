@@ -323,6 +323,28 @@ class GoogleOAuthService:
             return await self.refresh_access_token(account)
         except Exception as e:
             logger.error(f"静默续期 OAuth 账号 [{account.name}] 失败: {e}")
+            # 智能兜底：若旧 refresh_token 因 Client ID 迁移导致 unauthorized_client，自动从本机 Antigravity Keyring 恢复活性
+            if "unauthorized_client" in str(e):
+                try:
+                    from ..core.oauth_google import google_oauth_manager
+                    host_cred = google_oauth_manager.get_host_keyring_credentials()
+                    if host_cred and host_cred.get("access_token"):
+                        logger.info(f"已自动使用本机 Windows Keyring 凭据为账号 [{account.name}] 恢复活性")
+                        new_acc = host_cred["access_token"]
+                        new_ref = host_cred.get("refresh_token")
+                        account.credentials = new_acc
+                        account.expires_at = now + 3600
+                        if new_ref:
+                            account.refresh_token = new_ref
+                        await AccountRepository.update_oauth_token(
+                            account_id=account.id or 0,
+                            access_token=new_acc,
+                            expires_at=now + 3600,
+                            refresh_token=new_ref or account.refresh_token,
+                        )
+                        return new_acc
+                except Exception as rec_err:
+                    logger.warning(f"从 Keyring 自动恢复账号活性跳过: {rec_err}")
             return token
 
 

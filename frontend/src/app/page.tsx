@@ -15,6 +15,8 @@ import {
   Brain,
   ClipboardList,
   EyeOff,
+  AlertTriangle,
+  CheckCircle2,
 } from 'lucide-react';
 
 import { Sidebar } from '@/components/Sidebar';
@@ -49,6 +51,7 @@ export default function WorkbenchPage() {
   const [messages, setMessages] = useState<Message[]>([]);
   const [inputPrompt, setInputPrompt] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
+  const isStreamingRef = useRef(false);
   const [statusPill, setStatusPill] = useState<StatusPillData | null>(null);
 
   // 当前选中模型及可用模型列表
@@ -113,6 +116,18 @@ export default function WorkbenchPage() {
 
   useEffect(() => {
     scrollToBottom();
+  }, [messages]);
+
+  // 实时捕获当前会话中等待用户确认授权的工具调用（无论页面滚到哪里，始终支持底部直达授权）
+  const pendingApprovalEvent = React.useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role === 'model' && m.tool_events) {
+        const found = m.tool_events.find((ev) => ev.status === 'require_approval');
+        if (found) return found;
+      }
+    }
+    return null;
   }, [messages]);
 
   // 全局 F11 全屏切换快捷键支持
@@ -217,6 +232,11 @@ export default function WorkbenchPage() {
     if (!activeConvId) {
       setMessages([]);
       setWorkingMemory({});
+      return;
+    }
+
+    // 关键防冲刷保护：若当前正在流式接收新会话的消息，绝不能拉取未写完的后端空记录覆盖当前正在渲染的内容！
+    if (isStreamingRef.current) {
       return;
     }
 
@@ -437,6 +457,7 @@ export default function WorkbenchPage() {
     }
 
     setIsStreaming(true);
+    isStreamingRef.current = true;
 
     const tempUserMsg: Message = {
       id: Date.now(),
@@ -500,122 +521,142 @@ export default function WorkbenchPage() {
           .replace(/```xml\s*```/gi, '')
           .trim();
 
+      let sseBuffer = '';
+
+      const handleSseLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed || !trimmed.startsWith('data: ')) return;
+        const rawData = trimmed.slice(6).trim();
+        if (!rawData) return;
+
+        try {
+          const parsed = JSON.parse(rawData);
+          if (parsed.type === 'conv_init') {
+            // 关键：收到会话初始化事件，立即绑定 conversation_id，防止后续生成重复会话并保证继承上下文记忆
+            if (parsed.conversation_id) {
+              setActiveConvId(parsed.conversation_id);
+              fetchConversations();
+            }
+          } else if (parsed.type === 'memory_refs') {
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                last.memory_refs = parsed.memories || [];
+              }
+              return updated;
+            });
+          } else if (parsed.type === 'scratchpad_update') {
+            setWorkingMemory(parsed.working_memory || {});
+          } else if (
+            parsed.type === 'require_approval' ||
+            parsed.type === 'tool_start' ||
+            parsed.type === 'tool_end'
+          ) {
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                const existingEvents = [...(last.tool_events || [])];
+                const idx = existingEvents.findIndex((e) => e.call_id === parsed.call_id);
+                const nextStatus =
+                  parsed.type === 'require_approval'
+                    ? 'require_approval'
+                    : parsed.type === 'tool_start'
+                    ? 'running'
+                    : parsed.status || 'completed';
+
+                const nextItem: ToolExecutionCardItem = {
+                  call_id: parsed.call_id,
+                  name: parsed.name || 'execute_local_command',
+                  command: parsed.command || parsed.name || '',
+                  reason: parsed.reason,
+                  cwd: parsed.cwd,
+                  status: nextStatus,
+                  exit_code: parsed.exit_code,
+                  output: parsed.output,
+                  compressed: parsed.compressed,
+                };
+
+                if (idx >= 0) {
+                  existingEvents[idx] = { ...existingEvents[idx], ...nextItem };
+                } else {
+                  existingEvents.push(nextItem);
+                }
+                last.tool_events = existingEvents;
+                last.content = stripXmlToolTags(partialText);
+              }
+              return updated;
+            });
+            // 收到需要审批时立即自动平滑滚动到底部聚焦卡片
+            if (parsed.type === 'require_approval') {
+              setTimeout(scrollToBottom, 50);
+            }
+          } else if (parsed.type === 'chunk') {
+            partialText += parsed.content;
+            executorAccount = parsed.account || executorAccount;
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                last.content = stripXmlToolTags(partialText);
+                last.executed_by_account = executorAccount;
+                last.is_relayed = isRelayed;
+              }
+              return updated;
+            });
+          } else if (parsed.type === 'done') {
+            if (parsed.full_content) {
+              partialText = parsed.full_content;
+            }
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                last.content = stripXmlToolTags(partialText);
+              }
+              return updated;
+            });
+          } else if (parsed.type === 'tool_request') {
+            setIsActionDrawerOpen(true);
+            setPendingActionCount((prev) => prev + 1);
+          } else if (parsed.type === 'relay') {
+            isRelayed = true;
+            executorAccount = parsed.account;
+          } else if (parsed.type === 'error') {
+            partialText += '\n\n' + parsed.content;
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                last.content = partialText;
+              }
+              return updated;
+            });
+          }
+        } catch (err) {
+          console.warn('SSE 解析异常:', err, rawData);
+        }
+      };
+
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
 
         const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
+        sseBuffer += chunk;
+        const lines = sseBuffer.split('\n');
+        // 将未换行闭合的末尾字符放回 buffer 等待下个分包
+        sseBuffer = lines.pop() || '';
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const rawData = line.slice(6).trim();
-            if (!rawData) continue;
-
-            try {
-              const parsed = JSON.parse(rawData);
-              if (parsed.type === 'conv_init') {
-                // 关键：收到会话初始化事件，立即绑定 conversation_id，防止后续生成重复会话并保证继承上下文记忆
-                if (parsed.conversation_id) {
-                  setActiveConvId(parsed.conversation_id);
-                  fetchConversations();
-                }
-              } else if (parsed.type === 'memory_refs') {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last && last.role === 'model') {
-                    last.memory_refs = parsed.memories || [];
-                  }
-                  return updated;
-                });
-              } else if (parsed.type === 'scratchpad_update') {
-                setWorkingMemory(parsed.working_memory || {});
-              } else if (
-                parsed.type === 'require_approval' ||
-                parsed.type === 'tool_start' ||
-                parsed.type === 'tool_end'
-              ) {
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last && last.role === 'model') {
-                    const existingEvents = [...(last.tool_events || [])];
-                    const idx = existingEvents.findIndex((e) => e.call_id === parsed.call_id);
-                    const nextStatus =
-                      parsed.type === 'require_approval'
-                        ? 'require_approval'
-                        : parsed.type === 'tool_start'
-                        ? 'running'
-                        : parsed.status || 'completed';
-
-                    const nextItem: ToolExecutionCardItem = {
-                      call_id: parsed.call_id,
-                      name: parsed.name || 'execute_local_command',
-                      command: parsed.command || parsed.name || '',
-                      reason: parsed.reason,
-                      cwd: parsed.cwd,
-                      status: nextStatus,
-                      exit_code: parsed.exit_code,
-                      output: parsed.output,
-                      compressed: parsed.compressed,
-                    };
-
-                    if (idx >= 0) {
-                      existingEvents[idx] = { ...existingEvents[idx], ...nextItem };
-                    } else {
-                      existingEvents.push(nextItem);
-                    }
-                    last.tool_events = existingEvents;
-                    last.content = stripXmlToolTags(partialText);
-                  }
-                  return updated;
-                });
-              } else if (parsed.type === 'chunk') {
-                partialText += parsed.content;
-                executorAccount = parsed.account || executorAccount;
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last && last.role === 'model') {
-                    last.content = stripXmlToolTags(partialText);
-                    last.executed_by_account = executorAccount;
-                    last.is_relayed = isRelayed;
-                  }
-                  return updated;
-                });
-              } else if (parsed.type === 'done') {
-                if (parsed.full_content) {
-                  partialText = parsed.full_content;
-                }
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last && last.role === 'model') {
-                    last.content = stripXmlToolTags(partialText);
-                  }
-                  return updated;
-                });
-              } else if (parsed.type === 'tool_request') {
-                setIsActionDrawerOpen(true);
-                setPendingActionCount((prev) => prev + 1);
-              } else if (parsed.type === 'relay') {
-                isRelayed = true;
-                executorAccount = parsed.account;
-              } else if (parsed.type === 'error') {
-                partialText += '\n\n' + parsed.content;
-                setMessages((prev) => {
-                  const updated = [...prev];
-                  const last = updated[updated.length - 1];
-                  if (last && last.role === 'model') {
-                    last.content = partialText;
-                  }
-                  return updated;
-                });
-              }
-            } catch (err) {}
-          }
+          handleSseLine(line);
         }
+      }
+
+      // 处理流结束时 buffer 中残留的最后一行数据
+      if (sseBuffer.trim()) {
+        handleSseLine(sseBuffer);
       }
 
       fetchConversations();
@@ -624,6 +665,7 @@ export default function WorkbenchPage() {
       console.error(err);
     } finally {
       setIsStreaming(false);
+      isStreamingRef.current = false;
     }
   };
 
@@ -745,15 +787,21 @@ export default function WorkbenchPage() {
     handleSendMessage(toneMap[tone]);
   };
 
-  const handleOpenCanvas = (code: string, language: string) => {
+  const handleOpenCanvas = (code: string, language: string, customTitle?: string) => {
     let canvasType: 'html' | 'mermaid' | 'code' | 'image' = 'code';
-    let title = 'Artifacts 预览';
+    let title = customTitle || 'Artifacts 预览';
     if (language === 'mermaid') {
       canvasType = 'mermaid';
-      title = 'Mermaid 架构拓扑预览';
+      title = customTitle || 'Mermaid 架构拓扑预览';
     } else if (language === 'image') {
       canvasType = 'image';
-      title = '生成的 AI 画作原图预览';
+      if (customTitle) {
+        title = customTitle;
+      } else if (code.includes('pollinations.ai') || code.includes('model=turbo')) {
+        title = '生成的 AI 画作原图预览';
+      } else {
+        title = '图片大图预览';
+      }
     }
     setCanvasState({
       isOpen: true,
@@ -918,14 +966,6 @@ export default function WorkbenchPage() {
                     <ThinkingBlock content={msg.thinking} isStreaming={isStreaming && index === messages.length - 1} />
                   )}
 
-                  {/* 内联终端工具调用与安全审批卡片 */}
-                  {!isUser && msg.tool_events && msg.tool_events.length > 0 && (
-                    <InlineToolCard
-                      events={msg.tool_events}
-                      onApprove={handleApproveToolCall}
-                    />
-                  )}
-
                   {/* 长期记忆引用溯源微提示 */}
                   {!isUser && msg.memory_refs && msg.memory_refs.length > 0 && (
                     <button
@@ -939,97 +979,114 @@ export default function WorkbenchPage() {
                     </button>
                   )}
 
-                  {/* 消息正文主体：大字体、高清晰度、长 Token 强制自然折行 */}
-                  <div
-                    className={`max-w-[88%] md:max-w-[82%] rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] break-anywhere shadow-sm ${
-                      isUser
-                        ? 'bg-blue-600 text-white rounded-tr-none shadow-blue-500/10'
-                        : 'bg-surface-card text-foreground rounded-tl-none border border-border'
-                    }`}
-                  >
-                    {isUser ? (
-                      <div className="text-white break-anywhere">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={{
-                            img({ node, src, alt, ...props }: any) {
-                              if (!src) return null;
-                              return (
-                                <span className="block my-2">
-                                  <img
-                                    src={src}
-                                    alt={alt || '附带图片'}
-                                    className="rounded-xl border border-white/20 max-w-full h-auto object-cover max-h-[360px] cursor-pointer shadow-md hover:opacity-95 transition-opacity"
-                                    onClick={() => handleOpenCanvas(src, 'image')}
-                                    {...props}
-                                  />
-                                  {alt && (
-                                    <span className="block text-[11px] text-blue-100 mt-1 opacity-80">
-                                      {alt}
-                                    </span>
-                                  )}
-                                </span>
-                              );
-                            },
-                          }}
-                        >
-                          {msg.content}
-                        </ReactMarkdown>
-                      </div>
-                    ) : (
-                      <div className="prose dark:prose-invert max-w-none text-foreground break-anywhere">
-                        <ReactMarkdown
-                          remarkPlugins={[remarkGfm]}
-                          components={{
-                            code({ node, inline, className, children, ...props }: any) {
-                              const match = /language-(\w+)/.exec(className || '');
-                              const language = match ? match[1] : '';
-                              const codeString = String(children).replace(/\n$/, '');
-
-                              if (!inline && language) {
+                  {/* 消息正文主体：大字体、高清晰度、长 Token 强制自然折行（过滤纯工具执行时的无内容空白卡片） */}
+                  {(isUser || msg.content || (isStreaming && index === messages.length - 1 && (!msg.tool_events || msg.tool_events.length === 0))) && (
+                    <div
+                      className={`max-w-[88%] md:max-w-[82%] rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] break-anywhere shadow-sm ${
+                        isUser
+                          ? 'bg-blue-600 text-white rounded-tr-none shadow-blue-500/10'
+                          : 'bg-surface-card text-foreground rounded-tl-none border border-border'
+                      }`}
+                    >
+                      {isUser ? (
+                        <div className="text-white break-anywhere">
+                          <ReactMarkdown
+                            remarkPlugins={[remarkGfm]}
+                            components={{
+                              img({ node, src, alt, ...props }: any) {
+                                if (!src) return null;
                                 return (
-                                  <CodeBlock
-                                    code={codeString}
-                                    language={language}
-                                    onSendToCanvas={(c: string, l: string) => handleOpenCanvas(c, l)}
-                                  />
+                                  <span className="block my-2">
+                                    <img
+                                      src={src}
+                                      alt={alt || '附带图片'}
+                                      className="rounded-xl border border-white/20 max-w-full h-auto object-cover max-h-[360px] cursor-pointer shadow-md hover:opacity-95 transition-opacity"
+                                      onClick={() => handleOpenCanvas(src, 'image', alt ? `附带图片: ${alt}` : '上传图片原图预览')}
+                                      {...props}
+                                    />
+                                    {alt && (
+                                      <span className="block text-[11px] text-blue-100 mt-1 opacity-80">
+                                        {alt}
+                                      </span>
+                                    )}
+                                  </span>
                                 );
-                              }
-                              return (
-                                <code
-                                  className="bg-surface-200 border border-border px-1.5 py-0.5 rounded font-mono text-[12px] text-amber-600 dark:text-amber-300 break-anywhere"
-                                  {...props}
-                                >
-                                  {children}
-                                </code>
-                              );
-                            },
-                            img({ node, src, alt, ...props }: any) {
-                              if (!src) return null;
-                              return (
-                                <span className="block my-3">
-                                  <img
-                                    src={src}
-                                    alt={alt || 'AI 生成插画'}
-                                    className="rounded-xl border border-border shadow-lg max-w-full h-auto object-cover max-h-[512px] hover:scale-[1.01] transition-transform cursor-pointer"
-                                    onClick={() => handleOpenCanvas(src, 'image')}
-                                    {...props}
-                                  />
-                                  {alt && (
-                                    <span className="block text-xs text-muted-foreground mt-1 italic text-center">
-                                      {alt}（点击可在右侧画布全屏查看大图）
+                              },
+                            }}
+                          >
+                            {msg.content}
+                          </ReactMarkdown>
+                        </div>
+                      ) : (
+                        <div className="prose dark:prose-invert max-w-none text-foreground break-anywhere">
+                          {msg.content ? (
+                            <ReactMarkdown
+                              remarkPlugins={[remarkGfm]}
+                              components={{
+                                code({ node, inline, className, children, ...props }: any) {
+                                  const match = /language-(\w+)/.exec(className || '');
+                                  const language = match ? match[1] : '';
+                                  const codeString = String(children).replace(/\n$/, '');
+
+                                  if (!inline && language) {
+                                    return (
+                                      <CodeBlock
+                                        code={codeString}
+                                        language={language}
+                                        onSendToCanvas={(c: string, l: string) => handleOpenCanvas(c, l)}
+                                      />
+                                    );
+                                  }
+                                  return (
+                                    <code
+                                      className="bg-surface-200 border border-border px-1.5 py-0.5 rounded font-mono text-[12px] text-amber-600 dark:text-amber-300 break-anywhere"
+                                      {...props}
+                                    >
+                                      {children}
+                                    </code>
+                                  );
+                                },
+                                img({ node, src, alt, ...props }: any) {
+                                  if (!src) return null;
+                                  return (
+                                    <span className="block my-3">
+                                      <img
+                                        src={src}
+                                        alt={alt || 'AI 生成插画'}
+                                        className="rounded-xl border border-border shadow-lg max-w-full h-auto object-cover max-h-[512px] hover:scale-[1.01] transition-transform cursor-pointer"
+                                        onClick={() => handleOpenCanvas(src, 'image', alt ? `画作预览: ${alt}` : '生成的 AI 画作原图预览')}
+                                        {...props}
+                                      />
+                                      {alt && (
+                                        <span className="block text-xs text-muted-foreground mt-1 italic text-center">
+                                          {alt}（点击可在右侧画布全屏查看大图）
+                                        </span>
+                                      )}
                                     </span>
-                                  )}
-                                </span>
-                              );
-                            },
-                          }}
-                        >
-                          {msg.content || (isStreaming && index === messages.length - 1 ? '正在深度思考生成中...' : '')}
-                        </ReactMarkdown>
-                      </div>
-                    )}
-                  </div>
+                                  );
+                                },
+                              }}
+                            >
+                              {msg.content}
+                            </ReactMarkdown>
+                          ) : (
+                            <div className="flex items-center space-x-2 text-muted-foreground text-xs py-1">
+                              <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping shrink-0" />
+                              <span>正在调度本地执行与安全分析...</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 内联终端工具调用与安全审批卡片：跟随在思考过程与正文输出之后的最底端，避免被上方长内容顶走 */}
+                  {!isUser && msg.tool_events && msg.tool_events.length > 0 && (
+                    <InlineToolCard
+                      events={msg.tool_events}
+                      onApprove={handleApproveToolCall}
+                    />
+                  )}
 
                   {/* AI 消息交互底栏 */}
                   {!isUser && msg.content && (
@@ -1095,6 +1152,62 @@ export default function WorkbenchPage() {
               </div>
             )}
 
+            {/* 全局常驻待审批卡片：无论页面向上滚动多远或思考过程多长，始终可在输入框正上方一键点击允许或拒绝 */}
+            {pendingApprovalEvent && (
+              <div className="px-4 py-3 mb-2 rounded-2xl bg-amber-500/15 border border-amber-500/40 backdrop-blur-md flex items-center justify-between shadow-lg animate-fade-in text-xs">
+                <div className="flex items-center space-x-2.5 min-w-0 mr-3">
+                  <div className="w-7 h-7 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center shrink-0">
+                    <AlertTriangle className="w-4 h-4 text-amber-500 animate-pulse" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="font-bold text-amber-600 dark:text-amber-400">
+                      安全沙箱拦截：Agent 申请执行操作
+                    </div>
+                    <div className="text-[11px] text-foreground/80 font-mono truncate max-w-[420px]">
+                      {pendingApprovalEvent.command}
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center space-x-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => handleApproveToolCall(pendingApprovalEvent.call_id, false)}
+                    className="px-3 py-1.5 rounded-xl bg-surface-200 hover:bg-rose-500/20 text-muted-foreground hover:text-rose-500 font-semibold text-xs transition-colors"
+                  >
+                    拒绝
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleApproveToolCall(pendingApprovalEvent.call_id, true)}
+                    className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95 flex items-center space-x-1"
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 mr-1" />
+                    <span>允许执行</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* 智能防幻觉意图嗅探胶囊：当检测到写盘需求却处于非 Agent 模式时一键引导 */}
+            {sceneMode !== 'agent' && /(写入|创建文件|新建文件|写到|落盘|保存到|在.*创建|新建.*目录|写代码到|写入代码)/.test(inputPrompt) && (
+              <div className="px-3.5 py-1.5 mb-2 rounded-xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-between text-xs text-blue-600 dark:text-blue-300 animate-fade-in shadow-sm">
+                <div className="flex items-center space-x-2">
+                  <Sparkles className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                  <span>
+                    检测到本地写盘需求：当前处于<strong>「{sceneMode === 'chat' ? '标准对话' : '极速单次'}」</strong>模式（仅生成文本代码）。
+                    需 AI 真实操作磁盘物理创建文件？
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => handleSwitchSceneMode('agent')}
+                  className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-[11px] shrink-0 ml-2 shadow-sm transition-all"
+                >
+                  一键切换为 Agent 任务
+                </button>
+              </div>
+            )}
+
             {/* 核心输入大胶囊 */}
             <div className="rounded-2xl border border-border/80 bg-surface-card p-2 focus-within:border-accent focus-within:shadow-md transition-all shadow-sm">
               <textarea
@@ -1127,9 +1240,9 @@ export default function WorkbenchPage() {
                   <div className="flex items-center rounded-lg bg-surface-100 border border-border/70 p-0.5 text-[11px]">
                     {(
                       [
-                        { id: 'oneshot', label: '极速单次', tip: '零历史负担，纯单次极速问答' },
-                        { id: 'chat', label: '标准对话', tip: '滑动窗口多轮上下文 + 长期记忆' },
-                        { id: 'agent', label: 'Agent任务', tip: '完整三层记忆 + 受控终端与工具闭环' },
+                        { id: 'oneshot', label: '极速单次', tip: '极速单次：纯单次文本解答，零历史负担，不调用本地工具' },
+                        { id: 'chat', label: '标准对话', tip: '标准对话：多轮上下文问答，不操作修改本地磁盘文件' },
+                        { id: 'agent', label: 'Agent任务', tip: 'Agent任务：全功能模式，具备终端执行与本地代码真实物理写盘能力' },
                       ] as const
                     ).map((m) => (
                       <button

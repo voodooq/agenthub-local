@@ -8,6 +8,7 @@ MCP 客户端常驻连接池管理器 (MCPManager)
 import asyncio
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -40,7 +41,15 @@ class _StdioMCPConnection:
 
         merged_env = os.environ.copy()
         merged_env.update(self.custom_env)
-        cmd_list = [self.command] + self.args
+
+        # 在 Windows 上优先解析完整可执行路径（如 npx -> npx.cmd），防 WinError 2
+        resolved_cmd = shutil.which(self.command) or self.command
+        cmd_list = [resolved_cmd] + self.args
+
+        # 若目标命令不存在，优雅跳过并提示
+        if not shutil.which(self.command):
+            logger.info(f"MCP Server [{self.name}] 依赖命令 `{self.command}` 未在系统 PATH 中找到，已跳过拉起。")
+            return False
 
         try:
             self.proc = subprocess.Popen(
@@ -49,6 +58,7 @@ class _StdioMCPConnection:
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 env=merged_env,
+                shell=(sys.platform == "win32" and resolved_cmd.lower().endswith((".cmd", ".bat"))),
                 start_new_session=(sys.platform != "win32"),
             )
             # 发送 MCP 标准 initialize 握手

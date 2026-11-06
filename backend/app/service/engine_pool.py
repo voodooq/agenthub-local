@@ -219,11 +219,14 @@ class EnginePoolService:
                                 yield {"type": "chunk", "content": ch, "account": prov_name}
 
                         if full_custom_text:
+                            custom_tokens = max(1, (len(user_prompt) + len(full_custom_text)) // 3)
+                            # 若自定义通道名称匹配本地账号库，原子累加调用频次与 Token
+                            await AccountRepository.record_usage(prov_name, tokens_spent=custom_tokens)
                             yield {
                                 "type": "done",
                                 "full_content": full_custom_text,
                                 "account": prov_name,
-                                "usage": {"totalTokenCount": len(full_custom_text) // 3},
+                                "usage": {"totalTokenCount": custom_tokens},
                             }
                             return
                     except GeminiAPIException as g_err:
@@ -321,7 +324,7 @@ class EnginePoolService:
                         full_response_text += chunk
                         yield {"type": "chunk", "content": chunk, "account": account.name}
 
-                    total_tokens = len(full_response_text) // 3
+                    total_tokens = max(1, (len(user_prompt) + len(full_response_text)) // 3)
                     latency_ms = (time.time() - start_time) * 1000
                     tracker.record_request_end(latency_ms, tokens=total_tokens)
                     await AccountRepository.record_usage(account.name, tokens_spent=total_tokens)

@@ -381,14 +381,23 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
   };
 
   useEffect(() => {
-    if (isOpen) {
+    if (!isOpen) return;
+    fetchAccounts();
+    fetchProviders();
+    fetchOAuthConfig();
+    if (activeTab === 'audit') {
+      fetchAuditLogs();
+    }
+
+    // 弹窗开启时，每 3 秒自动轮询一次最新的调用频次与 Token 消耗指标
+    const pollTimer = setInterval(() => {
       fetchAccounts();
-      fetchProviders();
-      fetchOAuthConfig();
       if (activeTab === 'audit') {
         fetchAuditLogs();
       }
-    }
+    }, 3000);
+
+    return () => clearInterval(pollTimer);
   }, [isOpen, activeTab]);
 
   // 监听浏览器跨窗口 OAuth 回调 postMessage
@@ -724,6 +733,8 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
       });
     } finally {
       setTestingId(null);
+      await fetchAccounts();
+      if (onRefresh) onRefresh();
     }
   };
 
@@ -852,18 +863,33 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   </div>
                 </div>
 
-                {data?.summary && data.summary.total_accounts > 0 && (
+                <div className="flex items-center space-x-2 shrink-0">
                   <button
                     type="button"
-                    onClick={handlePurgeAll}
-                    disabled={purgingAll}
-                    className="ml-4 px-3 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs shrink-0 flex items-center space-x-1.5 transition-colors"
-                    title="彻底清空算力池所有账号，并物理删除宿主机上的所有隔离文件与缓存"
+                    onClick={() => {
+                      fetchAccounts();
+                      fetchProviders();
+                    }}
+                    className="ml-4 px-3 py-1 rounded-lg bg-surface-200/80 hover:bg-surface-300 text-slate-300 border border-border/80 text-xs shrink-0 flex items-center space-x-1.5 transition-colors"
+                    title="立即从本地 SQLite 数据库刷新各账号今日调用量与消耗 Token"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
-                    <span>{purgingAll ? '正在清空...' : '彻底清空算力池'}</span>
+                    <RefreshCw className="w-3.5 h-3.5 text-blue-400" />
+                    <span>刷新用量统计</span>
                   </button>
-                )}
+
+                  {data?.summary && data.summary.total_accounts > 0 && (
+                    <button
+                      type="button"
+                      onClick={handlePurgeAll}
+                      disabled={purgingAll}
+                      className="px-3 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs shrink-0 flex items-center space-x-1.5 transition-colors"
+                      title="彻底清空算力池所有账号，并物理删除宿主机上的所有隔离文件与缓存"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>{purgingAll ? '正在清空...' : '彻底清空算力池'}</span>
+                    </button>
+                  )}
+                </div>
               </div>
 
               {/* 顶部统计卡片 */}
@@ -882,9 +908,12 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     <div className="text-2xl font-bold text-amber-400 mt-1">{data.summary.cooldown_accounts}</div>
                   </div>
                   <div className="p-4 rounded-xl bg-surface-200/40 border border-border/80">
-                    <div className="text-xs text-blue-400 font-medium">今日累计调用 (估算)</div>
+                    <div className="text-xs text-blue-400 font-medium">今日累计调用 / 消耗</div>
                     <div className="text-2xl font-bold text-blue-400 mt-1">
                       {data.summary.total_today_used} <span className="text-xs font-normal text-slate-400">次</span>
+                    </div>
+                    <div className="text-[11px] text-slate-400 mt-1">
+                      总消耗: <strong className="text-slate-200">{(data.summary.total_tokens_all || 0).toLocaleString()}</strong> Token
                     </div>
                   </div>
                 </div>
