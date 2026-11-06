@@ -143,12 +143,14 @@ class SkillLoader:
         fallback_slug = Path(filename_hint or "imported-skill").stem
         if fallback_slug.upper() == "SKILL":
             fallback_slug = "imported-skill"
-        meta = self._parse_frontmatter(raw_md, fallback_slug)
-        # 若正文中无标题但有 # 标题，提取首行标题辅助命名
-        if meta["name"] == fallback_slug:
+        meta = self._parse_frontmatter(raw_md, "")
+        # 若 Frontmatter 中未指定 name，则尝试提取首行 # 标题或使用文件名兜底
+        if not meta["name"]:
             m_title = re.search(r"^#\s+(.+)$", raw_md, re.MULTILINE)
             if m_title:
                 meta["name"] = m_title.group(1).strip()[:40]
+            else:
+                meta["name"] = fallback_slug
         return self.save_skill(
             name=meta["name"],
             description=meta["description"],
