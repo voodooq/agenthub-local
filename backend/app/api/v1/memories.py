@@ -1,0 +1,306 @@
+"""
+长期记忆画像管理 (Memory Hub)、多协议算力池 (LLM Providers)、四步跨平台导入向导 (Unified Importer) 与 Skill/MCP 扩展 API
+"""
+from typing import Any
+from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from pydantic import BaseModel, Field
+
+from ...memory.long_term import long_term_memory
+from ...extensions.skill_loader import skill_loader
+from ...extensions.mcp_manager import mcp_manager
+from ...core.provider_adapter import provider_adapter
+from ...core.oauth_google import google_oauth_manager
+from ...service.unified_importer import unified_importer
+
+router = APIRouter(tags=["Memories, Providers & Importer"])
+
+
+# ──────────────────── 1. 长期记忆画像 (Memory Hub) ────────────────────
+
+class MemoryCreateRequest(BaseModel):
+    """手动新增一条长期记忆"""
+    category: str = Field(default="preference", description="分类: env_info | preference | rule")
+    content: str = Field(..., description="记忆内容描述")
+    confidence: float = Field(default=0.90, ge=0.1, le=1.0, description="初始置信度权重")
+    is_pinned: int | bool = Field(default=0, description="是否置顶豁免30天衰减")
+    source: str = Field(default="manual", description="记忆来源标记")
+
+
+class MemoryUpdateRequest(BaseModel):
+    """修改已有长期记忆"""
+    category: str | None = None
+    content: str | None = None
+    confidence: float | None = Field(default=None, ge=0.1, le=1.0)
+    is_pinned: int | bool | None = None
+
+
+class MCPConfigUpdateRequest(BaseModel):
+    """更新 mcp_servers.json 配置"""
+    mcpServers: dict[str, Any] = Field(default_factory=dict)
+
+
+@router.get("/memories")
+async def list_long_term_memories():
+    """获取所有长期记忆画像列表"""
+    items = await long_term_memory.list_all()
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/memories")
+async def create_long_term_memory(req: MemoryCreateRequest):
+    """新增一条长期记忆画像"""
+    if not req.content.strip():
+        raise HTTPException(status_code=400, detail="记忆内容不能为空")
+    item = await long_term_memory.add_memory(
+        category=req.category,
+        content=req.content,
+        confidence=req.confidence,
+        source=req.source,
+        is_pinned=req.is_pinned,
+    )
+    return item
+
+
+@router.patch("/memories/{mem_id}")
+async def update_long_term_memory(mem_id: str, req: MemoryUpdateRequest):
+    """修改单条长期记忆内容、分类、置信度或置顶状态"""
+    ok = await long_term_memory.update_memory(
+        mem_id=mem_id,
+        content=req.content,
+        category=req.category,
+        confidence=req.confidence,
+        is_pinned=req.is_pinned,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="未找到该条长期记忆")
+    return {"status": "ok", "id": mem_id}
+
+
+@router.delete("/memories/{mem_id}")
+async def delete_long_term_memory(mem_id: str):
+    """删除单条长期记忆"""
+    ok = await long_term_memory.delete_memory(mem_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="未找到该条长期记忆")
+    return {"status": "ok", "id": mem_id}
+
+
+@router.delete("/memories")
+async def clear_all_long_term_memories():
+    """一键清空所有长期记忆画像"""
+    deleted = await long_term_memory.clear_all()
+    return {"status": "ok", "deleted_count": deleted}
+
+
+# ──────────────────── 2. Skill & MCP 扩展总线 ────────────────────
+
+@router.get("/extensions/skills")
+async def list_installed_skills():
+    """获取本地 skills/ 目录下已挂载的所有按需专业技能包"""
+    skills = skill_loader.list_skills()
+    return {"skills": skills, "total": len(skills)}
+
+
+@router.get("/extensions/mcp")
+async def get_mcp_servers_config():
+    """获取本地 mcp_servers.json 配置"""
+    return mcp_manager.load_config()
+
+
+@router.put("/extensions/mcp")
+async def update_mcp_servers_config(req: MCPConfigUpdateRequest):
+    """保存并更新 mcp_servers.json 配置"""
+    mcp_manager.save_config({"mcpServers": req.mcpServers})
+    return {"status": "ok", "mcpServers": req.mcpServers}
+
+
+# ──────────────────── 3. 多协议大模型供应商池 (LLM Providers) ────────────────────
+
+class LLMProviderSaveRequest(BaseModel):
+    """保存或更新大模型供应商请求"""
+    id: str | None = None
+    name: str = Field(..., description="供应商显示名称，如 DeepSeek 官方 / 本地 Ollama")
+    provider_type: str = Field(default="openai_compat", description="google_pool | gemini_api | openai_compat | anthropic")
+    base_url: str = Field(default="", description="API Base URL，如 https://api.deepseek.com/v1 或 http://127.0.0.1:11434/v1")
+    api_key: str = Field(default="", description="API Key（留空则在更新时保持原加密 Key）")
+    models: list[str] = Field(default_factory=list, description="该通道支持的模型列表")
+    role_binding: str = Field(default="both", description="primary(主力推理) | light(后台记忆提炼) | both(通用)")
+    tool_call_mode: str = Field(default="auto", description="auto | native | xml_prompt")
+    priority: int = Field(default=5, description="调度优先级（越小越优先）")
+    is_enabled: int = Field(default=1, description="1=启用, 0=禁用")
+
+
+class GoogleOAuthInitRequest(BaseModel):
+    """发起 Google OAuth PKCE 授权会话请求"""
+    remark: str | None = Field(default=None, description="账号备注名称，如 用户A的主力账号")
+    role_binding: str = Field(default="both", description="primary | light | both")
+    priority: int = Field(default=5, description="故障转移优先级（数字越小越优先）")
+
+
+class GoogleOAuthManualCallbackRequest(BaseModel):
+    """手动粘贴 Google OAuth 回调 URL 完成授权"""
+    callback_url: str = Field(..., description="浏览器地址栏完整回调 URL (含 code 和 state)")
+    state: str | None = Field(default=None, description="可选兜底 state")
+    remark: str | None = Field(default=None, description="账号备注名称")
+    role_binding: str = Field(default="both", description="primary | light | both")
+    priority: int = Field(default=5, description="故障转移优先级")
+
+
+@router.get("/providers")
+@router.get("/providers/list")
+async def list_llm_providers():
+    """获取所有已配置的大模型供应商列表（含冷却状态与令牌标识）"""
+    items = await provider_adapter.list_providers()
+    return {"providers": items, "total": len(items)}
+
+
+@router.post("/providers/oauth/init")
+async def init_google_oauth_provider(req: GoogleOAuthInitRequest | None = None):
+    """
+    发起 Google 官方桌面端 PKCE OAuth 授权：
+    生成带 code_challenge 的授权链接，同时尝试在本地 1455 端口启动自动回环监听。
+    """
+    r = req or GoogleOAuthInitRequest()
+    return await google_oauth_manager.create_auth_session(
+        remark=r.remark,
+        role_binding=r.role_binding,
+        priority=r.priority,
+    )
+
+
+@router.post("/providers/oauth/manual-callback")
+async def manual_callback_google_oauth_provider(req: GoogleOAuthManualCallbackRequest):
+    """
+    模式 B 手动粘贴完整回调 URL 兜底：
+    从 URL 中提取 code 与 state，完成 PKCE 令牌换取并加密写入 llm_providers 表。
+    """
+    try:
+        saved = await google_oauth_manager.complete_by_manual_url(
+            callback_url=req.callback_url,
+            fallback_state=req.state,
+            remark=req.remark,
+            role_binding=req.role_binding,
+            priority=req.priority,
+        )
+        return {"status": "ok", "provider": saved}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Google OAuth 令牌换取失败: {str(e)}")
+
+
+@router.post("/providers")
+async def save_llm_provider(req: LLMProviderSaveRequest):
+    """新增或更新一个大模型供应商配置"""
+    saved = await provider_adapter.save_provider(
+        name=req.name,
+        provider_type=req.provider_type,
+        base_url=req.base_url,
+        api_key=req.api_key,
+        models=req.models,
+        role_binding=req.role_binding,
+        tool_call_mode=req.tool_call_mode,
+        priority=req.priority,
+        is_enabled=req.is_enabled,
+        provider_id=req.id,
+    )
+    return saved
+
+
+@router.delete("/providers/{provider_id}")
+async def delete_llm_provider(provider_id: str):
+    """删除自定义大模型供应商"""
+    ok = await provider_adapter.delete_provider(provider_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail="内置算力池不可删除或供应商不存在")
+    return {"status": "ok", "id": provider_id}
+
+
+# ──────────────────── 4. 四步可视化跨平台数据导入向导 (Unified Importer) ────────────────────
+
+class ImportTextParseRequest(BaseModel):
+    """直接粘贴 Markdown 规则或 JSON 文本进行解析嗅探"""
+    filename: str = Field(default="GEMINI.md")
+    content: str = Field(..., description="粘贴的规则或 JSON 文本")
+    source_hint: str | None = Field(default=None)
+
+
+class ImportCommitRequest(BaseModel):
+    """Step 4 确认执行事务导入"""
+    preview_id: str = Field(..., description="Step 1 解析返回的 preview_id")
+    import_conversations: bool = Field(default=True, description="是否导入历史聊天记录并建立 FTS5 索引")
+    import_memories: bool = Field(default=True, description="是否导入显式规则与长期记忆")
+    extract_implicit: bool = Field(default=False, description="是否从历史长对话中自动挖掘隐性偏好")
+    memory_resolutions: list[dict[str, Any]] | None = Field(
+        default=None,
+        description="用户在 Step 3 冲突比对表中指定的处理动作列表 [{'temp_id': '...', 'resolution': 'add|overwrite|keep_both|skip'}]",
+    )
+
+
+@router.post("/import/parse")
+async def parse_import_file(
+    file: UploadFile = File(...),
+    source_hint: str | None = Form(default=None),
+):
+    """
+    Step 1 上传文件嗅探与 Step 3 冲突比对预览：
+    支持拖拽上传 .zip / .json / .md / .cursorrules 文件。
+    """
+    try:
+        raw_bytes = await file.read()
+        result = await unified_importer.parse_and_stage(
+            filename=file.filename or "import_bundle.json",
+            raw_bytes=raw_bytes,
+            source_hint=source_hint,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"解析导入文件失败: {str(e)}")
+
+
+@router.post("/import/parse-text")
+async def parse_import_raw_text(req: ImportTextParseRequest):
+    """Step 1 支持直接粘贴 GEMINI.md / .cursorrules 或 JSON 文本进行解析预览"""
+    if not req.content.strip():
+        raise HTTPException(status_code=400, detail="粘贴内容不能为空")
+    try:
+        result = await unified_importer.parse_and_stage(
+            filename=req.filename,
+            raw_bytes=req.content.encode("utf-8"),
+            source_hint=req.source_hint,
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"解析粘贴文本失败: {str(e)}")
+
+
+@router.post("/import/commit")
+async def commit_staged_import(req: ImportCommitRequest):
+    """Step 4 开启 BEGIN IMMEDIATE 批量事务落盘并生成可回滚批次记录"""
+    try:
+        res = await unified_importer.commit_import(
+            preview_id=req.preview_id,
+            import_conversations=req.import_conversations,
+            import_memories=req.import_memories,
+            extract_implicit=req.extract_implicit,
+            memory_resolutions=req.memory_resolutions,
+        )
+        return res
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"事务导入失败: {str(e)}")
+
+
+@router.get("/import/batches")
+async def list_import_batches():
+    """获取所有历史导入批次（供一键撤回某次导入使用）"""
+    batches = await unified_importer.list_batches()
+    return {"batches": batches, "total": len(batches)}
+
+
+@router.delete("/import/batches/{batch_id}")
+async def rollback_import_batch(batch_id: str):
+    """一键按批次撤回导入的所有会话、FTS5索引与长期记忆"""
+    stats = await unified_importer.rollback_batch(batch_id)
+    return {"status": "ok", "batch_id": batch_id, **stats}
