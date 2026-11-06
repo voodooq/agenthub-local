@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Brain,
@@ -13,10 +13,17 @@ import {
   Puzzle,
   ShieldCheck,
   Pin,
-  Cpu,
+  Layers,
+  Save,
+  RefreshCw,
+  Upload,
+  CheckCircle2,
+  AlertTriangle,
+  Eye,
 } from 'lucide-react';
 import { LongTermMemoryItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
+import { PersonaPreset, SkillItem } from './SettingsModal';
 
 interface MemoryHubModalProps {
   isOpen: boolean;
@@ -29,23 +36,8 @@ interface SkillInfo {
   name: string;
   description: string;
   path: string;
-}
-
-interface LLMProviderItem {
-  id: string;
-  name: string;
-  provider_type: 'google_pool' | 'google_oauth' | 'gemini_api' | 'openai_compat' | 'anthropic' | 'ollama';
-  base_url: string;
-  api_key_masked: string;
-  has_api_key: boolean;
-  has_refresh_token?: boolean;
-  cooldown_until?: string | null;
-  is_cooling_down?: boolean;
-  models: string[];
-  role_binding: 'primary' | 'light' | 'both';
-  tool_call_mode: 'auto' | 'native' | 'xml_prompt';
-  priority: number;
-  is_enabled: number;
+  content?: string;
+  is_builtin?: boolean;
 }
 
 const CATEGORY_MAP: Record<string, { label: string; colorClass: string }> = {
@@ -64,7 +56,7 @@ const CATEGORY_MAP: Record<string, { label: string; colorClass: string }> = {
 };
 
 export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHubModalProps) {
-  const [activeTab, setActiveTab] = useState<'memories' | 'providers' | 'extensions'>('memories');
+  const [activeTab, setActiveTab] = useState<'memories' | 'personality' | 'extensions'>('memories');
   const [memories, setMemories] = useState<LongTermMemoryItem[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -78,26 +70,50 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState('');
 
-  // 多源大模型供应商状态
-  const [providers, setProviders] = useState<LLMProviderItem[]>([]);
-  const [isAddingProvider, setIsAddingProvider] = useState(false);
-  const [provName, setProvName] = useState('');
-  const [provType, setProvType] = useState<'openai_compat' | 'gemini_api' | 'anthropic' | 'ollama'>('openai_compat');
-  const [provBaseUrl, setProvBaseUrl] = useState('https://api.deepseek.com/v1');
-  const [provApiKey, setProvApiKey] = useState('');
-  const [provModels, setProvModels] = useState('deepseek-chat, deepseek-reasoner');
-  const [provRole, setProvRole] = useState<'both' | 'primary' | 'light'>('both');
+  // ──────────── 回复性格与 SKILL 定制状态 ────────────
+  const [presets, setPresets] = useState<PersonaPreset[]>([]);
+  const [promptSkills, setPromptSkills] = useState<SkillItem[]>([]);
+  const [customPromptSkills, setCustomPromptSkills] = useState<SkillItem[]>([]);
+  const [selectedPersonaId, setSelectedPersonaId] = useState<string>('architect');
+  const [activeSkillIds, setActiveSkillIds] = useState<string[]>(['deep_debugger']);
+  const [customPrompt, setCustomPrompt] = useState<string>('');
+  const [savingPersonality, setSavingPersonality] = useState(false);
+  const [personalityFeedback, setPersonalityFeedback] = useState<{
+    success: boolean;
+    msg: string;
+  } | null>(null);
 
-  // Google OAuth PKCE 授权状态
-  const [oauthState, setOauthState] = useState<string>('');
-  const [oauthRemark, setOauthRemark] = useState<string>('');
-  const [oauthManualUrl, setOauthManualUrl] = useState<string>('');
-  const [oauthMessage, setOauthMessage] = useState<string>('');
-  const [oauthSubmitting, setOauthSubmitting] = useState<boolean>(false);
+  // 新增自定义叠加增强技能 (SKILL Prompt) 表单
+  const [showAddPromptSkill, setShowAddPromptSkill] = useState(false);
+  const [newPromptSkillName, setNewPromptSkillName] = useState('');
+  const [newPromptSkillIcon, setNewPromptSkillIcon] = useState('⚡');
+  const [newPromptSkillDesc, setNewPromptSkillDesc] = useState('');
+  const [newPromptSkillFragment, setNewPromptSkillFragment] = useState('');
 
-  // Skills & MCP
+  // ──────────── Workspace Skills & MCP 扩展总线状态 ────────────
   const [skills, setSkills] = useState<SkillInfo[]>([]);
   const [mcpServers, setMcpServers] = useState<Record<string, any>>({});
+  const [extFeedback, setExtFeedback] = useState<{ success: boolean; msg: string } | null>(null);
+  const [previewSkillId, setPreviewSkillId] = useState<string | null>(null);
+
+  // 新建/导入 Workspace Skill 状态
+  const [skillFormMode, setSkillFormMode] = useState<'none' | 'create' | 'import'>('none');
+  const [newSkillName, setNewSkillName] = useState('');
+  const [newSkillDesc, setNewSkillDesc] = useState('');
+  const [newSkillContent, setNewSkillContent] = useState('');
+  const [importSkillText, setImportSkillText] = useState('');
+  const [importSkillFilename, setImportSkillFilename] = useState('SKILL.md');
+  const skillFileInputRef = useRef<HTMLInputElement>(null);
+
+  // 新建/导入 MCP Server 状态
+  const [mcpFormMode, setMcpFormMode] = useState<'none' | 'create' | 'import'>('none');
+  const [newMcpName, setNewMcpName] = useState('');
+  const [newMcpCommand, setNewMcpCommand] = useState('npx');
+  const [newMcpArgs, setNewMcpArgs] = useState('-y @modelcontextprotocol/server-filesystem .');
+  const [newMcpDesc, setNewMcpDesc] = useState('');
+  const [newMcpEnvJson, setNewMcpEnvJson] = useState('');
+  const [importMcpJson, setImportMcpJson] = useState('');
+  const mcpFileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchMemories = async () => {
     setLoading(true);
@@ -114,14 +130,23 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
     }
   };
 
-  const fetchProviders = async () => {
+  const fetchPersonalitySettings = async () => {
     try {
-      const res = await apiFetch('/api/v1/providers');
+      const res = await apiFetch('/api/v1/settings/personality');
       if (res.ok) {
         const data = await res.json();
-        setProviders(data.providers || []);
+        setPresets(data.presets || []);
+        setPromptSkills(data.skills || []);
+        if (data.config) {
+          setSelectedPersonaId(data.config.selected_persona_id || 'architect');
+          setActiveSkillIds(data.config.active_skill_ids || ['deep_debugger']);
+          setCustomPrompt(data.config.custom_system_prompt || '');
+          setCustomPromptSkills(data.config.custom_skills || []);
+        }
       }
-    } catch (e) {}
+    } catch (e) {
+      console.warn('拉取性格设置失败:', e);
+    }
   };
 
   const fetchExtensions = async () => {
@@ -144,13 +169,16 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
   useEffect(() => {
     if (isOpen) {
       fetchMemories();
-      fetchProviders();
+      fetchPersonalitySettings();
       fetchExtensions();
+      setPersonalityFeedback(null);
+      setExtFeedback(null);
     }
   }, [isOpen]);
 
   if (!isOpen) return null;
 
+  // ──────────── 长期记忆操作 ────────────
   const handleAddMemory = async () => {
     if (!newContent.trim()) return;
     try {
@@ -222,129 +250,246 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
     } catch (e) {}
   };
 
-  const handleInitGoogleOAuth = async () => {
-    setOauthMessage('');
+  // ──────────── 回复性格与 SKILL 定制操作 ────────────
+  const handleTogglePromptSkill = (skillId: string) => {
+    setActiveSkillIds((prev) =>
+      prev.includes(skillId) ? prev.filter((id) => id !== skillId) : [...prev, skillId]
+    );
+  };
+
+  const handleAddCustomPromptSkill = () => {
+    if (!newPromptSkillName.trim() || !newPromptSkillFragment.trim()) return;
+    const newId = `custom_${Date.now()}`;
+    const newItem: SkillItem = {
+      id: newId,
+      name: newPromptSkillName.trim(),
+      icon: newPromptSkillIcon.trim() || '⚡',
+      description: newPromptSkillDesc.trim() || '用户自定义叠加增强技能',
+      prompt_fragment: newPromptSkillFragment.trim(),
+      is_default: false,
+    };
+    const nextCustom = [...customPromptSkills, newItem];
+    setCustomPromptSkills(nextCustom);
+    setPromptSkills((prev) => [...prev, newItem]);
+    setActiveSkillIds((prev) => [...prev, newId]);
+    setNewPromptSkillName('');
+    setNewPromptSkillDesc('');
+    setNewPromptSkillFragment('');
+    setShowAddPromptSkill(false);
+  };
+
+  const handleDeleteCustomPromptSkill = (e: React.MouseEvent, skillId: string) => {
+    e.stopPropagation();
+    setCustomPromptSkills((prev) => prev.filter((s) => s.id !== skillId));
+    setPromptSkills((prev) => prev.filter((s) => s.id !== skillId));
+    setActiveSkillIds((prev) => prev.filter((id) => id !== skillId));
+  };
+
+  const handleSavePersonality = async () => {
     try {
-      const res = await apiFetch('/api/v1/providers/oauth/init', {
+      setSavingPersonality(true);
+      setPersonalityFeedback(null);
+      const payload = {
+        selected_persona_id: selectedPersonaId,
+        active_skill_ids: activeSkillIds,
+        custom_system_prompt: customPrompt,
+        custom_skills: customPromptSkills,
+      };
+
+      const res = await apiFetch('/api/v1/settings/personality', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          remark: oauthRemark.trim() || undefined,
-          role_binding: 'both',
-          priority: 3,
-        }),
+        body: JSON.stringify(payload),
       });
+
+      const resData = await res.json();
       if (res.ok) {
-        const data = await res.json();
-        setOauthState(data.state || '');
-        if (data.auth_url) {
-          window.open(data.auth_url, '_blank', 'noopener,noreferrer');
-          setOauthMessage(
-            data.local_server_listening
-              ? '已打开 Google 授权页（本地 1455 端口已开启自动回环监听，也可在下方手动粘贴回调 URL）'
-              : '已打开 Google 授权页，授权完成后请复制浏览器地址栏的完整 localhost:1455 回调 URL 粘贴至下方'
-          );
-        }
+        localStorage.setItem('geminihub_personality_config', JSON.stringify(payload));
+        setPersonalityFeedback({
+          success: true,
+          msg: '回复性格与叠加 SKILL 设置已成功保存并立即生效！',
+        });
+        onProvidersChanged?.();
+      } else {
+        setPersonalityFeedback({ success: false, msg: resData.detail || '保存失败' });
       }
-    } catch (e) {
-      setOauthMessage('发起 Google OAuth 授权失败，请检查后端服务状态');
+    } catch (e: any) {
+      setPersonalityFeedback({ success: false, msg: e.message || '网络异常' });
+    } finally {
+      setSavingPersonality(false);
     }
   };
 
-  const handleCompleteManualOAuth = async () => {
-    if (!oauthManualUrl.trim()) return;
-    setOauthSubmitting(true);
-    setOauthMessage('');
+  // ──────────── Workspace Skills 与 MCP 操作 ────────────
+  const handleCreateSkill = async () => {
+    if (!newSkillName.trim() || !newSkillContent.trim()) {
+      setExtFeedback({ success: false, msg: '请填写技能名称与 Markdown 规程正文' });
+      return;
+    }
     try {
-      const res = await apiFetch('/api/v1/providers/oauth/manual-callback', {
+      const res = await apiFetch('/api/v1/extensions/skills', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          callback_url: oauthManualUrl.trim(),
-          state: oauthState || undefined,
-          remark: oauthRemark.trim() || undefined,
-          role_binding: 'both',
-          priority: 3,
+          name: newSkillName.trim(),
+          description: newSkillDesc.trim() || '自定义按需专业技能包',
+          content: newSkillContent.trim(),
         }),
       });
       const data = await res.json();
       if (res.ok) {
-        setOauthManualUrl('');
-        setOauthRemark('');
-        setOauthMessage(`✅ 授权成功！账号已加密存入算力池：${data.provider?.name || 'Google OAuth'}`);
-        fetchProviders();
-        onProvidersChanged?.();
+        setSkills(data.skills || []);
+        setNewSkillName('');
+        setNewSkillDesc('');
+        setNewSkillContent('');
+        setSkillFormMode('none');
+        setExtFeedback({ success: true, msg: `✅ 已成功创建并挂载技能包：${data.skill?.name}` });
       } else {
-        setOauthMessage(`❌ 授权失败：${data.detail || '请检查回调 URL 是否完整'}`);
+        setExtFeedback({ success: false, msg: data.detail || '创建 Skill 失败' });
       }
-    } catch (e) {
-      setOauthMessage('❌ 网络异常，无法完成令牌换取');
-    } finally {
-      setOauthSubmitting(false);
+    } catch (e: any) {
+      setExtFeedback({ success: false, msg: e.message || '网络异常' });
     }
   };
 
-  const handleSaveProvider = async () => {
-    if (!provName.trim()) return;
-    const modelList = provModels
-      .split(',')
+  const handleImportSkill = async () => {
+    if (!importSkillText.trim()) {
+      setExtFeedback({ success: false, msg: '请先选择 SKILL.md 文件或粘贴技能 Markdown 内容' });
+      return;
+    }
+    try {
+      const res = await apiFetch('/api/v1/extensions/skills/import', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: importSkillFilename,
+          content: importSkillText.trim(),
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSkills(data.skills || []);
+        setImportSkillText('');
+        setSkillFormMode('none');
+        setExtFeedback({ success: true, msg: `✅ 成功导入并挂载技能包：${data.skill?.name}` });
+      } else {
+        setExtFeedback({ success: false, msg: data.detail || '导入 Skill 失败' });
+      }
+    } catch (e: any) {
+      setExtFeedback({ success: false, msg: e.message || '导入失败' });
+    }
+  };
+
+  const handleSkillFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setImportSkillFilename(file.name);
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      setImportSkillText(String(ev.target?.result || ''));
+    };
+    reader.readAsText(file, 'utf-8');
+    e.target.value = '';
+  };
+
+  const handleDeleteSkill = async (skillId: string) => {
+    try {
+      const res = await apiFetch(`/api/v1/extensions/skills/${encodeURIComponent(skillId)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setSkills(data.skills || []);
+        setExtFeedback({ success: true, msg: `已卸载技能包 [${skillId}]` });
+      }
+    } catch (e) {}
+  };
+
+  const handleAddMcpServer = async () => {
+    if (!newMcpName.trim() || !newMcpCommand.trim()) {
+      setExtFeedback({ success: false, msg: 'MCP 服务名称与启动命令不能为空' });
+      return;
+    }
+    let parsedEnv: Record<string, string> = {};
+    if (newMcpEnvJson.trim()) {
+      try {
+        parsedEnv = JSON.parse(newMcpEnvJson.trim());
+      } catch {
+        setExtFeedback({ success: false, msg: '环境变量必须为合法的 JSON 对象（如 {"GITHUB_TOKEN": "xxx"}）' });
+        return;
+      }
+    }
+    const argsList = newMcpArgs
+      .split(/\s+/)
       .map((s) => s.trim())
       .filter(Boolean);
+
     try {
-      const res = await apiFetch('/api/v1/providers', {
+      const res = await apiFetch('/api/v1/extensions/mcp/server', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          name: provName.trim(),
-          provider_type: provType,
-          base_url: provBaseUrl.trim(),
-          api_key: provApiKey.trim(),
-          models: modelList,
-          role_binding: provRole,
-          priority: 2,
-          is_enabled: 1,
+          name: newMcpName.trim(),
+          command: newMcpCommand.trim(),
+          args: argsList,
+          env: parsedEnv,
+          description: newMcpDesc.trim(),
+          enabled: true,
         }),
       });
+      const data = await res.json();
       if (res.ok) {
-        setProvName('');
-        setProvApiKey('');
-        setIsAddingProvider(false);
-        fetchProviders();
-        onProvidersChanged?.();
+        setMcpServers(data.mcpServers || {});
+        setNewMcpName('');
+        setNewMcpDesc('');
+        setNewMcpEnvJson('');
+        setMcpFormMode('none');
+        setExtFeedback({ success: true, msg: `✅ 已成功添加并启用 MCP 服务：${newMcpName.trim()}` });
+      } else {
+        setExtFeedback({ success: false, msg: data.detail || '添加 MCP 服务失败' });
       }
-    } catch (e) {}
+    } catch (e: any) {
+      setExtFeedback({ success: false, msg: e.message || '网络异常' });
+    }
   };
 
-  const handleToggleProvider = async (p: LLMProviderItem) => {
+  const handleImportMcpJson = async () => {
+    if (!importMcpJson.trim()) {
+      setExtFeedback({ success: false, msg: '请选择 JSON 配置文件或粘贴 MCP JSON 配置' });
+      return;
+    }
     try {
-      await apiFetch('/api/v1/providers', {
+      const res = await apiFetch('/api/v1/extensions/mcp/import', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          id: p.id,
-          name: p.name,
-          provider_type: p.provider_type,
-          base_url: p.base_url,
-          models: p.models,
-          role_binding: p.role_binding,
-          tool_call_mode: p.tool_call_mode,
-          priority: p.priority,
-          is_enabled: p.is_enabled ? 0 : 1,
-        }),
+        body: JSON.stringify({ raw_json: importMcpJson.trim() }),
       });
-      fetchProviders();
-      onProvidersChanged?.();
-    } catch (e) {}
+      const data = await res.json();
+      if (res.ok) {
+        setMcpServers(data.mcpServers || {});
+        setImportMcpJson('');
+        setMcpFormMode('none');
+        setExtFeedback({
+          success: true,
+          msg: `✅ 成功导入 ${data.imported_count || 1} 个 MCP 服务节点！`,
+        });
+      } else {
+        setExtFeedback({ success: false, msg: data.detail || '导入 MCP 配置失败' });
+      }
+    } catch (e: any) {
+      setExtFeedback({ success: false, msg: e.message || '网络异常' });
+    }
   };
 
-  const handleDeleteProvider = async (id: string) => {
-    try {
-      const res = await apiFetch(`/api/v1/providers/${id}`, { method: 'DELETE' });
-      if (res.ok) {
-        fetchProviders();
-        onProvidersChanged?.();
-      }
-    } catch (e) {}
+  const handleMcpFileSelected = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      setImportMcpJson(String(ev.target?.result || ''));
+    };
+    reader.readAsText(file, 'utf-8');
+    e.target.value = '';
   };
 
   const handleToggleMcpServer = async (srvName: string) => {
@@ -365,9 +510,24 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
     } catch (e) {}
   };
 
+  const handleDeleteMcpServer = async (srvName: string) => {
+    try {
+      const res = await apiFetch(`/api/v1/extensions/mcp/${encodeURIComponent(srvName)}`, {
+        method: 'DELETE',
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setMcpServers(data.mcpServers || {});
+        setExtFeedback({ success: true, msg: `已移除 MCP 服务 [${srvName}]` });
+      }
+    } catch (e) {}
+  };
+
+  const customSkillIdSet = new Set(customPromptSkills.map((s) => s.id));
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fade-in">
-      <div className="w-full max-w-3xl max-h-[86vh] flex flex-col rounded-2xl bg-surface-card border border-border shadow-2xl overflow-hidden">
+      <div className="w-full max-w-3xl max-h-[88vh] flex flex-col rounded-2xl bg-surface-card border border-border shadow-2xl overflow-hidden text-foreground">
         {/* 顶部标题栏 */}
         <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-surface-100/60">
           <div className="flex items-center space-x-2.5">
@@ -376,10 +536,10 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
             </div>
             <div>
               <h2 className="text-[15px] font-bold text-foreground">
-                记忆中枢 · 多源算力池 · Skill/MCP 扩展总线
+                记忆中枢 · 回复性格 · Skill 与 MCP 扩展总线
               </h2>
               <p className="text-xs text-muted-foreground">
-                SQLite FTS5 长期记忆画像 · OpenAI/DeepSeek/Ollama 多协议接入 · 按需技能与常驻 MCP
+                SQLite FTS5 长期记忆画像 · 回复性格与 SKILL 定制 · 支持自定义 Skill 与 MCP 服务添加及导入
               </p>
             </div>
           </div>
@@ -408,15 +568,15 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
             </button>
 
             <button
-              onClick={() => setActiveTab('providers')}
+              onClick={() => setActiveTab('personality')}
               className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
-                activeTab === 'providers'
+                activeTab === 'personality'
                   ? 'border-blue-500 text-blue-600 dark:text-blue-400'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
               }`}
             >
-              <Cpu className="w-3.5 h-3.5" />
-              <span>多源大模型 API ({providers.length})</span>
+              <Brain className="w-3.5 h-3.5 text-purple-500" />
+              <span>回复性格与 SKILL 定制</span>
             </button>
 
             <button
@@ -427,8 +587,8 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                   : 'border-transparent text-muted-foreground hover:text-foreground'
               }`}
             >
-              <Puzzle className="w-3.5 h-3.5" />
-              <span>Skill 技能包与 MCP ({skills.length})</span>
+              <Puzzle className="w-3.5 h-3.5 text-teal-500" />
+              <span>Skill 技能包与 MCP ({skills.length + Object.keys(mcpServers).length})</span>
             </button>
           </div>
 
@@ -452,25 +612,13 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
               )}
             </div>
           )}
-
-          {activeTab === 'providers' && (
-            <div className="pb-2">
-              <button
-                onClick={() => setIsAddingProvider(!isAddingProvider)}
-                className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>接入自定义 API / Ollama</span>
-              </button>
-            </div>
-          )}
         </div>
 
         {/* 内容区 */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-4">
+        <div className="flex-1 overflow-y-auto p-6 space-y-5">
+          {/* ────────── TAB 1: 长期记忆画像 ────────── */}
           {activeTab === 'memories' && (
             <>
-              {/* 手动新增长期记忆表单 */}
               {isAdding && (
                 <div className="p-4 rounded-xl bg-surface-100 border border-border space-y-3">
                   <div className="flex items-center justify-between flex-wrap gap-2">
@@ -523,7 +671,6 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                 </div>
               )}
 
-              {/* 记忆列表 */}
               {loading ? (
                 <div className="text-center py-12 text-xs text-muted-foreground">
                   正在加载本地长期记忆库...
@@ -626,302 +773,649 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
             </>
           )}
 
-          {/* ────────── TAB 2: 多协议大模型供应商池 ────────── */}
-          {activeTab === 'providers' && (
-            <div className="space-y-4">
-              {/* Google 官方桌面端 PKCE OAuth 授权接入卡片 */}
-              <div className="p-4 rounded-xl bg-blue-500/5 border border-blue-500/25 space-y-3 text-xs">
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <div>
-                    <h4 className="font-bold text-foreground flex items-center space-x-1.5">
-                      <span>🔐 Google 官方 OAuth 算力池接入（免 GCP 项目门槛 · 标准 PKCE 安全流）</span>
-                    </h4>
-                    <p className="text-[11px] text-muted-foreground mt-0.5">
-                      支持本机 1455 端口自动回环捕获 + 远程/指纹浏览器手动粘贴回调 URL 双模兜底，遇到 429 自动 &lt;50ms 冷却接力
-                    </p>
-                  </div>
-                  <div className="flex items-center space-x-2">
-                    <input
-                      type="text"
-                      value={oauthRemark}
-                      onChange={(e) => setOauthRemark(e.target.value)}
-                      placeholder="账号备注(可选，如主力号A)"
-                      className="px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-foreground outline-none w-40"
-                    />
-                    <button
-                      type="button"
-                      onClick={handleInitGoogleOAuth}
-                      className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-semibold transition-colors shrink-0"
-                    >
-                      🔗 发起 Google OAuth 授权
-                    </button>
-                  </div>
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  <input
-                    type="text"
-                    value={oauthManualUrl}
-                    onChange={(e) => setOauthManualUrl(e.target.value)}
-                    placeholder="模式 B 手动兜底：粘贴浏览器跳转后的完整回调 URL (http://localhost:1455/auth/callback?code=...&state=...)"
-                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-foreground font-mono outline-none"
-                  />
-                  <button
-                    type="button"
-                    disabled={oauthSubmitting || !oauthManualUrl.trim()}
-                    onClick={handleCompleteManualOAuth}
-                    className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold transition-colors shrink-0"
-                  >
-                    {oauthSubmitting ? '换取令牌中...' : '确认完成授权'}
-                  </button>
-                </div>
-
-                {oauthMessage && (
-                  <p className="text-[11px] text-blue-600 dark:text-blue-400 font-medium">
-                    {oauthMessage}
-                  </p>
-                )}
-              </div>
-
-              {isAddingProvider && (
-                <div className="p-4 rounded-xl bg-surface-100 border border-border space-y-3 text-xs">
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                    <div>
-                      <label className="block text-muted-foreground mb-1">通道名称</label>
-                      <input
-                        type="text"
-                        value={provName}
-                        onChange={(e) => setProvName(e.target.value)}
-                        placeholder="如 DeepSeek 官方 / 本地 Ollama"
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-foreground outline-none"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-muted-foreground mb-1">协议类型</label>
-                      <select
-                        value={provType}
-                        onChange={(e) => {
-                          const v = e.target.value as any;
-                          setProvType(v);
-                          if (v === 'openai_compat') setProvBaseUrl('https://api.deepseek.com/v1');
-                          if (v === 'ollama') {
-                            setProvBaseUrl('http://127.0.0.1:11434/v1');
-                            setProvModels('qwen2.5-coder:14b, deepseek-r1:14b');
-                          }
-                          if (v === 'anthropic') setProvBaseUrl('https://api.anthropic.com/v1');
-                          if (v === 'gemini_api') setProvBaseUrl('');
-                        }}
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-foreground outline-none"
-                      >
-                        <option value="openai_compat">OpenAI 兼容 (DeepSeek / 硅基流动 / OpenAI)</option>
-                        <option value="ollama">Ollama 本地模型 (http://127.0.0.1:11434/v1)</option>
-                        <option value="gemini_api">Google AI Studio API Key</option>
-                        <option value="anthropic">Anthropic Claude API</option>
-                      </select>
-                    </div>
-                    <div>
-                      <label className="block text-muted-foreground mb-1">角色绑定策略</label>
-                      <select
-                        value={provRole}
-                        onChange={(e) => setProvRole(e.target.value as any)}
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-foreground outline-none"
-                      >
-                        <option value="both">🧠+⚡ 主力推理 + 后台记忆通用</option>
-                        <option value="primary">🧠 仅作为主力对话与 Agent 推理</option>
-                        <option value="light">⚡ 仅作为后台轻量记忆提炼与摘要</option>
-                      </select>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-muted-foreground mb-1">
-                        Base URL (本地 Ollama 填 http://127.0.0.1:11434/v1)
-                      </label>
-                      <input
-                        type="text"
-                        value={provBaseUrl}
-                        onChange={(e) => setProvBaseUrl(e.target.value)}
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-foreground font-mono outline-none"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-muted-foreground mb-1">
-                        API Key (本地加密存储，Ollama 可留空)
-                      </label>
-                      <input
-                        type="password"
-                        value={provApiKey}
-                        onChange={(e) => setProvApiKey(e.target.value)}
-                        placeholder="sk-..."
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-foreground font-mono outline-none"
-                      />
-                    </div>
-                  </div>
-
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex-1">
-                      <label className="block text-muted-foreground mb-1">
-                        可用模型 ID 列表（逗号分隔，保存后将直接出现在聊天模型选择器中）
-                      </label>
-                      <input
-                        type="text"
-                        value={provModels}
-                        onChange={(e) => setProvModels(e.target.value)}
-                        placeholder="deepseek-chat, qwen2.5-coder:14b, gpt-4o"
-                        className="w-full px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-foreground font-mono outline-none"
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleSaveProvider}
-                      className="mt-5 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-semibold shrink-0"
-                    >
-                      保存通道
-                    </button>
-                  </div>
+          {/* ────────── TAB 2: 回复性格与 SKILL 定制 ────────── */}
+          {activeTab === 'personality' && (
+            <div className="space-y-6">
+              {personalityFeedback && (
+                <div
+                  className={`p-3.5 rounded-xl text-xs flex items-center space-x-2 animate-fadeIn ${
+                    personalityFeedback.success
+                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border border-emerald-500/20'
+                      : 'bg-rose-500/10 text-rose-600 dark:text-rose-300 border border-rose-500/20'
+                  }`}
+                >
+                  {personalityFeedback.success ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                  ) : (
+                    <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
+                  )}
+                  <span>{personalityFeedback.msg}</span>
                 </div>
               )}
 
-              <div className="space-y-2.5">
-                {providers.map((p) => (
-                  <div
-                    key={p.id}
-                    className="p-3.5 rounded-xl bg-surface-100/70 border border-border flex items-center justify-between gap-3"
-                  >
-                    <div className="space-y-1 min-w-0">
-                      <div className="flex items-center flex-wrap gap-2">
-                        <span className="text-xs font-bold text-foreground">{p.name}</span>
-                        <span className="px-2 py-0.5 rounded bg-blue-500/15 text-blue-600 dark:text-blue-400 text-[10px] font-mono">
-                          {p.provider_type}
-                        </span>
-                        <span className="px-2 py-0.5 rounded bg-purple-500/15 text-purple-600 dark:text-purple-400 text-[10px]">
-                          职责: {p.role_binding === 'primary' ? '主力推理' : p.role_binding === 'light' ? '后台轻量提炼' : '主力+后台通用'}
-                        </span>
-                        {p.is_cooling_down ? (
-                          <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-600 dark:text-amber-400 text-[10px] font-semibold">
-                            ⏳ 429 冷却至 {p.cooldown_until}
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 text-[10px]">
-                            ● 就绪 (优先级 {p.priority})
-                          </span>
-                        )}
-                      </div>
-                      <div className="text-[11px] text-muted-foreground font-mono truncate">
-                        模型: {(p.models || []).join(', ')}
-                        {p.base_url ? ` · Endpoint: ${p.base_url}` : ''}
-                        {p.api_key_masked ? ` · Key: ${p.api_key_masked}` : ''}
-                      </div>
-                    </div>
+              {/* 1. 回复性格模板 (Persona) */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-foreground flex items-center space-x-2">
+                    <Brain className="w-4 h-4 text-purple-500" />
+                    <span>核心回复性格模板</span>
+                  </label>
+                  <span className="text-[11px] text-muted-foreground">点击卡片即可切换</span>
+                </div>
 
-                    <div className="flex items-center space-x-2 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handleToggleProvider(p)}
-                        className={`px-3 py-1 rounded-lg text-xs font-medium ${
-                          p.is_enabled
-                            ? 'bg-emerald-600 text-white'
-                            : 'bg-surface-200 text-muted-foreground'
+                <div className="grid grid-cols-2 gap-3">
+                  {presets.map((persona) => {
+                    const isSelected = persona.id === selectedPersonaId;
+                    return (
+                      <div
+                        key={persona.id}
+                        onClick={() => setSelectedPersonaId(persona.id)}
+                        className={`p-3.5 rounded-2xl border transition-all cursor-pointer relative ${
+                          isSelected
+                            ? 'bg-blue-600/10 border-blue-500/60 shadow-lg shadow-blue-500/10'
+                            : 'bg-surface-100 border-border hover:border-border-hover'
                         }`}
                       >
-                        {p.is_enabled ? '已启用' : '已停用'}
+                        <div className="flex items-start justify-between">
+                          <div className="flex items-center space-x-2">
+                            <span className="text-xl">{persona.avatar}</span>
+                            <div>
+                              <div className="text-xs font-bold text-foreground flex items-center space-x-1.5">
+                                <span>{persona.name}</span>
+                                {isSelected && (
+                                  <span className="w-4 h-4 rounded-full bg-blue-500 text-white flex items-center justify-center text-[10px]">
+                                    <Check className="w-2.5 h-2.5 stroke-[3]" />
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-blue-500 font-mono mt-0.5">
+                                {persona.tagline}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-muted-foreground mt-2 leading-relaxed break-anywhere">
+                          {persona.description}
+                        </p>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 2. 叠加增强技能 (SKILL Prompts) */}
+              <div className="space-y-3 pt-2 border-t border-border">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-foreground flex items-center space-x-2">
+                    <Layers className="w-4 h-4 text-teal-500" />
+                    <span>叠加增强技能 (SKILL Prompts)</span>
+                  </label>
+                  <div className="flex items-center space-x-2">
+                    <span className="text-[11px] text-muted-foreground">可多选叠加激活</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowAddPromptSkill(!showAddPromptSkill)}
+                      className="px-2.5 py-1 rounded-lg bg-teal-600/15 hover:bg-teal-600/25 text-teal-600 dark:text-teal-400 border border-teal-500/30 text-[11px] font-semibold flex items-center space-x-1 transition-colors"
+                    >
+                      <Plus className="w-3 h-3" />
+                      <span>自定义增强技能</span>
+                    </button>
+                  </div>
+                </div>
+
+                {showAddPromptSkill && (
+                  <div className="p-3.5 rounded-xl bg-surface-100 border border-teal-500/30 space-y-2.5">
+                    <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                      <input
+                        type="text"
+                        value={newPromptSkillIcon}
+                        onChange={(e) => setNewPromptSkillIcon(e.target.value)}
+                        placeholder="图标 (如 ⚡)"
+                        className="px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none"
+                      />
+                      <input
+                        type="text"
+                        value={newPromptSkillName}
+                        onChange={(e) => setNewPromptSkillName(e.target.value)}
+                        placeholder="技能名称 (如 Rust 零拷贝专家)"
+                        className="sm:col-span-3 px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none"
+                      />
+                    </div>
+                    <input
+                      type="text"
+                      value={newPromptSkillDesc}
+                      onChange={(e) => setNewPromptSkillDesc(e.target.value)}
+                      placeholder="简短描述（显示在卡片上）"
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none"
+                    />
+                    <textarea
+                      rows={2}
+                      value={newPromptSkillFragment}
+                      onChange={(e) => setNewPromptSkillFragment(e.target.value)}
+                      placeholder="注入 System Prompt 的具体技能规则片段..."
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-none"
+                    />
+                    <div className="flex justify-end space-x-2">
+                      <button
+                        type="button"
+                        onClick={() => setShowAddPromptSkill(false)}
+                        className="px-3 py-1 rounded-lg text-xs text-muted-foreground hover:bg-surface-200"
+                      >
+                        取消
                       </button>
-                      {p.id !== 'provider_google_pool' && (
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteProvider(p.id)}
-                          className="p-1.5 rounded-lg text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10"
-                          title="删除该自定义通道"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={handleAddCustomPromptSkill}
+                        className="px-3.5 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold"
+                      >
+                        添加至列表
+                      </button>
                     </div>
                   </div>
-                ))}
+                )}
+
+                <div className="grid grid-cols-2 gap-3">
+                  {promptSkills.map((skill) => {
+                    const isActive = activeSkillIds.includes(skill.id);
+                    const isCustom = customSkillIdSet.has(skill.id);
+                    return (
+                      <div
+                        key={skill.id}
+                        onClick={() => handleTogglePromptSkill(skill.id)}
+                        className={`p-3 rounded-2xl border transition-all cursor-pointer flex items-start space-x-3 ${
+                          isActive
+                            ? 'bg-teal-500/10 border-teal-500/50'
+                            : 'bg-surface-100 border-border hover:border-border-hover'
+                        }`}
+                      >
+                        <span className="text-xl shrink-0 mt-0.5">{skill.icon}</span>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-bold text-foreground truncate">
+                              {skill.name}
+                            </span>
+                            <div className="flex items-center space-x-1.5">
+                              {isCustom && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => handleDeleteCustomPromptSkill(e, skill.id)}
+                                  className="p-0.5 text-muted-foreground hover:text-rose-500"
+                                  title="删除此自定义技能"
+                                >
+                                  <Trash2 className="w-3 h-3" />
+                                </button>
+                              )}
+                              <input
+                                type="checkbox"
+                                checked={isActive}
+                                onChange={() => {}}
+                                className="rounded border-border bg-surface-200 text-teal-500 focus:ring-0"
+                              />
+                            </div>
+                          </div>
+                          <p className="text-[11px] text-muted-foreground mt-1 leading-snug break-anywhere">
+                            {skill.description}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* 3. 自定义系统指令补充与保存按钮 */}
+              <div className="space-y-3 pt-2 border-t border-border">
+                <label className="text-xs font-bold text-foreground flex items-center justify-between">
+                  <span>自定义系统指令补充 (选填，将在每次请求追加至模型头部)</span>
+                  <span className="text-[10px] text-muted-foreground">支持个人化习惯定制</span>
+                </label>
+                <textarea
+                  rows={3}
+                  placeholder="例如：回答始终使用中文、涉及 Python 必须标注类型注解、避免长篇大论..."
+                  value={customPrompt}
+                  onChange={(e) => setCustomPrompt(e.target.value)}
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-surface-100 border border-border text-foreground placeholder-muted-foreground text-xs focus:outline-none focus:border-blue-500 resize-none font-mono"
+                />
+
+                <div className="flex justify-end pt-1">
+                  <button
+                    type="button"
+                    onClick={handleSavePersonality}
+                    disabled={savingPersonality}
+                    className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs transition-colors shadow-md shadow-blue-500/20 flex items-center space-x-1.5 disabled:opacity-50"
+                  >
+                    {savingPersonality ? (
+                      <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    ) : (
+                      <Save className="w-3.5 h-3.5" />
+                    )}
+                    <span>保存性格与 SKILL 设置</span>
+                  </button>
+                </div>
               </div>
             </div>
           )}
 
-          {/* ────────── TAB 3: Skill & MCP 扩展 ────────── */}
+          {/* ────────── TAB 3: Skill 技能包与 MCP 扩展 (支持自定义添加与导入) ────────── */}
           {activeTab === 'extensions' && (
             <div className="space-y-6">
-              {/* Skills 区域 */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-bold text-foreground flex items-center space-x-1.5">
-                    <Terminal className="w-3.5 h-3.5 text-blue-500" />
-                    <span>按需专业技能包 (Workspace Skills)</span>
-                  </h3>
-                  <span className="text-[11px] text-muted-foreground">
-                    目录: ./skills/*/SKILL.md（平时仅加载摘要，按需注入全文）
-                  </span>
+              {extFeedback && (
+                <div
+                  className={`p-3 rounded-xl text-xs flex items-center justify-between animate-fadeIn ${
+                    extFeedback.success
+                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border border-emerald-500/20'
+                      : 'bg-rose-500/10 text-rose-600 dark:text-rose-300 border border-rose-500/20'
+                  }`}
+                >
+                  <span>{extFeedback.msg}</span>
+                  <button
+                    type="button"
+                    onClick={() => setExtFeedback(null)}
+                    className="text-muted-foreground hover:text-foreground ml-2"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
                 </div>
-                <div className="grid grid-cols-1 gap-2.5">
-                  {skills.map((sk) => (
-                    <div
-                      key={sk.id}
-                      className="p-3.5 rounded-xl bg-surface-100/70 border border-border flex items-start justify-between"
+              )}
+
+              {/* 1. Workspace Skills 区域 */}
+              <div className="space-y-3">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div>
+                    <h3 className="text-xs font-bold text-foreground flex items-center space-x-1.5">
+                      <Terminal className="w-3.5 h-3.5 text-blue-500" />
+                      <span>按需专业技能包 (Workspace Skills · ./skills/*/SKILL.md)</span>
+                    </h3>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      平时仅向模型暴露摘要（省 Token），触发任务时按需自动注入完整 SKILL.md 规程
+                    </p>
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSkillFormMode(skillFormMode === 'create' ? 'none' : 'create')
+                      }
+                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors"
                     >
-                      <div className="space-y-1">
-                        <div className="flex items-center space-x-2">
-                          <span className="text-xs font-bold text-foreground font-mono">
-                            {sk.name}
-                          </span>
-                          <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
-                            已就绪
-                          </span>
-                        </div>
-                        <p className="text-xs text-muted-foreground">{sk.description}</p>
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>新建 Skill</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setSkillFormMode(skillFormMode === 'import' ? 'none' : 'import')
+                      }
+                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-surface-100 hover:bg-surface-200 border border-border text-foreground text-xs font-medium transition-colors"
+                    >
+                      <Upload className="w-3.5 h-3.5 text-blue-500" />
+                      <span>导入 SKILL.md</span>
+                    </button>
+                  </div>
+                </div>
+
+                {/* 新建自定义 Skill 表单 */}
+                {skillFormMode === 'create' && (
+                  <div className="p-4 rounded-xl bg-surface-100 border border-blue-500/30 space-y-3">
+                    <div className="text-xs font-bold text-foreground">
+                      新建自定义按需技能包 (自动生成 skills/&lt;name&gt;/SKILL.md)
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <input
+                        type="text"
+                        value={newSkillName}
+                        onChange={(e) => setNewSkillName(e.target.value)}
+                        placeholder="技能标识名称 (如 docker-deploy-helper)"
+                        className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                      />
+                      <input
+                        type="text"
+                        value={newSkillDesc}
+                        onChange={(e) => setNewSkillDesc(e.target.value)}
+                        placeholder="一句话触发条件与用途说明"
+                        className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none"
+                      />
+                    </div>
+                    <textarea
+                      rows={5}
+                      value={newSkillContent}
+                      onChange={(e) => setNewSkillContent(e.target.value)}
+                      placeholder={
+                        '# 技能执行规程标题\n\n1. 第一步执行的检查指令...\n2. 第二步处理规范...\n3. 边界条件与安全注意事项...'
+                      }
+                      className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-y"
+                    />
+                    <div className="flex justify-end space-x-2">
+                      <button
+                        type="button"
+                        onClick={() => setSkillFormMode('none')}
+                        className="px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:bg-surface-200"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleCreateSkill}
+                        className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold"
+                      >
+                        保存并挂载 Skill
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* 导入 SKILL.md 表单 */}
+                {skillFormMode === 'import' && (
+                  <div className="p-4 rounded-xl bg-surface-100 border border-blue-500/30 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-foreground">
+                        导入外部 SKILL.md 文件或直接粘贴 Markdown 规程
+                      </span>
+                      <div>
+                        <input
+                          ref={skillFileInputRef}
+                          type="file"
+                          accept=".md,.txt"
+                          onChange={handleSkillFileSelected}
+                          className="hidden"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => skillFileInputRef.current?.click()}
+                          className="px-3 py-1 rounded-lg bg-blue-500/15 hover:bg-blue-500/25 text-blue-600 dark:text-blue-400 border border-blue-500/30 text-xs font-medium flex items-center space-x-1"
+                        >
+                          <Upload className="w-3 h-3" />
+                          <span>选择本地 SKILL.md 文件</span>
+                        </button>
                       </div>
                     </div>
-                  ))}
+                    <textarea
+                      rows={5}
+                      value={importSkillText}
+                      onChange={(e) => setImportSkillText(e.target.value)}
+                      placeholder={
+                        '---\nname: my-custom-skill\ndescription: 当需要执行特定领域任务时调用此技能\n---\n\n# 详细技能操作指南...'
+                      }
+                      className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-y"
+                    />
+                    <div className="flex justify-end space-x-2">
+                      <button
+                        type="button"
+                        onClick={() => setSkillFormMode('none')}
+                        className="px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:bg-surface-200"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleImportSkill}
+                        className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
+                      >
+                        确认导入并挂载
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 gap-2.5">
+                  {skills.map((sk) => {
+                    const isPreviewing = previewSkillId === sk.id;
+                    return (
+                      <div
+                        key={sk.id}
+                        className="p-3.5 rounded-xl bg-surface-100/70 border border-border space-y-2"
+                      >
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="space-y-1 flex-1 min-w-0">
+                            <div className="flex items-center space-x-2">
+                              <span className="text-xs font-bold text-foreground font-mono">
+                                {sk.name}
+                              </span>
+                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                                已就绪
+                              </span>
+                              {sk.is_builtin && (
+                                <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-500/15 text-blue-600 dark:text-blue-400">
+                                  内置示例
+                                </span>
+                              )}
+                            </div>
+                            <p className="text-xs text-muted-foreground break-anywhere">
+                              {sk.description}
+                            </p>
+                          </div>
+
+                          <div className="flex items-center space-x-1 shrink-0">
+                            {sk.content && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setPreviewSkillId(isPreviewing ? null : sk.id)
+                                }
+                                className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
+                                title="查看 SKILL.md 内容"
+                              >
+                                <Eye className="w-3.5 h-3.5" />
+                              </button>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteSkill(sk.id)}
+                              className="p-1.5 rounded-lg text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+                              title="删除此技能包"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+
+                        {isPreviewing && sk.content && (
+                          <pre className="p-3 rounded-lg bg-surface-card border border-border text-[11px] font-mono text-muted-foreground overflow-x-auto whitespace-pre-wrap max-h-48">
+                            {sk.content}
+                          </pre>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 
-              {/* MCP Servers 区域 */}
-              <div className="space-y-2.5">
-                <div className="flex items-center justify-between">
-                  <h3 className="text-xs font-bold text-foreground flex items-center space-x-1.5">
-                    <ShieldCheck className="w-3.5 h-3.5 text-purple-500" />
-                    <span>MCP 外部扩展服务池 (data/mcp_servers.json)</span>
-                  </h3>
-                  <span className="text-[11px] text-muted-foreground">
-                    常驻 JSON-RPC 连接池 · 随应用退出自动清理进程树
-                  </span>
+              {/* 2. MCP Servers 区域 */}
+              <div className="space-y-3 pt-3 border-t border-border">
+                <div className="flex items-center justify-between flex-wrap gap-2">
+                  <div>
+                    <h3 className="text-xs font-bold text-foreground flex items-center space-x-1.5">
+                      <ShieldCheck className="w-3.5 h-3.5 text-purple-500" />
+                      <span>MCP 外部扩展服务池 (data/mcp_servers.json)</span>
+                    </h3>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      常驻 JSON-RPC 连接池 · 支持手动添加或直接导入 Claude Desktop / Cursor MCP JSON 配置
+                    </p>
+                  </div>
+
+                  <div className="flex items-center space-x-2">
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setMcpFormMode(mcpFormMode === 'create' ? 'none' : 'create')
+                      }
+                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium transition-colors"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>添加 MCP 服务</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setMcpFormMode(mcpFormMode === 'import' ? 'none' : 'import')
+                      }
+                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-surface-100 hover:bg-surface-200 border border-border text-foreground text-xs font-medium transition-colors"
+                    >
+                      <Upload className="w-3.5 h-3.5 text-purple-500" />
+                      <span>导入 MCP JSON</span>
+                    </button>
+                  </div>
                 </div>
+
+                {/* 手动添加 MCP 服务表单 */}
+                {mcpFormMode === 'create' && (
+                  <div className="p-4 rounded-xl bg-surface-100 border border-purple-500/30 space-y-3">
+                    <div className="text-xs font-bold text-foreground">
+                      添加自定义 stdio MCP 服务节点
+                    </div>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                      <input
+                        type="text"
+                        value={newMcpName}
+                        onChange={(e) => setNewMcpName(e.target.value)}
+                        placeholder="服务名称 (如 github / sqlite)"
+                        className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                      />
+                      <input
+                        type="text"
+                        value={newMcpCommand}
+                        onChange={(e) => setNewMcpCommand(e.target.value)}
+                        placeholder="启动命令 (如 npx / uvx / python)"
+                        className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                      />
+                      <input
+                        type="text"
+                        value={newMcpDesc}
+                        onChange={(e) => setNewMcpDesc(e.target.value)}
+                        placeholder="功能说明 (选填)"
+                        className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none"
+                      />
+                    </div>
+                    <input
+                      type="text"
+                      value={newMcpArgs}
+                      onChange={(e) => setNewMcpArgs(e.target.value)}
+                      placeholder="启动参数（空格分隔，如 -y @modelcontextprotocol/server-github）"
+                      className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                    />
+                    <input
+                      type="text"
+                      value={newMcpEnvJson}
+                      onChange={(e) => setNewMcpEnvJson(e.target.value)}
+                      placeholder='环境变量 JSON（选填，如 {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}）'
+                      className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                    />
+                    <div className="flex justify-end space-x-2">
+                      <button
+                        type="button"
+                        onClick={() => setMcpFormMode('none')}
+                        className="px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:bg-surface-200"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleAddMcpServer}
+                        className="px-4 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold"
+                      >
+                        保存并接入 MCP
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {/* 导入 MCP JSON 配置表单 */}
+                {mcpFormMode === 'import' && (
+                  <div className="p-4 rounded-xl bg-surface-100 border border-purple-500/30 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <span className="text-xs font-bold text-foreground">
+                        导入 mcp_servers.json / claude_desktop_config.json 配置
+                      </span>
+                      <div>
+                        <input
+                          ref={mcpFileInputRef}
+                          type="file"
+                          accept=".json"
+                          onChange={handleMcpFileSelected}
+                          className="hidden"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => mcpFileInputRef.current?.click()}
+                          className="px-3 py-1 rounded-lg bg-purple-500/15 hover:bg-purple-500/25 text-purple-600 dark:text-purple-400 border border-purple-500/30 text-xs font-medium flex items-center space-x-1"
+                        >
+                          <Upload className="w-3 h-3" />
+                          <span>选择本地 JSON 文件</span>
+                        </button>
+                      </div>
+                    </div>
+                    <textarea
+                      rows={5}
+                      value={importMcpJson}
+                      onChange={(e) => setImportMcpJson(e.target.value)}
+                      placeholder={
+                        '{\n  "mcpServers": {\n    "memory": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-memory"]\n    }\n  }\n}'
+                      }
+                      className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-y"
+                    />
+                    <div className="flex justify-end space-x-2">
+                      <button
+                        type="button"
+                        onClick={() => setMcpFormMode('none')}
+                        className="px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:bg-surface-200"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleImportMcpJson}
+                        className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
+                      >
+                        确认批量导入 MCP
+                      </button>
+                    </div>
+                  </div>
+                )}
+
                 <div className="space-y-2">
                   {Object.entries(mcpServers).map(([srvName, cfg]: [string, any]) => (
                     <div
                       key={srvName}
-                      className="p-3.5 rounded-xl bg-surface-100/70 border border-border flex items-center justify-between"
+                      className="p-3.5 rounded-xl bg-surface-100/70 border border-border flex items-center justify-between gap-3"
                     >
-                      <div className="space-y-1">
-                        <div className="flex items-center space-x-2">
+                      <div className="space-y-1 flex-1 min-w-0">
+                        <div className="flex items-center flex-wrap gap-2">
                           <span className="text-xs font-bold text-foreground font-mono">
                             {srvName}
                           </span>
-                          <span className="text-[11px] text-muted-foreground font-mono bg-surface-200 px-1.5 py-0.5 rounded">
+                          <span className="text-[11px] text-muted-foreground font-mono bg-surface-200 px-1.5 py-0.5 rounded truncate max-w-md">
                             {cfg.command} {(cfg.args || []).join(' ')}
                           </span>
                         </div>
                         {cfg.description && (
-                          <p className="text-xs text-muted-foreground">{cfg.description}</p>
+                          <p className="text-xs text-muted-foreground break-anywhere">
+                            {cfg.description}
+                          </p>
                         )}
                       </div>
 
-                      <button
-                        type="button"
-                        onClick={() => handleToggleMcpServer(srvName)}
-                        className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
-                          cfg.enabled
-                            ? 'bg-emerald-600 text-white'
-                            : 'bg-surface-200 text-muted-foreground hover:text-foreground'
-                        }`}
-                      >
-                        {cfg.enabled ? '已启用' : '未启用'}
-                      </button>
+                      <div className="flex items-center space-x-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleMcpServer(srvName)}
+                          className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                            cfg.enabled
+                              ? 'bg-emerald-600 text-white'
+                              : 'bg-surface-200 text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          {cfg.enabled ? '已启用' : '未启用'}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteMcpServer(srvName)}
+                          className="p-1.5 rounded-lg text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+                          title="删除此 MCP 服务"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
                     </div>
                   ))}
                 </div>

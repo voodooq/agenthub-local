@@ -94,11 +94,72 @@ async def clear_all_long_term_memories():
 
 # ──────────────────── 2. Skill & MCP 扩展总线 ────────────────────
 
+class SkillSaveRequest(BaseModel):
+    """创建或更新自定义本地 Skill"""
+    id: str | None = Field(default=None, description="可选 Skill 目录 ID")
+    name: str = Field(..., description="Skill 唯一名称标识，如 docker-deploy-helper")
+    description: str = Field(..., description="一句话技能触发与用途说明")
+    content: str = Field(..., description="Skill 详细 Markdown 操作规程正文")
+
+
+class SkillImportRequest(BaseModel):
+    """通过 SKILL.md 原始文本或文件内容导入 Skill"""
+    filename: str = Field(default="SKILL.md")
+    content: str = Field(..., description="完整的 SKILL.md 内容（支持 YAML Frontmatter）")
+
+
+class MCPServerSaveRequest(BaseModel):
+    """添加或更新单个 MCP Server"""
+    name: str = Field(..., description="MCP 服务唯一标识，如 github / sqlite / fetch")
+    command: str = Field(..., description="启动命令，如 npx / uvx / python / node")
+    args: list[str] = Field(default_factory=list, description="启动参数列表")
+    env: dict[str, str] = Field(default_factory=dict, description="附加环境变量字典")
+    description: str = Field(default="", description="服务说明")
+    enabled: bool = Field(default=True, description="是否立即启用")
+
+
+class MCPImportRequest(BaseModel):
+    """通过 JSON 配置批量导入 MCP Servers"""
+    raw_json: str = Field(..., description="兼容 mcp_servers.json 或 claude_desktop_config.json 的 JSON 字符串")
+
+
 @router.get("/extensions/skills")
 async def list_installed_skills():
     """获取本地 skills/ 目录下已挂载的所有按需专业技能包"""
     skills = skill_loader.list_skills()
     return {"skills": skills, "total": len(skills)}
+
+
+@router.post("/extensions/skills")
+async def create_or_update_skill(req: SkillSaveRequest):
+    """手动新建或更新一个本地按需专业技能包 (skills/<id>/SKILL.md)"""
+    if not req.name.strip() or not req.content.strip():
+        raise HTTPException(status_code=400, detail="技能名称与正文规程不能为空")
+    saved = skill_loader.save_skill(
+        name=req.name,
+        description=req.description,
+        content=req.content,
+        skill_id=req.id,
+    )
+    return {"status": "ok", "skill": saved, "skills": skill_loader.list_skills()}
+
+
+@router.post("/extensions/skills/import")
+async def import_skill_from_markdown(req: SkillImportRequest):
+    """导入外部 SKILL.md 文件或粘贴的 Markdown 技能包"""
+    if not req.content.strip():
+        raise HTTPException(status_code=400, detail="导入的 SKILL.md 内容不能为空")
+    saved = skill_loader.import_skill_markdown(raw_md=req.content, filename_hint=req.filename)
+    return {"status": "ok", "skill": saved, "skills": skill_loader.list_skills()}
+
+
+@router.delete("/extensions/skills/{skill_id}")
+async def delete_installed_skill(skill_id: str):
+    """删除指定的本地 Skill 技能包"""
+    ok = skill_loader.delete_skill(skill_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="未找到该技能包或已删除")
+    return {"status": "ok", "id": skill_id, "skills": skill_loader.list_skills()}
 
 
 @router.get("/extensions/mcp")
@@ -112,6 +173,74 @@ async def update_mcp_servers_config(req: MCPConfigUpdateRequest):
     """保存并更新 mcp_servers.json 配置"""
     mcp_manager.save_config({"mcpServers": req.mcpServers})
     return {"status": "ok", "mcpServers": req.mcpServers}
+
+
+@router.post("/extensions/mcp/server")
+async def add_or_update_mcp_server(req: MCPServerSaveRequest):
+    """新增或更新单个自定义 MCP 服务节点"""
+    srv_name = req.name.strip()
+    if not srv_name or not req.command.strip():
+        raise HTTPException(status_code=400, detail="MCP 服务名称与启动命令不能为空")
+    cfg = mcp_manager.load_config()
+    servers = cfg.setdefault("mcpServers", {})
+    servers[srv_name] = {
+        "command": req.command.strip(),
+        "args": [a.strip() for a in req.args if a.strip()],
+        "env": req.env or {},
+        "description": req.description.strip() or f"自定义 MCP 服务 ({srv_name})",
+        "enabled": req.enabled,
+    }
+    mcp_manager.save_config({"mcpServers": servers})
+    return {"status": "ok", "mcpServers": servers}
+
+
+@router.post("/extensions/mcp/import")
+async def import_mcp_servers_json(req: MCPImportRequest):
+    """从粘贴或上传的 JSON 配置中批量导入 MCP 服务节点"""
+    import json
+    try:
+        parsed = json.loads(req.raw_json.strip())
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"JSON 格式解析失败: {str(e)}")
+
+    if not isinstance(parsed, dict):
+        raise HTTPException(status_code=400, detail="MCP 配置必须为 JSON 对象")
+
+    incoming = parsed.get("mcpServers") if isinstance(parsed.get("mcpServers"), dict) else parsed
+    cfg = mcp_manager.load_config()
+    servers = cfg.setdefault("mcpServers", {})
+    imported_count = 0
+
+    for k, v in incoming.items():
+        if isinstance(v, dict) and v.get("command"):
+            servers[k.strip()] = {
+                "command": str(v.get("command", "")).strip(),
+                "args": [str(a) for a in (v.get("args") or [])],
+                "env": v.get("env") if isinstance(v.get("env"), dict) else {},
+                "description": str(v.get("description") or f"导入的 MCP 服务 ({k})"),
+                "enabled": bool(v.get("enabled", True)),
+            }
+            imported_count += 1
+
+    if imported_count == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="未在 JSON 中识别到包含 'command' 字段的有效 MCP 服务配置",
+        )
+
+    mcp_manager.save_config({"mcpServers": servers})
+    return {"status": "ok", "imported_count": imported_count, "mcpServers": servers}
+
+
+@router.delete("/extensions/mcp/{server_name}")
+async def delete_mcp_server(server_name: str):
+    """删除指定的 MCP 服务节点"""
+    cfg = mcp_manager.load_config()
+    servers = cfg.get("mcpServers", {})
+    if server_name in servers:
+        del servers[server_name]
+        mcp_manager.save_config({"mcpServers": servers})
+    return {"status": "ok", "mcpServers": servers}
 
 
 # ──────────────────── 3. 多协议大模型供应商池 (LLM Providers) ────────────────────
@@ -166,6 +295,12 @@ async def init_google_oauth_provider(req: GoogleOAuthInitRequest | None = None):
         role_binding=r.role_binding,
         priority=r.priority,
     )
+
+
+@router.get("/providers/oauth/status/{state}")
+async def get_google_oauth_session_status(state: str):
+    """轮询查询 1455 端口自动回环是否已完成指定 state 的 Google OAuth 授权"""
+    return google_oauth_manager.get_session_status(state)
 
 
 @router.post("/providers/oauth/manual-callback")

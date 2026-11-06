@@ -21,6 +21,7 @@ import httpx
 from pathlib import Path
 from .config import settings
 from .logging_config import logger
+from .proxy_helper import get_system_proxy_url
 from ..repository.db import db_manager
 from ..repository.account_repository import AccountRepository
 
@@ -34,23 +35,108 @@ class GoogleOAuthManager:
     SCOPES = [
         "https://www.googleapis.com/auth/cloud-platform",
         "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/cclog",
+        "https://www.googleapis.com/auth/experimentsandconfigs",
+        "https://www.googleapis.com/auth/aicode",
         "openid",
     ]
 
     def __init__(self) -> None:
         self._pending_sessions: Dict[str, Dict[str, Any]] = {}
+        self._completed_codes: Dict[str, Dict[str, Any]] = {}
         self._server: Optional[asyncio.AbstractServer] = None
         # 内存 Access Token 缓存: provider_id -> {"access_token": str, "expires_at": float}
         self._token_cache: Dict[str, Dict[str, Any]] = {}
         self._cfg_file = Path("data/.oauth_client.json")
 
     def _load_local_oauth_cfg(self) -> Dict[str, str]:
+        cfg: Dict[str, str] = {}
         if self._cfg_file.exists():
             try:
-                return json.loads(self._cfg_file.read_text(encoding="utf-8"))
+                cfg = json.loads(self._cfg_file.read_text(encoding="utf-8"))
             except Exception:
-                pass
+                cfg = {}
+        cid = cfg.get("client_id", "")
+        # 若本地尚未生成配置或仍为已废弃的旧版 CLI Client ID，则自动从本机 agy 引擎提取最新官方 Client 凭据
+        if not cid or cid.startswith("681255809395-"):
+            discovered = self._discover_cli_oauth_client()
+            if discovered.get("client_id"):
+                cfg = discovered
+                try:
+                    self._cfg_file.parent.mkdir(parents=True, exist_ok=True)
+                    self._cfg_file.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
+                except Exception:
+                    pass
+        return cfg
+
+    @staticmethod
+    def _discover_cli_oauth_client() -> Dict[str, str]:
+        """从本机已安装的 Antigravity CLI 二进制中动态读取公开桌面端 OAuth 凭据（仓库零硬编码密钥）"""
+        import re
+        candidates = [
+            Path.home() / ".gemini" / "bin" / "agy.exe",
+            Path.home() / ".gemini" / "bin" / "agy",
+        ]
+        for bin_path in candidates:
+            if bin_path.exists():
+                try:
+                    raw = bin_path.read_bytes()
+                    m_id = re.search(rb"1071006060591-[a-zA-Z0-9_]+\.apps\.googleusercontent\.com", raw)
+                    m_sec = re.search(rb"GOCSPX-K58[a-zA-Z0-9_-]{25}", raw)
+                    if m_id and m_sec:
+                        return {
+                            "client_id": m_id.group(0).decode("ascii"),
+                            "client_secret": m_sec.group(0).decode("ascii"),
+                        }
+                except Exception:
+                    pass
         return {}
+
+    def get_host_keyring_credentials(self) -> Optional[Dict[str, str]]:
+        """读取本机 Windows 凭据管理器中已登录的 Antigravity OAuth 令牌（用于旧版令牌无缝升级或兜底）"""
+        import sys
+        if sys.platform != "win32":
+            return None
+        try:
+            import ctypes
+            import ctypes.wintypes as w
+
+            class _CREDENTIAL(ctypes.Structure):
+                _fields_ = [
+                    ("Flags", w.DWORD),
+                    ("Type", w.DWORD),
+                    ("TargetName", w.LPWSTR),
+                    ("Comment", w.LPWSTR),
+                    ("LastWritten", w.FILETIME),
+                    ("CredentialBlobSize", w.DWORD),
+                    ("CredentialBlob", ctypes.POINTER(ctypes.c_ubyte)),
+                    ("Persist", w.DWORD),
+                    ("AttributeCount", w.DWORD),
+                    ("Attributes", ctypes.c_void_p),
+                    ("TargetAlias", w.LPWSTR),
+                    ("UserName", w.LPWSTR),
+                ]
+
+            p_cred = ctypes.POINTER(_CREDENTIAL)()
+            if ctypes.windll.advapi32.CredReadW("gemini:antigravity", 1, 0, ctypes.byref(p_cred)):
+                try:
+                    blob = bytes(p_cred.contents.CredentialBlob[: p_cred.contents.CredentialBlobSize]).decode(
+                        "utf-8", errors="ignore"
+                    )
+                    parsed = json.loads(blob)
+                    tok_obj = parsed.get("token") or {}
+                    if tok_obj.get("access_token") or tok_obj.get("refresh_token"):
+                        return {
+                            "access_token": tok_obj.get("access_token", ""),
+                            "refresh_token": tok_obj.get("refresh_token", ""),
+                            "email": parsed.get("id_token_email", ""),
+                        }
+                finally:
+                    ctypes.windll.advapi32.CredFree(p_cred)
+        except Exception as e:
+            logger.debug(f"读取本机 Antigravity Keyring 凭据跳过: {e}")
+        return None
 
     @property
     def client_id(self) -> str:
@@ -88,16 +174,17 @@ class GoogleOAuthManager:
         except Exception:
             return enc_val
 
-    async def create_auth_session(self, remark: str = "", role_binding: str = "both", priority: int = 5) -> Dict[str, str]:
+    async def create_auth_session(self, remark: Optional[str] = None, role_binding: str = "both", priority: int = 5) -> Dict[str, Any]:
         """初始化 PKCE OAuth 授权会话并确保本地 1455 端口回环监听已启动"""
         state = secrets.token_urlsafe(16)
         code_verifier, code_challenge = self._generate_pkce()
+        clean_remark = (remark or "").strip()
 
         self._pending_sessions[state] = {
             "code_verifier": code_verifier,
-            "remark": remark.strip(),
-            "role_binding": role_binding,
-            "priority": priority,
+            "remark": clean_remark,
+            "role_binding": role_binding or "both",
+            "priority": int(priority or 5),
             "event": asyncio.Event(),
             "result": None,
         }
@@ -120,19 +207,32 @@ class GoogleOAuthManager:
             "state": state,
             "auth_url": auth_url,
             "redirect_uri": self.REDIRECT_URI,
+            "local_server_listening": self._server is not None,
+        }
+
+    def get_session_status(self, state: str) -> Dict[str, Any]:
+        """查询指定 state 的 PKCE 授权会话是否已由 1455 端口自动回环完成"""
+        session = self._pending_sessions.get(state or "")
+        if not session:
+            return {"completed": False, "provider": None}
+        res = session.get("result")
+        return {
+            "completed": res is not None,
+            "provider": res,
         }
 
     async def complete_by_manual_url(
         self,
         callback_url: str,
         fallback_state: Optional[str] = None,
-        remark: str = "",
+        remark: Optional[str] = None,
         role_binding: str = "both",
         priority: int = 5,
     ) -> Dict[str, Any]:
         """
         方式 B：接收用户在指纹浏览器或远程环境登录完后复制粘贴的完整回调 URL（或直接粘贴的 code），
         解析 code 并完成 Token 换取与 SQLite 落盘。
+        若本机 1455 端口已提前自动消费了该一次性 code，则直接幂等返回已保存的账号结果，避免二次请求触发 invalid_grant。
         """
         raw_input = (callback_url or "").strip()
         if not raw_input:
@@ -150,13 +250,21 @@ class GoogleOAuthManager:
         if not code:
             raise ValueError("未在链接中识别到有效的 code 参数，请检查粘贴的内容。")
 
+        # 幂等保护：若 1455 端口自动回环刚刚已经消费了该 code 或 state，直接返回已入库的 provider
+        if code in self._completed_codes:
+            return self._completed_codes[code]
+        session = self._pending_sessions.get(state or "")
+        if session and session.get("result"):
+            return session["result"]
+
         token_info = await self._exchange_code_for_token(code=code, state=state)
         saved = await self._persist_google_provider(
             token_info=token_info,
-            remark=remark,
+            remark=remark or "",
             state=state,
             role_binding=role_binding,
             priority=priority,
+            code=code,
         )
         return saved
 
@@ -173,7 +281,12 @@ class GoogleOAuthManager:
         if session and "code_verifier" in session:
             payload["code_verifier"] = session["code_verifier"]
 
-        async with httpx.AsyncClient(timeout=20.0) as client:
+        proxy = get_system_proxy_url()
+        client_kwargs: Dict[str, Any] = {"timeout": 20.0}
+        if proxy:
+            client_kwargs["proxy"] = proxy
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data=payload)
             if resp.status_code != 200:
                 raise RuntimeError(f"Google Token 换取失败 ({resp.status_code}): {resp.text}")
@@ -196,14 +309,15 @@ class GoogleOAuthManager:
     async def _persist_google_provider(
         self,
         token_info: Dict[str, Any],
-        remark: str = "",
+        remark: Optional[str] = None,
         state: Optional[str] = None,
         role_binding: str = "both",
         priority: int = 5,
+        code: Optional[str] = None,
     ) -> Dict[str, Any]:
         """将换取成功的 Google OAuth 账号写入 llm_providers 表，并同步至 accounts 表"""
         session = self._pending_sessions.get(state or "") or {}
-        effective_remark = remark.strip() or session.get("remark") or ""
+        effective_remark = (remark or "").strip() or (session.get("remark") or "").strip()
         effective_role = session.get("role_binding") or role_binding or "both"
         effective_priority = int(session.get("priority") or priority or 5)
 
@@ -256,25 +370,40 @@ class GoogleOAuthManager:
             "expires_at": time.time() + expires_in - 60,
         }
 
-        # 同步写入 accounts 表以兼容顶部状态胶囊与账号池视图
+        # 同步写入 accounts 表以兼容顶部状态胶囊与账号池容量水位视图
         try:
-            await AccountRepository.upsert_oauth_account(
-                name=f"google_{safe_email_slug}",
-                email=email,
-                avatar_url=token_info.get("picture", ""),
-                access_token=access_token,
-                refresh_token=refresh_token,
-                expires_at=int(time.time()) + expires_in,
-                auth_type="oauth_google_one",
-            )
+            existing_acc = await AccountRepository.get_by_email(email)
+            exp_ts = int(time.time()) + expires_in
+            if existing_acc and existing_acc.id is not None:
+                await AccountRepository.update_oauth_token(
+                    account_id=existing_acc.id,
+                    access_token=access_token,
+                    expires_at=exp_ts,
+                    refresh_token=refresh_token or None,
+                )
+                await AccountRepository.recover_active(existing_acc.id)
+            else:
+                acc_name = effective_remark or f"oauth_{safe_email_slug}"
+                if await AccountRepository.get_by_name(acc_name):
+                    acc_name = f"{acc_name}_{safe_email_slug}"
+                await AccountRepository.create(
+                    {
+                        "name": acc_name,
+                        "auth_type": "oauth_google_one",
+                        "credentials": access_token,
+                        "priority": effective_priority,
+                        "rpm_limit": 15,
+                        "rpd_limit": 1500,
+                        "email": email,
+                        "avatar_url": token_info.get("picture", ""),
+                        "refresh_token": refresh_token,
+                        "expires_at": exp_ts,
+                    }
+                )
         except Exception as e:
-            logger.debug(f"同步写入 accounts 表跳过: {e}")
+            logger.warning(f"同步写入 accounts 表异常: {e}")
 
-        if session and isinstance(session.get("event"), asyncio.Event):
-            session["result"] = {"id": provider_id, "email": email, "name": display_name}
-            session["event"].set()
-
-        return {
+        saved_payload = {
             "id": provider_id,
             "name": display_name,
             "email": email,
@@ -284,6 +413,13 @@ class GoogleOAuthManager:
             "role_binding": effective_role,
             "priority": effective_priority,
         }
+        if code:
+            self._completed_codes[code] = saved_payload
+        if session and isinstance(session.get("event"), asyncio.Event):
+            session["result"] = saved_payload
+            session["event"].set()
+
+        return saved_payload
 
     async def ensure_valid_access_token(self, provider_row: Dict[str, Any]) -> str:
         """
@@ -297,11 +433,13 @@ class GoogleOAuthManager:
             return cached["access_token"]
 
         refresh_token = self._decode_secret(provider_row.get("refresh_token_encrypted") or "")
+        fallback_token = self._decode_secret(provider_row.get("api_key_encrypted") or "")
         if not refresh_token:
-            # 回退使用已保存的 access_token
-            fallback_token = self._decode_secret(provider_row.get("api_key_encrypted") or "")
             if fallback_token:
                 return fallback_token
+            host_cred = self.get_host_keyring_credentials()
+            if host_cred and host_cred.get("access_token"):
+                return host_cred["access_token"]
             raise RuntimeError(f"Google OAuth 账号 [{provider_row.get('name')}] 缺少 refresh_token，请重新授权")
 
         payload = {
@@ -310,9 +448,37 @@ class GoogleOAuthManager:
             "refresh_token": refresh_token,
             "grant_type": "refresh_token",
         }
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        proxy = get_system_proxy_url()
+        client_kwargs: Dict[str, Any] = {"timeout": 15.0}
+        if proxy:
+            client_kwargs["proxy"] = proxy
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
             resp = await client.post("https://oauth2.googleapis.com/token", data=payload)
             if resp.status_code != 200:
+                # 若旧令牌因 Client ID 迁移无法刷新，优先回退有效 access_token 或本机 Keyring 令牌
+                host_cred = self.get_host_keyring_credentials()
+                if host_cred and host_cred.get("refresh_token"):
+                    resp2 = await client.post(
+                        "https://oauth2.googleapis.com/token",
+                        data={
+                            "client_id": self.client_id,
+                            "client_secret": self.client_secret,
+                            "refresh_token": host_cred["refresh_token"],
+                            "grant_type": "refresh_token",
+                        },
+                    )
+                    if resp2.status_code == 200:
+                        data = resp2.json()
+                        new_access = data["access_token"]
+                        expires_in = int(data.get("expires_in", 3600))
+                        self._token_cache[pid] = {
+                            "access_token": new_access,
+                            "expires_at": now + expires_in - 60,
+                        }
+                        return new_access
+                if fallback_token:
+                    return fallback_token
                 raise RuntimeError(f"刷新 Google Access Token 失败 ({resp.status_code}): {resp.text[:200]}")
             data = resp.json()
             new_access = data["access_token"]
@@ -357,7 +523,7 @@ class GoogleOAuthManager:
                 else:
                     try:
                         token_info = await self._exchange_code_for_token(code, state)
-                        saved = await self._persist_google_provider(token_info=token_info, state=state)
+                        saved = await self._persist_google_provider(token_info=token_info, state=state, code=code)
                         html = (
                             "<!DOCTYPE html><html><head><meta charset='utf-8'><title>授权成功</title></head>"
                             "<body style='font-family:sans-serif;text-align:center;padding-top:80px;background:#0f172a;color:#f8fafc;'>"

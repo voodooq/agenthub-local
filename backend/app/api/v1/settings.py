@@ -35,6 +35,7 @@ class PersonalityConfig(BaseModel):
     selected_persona_id: str = Field(default="architect", description="当前选中的性格模板 ID")
     active_skill_ids: List[str] = Field(default=["deep_debugger"], description="当前激活的技能插件列表")
     custom_system_prompt: str = Field(default="", description="用户自定义追加的全局 Prompt")
+    custom_skills: List[SkillItem] = Field(default_factory=list, description="用户自定义的增强技能包列表")
 
 
 # 预置 5 大实用且有血有肉的性格人设
@@ -166,9 +167,14 @@ async def get_personality_settings():
         except Exception as e:
             logger.warning(f"读取个性化配置失败，使用默认配置: {e}")
 
+    preset_ids = {s.id for s in PRESET_SKILLS}
+    merged_skills = list(PRESET_SKILLS) + [
+        cs for cs in (current_config.custom_skills or []) if cs.id not in preset_ids
+    ]
+
     return {
         "presets": PRESET_PERSONAS,
-        "skills": PRESET_SKILLS,
+        "skills": merged_skills,
         "config": current_config
     }
 

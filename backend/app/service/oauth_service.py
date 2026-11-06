@@ -26,30 +26,26 @@ class GoogleOAuthService:
     TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token"
     USERINFO_ENDPOINT = "https://www.googleapis.com/oauth2/v3/userinfo"
 
-    # NOTE: 官方标准登录权限集合（严格使用官方客户端已注册权限，避免 restricted_client 403 错误）
+    # NOTE: 官方标准登录权限集合（对齐 Antigravity 官方客户端权限集）
     SCOPES = [
         "openid",
         "https://www.googleapis.com/auth/userinfo.email",
         "https://www.googleapis.com/auth/userinfo.profile",
-        "https://www.googleapis.com/auth/cloud-platform"
+        "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/cclog",
+        "https://www.googleapis.com/auth/experimentsandconfigs",
+        "https://www.googleapis.com/auth/aicode",
     ]
 
     def __init__(self) -> None:
+        import os
         from pathlib import Path
+        from ..core.oauth_google import google_oauth_manager
         self._cfg_file = Path("data/.oauth_client.json")
-        self.client_id: str = (getattr(settings, "google_oauth_client_id", "") or "").strip()
-        self.client_secret: str = (getattr(settings, "google_oauth_client_secret", "") or "").strip()
-        if self._cfg_file.exists():
-            try:
-                c_data = json.loads(self._cfg_file.read_text(encoding="utf-8"))
-                if not self.client_id:
-                    self.client_id = c_data.get("client_id", "").strip()
-                if not self.client_secret:
-                    self.client_secret = c_data.get("client_secret", "").strip()
-            except Exception as e:
-                logger.warning(f"读取本地 OAuth 配置失败: {e}")
+        self.client_id: str = (getattr(settings, "google_oauth_client_id", "") or "").strip() or google_oauth_manager.client_id
+        self.client_secret: str = (getattr(settings, "google_oauth_client_secret", "") or "").strip() or google_oauth_manager.client_secret
 
-        if not self.client_id:
+        if not self.client_id or self.client_id == "YOUR_GOOGLE_OAUTH_CLIENT_ID":
             self.client_id = os.getenv("GOOGLE_OAUTH_CLIENT_ID", "")
         if not self.client_secret:
             self.client_secret = os.getenv("GOOGLE_OAUTH_CLIENT_SECRET", "")
@@ -273,7 +269,13 @@ class GoogleOAuthService:
         if self.client_secret:
             payload["client_secret"] = self.client_secret
 
-        async with httpx.AsyncClient(timeout=15.0) as client:
+        from ..core.proxy_helper import get_system_proxy_url
+        proxy = get_system_proxy_url()
+        client_kwargs: dict[str, Any] = {"timeout": 15.0}
+        if proxy:
+            client_kwargs["proxy"] = proxy
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
             resp = await client.post(self.TOKEN_ENDPOINT, data=payload)
             if resp.status_code != 200:
                 raise ValueError(f"Google 凭据静默刷新失败: {resp.text}")

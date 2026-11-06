@@ -349,7 +349,7 @@ export function SettingsModal({
             <div>
               <h2 className="text-sm font-bold text-foreground">系统全景设置中心</h2>
               <p className="text-[11px] text-muted-foreground">
-                模型自动识别与一键测试、浅色/深色主题外观、回复性格与技能定制
+                模型自动识别与一键测试、上下文轮数管理与浅色/深色主题外观（回复性格与 SKILL 定制已整合至「记忆中枢」）
               </p>
             </div>
           </div>
@@ -408,19 +408,6 @@ export function SettingsModal({
           >
             <Sun className="w-4 h-4 text-amber-500" />
             <span>界面显示外观 (主题色)</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('personality')}
-            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all ${
-              activeTab === 'personality'
-                ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <Brain className="w-4 h-4 text-purple-500" />
-            <span>回复性格与 SKILL 定制</span>
           </button>
         </div>
 
@@ -796,137 +783,6 @@ export function SettingsModal({
               </div>
             </div>
           )}
-
-          {/* ==================== TAB 3: 回复性格与技能定制 ==================== */}
-          {activeTab === 'personality' && (
-            <div className="space-y-6">
-              {feedback && (
-                <div
-                  className={`p-3.5 rounded-xl text-xs flex items-center space-x-2 animate-fadeIn ${
-                    feedback.success
-                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border border-emerald-500/20'
-                      : 'bg-rose-500/10 text-rose-600 dark:text-rose-300 border border-rose-500/20'
-                  }`}
-                >
-                  {feedback.success ? (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-                  ) : (
-                    <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
-                  )}
-                  <span>{feedback.msg}</span>
-                </div>
-              )}
-
-              {/* 1. 回复性格模板 (Persona) */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-foreground flex items-center space-x-2">
-                    <Brain className="w-4 h-4 text-purple-500" />
-                    <span>核心回复性格模板</span>
-                  </label>
-                  <span className="text-[11px] text-muted-foreground">点击卡片即可切换</span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  {presets.map((persona) => {
-                    const isSelected = persona.id === selectedPersonaId;
-                    return (
-                      <div
-                        key={persona.id}
-                        onClick={() => setSelectedPersonaId(persona.id)}
-                        className={`p-3.5 rounded-2xl border transition-all cursor-pointer relative ${
-                          isSelected
-                            ? 'bg-blue-600/10 border-blue-500/60 shadow-lg shadow-blue-500/10'
-                            : 'bg-surface-100 border-border hover:border-border-hover'
-                        }`}
-                      >
-                        <div className="flex items-start justify-between">
-                          <div className="flex items-center space-x-2">
-                            <span className="text-xl">{persona.avatar}</span>
-                            <div>
-                              <div className="text-xs font-bold text-foreground flex items-center space-x-1.5">
-                                <span>{persona.name}</span>
-                                {isSelected && (
-                                  <span className="w-4 h-4 rounded-full bg-blue-500 text-white flex items-center justify-center text-[10px]">
-                                    <Check className="w-2.5 h-2.5 stroke-[3]" />
-                                  </span>
-                                )}
-                              </div>
-                              <p className="text-[10px] text-blue-500 font-mono mt-0.5">
-                                {persona.tagline}
-                              </p>
-                            </div>
-                          </div>
-                        </div>
-                        <p className="text-[11px] text-muted-foreground mt-2 leading-relaxed break-anywhere">
-                          {persona.description}
-                        </p>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* 2. 增强技能插件库 (SKILL) */}
-              <div className="space-y-3 pt-2 border-t border-border">
-                <div className="flex items-center justify-between">
-                  <label className="text-xs font-bold text-foreground flex items-center space-x-2">
-                    <Layers className="w-4 h-4 text-teal-500" />
-                    <span>叠加增强技能 (SKILL Prompts)</span>
-                  </label>
-                  <span className="text-[11px] text-muted-foreground">可多选叠加激活</span>
-                </div>
-
-                <div className="grid grid-cols-2 gap-3">
-                  {skills.map((skill) => {
-                    const isActive = activeSkillIds.includes(skill.id);
-                    return (
-                      <div
-                        key={skill.id}
-                        onClick={() => handleToggleSkill(skill.id)}
-                        className={`p-3 rounded-2xl border transition-all cursor-pointer flex items-start space-x-3 ${
-                          isActive
-                            ? 'bg-teal-500/10 border-teal-500/50'
-                            : 'bg-surface-100 border-border hover:border-border-hover'
-                        }`}
-                      >
-                        <span className="text-xl shrink-0 mt-0.5">{skill.icon}</span>
-                        <div className="flex-1 min-w-0">
-                          <div className="flex items-center justify-between">
-                            <span className="text-xs font-bold text-foreground">{skill.name}</span>
-                            <input
-                              type="checkbox"
-                              checked={isActive}
-                              onChange={() => {}}
-                              className="rounded border-border bg-surface-200 text-teal-500 focus:ring-0"
-                            />
-                          </div>
-                          <p className="text-[11px] text-muted-foreground mt-1 leading-snug break-anywhere">
-                            {skill.description}
-                          </p>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* 3. 动态系统 Prompt 预览与自定义补充 */}
-              <div className="space-y-2 pt-2 border-t border-border">
-                <label className="text-xs font-bold text-foreground flex items-center justify-between">
-                  <span>自定义系统指令补充 (选填，将在每次请求追加至模型头部)</span>
-                  <span className="text-[10px] text-muted-foreground">支持个人化习惯定制</span>
-                </label>
-                <textarea
-                  rows={3}
-                  placeholder="例如：回答始终使用中文、涉及 Python 必须标注类型注解、避免长篇大论..."
-                  value={customPrompt}
-                  onChange={(e) => setCustomPrompt(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-surface-100 border border-border text-foreground placeholder-muted-foreground text-xs focus:outline-none focus:border-blue-500 resize-none font-mono"
-                />
-              </div>
-            </div>
-          )}
         </div>
 
         {/* 底部按钮栏 */}
@@ -944,21 +800,6 @@ export function SettingsModal({
             >
               关闭
             </button>
-            {activeTab === 'personality' && (
-              <button
-                type="button"
-                onClick={handleSavePersonality}
-                disabled={saving}
-                className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs transition-colors shadow-md shadow-blue-500/20 flex items-center space-x-1.5 disabled:opacity-50"
-              >
-                {saving ? (
-                  <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                ) : (
-                  <Save className="w-3.5 h-3.5" />
-                )}
-                <span>保存性格设置</span>
-              </button>
-            )}
           </div>
         </div>
       </div>

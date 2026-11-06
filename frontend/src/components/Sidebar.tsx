@@ -197,10 +197,10 @@ export function Sidebar({
           className={`w-full flex items-center rounded-lg hover:bg-surface-100 text-foreground text-xs font-normal transition-colors group ${
             isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-2'
           }`}
-          title="Google 算力账号池"
+          title="统一管理 Google OAuth、本地 CLI、多源大模型 API 与额度监控"
         >
           <Key className="w-4 h-4 text-muted-foreground group-hover:text-foreground shrink-0 transition-colors" />
-          {!isCollapsed && <span>账号池与额度</span>}
+          {!isCollapsed && <span>账号管理与额度</span>}
         </button>
 
         <button

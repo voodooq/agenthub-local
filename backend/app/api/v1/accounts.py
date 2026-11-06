@@ -144,6 +144,54 @@ async def test_account(account_id: int = Path(...)):
                 "message": f"连接 Google AI Studio 异常: {str(e)}"
             }
 
+    if target.auth_type in ("oauth_google_one", "oauth_personal"):
+        from ...service.gemini_client import GeminiClient
+        from ...service.oauth_service import oauth_service
+        from ...repository.db import db_manager
+        try:
+            valid_token = await oauth_service.ensure_valid_token(target)
+            probe = await GeminiClient.test_key(
+                api_key=valid_token,
+                model_name="gemini-2.5-flash",
+                auth_type="oauth_google_one",
+                strict_model=False,
+            )
+            if probe.get("valid"):
+                if target.status != "active":
+                    await AccountRepository.recover_active(account_id)
+                # 同步解除 llm_providers 中对应 OAuth 通道的冷却状态
+                if target.email:
+                    safe_slug = target.email.split("@")[0].replace(".", "_")
+                    async with db_manager.get_connection() as conn:
+                        await conn.execute(
+                            "UPDATE llm_providers SET cooldown_until = NULL, is_enabled = 1 WHERE id = ?",
+                            (f"google_oauth_{safe_slug}",),
+                        )
+                        await conn.commit()
+                return {
+                    "account_id": account_id,
+                    "name": target.name,
+                    "logged_in": True,
+                    "status": "active",
+                    "message": f"Google OAuth 算力通道连通性测试 100% 成功（延迟 {probe.get('latency_ms', 0)}ms），已恢复就绪！"
+                }
+            else:
+                return {
+                    "account_id": account_id,
+                    "name": target.name,
+                    "logged_in": False,
+                    "status": target.status,
+                    "message": probe.get("error") or "OAuth 令牌验证未通过，请重新发起 Google OAuth 授权"
+                }
+        except Exception as e:
+            return {
+                "account_id": account_id,
+                "name": target.name,
+                "logged_in": False,
+                "status": target.status,
+                "message": f"Google OAuth 连通性探测异常: {str(e)}"
+            }
+
     # 默认针对 gemini_cli
     logged_in = is_account_logged_in(target.name)
     current_status = target.status
@@ -187,6 +235,7 @@ async def recover_account(account_id: int = Path(...)):
 async def purge_all_accounts():
     """彻底清空算力池所有账号：清理数据库、删除全部本地目录、清空配额与缓存"""
     from ...service.cli_account_service import delete_account_dir, ACCOUNTS_ROOT
+    from ...repository.db import db_manager
     import shutil
     
     accounts = await AccountRepository.get_all()
@@ -195,6 +244,10 @@ async def purge_all_accounts():
         quota_monitor.remove_tracker(acc.name)
         if acc.id:
             await AccountRepository.delete(acc.id)
+
+    async with db_manager.get_connection() as conn:
+        await conn.execute("DELETE FROM llm_providers WHERE provider_type = 'google_oauth'")
+        await conn.commit()
             
     # 清理所有孤儿目录
     if ACCOUNTS_ROOT.exists():
@@ -212,6 +265,7 @@ async def purge_all_accounts():
 async def delete_account(account_id: int):
     """彻底删除单个账号：删除数据库记录、删除专属目录及配置文件、清理内存追踪缓存"""
     from ...service.cli_account_service import delete_account_dir
+    from ...repository.db import db_manager
     account = await AccountRepository.get_by_id(account_id)
     if not account:
         raise HTTPException(status_code=404, detail="账号不存在")
@@ -222,8 +276,13 @@ async def delete_account(account_id: int):
     # 2. 清理内存水位监控缓存
     quota_monitor.remove_tracker(account.name)
 
-    # 3. 数据库删除
+    # 3. 数据库删除（含同步清理 llm_providers 中的 Google OAuth 通道）
     await AccountRepository.delete(account_id)
+    if account.email:
+        safe_slug = account.email.split("@")[0].replace(".", "_")
+        async with db_manager.get_connection() as conn:
+            await conn.execute("DELETE FROM llm_providers WHERE id = ?", (f"google_oauth_{safe_slug}",))
+            await conn.commit()
     await audit_service.log(
         event_type="account_delete",
         actor="user",

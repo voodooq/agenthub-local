@@ -61,6 +61,23 @@ interface DashboardStats {
   };
 }
 
+interface LLMProviderItem {
+  id: string;
+  name: string;
+  provider_type: 'google_pool' | 'google_oauth' | 'gemini_api' | 'openai_compat' | 'anthropic' | 'ollama';
+  base_url: string;
+  api_key_masked: string;
+  has_api_key: boolean;
+  has_refresh_token?: boolean;
+  cooldown_until?: string | null;
+  is_cooling_down?: boolean;
+  models: string[];
+  role_binding: 'primary' | 'light' | 'both';
+  tool_call_mode: 'auto' | 'native' | 'xml_prompt';
+  priority: number;
+  is_enabled: number;
+}
+
 interface AccountModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -70,11 +87,30 @@ interface AccountModalProps {
 export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) {
   const [data, setData] = useState<DashboardStats | null>(null);
   const [activeTab, setActiveTab] = useState<'accounts' | 'add_account' | 'audit'>('accounts');
-  const [addMode, setAddMode] = useState<'cli' | 'api_key' | 'standard_oauth'>('cli');
+  const [addMode, setAddMode] = useState<'pkce_oauth' | 'custom_api' | 'cli' | 'api_key' | 'standard_oauth'>('pkce_oauth');
   const [loading, setLoading] = useState(false);
   const [testingId, setTestingId] = useState<number | null>(null);
   const [testResult, setTestResult] = useState<{ id: number; success: boolean; msg: string } | null>(null);
   const [purgingAll, setPurgingAll] = useState(false);
+
+  // 多源大模型供应商状态 (llm_providers)
+  const [providers, setProviders] = useState<LLMProviderItem[]>([]);
+  const [provName, setProvName] = useState('');
+  const [provType, setProvType] = useState<'openai_compat' | 'gemini_api' | 'anthropic' | 'ollama'>('openai_compat');
+  const [provBaseUrl, setProvBaseUrl] = useState('https://api.deepseek.com/v1');
+  const [provApiKey, setProvApiKey] = useState('');
+  const [provModels, setProvModels] = useState('deepseek-chat, deepseek-reasoner');
+  const [provRole, setProvRole] = useState<'both' | 'primary' | 'light'>('both');
+  const [provPriority, setProvPriority] = useState<number>(2);
+  const [savingProvider, setSavingProvider] = useState(false);
+
+  // Google 官方 PKCE OAuth 授权状态 (1455 端口自动回环 + 手动粘贴 URL 双模)
+  const [pkceState, setPkceState] = useState<string>('');
+  const [pkceRemark, setPkceRemark] = useState<string>('');
+  const [pkceRole, setPkceRole] = useState<'both' | 'primary' | 'light'>('both');
+  const [pkcePriority, setPkcePriority] = useState<number>(1);
+  const [pkceManualUrl, setPkceManualUrl] = useState<string>('');
+  const [pkceSubmitting, setPkceSubmitting] = useState<boolean>(false);
 
   // 1. 本地 CLI 登录状态
   const [newAlias, setNewAlias] = useState('');
@@ -154,9 +190,200 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
     }
   };
 
+  // 拉取多源算力供应商列表 (llm_providers)
+  const fetchProviders = async () => {
+    try {
+      const res = await apiFetch('/api/v1/providers');
+      if (res.ok) {
+        const resData = await res.json();
+        setProviders(resData.providers || []);
+      }
+    } catch (e) {
+      console.error('获取多源算力池列表失败:', e);
+    }
+  };
+
+  // 发起 Google 官方桌面端 PKCE OAuth 授权
+  const handleInitPkceOAuth = async () => {
+    setFeedbackMsg(null);
+    try {
+      const res = await apiFetch('/api/v1/providers/oauth/init', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          remark: pkceRemark.trim() || undefined,
+          role_binding: pkceRole,
+          priority: Number(pkcePriority) || 1,
+        }),
+      });
+      if (res.ok) {
+        const resData = await res.json();
+        setPkceState(resData.state || '');
+        if (resData.auth_url) {
+          window.open(resData.auth_url, '_blank', 'noopener,noreferrer');
+          setFeedbackMsg({
+            success: true,
+            msg: resData.local_server_listening
+              ? '已打开 Google 官方授权页（本机 1455 端口已开启自动回环监听，授权后自动入库；若在远程/隔离浏览器打开，也可复制回调 URL 粘贴至下方）'
+              : '已打开 Google 官方授权页，授权完成后请复制浏览器地址栏完整的 http://localhost:1455/auth/callback?code=... 链接粘贴至下方确认',
+          });
+        }
+      }
+    } catch (e) {
+      setFeedbackMsg({ success: false, msg: '发起 Google OAuth PKCE 授权失败，请检查后端服务状态' });
+    }
+  };
+
+  // 轮询 1455 端口自动回环授权状态
+  useEffect(() => {
+    if (!pkceState) return;
+    const timer = setInterval(async () => {
+      try {
+        const res = await apiFetch(`/api/v1/providers/oauth/status/${pkceState}`);
+        if (res.ok) {
+          const st = await res.json();
+          if (st.completed && st.provider) {
+            clearInterval(timer);
+            setPkceState('');
+            setPkceManualUrl('');
+            setPkceRemark('');
+            setFeedbackMsg({
+              success: true,
+              msg: `✅ 授权成功！本地 1455 端口已自动捕获并绑定账号：${st.provider.name}`,
+            });
+            fetchAccounts();
+            fetchProviders();
+            onRefresh?.();
+          }
+        }
+      } catch (e) {}
+    }, 1500);
+    return () => clearInterval(timer);
+  }, [pkceState]);
+
+  // 手动粘贴回调 URL 完成 PKCE 授权
+  const handleCompleteManualPkceOAuth = async () => {
+    if (!pkceManualUrl.trim()) return;
+    setPkceSubmitting(true);
+    setFeedbackMsg(null);
+    try {
+      const res = await apiFetch('/api/v1/providers/oauth/manual-callback', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          callback_url: pkceManualUrl.trim(),
+          state: pkceState || undefined,
+          remark: pkceRemark.trim() || undefined,
+          role_binding: pkceRole,
+          priority: Number(pkcePriority) || 1,
+        }),
+      });
+      const resData = await res.json();
+      if (res.ok) {
+        setPkceManualUrl('');
+        setPkceRemark('');
+        setFeedbackMsg({
+          success: true,
+          msg: `✅ 授权成功！账号已加密存入算力池：${resData.provider?.name || 'Google OAuth'}`,
+        });
+        fetchAccounts();
+        fetchProviders();
+        onRefresh?.();
+      } else {
+        setFeedbackMsg({
+          success: false,
+          msg: `❌ 授权失败：${resData.detail || '请检查回调 URL 是否包含完整的 code 参数'}`,
+        });
+      }
+    } catch (e) {
+      setFeedbackMsg({ success: false, msg: '❌ 网络异常，无法完成令牌换取' });
+    } finally {
+      setPkceSubmitting(false);
+    }
+  };
+
+  // 保存自定义 API / Ollama 通道
+  const handleSaveProvider = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!provName.trim()) {
+      setFeedbackMsg({ success: false, msg: '请填写通道显示名称' });
+      return;
+    }
+    const modelList = provModels
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+    try {
+      setSavingProvider(true);
+      setFeedbackMsg(null);
+      const res = await apiFetch('/api/v1/providers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: provName.trim(),
+          provider_type: provType,
+          base_url: provBaseUrl.trim(),
+          api_key: provApiKey.trim(),
+          models: modelList,
+          role_binding: provRole,
+          priority: Number(provPriority) || 2,
+          is_enabled: 1,
+        }),
+      });
+      if (res.ok) {
+        setFeedbackMsg({
+          success: true,
+          msg: `✅ 多源算力通道 [${provName.trim()}] 已保存并加入调度池！`,
+        });
+        setProvName('');
+        setProvApiKey('');
+        fetchProviders();
+        onRefresh?.();
+      }
+    } catch (err: any) {
+      setFeedbackMsg({ success: false, msg: err.message || '保存自定义通道失败' });
+    } finally {
+      setSavingProvider(false);
+    }
+  };
+
+  const handleToggleProvider = async (p: LLMProviderItem) => {
+    try {
+      await apiFetch('/api/v1/providers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          id: p.id,
+          name: p.name,
+          provider_type: p.provider_type,
+          base_url: p.base_url,
+          models: p.models,
+          role_binding: p.role_binding,
+          tool_call_mode: p.tool_call_mode,
+          priority: p.priority,
+          is_enabled: p.is_enabled ? 0 : 1,
+        }),
+      });
+      fetchProviders();
+      onRefresh?.();
+    } catch (e) {}
+  };
+
+  const handleDeleteProvider = async (id: string, name: string) => {
+    if (!window.confirm(`确定要从算力池中删除通道 [${name}] 吗？`)) return;
+    try {
+      const res = await apiFetch(`/api/v1/providers/${id}`, { method: 'DELETE' });
+      if (res.ok) {
+        fetchProviders();
+        onRefresh?.();
+      }
+    } catch (e) {}
+  };
+
   useEffect(() => {
     if (isOpen) {
       fetchAccounts();
+      fetchProviders();
       fetchOAuthConfig();
       if (activeTab === 'audit') {
         fetchAuditLogs();
@@ -546,13 +773,13 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
             </div>
             <div>
               <div className="flex items-center space-x-2">
-                <h2 className="text-base font-bold text-white tracking-wide">Google 账号池与算力中心</h2>
+                <h2 className="text-base font-bold text-white tracking-wide">账号管理与多源算力池中心</h2>
                 <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 font-medium">
-                  多引擎智能避险调度
+                  PKCE OAuth · CLI · 多协议 API · &lt;50ms 429 无感接力
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-0.5">
-                支持 Antigravity CLI 隔离运行与官方个人免费通道，智能容量监控与 429 秒级无感轮转
+                统一管理 Google 官方 OAuth (1455端口自动回环/手动粘贴URL)、本地 CLI 引擎、DeepSeek / Ollama / Claude 自定义 API 与实时配额监控
               </p>
             </div>
           </div>
@@ -575,12 +802,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
             }`}
           >
             <Cpu className="w-4 h-4" />
-            <span>账号池与容量监控</span>
-            {data?.summary && (
-              <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-blue-500/20 text-blue-300">
-                {data.summary.total_accounts}
-              </span>
-            )}
+            <span>账号池、多源 API 与额度监控</span>
+            <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-blue-500/20 text-blue-300">
+              {(data?.summary?.total_accounts || 0) + providers.filter((p) => p.id !== 'provider_google_pool').length}
+            </span>
           </button>
 
           <button
@@ -595,7 +820,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
             }`}
           >
             <Plus className="w-4 h-4" />
-            <span>添加 Google 账号 (分步向导)</span>
+            <span>添加 Google 账号 / 接入大模型 API</span>
           </button>
 
           <button
@@ -816,31 +1041,154 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   </div>
                 ))}
               </div>
+
+              {/* 多源大模型 API 与 PKCE 算力通道列表 (llm_providers) */}
+              <div className="pt-4 border-t border-border/60 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className="text-xs font-bold text-white flex items-center space-x-2">
+                      <Cpu className="w-4 h-4 text-blue-400" />
+                      <span>多协议大模型 API 与 PKCE 授权通道 ({providers.length})</span>
+                    </h3>
+                    <p className="text-[11px] text-slate-400 mt-0.5">
+                      统一管理 Google OAuth (PKCE)、OpenAI 兼容 (DeepSeek / 硅基流动)、本地 Ollama 与 Anthropic Claude 角色绑定与 429 冷却状态
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setAddMode('custom_api');
+                      setActiveTab('add_account');
+                    }}
+                    className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-medium flex items-center space-x-1 transition-colors"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>接入自定义 API / Ollama</span>
+                  </button>
+                </div>
+
+                <div className="space-y-2.5">
+                  {providers.map((p) => (
+                    <div
+                      key={p.id}
+                      className="p-3.5 rounded-xl bg-surface-200/40 border border-border/80 flex items-center justify-between gap-3"
+                    >
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex items-center flex-wrap gap-2">
+                          <span className="text-xs font-bold text-white">{p.name}</span>
+                          <span className="px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 text-[10px] font-mono">
+                            {p.provider_type}
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px]">
+                            职责: {p.role_binding === 'primary' ? '主力推理' : p.role_binding === 'light' ? '后台轻量提炼' : '主力+后台通用'}
+                          </span>
+                          {p.is_cooling_down ? (
+                            <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 text-[10px] font-semibold">
+                              ⏳ 429 冷却至 {p.cooldown_until}
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[10px]">
+                              ● 就绪 (优先级 {p.priority})
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-[11px] text-slate-400 font-mono truncate">
+                          模型: {(p.models || []).join(', ')}
+                          {p.base_url ? ` · Endpoint: ${p.base_url}` : ''}
+                          {p.api_key_masked ? ` · Key: ${p.api_key_masked}` : ''}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center space-x-2 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleProvider(p)}
+                          className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
+                            p.is_enabled
+                              ? 'bg-emerald-600 text-white'
+                              : 'bg-surface-300/40 text-slate-400'
+                          }`}
+                        >
+                          {p.is_enabled ? '已启用' : '已停用'}
+                        </button>
+                        {p.id !== 'provider_google_pool' && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteProvider(p.id, p.name)}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                            title="删除该自定义通道"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
           )}
 
-          {/* ──────────────────── TAB 2: 添加 Google 账号 (分步向导) ──────────────────── */}
+          {/* ──────────────────── TAB 2: 添加 Google 账号 / 接入大模型 API ──────────────────── */}
           {activeTab === 'add_account' && (
-            <div className="max-w-2xl mx-auto space-y-6 py-2">
+            <div className="max-w-3xl mx-auto space-y-6 py-2">
               {/* 子通道选择卡 */}
-              <div className="grid grid-cols-3 gap-2.5 p-1.5 bg-surface-200/50 rounded-2xl border border-border/60">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-2 p-1.5 bg-surface-200/50 rounded-2xl border border-border/60">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAddMode('pkce_oauth');
+                    setFeedbackMsg(null);
+                  }}
+                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
+                    addMode === 'pkce_oauth'
+                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
+                  }`}
+                >
+                  <div className="flex items-center space-x-1">
+                    <Shield className="w-3.5 h-3.5" />
+                    <span>Google OAuth (PKCE)</span>
+                  </div>
+                  <span className="text-[10px] font-normal opacity-80">免GCP门槛 · 自动/粘贴双模</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAddMode('custom_api');
+                    setFeedbackMsg(null);
+                  }}
+                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
+                    addMode === 'custom_api'
+                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                      : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
+                  }`}
+                >
+                  <div className="flex items-center space-x-1">
+                    <Cpu className="w-3.5 h-3.5" />
+                    <span>自定义 API / Ollama</span>
+                  </div>
+                  <span className="text-[10px] font-normal opacity-80">DeepSeek · 本地Ollama · Claude</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => {
                     setAddMode('cli');
                     setFeedbackMsg(null);
                   }}
-                  className={`py-2.5 px-3 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
+                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
                     addMode === 'cli'
                       ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
                   }`}
                 >
-                  <div className="flex items-center space-x-1.5">
+                  <div className="flex items-center space-x-1">
                     <Terminal className="w-3.5 h-3.5" />
-                    <span>本地 CLI 官方通道</span>
+                    <span>本地 CLI 引擎</span>
                   </div>
-                  <span className="text-[10px] font-normal opacity-80">免 API Key · 走 Antigravity 原生引擎</span>
+                  <span className="text-[10px] font-normal opacity-80">Antigravity 隔离环境</span>
                 </button>
 
                 <button
@@ -849,17 +1197,17 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     setAddMode('api_key');
                     setFeedbackMsg(null);
                   }}
-                  className={`py-2.5 px-3 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
+                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
                     addMode === 'api_key'
                       ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
                   }`}
                 >
-                  <div className="flex items-center space-x-1.5">
+                  <div className="flex items-center space-x-1">
                     <Key className="w-3.5 h-3.5" />
-                    <span>官方免费 API Key</span>
+                    <span>Google 免费 Key</span>
                   </div>
-                  <span className="text-[10px] font-normal opacity-80">个人全免费 · 免客户端 · 秒级可用</span>
+                  <span className="text-[10px] font-normal opacity-80">AI Studio 密钥直连</span>
                 </button>
 
                 <button
@@ -868,17 +1216,17 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     setAddMode('standard_oauth');
                     setFeedbackMsg(null);
                   }}
-                  className={`py-2.5 px-3 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
+                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
                     addMode === 'standard_oauth'
                       ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
                   }`}
                 >
-                  <div className="flex items-center space-x-1.5">
+                  <div className="flex items-center space-x-1">
                     <Globe className="w-3.5 h-3.5" />
-                    <span>自建 Google OAuth</span>
+                    <span>自建 GCP OAuth</span>
                   </div>
-                  <span className="text-[10px] font-normal opacity-80">Google Cloud 开发者 · 单点登录</span>
+                  <span className="text-[10px] font-normal opacity-80">企业自建 Client ID</span>
                 </button>
               </div>
 
@@ -898,6 +1246,230 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   )}
                   <span className="leading-relaxed">{feedbackMsg.msg}</span>
                 </div>
+              )}
+
+              {/* ──────────────────── 模式 A: Google 官方桌面端 PKCE OAuth (免 GCP 门槛 · 双模回调) ──────────────────── */}
+              {addMode === 'pkce_oauth' && (
+                <div className="space-y-5 animate-fadeIn">
+                  <div className="p-5 rounded-2xl bg-gradient-to-r from-blue-950/40 via-surface-200/50 to-indigo-950/40 border border-blue-500/40 space-y-4">
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div>
+                        <div className="flex items-center space-x-2 text-sm font-bold text-white">
+                          <Shield className="w-4 h-4 text-blue-400" />
+                          <span>🔐 Google 官方 OAuth 算力池接入（免 GCP 项目门槛 · 标准 PKCE 安全流）</span>
+                        </div>
+                        <p className="text-xs text-slate-300 mt-1 leading-relaxed">
+                          支持本机 <code className="text-blue-300 font-mono">1455</code> 端口自动回环监听捕获 + 远程/指纹浏览器隔离环境手动粘贴回调 URL 双模兜底，遇到 HTTP 429 自动 &lt;50ms 冷却并无感接力至下一节点。
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-xs pt-1">
+                      <div>
+                        <label className="block text-slate-300 mb-1.5 font-medium">账号备注名称 (可选)</label>
+                        <input
+                          type="text"
+                          value={pkceRemark}
+                          onChange={(e) => setPkceRemark(e.target.value)}
+                          placeholder="如：主力号A / 工作Gmail"
+                          className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-300 mb-1.5 font-medium">角色绑定策略</label>
+                        <select
+                          value={pkceRole}
+                          onChange={(e) => setPkceRole(e.target.value as any)}
+                          className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                        >
+                          <option value="both">🧠+⚡ 主力推理 + 后台记忆通用</option>
+                          <option value="primary">🧠 仅作为主力对话与 Agent 推理</option>
+                          <option value="light">⚡ 仅作为后台轻量记忆提炼</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-slate-300 mb-1.5 font-medium">调度优先级 (越小越优先)</label>
+                        <input
+                          type="number"
+                          min={1}
+                          max={100}
+                          value={pkcePriority}
+                          onChange={(e) => setPkcePriority(Number(e.target.value))}
+                          className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                        />
+                      </div>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleInitPkceOAuth}
+                      className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold text-xs transition-all shadow-lg shadow-blue-500/20 flex items-center justify-center space-x-2"
+                    >
+                      <ExternalLink className="w-4 h-4" />
+                      <span>🔗 第 1 步：发起 Google OAuth 授权 (打开浏览器并启动本地 1455 端口监听)</span>
+                    </button>
+
+                    <div className="pt-3 border-t border-border/60 space-y-2 text-xs">
+                      <label className="block text-slate-300 font-medium">
+                        第 2 步（模式 B 手动兜底）：若在远程/指纹浏览器授权后未自动跳转回本机，请粘贴浏览器地址栏的完整回调 URL：
+                      </label>
+                      <div className="flex items-center space-x-2">
+                        <input
+                          type="text"
+                          value={pkceManualUrl}
+                          onChange={(e) => setPkceManualUrl(e.target.value)}
+                          placeholder="粘贴完整回调 URL (http://localhost:1455/auth/callback?code=4/0A...&state=...)"
+                          className="flex-1 px-3 py-2.5 rounded-xl bg-surface-100 border border-border/80 text-white font-mono text-xs outline-none focus:border-emerald-500"
+                        />
+                        <button
+                          type="button"
+                          disabled={pkceSubmitting || !pkceManualUrl.trim()}
+                          onClick={handleCompleteManualPkceOAuth}
+                          className="px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white font-semibold text-xs transition-colors shrink-0 flex items-center space-x-1.5"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          <span>{pkceSubmitting ? '换取令牌中...' : '确认完成授权'}</span>
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* ──────────────────── 模式 B: 接入第三方自定义大模型 API / 本地 Ollama ──────────────────── */}
+              {addMode === 'custom_api' && (
+                <form onSubmit={handleSaveProvider} className="p-5 rounded-2xl bg-surface-200/40 border border-border/80 space-y-4 text-xs animate-fadeIn">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <h4 className="text-sm font-bold text-white flex items-center space-x-2">
+                        <Cpu className="w-4 h-4 text-blue-400" />
+                        <span>接入第三方大模型 API 或本地 Ollama 引擎</span>
+                      </h4>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        支持将高智商模型绑定为「主力推理」，将低成本或本地 Ollama 模型绑定为「后台轻量记忆提炼」，自动节省主力配额
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div>
+                      <label className="block text-slate-300 mb-1.5 font-medium">通道名称</label>
+                      <input
+                        type="text"
+                        required
+                        value={provName}
+                        onChange={(e) => setProvName(e.target.value)}
+                        placeholder="如 DeepSeek 官方 / 本地 Ollama"
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-1.5 font-medium">协议类型</label>
+                      <select
+                        value={provType}
+                        onChange={(e) => {
+                          const v = e.target.value as any;
+                          setProvType(v);
+                          if (v === 'openai_compat') {
+                            setProvBaseUrl('https://api.deepseek.com/v1');
+                            setProvModels('deepseek-chat, deepseek-reasoner');
+                          }
+                          if (v === 'ollama') {
+                            setProvBaseUrl('http://127.0.0.1:11434/v1');
+                            setProvModels('qwen2.5-coder:14b, deepseek-r1:14b');
+                          }
+                          if (v === 'anthropic') {
+                            setProvBaseUrl('https://api.anthropic.com/v1');
+                            setProvModels('claude-3-7-sonnet-latest');
+                          }
+                          if (v === 'gemini_api') {
+                            setProvBaseUrl('');
+                            setProvModels('gemini-2.5-pro, gemini-2.5-flash');
+                          }
+                        }}
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                      >
+                        <option value="openai_compat">OpenAI 兼容 (DeepSeek / 硅基流动 / OpenAI)</option>
+                        <option value="ollama">Ollama 本地模型 (http://127.0.0.1:11434/v1)</option>
+                        <option value="gemini_api">Google AI Studio API Key</option>
+                        <option value="anthropic">Anthropic Claude API</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-1.5 font-medium">角色绑定策略</label>
+                      <select
+                        value={provRole}
+                        onChange={(e) => setProvRole(e.target.value as any)}
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                      >
+                        <option value="both">🧠+⚡ 主力推理 + 后台记忆通用</option>
+                        <option value="primary">🧠 仅作为主力对话与 Agent 推理</option>
+                        <option value="light">⚡ 仅作为后台轻量记忆提炼与摘要</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                    <div className="md:col-span-2">
+                      <label className="block text-slate-300 mb-1.5 font-medium">
+                        Base URL (本地 Ollama 填 http://127.0.0.1:11434/v1)
+                      </label>
+                      <input
+                        type="text"
+                        value={provBaseUrl}
+                        onChange={(e) => setProvBaseUrl(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-1.5 font-medium">
+                        API Key (本地加密存储，Ollama 可留空)
+                      </label>
+                      <input
+                        type="password"
+                        value={provApiKey}
+                        onChange={(e) => setProvApiKey(e.target.value)}
+                        placeholder="sk-..."
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-blue-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                    <div className="md:col-span-3">
+                      <label className="block text-slate-300 mb-1.5 font-medium">
+                        可用模型 ID 列表（逗号分隔，保存后直接出现在聊天顶部模型选择器中）
+                      </label>
+                      <input
+                        type="text"
+                        value={provModels}
+                        onChange={(e) => setProvModels(e.target.value)}
+                        placeholder="deepseek-chat, qwen2.5-coder:14b, gpt-4o"
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-slate-300 mb-1.5 font-medium">调度优先级</label>
+                      <input
+                        type="number"
+                        min={1}
+                        max={100}
+                        value={provPriority}
+                        onChange={(e) => setProvPriority(Number(e.target.value))}
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                      />
+                    </div>
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={savingProvider}
+                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold text-xs transition-all shadow-lg shadow-blue-500/20 flex items-center justify-center space-x-2"
+                  >
+                    <Plus className="w-4 h-4" />
+                    <span>{savingProvider ? '正在保存...' : '保存通道并加入算力调度池'}</span>
+                  </button>
+                </form>
               )}
 
               {/* ──────────────────── 模式 1: 本地 CLI 官方通道 (Antigravity) ──────────────────── */}

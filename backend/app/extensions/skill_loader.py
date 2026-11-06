@@ -91,10 +91,82 @@ class SkillLoader:
                             "name": meta["name"],
                             "description": meta["description"],
                             "path": str(skill_md.resolve()),
+                            "content": raw,
+                            "is_builtin": item.name in ("git-commit-helper", "local-env-doctor"),
                         })
                     except Exception as e:
                         logger.warning(f"读取 Skill {item.name} 失败: {e}")
         return results
+
+    @staticmethod
+    def _sanitize_skill_id(raw_id: str) -> str:
+        """将任意名称转化为安全的文件夹标识"""
+        clean = re.sub(r"[^a-zA-Z0-9_-]+", "-", (raw_id or "").strip().lower()).strip("-")
+        return clean or "custom-skill"
+
+    def save_skill(
+        self,
+        name: str,
+        description: str,
+        content: str,
+        skill_id: str | None = None,
+    ) -> dict[str, Any]:
+        """创建或更新自定义本地 Skill (写入 skills/<id>/SKILL.md)"""
+        safe_id = self._sanitize_skill_id(skill_id or name)
+        target_dir = self.skills_dir / safe_id
+        target_dir.mkdir(parents=True, exist_ok=True)
+        skill_md = target_dir / "SKILL.md"
+
+        clean_body = (content or "").strip()
+        if clean_body.startswith("---"):
+            full_md = clean_body + "\n"
+        else:
+            full_md = (
+                f"---\n"
+                f"name: {name.strip() or safe_id}\n"
+                f"description: {description.strip() or '自定义专业技能规程'}\n"
+                f"---\n\n"
+                f"{clean_body}\n"
+            )
+        skill_md.write_text(full_md, encoding="utf-8")
+        meta = self._parse_frontmatter(full_md, safe_id)
+        return {
+            "id": safe_id,
+            "name": meta["name"],
+            "description": meta["description"],
+            "path": str(skill_md.resolve()),
+            "content": full_md,
+        }
+
+    def import_skill_markdown(self, raw_md: str, filename_hint: str = "") -> dict[str, Any]:
+        """从导入的 SKILL.md 文本解析 Frontmatter 并自动落盘至 skills/ 目录"""
+        fallback_slug = Path(filename_hint or "imported-skill").stem
+        if fallback_slug.upper() == "SKILL":
+            fallback_slug = "imported-skill"
+        meta = self._parse_frontmatter(raw_md, fallback_slug)
+        # 若正文中无标题但有 # 标题，提取首行标题辅助命名
+        if meta["name"] == fallback_slug:
+            m_title = re.search(r"^#\s+(.+)$", raw_md, re.MULTILINE)
+            if m_title:
+                meta["name"] = m_title.group(1).strip()[:40]
+        return self.save_skill(
+            name=meta["name"],
+            description=meta["description"],
+            content=raw_md,
+            skill_id=meta["name"],
+        )
+
+    def delete_skill(self, skill_id: str) -> bool:
+        """删除指定的本地 Skill 目录"""
+        import shutil
+        safe_id = os.path.basename((skill_id or "").strip())
+        if not safe_id:
+            return False
+        target_dir = self.skills_dir / safe_id
+        if not target_dir.exists() or not target_dir.is_dir():
+            return False
+        shutil.rmtree(target_dir, ignore_errors=True)
+        return True
 
     def get_skills_summary_prompt(self) -> str:
         """生成极简的可用 Skill 列表摘要（仅数十 Token），供注入 System Prompt"""
