@@ -129,6 +129,29 @@ class ConversationRepository:
             await conn.commit()
 
     @staticmethod
+    async def get_last_extracted_turn_id(conv_id: str) -> int:
+        """获取指定会话长期记忆已提炼的水位线 turn_id"""
+        async with db_manager.get_connection() as conn:
+            async with conn.execute(
+                "SELECT last_extracted_turn_id FROM conversations WHERE id = ?",
+                (conv_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0] is not None:
+                    return int(row[0])
+                return 0
+
+    @staticmethod
+    async def update_last_extracted_turn_id(conv_id: str, turn_id: int) -> None:
+        """推进长期记忆已提炼的水位线游标"""
+        async with db_manager.get_connection() as conn:
+            await conn.execute(
+                "UPDATE conversations SET last_extracted_turn_id = ? WHERE id = ?",
+                (turn_id, conv_id),
+            )
+            await conn.commit()
+
+    @staticmethod
     async def touch(conv_id: str) -> None:
         """更新最后活动时间"""
         async with db_manager.get_connection() as conn:

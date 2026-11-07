@@ -268,6 +268,80 @@ class GoogleOAuthManager:
         )
         return saved
 
+    async def complete_by_refresh_token(
+        self,
+        raw_token_or_json: str,
+        remark: Optional[str] = None,
+        role_binding: str = "both",
+        priority: int = 5,
+    ) -> Dict[str, Any]:
+        """
+        方式 C (Token/JSON 直填)：解析 refresh_token 并验证有效性，拉取邮箱信息落盘。
+        """
+        raw_text = (raw_token_or_json or "").strip()
+        if not raw_text:
+            raise ValueError("Token 或 JSON 不能为空")
+
+        refresh_token = ""
+        cid = self.client_id
+        csecret = self.client_secret
+
+        if raw_text.startswith("{") and raw_text.endswith("}"):
+            try:
+                parsed = json.loads(raw_text)
+                refresh_token = parsed.get("refresh_token") or parsed.get("token") or ""
+                if parsed.get("client_id"):
+                    cid = parsed["client_id"]
+                if parsed.get("client_secret"):
+                    csecret = parsed["client_secret"]
+            except Exception:
+                pass
+        if not refresh_token:
+            refresh_token = raw_text
+
+        proxy = get_system_proxy_url()
+        client_kwargs: Dict[str, Any] = {"timeout": 20.0}
+        if proxy:
+            client_kwargs["proxy"] = proxy
+
+        payload = {
+            "client_id": cid,
+            "client_secret": csecret,
+            "refresh_token": refresh_token,
+            "grant_type": "refresh_token",
+        }
+
+        async with httpx.AsyncClient(**client_kwargs) as client:
+            resp = await client.post("https://oauth2.googleapis.com/token", data=payload)
+            if resp.status_code != 200:
+                raise RuntimeError(f"验证 Refresh Token 失败 ({resp.status_code}): {resp.text}")
+            tokens = resp.json()
+            access_token = tokens.get("access_token")
+
+            user_resp = await client.get(
+                "https://www.googleapis.com/oauth2/v2/userinfo",
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            user_info = user_resp.json() if user_resp.status_code == 200 else {}
+
+        token_info = {
+            "email": user_info.get("email", "imported@gmail.com"),
+            "picture": user_info.get("picture", ""),
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "expires_in": int(tokens.get("expires_in", 3600)),
+        }
+
+        saved = await self._persist_google_provider(
+            token_info=token_info,
+            remark=remark or "",
+            state=None,
+            role_binding=role_binding,
+            priority=priority,
+            code=None,
+        )
+        return saved
+
     async def _exchange_code_for_token(self, code: str, state: Optional[str]) -> Dict[str, Any]:
         """向 Google OAuth2 Token 端点换取 access_token 与长期 refresh_token"""
         session = self._pending_sessions.get(state or "")

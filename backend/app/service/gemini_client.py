@@ -390,91 +390,101 @@ class GeminiClient:
                     total_buffered_len = 0
                     buffer_flushed = False
 
-                    async with client.stream("POST", cc_url, headers=cc_headers, json=cc_payload) as response:
-                        if response.status_code in (401, 403) and idx == 0:
-                            # 尝试自动使用本机 Keyring 中的新版 Antigravity 令牌无缝接力
-                            fallback_tok = await cls._get_fallback_oauth_token(client, failed_token=active_token)
-                            if fallback_tok and fallback_tok != active_token:
-                                active_token = fallback_tok
-                                project_id = await cls._resolve_cloudcode_project(active_token, client)
-                                cc_headers["Authorization"] = f"Bearer {active_token}"
-                                async with client.stream("POST", cc_url, headers=cc_headers, json=cc_payload) as retry_resp:
-                                    if retry_resp.status_code == 200:
-                                        async for line in retry_resp.aiter_lines():
-                                            if line and line.startswith("data: "):
-                                                raw_data = line[6:].strip()
-                                                if raw_data == "[DONE]":
-                                                    break
-                                                try:
-                                                    data_json = json.loads(raw_data)
-                                                    inner = data_json.get("response", data_json)
-                                                    for cand in inner.get("candidates", []):
-                                                        for part in cand.get("content", {}).get("parts", []):
-                                                            if part.get("text") and not part.get("thought"):
-                                                                yield part["text"]
-                                                except json.JSONDecodeError:
-                                                    continue
-                                        return
+                    try:
+                        async with client.stream("POST", cc_url, headers=cc_headers, json=cc_payload) as response:
+                            if response.status_code in (401, 403) and idx == 0:
+                                # 尝试自动使用本机 Keyring 中的新版 Antigravity 令牌无缝接力
+                                fallback_tok = await cls._get_fallback_oauth_token(client, failed_token=active_token)
+                                if fallback_tok and fallback_tok != active_token:
+                                    active_token = fallback_tok
+                                    project_id = await cls._resolve_cloudcode_project(active_token, client)
+                                    cc_headers["Authorization"] = f"Bearer {active_token}"
+                                    async with client.stream("POST", cc_url, headers=cc_headers, json=cc_payload) as retry_resp:
+                                        if retry_resp.status_code == 200:
+                                            async for line in retry_resp.aiter_lines():
+                                                if line and line.startswith("data: "):
+                                                    raw_data = line[6:].strip()
+                                                    if raw_data == "[DONE]":
+                                                        break
+                                                    try:
+                                                        data_json = json.loads(raw_data)
+                                                        inner = data_json.get("response", data_json)
+                                                        for cand in inner.get("candidates", []):
+                                                            for part in cand.get("content", {}).get("parts", []):
+                                                                if part.get("text") and not part.get("thought"):
+                                                                    yield part["text"]
+                                                    except json.JSONDecodeError:
+                                                        continue
+                                            return
 
-                        # 404 / 429 / 503 场景下，若还有候选可用模型，自动无缝降级切换
-                        if response.status_code in (404, 429, 503) and idx < len(candidate_models) - 1:
-                            next_model = candidate_models[idx + 1]
-                            logger.info(f"CloudCode 模型 [{target_cc_model}] 响应 [{response.status_code}]，自动降级至 [{next_model}]")
-                            if on_downgrade:
-                                try:
-                                    on_downgrade(model_name, next_model, f"{response.status_code}_quota_or_capacity")
-                                except Exception as cb_err:
-                                    logger.warning(f"触发模型降级回调异常: {cb_err}")
-                            continue
-
-                        if response.status_code != 200:
-                            error_text = await response.aread()
-                            err_msg = error_text.decode("utf-8", errors="ignore")
-                            if cls.is_version_deprecation_message(err_msg) and idx < len(candidate_models) - 1:
+                            # 404 / 429 / 503 场景下，若还有候选可用模型，自动无缝降级切换
+                            if response.status_code in (404, 429, 503) and idx < len(candidate_models) - 1:
                                 next_model = candidate_models[idx + 1]
-                                logger.warning(f"模型 [{target_cc_model}] 提示版本/套餐受限，自动降级至 [{next_model}]")
+                                logger.info(f"CloudCode 模型 [{target_cc_model}] 响应 [{response.status_code}]，自动降级至 [{next_model}]")
                                 if on_downgrade:
                                     try:
-                                        on_downgrade(model_name, next_model, "plan_quota_unsupported")
+                                        on_downgrade(model_name, next_model, f"{response.status_code}_quota_or_capacity")
                                     except Exception as cb_err:
                                         logger.warning(f"触发模型降级回调异常: {cb_err}")
                                 continue
-                            raise GeminiAPIException(status_code=response.status_code, message=err_msg)
 
-                        async for line in response.aiter_lines():
-                            if not line:
-                                continue
-                            if line.startswith("data: "):
-                                raw_data = line[len("data: "):].strip()
-                                if raw_data == "[DONE]":
-                                    break
-                                try:
-                                    data_json = json.loads(raw_data)
-                                    inner = data_json.get("response", data_json)
-                                    candidates = inner.get("candidates", [])
-                                    if candidates:
-                                        parts = candidates[0].get("content", {}).get("parts", [])
-                                        for part in parts:
-                                            text_chunk = part.get("text")
-                                            if text_chunk and not part.get("thought"):
-                                                if not buffer_flushed:
-                                                    buffered_chunks.append(text_chunk)
-                                                    total_buffered_len += len(text_chunk)
-                                                    combined_head = "".join(buffered_chunks)
-                                                    if cls.is_version_deprecation_message(combined_head):
-                                                        deprecation_detected = True
-                                                        break
-                                                    if total_buffered_len >= 120:
-                                                        buffer_flushed = True
-                                                        for bc in buffered_chunks:
-                                                            yield bc
-                                                        buffered_chunks.clear()
-                                                else:
-                                                    yield text_chunk
-                                        if deprecation_detected:
-                                            break
-                                except json.JSONDecodeError:
+                            if response.status_code != 200:
+                                error_text = await response.aread()
+                                err_msg = error_text.decode("utf-8", errors="ignore")
+                                if cls.is_version_deprecation_message(err_msg) and idx < len(candidate_models) - 1:
+                                    next_model = candidate_models[idx + 1]
+                                    logger.warning(f"模型 [{target_cc_model}] 提示版本/套餐受限，自动降级至 [{next_model}]")
+                                    if on_downgrade:
+                                        try:
+                                            on_downgrade(model_name, next_model, "plan_quota_unsupported")
+                                        except Exception as cb_err:
+                                            logger.warning(f"触发模型降级回调异常: {cb_err}")
                                     continue
+                                raise GeminiAPIException(status_code=response.status_code, message=err_msg)
+
+                            async for line in response.aiter_lines():
+                                if not line:
+                                    continue
+                                if line.startswith("data: "):
+                                    raw_data = line[len("data: "):].strip()
+                                    if raw_data == "[DONE]":
+                                        break
+                                    try:
+                                        data_json = json.loads(raw_data)
+                                        inner = data_json.get("response", data_json)
+                                        candidates = inner.get("candidates", [])
+                                        if candidates:
+                                            parts = candidates[0].get("content", {}).get("parts", [])
+                                            for part in parts:
+                                                text_chunk = part.get("text")
+                                                if text_chunk and not part.get("thought"):
+                                                    if not buffer_flushed:
+                                                        buffered_chunks.append(text_chunk)
+                                                        total_buffered_len += len(text_chunk)
+                                                        combined_head = "".join(buffered_chunks)
+                                                        if cls.is_version_deprecation_message(combined_head):
+                                                            deprecation_detected = True
+                                                            break
+                                                        if total_buffered_len >= 120:
+                                                            buffer_flushed = True
+                                                            for bc in buffered_chunks:
+                                                                yield bc
+                                                            buffered_chunks.clear()
+                                                    else:
+                                                        yield text_chunk
+                                            if deprecation_detected:
+                                                break
+                                    except json.JSONDecodeError:
+                                        continue
+                    except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ReadTimeout, EOFError) as eof_err:
+                        logger.warning(f"CloudCode 网关流式推流中途断开 (EOF/RemoteProtocolError): {eof_err}")
+                        # 首包 120 字符缓冲期内若尚未向外吐出 Token，直接无感重试下一候选模型
+                        if not buffer_flushed and idx < len(candidate_models) - 1:
+                            continue
+                        raise GeminiAPIException(
+                            status_code=502,
+                            message=f"CloudCode 网关推流中断 (EOF/ConnectionReset): {eof_err}"
+                        )
 
                     if deprecation_detected:
                         if idx < len(candidate_models) - 1:

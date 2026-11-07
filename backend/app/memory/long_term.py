@@ -6,6 +6,7 @@
 3. 30天未命中记忆指数自然衰减与自动淘汰
 4. 完整的可视化 CRUD 管理接口（供前端 Memory Hub 面板调用）
 """
+import asyncio
 import json
 import math
 import re
@@ -200,6 +201,9 @@ class LongTermMemoryManager:
                     tuple(seen_ids),
                 )
                 await conn.commit()
+                for r in results:
+                    if r["id"] in seen_ids:
+                        r["hit_count"] = int(r.get("hit_count", 0)) + 1
 
             return results
 
@@ -285,6 +289,131 @@ class LongTermMemoryManager:
                     if ok:
                         applied += 1
         return applied
+
+
+    _debounce_tasks: dict[str, asyncio.Task] = {}
+
+    @classmethod
+    def schedule_extraction(cls, conv_id: str, delay_seconds: int = 180) -> None:
+        """
+        挂载 180 秒闲置防抖提炼定时任务：
+        若用户在 180 秒内持续对话，自动重置计时器；闲置 3 分钟后静默启动后台轻量记忆提纯。
+        """
+        if not conv_id:
+            return
+
+        if conv_id in cls._debounce_tasks and not cls._debounce_tasks[conv_id].done():
+            cls._debounce_tasks[conv_id].cancel()
+
+        async def _debounce_worker():
+            try:
+                await asyncio.sleep(delay_seconds)
+                logger.info(f"会话 {conv_id} 已闲置 {delay_seconds}s，开始后台异步提炼长期记忆画像...")
+                await cls.extract_from_conversation(conv_id)
+            except asyncio.CancelledError:
+                pass
+            except Exception as e:
+                logger.warning(f"会话 {conv_id} 异步记忆提炼异常: {e}")
+            finally:
+                cls._debounce_tasks.pop(conv_id, None)
+
+        task = asyncio.create_task(_debounce_worker())
+        cls._debounce_tasks[conv_id] = task
+
+    @classmethod
+    async def extract_from_conversation(cls, conv_id: str) -> int:
+        """
+        基于幂等水位线 (last_extracted_turn_id) 与 task_role="light" 双轨调度，
+        增量提炼当前会话的新事实与偏好，并执行 FTS5 BM25 冲突合并。
+        """
+        from ..repository.conversation_repository import ConversationRepository
+        from ..service.engine_pool import engine_pool
+
+        last_turn = await ConversationRepository.get_last_extracted_turn_id(conv_id)
+        async with db_manager.get_connection() as conn:
+            async with conn.execute(
+                """
+                SELECT turn_id, role, content FROM messages
+                WHERE conversation_id = ? AND turn_id > ? AND role IN ('user', 'model', 'assistant')
+                ORDER BY turn_id ASC, id ASC
+                """,
+                (conv_id, last_turn),
+            ) as cur:
+                rows = await cur.fetchall()
+
+        if not rows:
+            return 0
+
+        max_turn = max(int(r["turn_id"] or 0) for r in rows)
+        dialog_lines: list[str] = []
+        for r in rows:
+            role_label = "用户" if r["role"] == "user" else "AI助手"
+            c = str(r["content"] or "").strip()
+            # 过滤超长工具伪文本与冗余
+            if len(c) > 600:
+                c = c[:300] + "...[省略]..." + c[-100:]
+            if c:
+                dialog_lines.append(f"{role_label}: {c}")
+
+        dialog_text = "\n".join(dialog_lines)
+        if len(dialog_text) < 40:
+            # 有效信息量太少，直接推进水位线无需消耗 LLM
+            await ConversationRepository.update_last_extracted_turn_id(conv_id, max_turn)
+            return 0
+
+        # FTS5 检索最相关的已有记忆作为上下文
+        existing_mems = await cls.retrieve_relevant(dialog_text, limit=8, min_confidence=0.4)
+        existing_fmt = json.dumps([
+            {"id": m["id"], "category": m["category"], "content": m["content"], "confidence": m["confidence"]}
+            for m in existing_mems
+        ], ensure_ascii=False)
+
+        prompt = f"""你是一个个人认知画像提炼引擎。请从以下新增对话中，提炼出【长期有效】的用户偏好、环境路径、硬性指令或技术栈习惯，并结合已存记忆做合并决策。
+
+### 新增增量对话片段：
+{dialog_text}
+
+### 现有最相近的存量长期记忆：
+{existing_fmt}
+
+### 输出要求：
+1. 仅提炼长期不变的事实（如用户的开发环境习惯、喜欢的技术栈、操作系统版本、硬性格式要求），忽略临时性代码或琐碎讨论。
+2. 对比存量记忆：
+   - 若为全新偏好或环境事实，生成 action="ADD"（分类 category: env_info / preference / rule）；
+   - 若与存量记忆有冲突或更新，生成 action="UPDATE" 并带上 target_id 与 updated_content；
+   - 若已有相同或更详细记忆，无需重复添加。
+3. 必须输出且仅输出标准 JSON 数组，严禁包含任何 Markdown 标记或多余解释：
+[
+  {{"action": "ADD", "category": "preference", "content": "用户倾向使用 TypeScript 编写前端组件", "confidence": 0.9}},
+  {{"action": "UPDATE", "target_id": "mem_xxx", "content": "用户当前工作区已迁移至 E:\\work\\project", "confidence": 0.95}}
+]
+若无可提炼的长期事实，请直接输出 []。"""
+
+        try:
+            full_response = ""
+            async for chunk in engine_pool.stream_chat(
+                conversation_id=None,
+                user_prompt=prompt,
+                model_name="4 Argon",
+                thinking_level="low",
+                system_override="你是一个专门提取用户画像的极简信息抽取引擎，必须仅输出 JSON 数组格式。",
+                temperature=0.2,
+                task_role="light",
+            ):
+                if chunk.get("type") == "chunk":
+                    full_response += chunk.get("content", "")
+
+            # 提取 JSON 数组
+            json_match = re.search(r"\[\s*\{.*\}\s*\]", full_response, re.DOTALL)
+            if json_match:
+                ops = json.loads(json_match.group(0))
+                applied = await cls.apply_merge_operations(ops)
+                logger.info(f"会话 {conv_id} 长期记忆提炼完成：共应用 {applied} 条记忆决策")
+            await ConversationRepository.update_last_extracted_turn_id(conv_id, max_turn)
+            return len(rows)
+        except Exception as e:
+            logger.warning(f"长期记忆提炼执行失败: {e}")
+            return 0
 
 
 long_term_memory = LongTermMemoryManager()

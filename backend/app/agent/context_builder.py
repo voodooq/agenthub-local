@@ -192,14 +192,28 @@ class ContextBuilder:
             min_turn_id = max(1, current_turn_id - max_turns)
             raw_msgs = await MessageRepository.get_by_turn_window(conversation_id, min_turn_id)
 
+            # 轮内滑动窗口降噪 (Intra-Turn Rolling Mask):
+            # 统计当前轮次中的所有工具消息，仅保留最近 4 步的完整 output，早期步数自动切换为 compressed 摘要
+            current_turn_tool_msgs = [
+                m for m in raw_msgs if m.role == "tool" and (m.turn_id or 1) == current_turn_id
+            ]
+            recent_tool_ids = {
+                id(m) for m in current_turn_tool_msgs[-4:]
+            }
+
             for m in raw_msgs:
-                # 关键降噪策略 (Observation Masking)：
-                # 历史轮次 (turn_id < current_turn_id) 的工具执行输出一律使用单行折叠摘要，当前轮次保留完整输出
+                # 双层降噪策略 (Observation Masking)：
+                # 1. 历史轮次 (turn_id < current_turn_id) 一律使用单行折叠摘要；
+                # 2. 当前轮次内部 (turn_id == current_turn_id) 超过最近 4 步的前期工具输出同样自动轻量折叠，杜绝 40 步长程任务 Token 膨胀
                 if m.role == "tool":
-                    if (m.turn_id or 1) < current_turn_id and m.compressed_content:
-                        effective_text = m.compressed_content
+                    is_current_turn = (m.turn_id or 1) == current_turn_id
+                    if not is_current_turn or id(m) not in recent_tool_ids:
+                        effective_text = m.compressed_content or (
+                            f"[已折叠前期工具输出: 共 {len(m.content or '')} 字符]" if m.content else "[工具执行完成]"
+                        )
                     else:
                         effective_text = m.content
+
                     history_list.append({
                         "role": "tool",
                         "turn_id": m.turn_id or 1,

@@ -72,6 +72,7 @@ class DatabaseManager:
             "current_cwd": "TEXT",
             "import_source": "TEXT DEFAULT 'local'",
             "import_batch_id": "TEXT",
+            "last_extracted_turn_id": "INTEGER DEFAULT 0",
         }
         for col, col_type in new_columns.items():
             if col not in columns:
@@ -111,6 +112,8 @@ class DatabaseManager:
             "source": "TEXT DEFAULT 'auto_extract'",
             "is_pinned": "INTEGER DEFAULT 0",
             "import_batch_id": "TEXT",
+            "hit_count": "INTEGER DEFAULT 0",
+            "last_accessed_at": "DATETIME DEFAULT CURRENT_TIMESTAMP",
         }
         for col, col_type in new_columns.items():
             if col not in columns:
@@ -319,8 +322,8 @@ class DatabaseManager:
             """)
             await self._migrate_llm_providers_table(conn)
 
-            # 清理历史废弃的系统占位池记录（Google 官方账号已在统一账号池管理，无需保留此冗余占位条目）
-            await conn.execute("DELETE FROM llm_providers WHERE id = 'provider_google_pool' AND is_enabled = 0;")
+            # 清理历史废弃的系统占位池记录（彻底删除任何写死的占位项，所有通道均由用户自主控制）
+            await conn.execute("DELETE FROM llm_providers WHERE id = 'provider_google_pool';")
 
             # 10. 导入批次记录表 (import_batches - 支持按批次一键回滚)
             await conn.execute("""

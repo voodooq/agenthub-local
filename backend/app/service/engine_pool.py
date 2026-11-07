@@ -47,6 +47,7 @@ class EnginePoolService:
         context_rounds: int = 10,
         attachments: list[Any] | None = None,
         pre_built_history: list[dict[str, Any]] | None = None,
+        task_role: str = "primary",
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         带零感知热故障转移与可配置上下文记忆轮数的流式生成执行器。
@@ -147,7 +148,11 @@ class EnginePoolService:
         try:
             from ..core.provider_adapter import provider_adapter
             from ..core.oauth_google import google_oauth_manager
-            custom_providers = await provider_adapter.get_enabled_providers_for_role("primary")
+            custom_providers = await provider_adapter.get_enabled_providers_for_role(task_role)
+            if not custom_providers and task_role == "light":
+                # 若未单独配置后台轻量模型，优雅降级调度 primary 节点中后备节点
+                custom_providers = await provider_adapter.get_enabled_providers_for_role("primary")
+                custom_providers.reverse()
             prev_failed_prov_name = None
             for prov in custom_providers:
                 ptype = prov.get("provider_type")
@@ -378,8 +383,15 @@ class EnginePoolService:
 
                 except GeminiAPIException as g_err:
                     logger.warning(f"OAuth 账号 [{account.name}] 响应异常 [{g_err.status_code}]: {g_err.message}")
-                    if g_err.status_code in (429, 503):
+                    if g_err.status_code in (429, 503, 502):
                         encountered_rate_limit = True
+                        if full_response_text:
+                            yield {
+                                "type": "stream_reset",
+                                "reason": "mid_flight_retry",
+                                "message": "检测到上游网络流式断连 (EOF)，正在自动清空残缺气泡并无缝重试...",
+                            }
+                            full_response_text = ""
                     elif g_err.status_code in (401, 403):
                         encountered_auth_error = True
                     else:
@@ -388,6 +400,13 @@ class EnginePoolService:
                 except Exception as e:
                     logger.error(f"OAuth 账号 [{account.name}] 生成异常: {e}")
                     encountered_rate_limit = True
+                    if full_response_text:
+                        yield {
+                            "type": "stream_reset",
+                            "reason": "mid_flight_retry",
+                            "message": "检测到网络断流，正在无缝重试...",
+                        }
+                        full_response_text = ""
 
             # ──────────────────── 通道 2: Antigravity / Gemini CLI 引擎 ────────────────────
             elif account.cli_home_dir:

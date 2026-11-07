@@ -148,6 +148,21 @@ async def lifespan(app: FastAPI):
             asyncio.create_task(watch_parent_process(parent_pid))
 
     await db_manager.init_db()
+
+    # 启动长期记忆 30 天自然指数衰减每日守护任务
+    async def _daily_decay_task():
+        while True:
+            try:
+                from app.memory.long_term import long_term_memory
+                res = await long_term_memory.apply_time_decay()
+                if res.get("decayed") or res.get("deleted"):
+                    logger.info(f"[记忆生命周期] 30 天未命中衰减扫描完成: 衰减 {res['decayed']} 条，清理 {res['deleted']} 条")
+            except Exception as e:
+                logger.debug(f"长期记忆衰减任务执行异常: {e}")
+            await asyncio.sleep(86400)
+
+    asyncio.create_task(_daily_decay_task())
+
     yield
     logger.info("应用正在优雅关机，正在清理常驻 MCP 进程池...")
     try:

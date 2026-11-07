@@ -95,8 +95,15 @@ class _StdioMCPConnection:
                 assert self.proc and self.proc.stdin and self.proc.stdout
                 self.proc.stdin.write(payload.encode("utf-8"))
                 self.proc.stdin.flush()
-                line = self.proc.stdout.readline()
-                return line.decode("utf-8", errors="replace").strip()
+                # 循环读取直到找到合法的 JSON-RPC 响应行（跳过可能的控制台调试输出或日志）
+                for _ in range(25):
+                    raw_line = self.proc.stdout.readline()
+                    if not raw_line:
+                        break
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if line.startswith("{") and line.endswith("}") and '"jsonrpc"' in line:
+                        return line
+                return ""
 
             try:
                 resp_line = await asyncio.wait_for(asyncio.to_thread(_io_step), timeout=timeout)
@@ -110,9 +117,16 @@ class _StdioMCPConnection:
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         if not await self.ensure_started():
             return f"Error: MCP Server [{self.name}] 未就绪或启动失败。"
-        res = await self._send_rpc("tools/call", {"name": tool_name, "arguments": arguments}, timeout=30.0)
+        res = await self._send_rpc("tools/call", {"name": tool_name, "arguments": arguments}, timeout=35.0)
         if res is None:
             return f"Error: 调用 MCP 工具 [{tool_name}] 超时或无响应。"
+
+        # 按 MCP 规范解析提炼 content: [{"type": "text", "text": "..."}]
+        if isinstance(res, dict) and "content" in res and isinstance(res["content"], list):
+            text_parts = [item.get("text", "") for item in res["content"] if isinstance(item, dict) and item.get("type") == "text"]
+            if text_parts:
+                return "\n".join(text_parts)
+
         return json.dumps(res, ensure_ascii=False)
 
     def close(self) -> None:
@@ -128,7 +142,17 @@ class MCPManager:
 
     def __init__(self, config_path: str | Path | None = None) -> None:
         base_dir = Path(__file__).resolve().parent.parent.parent.parent
-        self.config_path = Path(config_path) if config_path else (base_dir / "data" / "mcp_servers.json")
+        # 优先读取项目根目录 mcp_servers.json，次级使用 data/mcp_servers.json
+        root_cfg = base_dir / "mcp_servers.json"
+        data_cfg = base_dir / "data" / "mcp_servers.json"
+
+        if config_path:
+            self.config_path = Path(config_path)
+        elif root_cfg.exists():
+            self.config_path = root_cfg
+        else:
+            self.config_path = data_cfg
+
         self._connections: dict[str, _StdioMCPConnection] = {}
         self._ensure_default_config()
 
@@ -138,11 +162,23 @@ class MCPManager:
             if not self.config_path.exists():
                 default_cfg = {
                     "mcpServers": {
-                        "filesystem-example": {
+                        "playwright-cdp": {
+                            "command": "npx",
+                            "args": ["-y", "@playwright/mcp@latest", "--cdp-endpoint", "http://localhost:9222"],
+                            "enabled": False,
+                            "description": "接管本机已开启 --remote-debugging-port=9222 的 Edge/Chrome 浏览器（免登录操控网页、点击、填表、获取DOM）"
+                        },
+                        "filesystem": {
                             "command": "npx",
                             "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
                             "enabled": False,
-                            "description": "官方本地文件系统 MCP 示例（按需开启）",
+                            "description": "本地指定目录安全读写与文件系统 MCP 扩展通道"
+                        },
+                        "sqlite": {
+                            "command": "uvx",
+                            "args": ["mcp-server-sqlite", "--db-path", "./data/gemini_hub_local.db"],
+                            "enabled": False,
+                            "description": "本地 SQLite 数据库查询与结构分析通道"
                         }
                     }
                 }

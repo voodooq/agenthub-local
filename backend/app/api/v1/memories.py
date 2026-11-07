@@ -324,6 +324,30 @@ async def manual_callback_google_oauth_provider(req: GoogleOAuthManualCallbackRe
         raise HTTPException(status_code=500, detail=f"Google OAuth 令牌换取失败: {str(e)}")
 
 
+class GoogleOAuthTokenImportRequest(BaseModel):
+    token_or_json: str = Field(..., description="Refresh Token 字符串或包含 client_id/refresh_token 的 JSON 片段")
+    remark: str | None = Field(default=None)
+    role_binding: str = Field(default="both")
+    priority: int = Field(default=5)
+
+
+@router.post("/providers/oauth/import-token")
+async def import_google_oauth_token(req: GoogleOAuthTokenImportRequest):
+    """方式 C (Token/JSON 直填)：验证 Refresh Token 有效性并直接导入入库"""
+    try:
+        saved = await google_oauth_manager.complete_by_refresh_token(
+            raw_token_or_json=req.token_or_json,
+            remark=req.remark,
+            role_binding=req.role_binding,
+            priority=req.priority,
+        )
+        return {"status": "ok", "provider": saved}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Refresh Token 验证失败: {str(e)}")
+
+
 @router.post("/providers")
 async def save_llm_provider(req: LLMProviderSaveRequest):
     """新增或更新一个大模型供应商配置"""
@@ -342,13 +366,30 @@ async def save_llm_provider(req: LLMProviderSaveRequest):
     return saved
 
 
+class LLMProviderTestRequest(BaseModel):
+    provider_type: str = Field(default="openai_compat")
+    base_url: str = Field(default="")
+    api_key: str = Field(default="")
+    model_name: str = Field(default="")
+
+
+@router.post("/providers/test-connection")
+async def test_provider_connection(req: LLMProviderTestRequest):
+    """探测指定大模型端点或本地 Ollama 的实时连通性、网络延迟与模型列表"""
+    res = await provider_adapter.test_connection(
+        provider_type=req.provider_type,
+        base_url=req.base_url,
+        api_key=req.api_key,
+        model_name=req.model_name,
+    )
+    return res
+
+
 @router.delete("/providers/{provider_id}")
 async def delete_llm_provider(provider_id: str):
-    """删除自定义大模型供应商"""
+    """删除大模型供应商通道（完全放开权限，无任何死锁）"""
     ok = await provider_adapter.delete_provider(provider_id)
-    if not ok:
-        raise HTTPException(status_code=400, detail="内置算力池不可删除或供应商不存在")
-    return {"status": "ok", "id": provider_id}
+    return {"status": "ok", "deleted": ok, "id": provider_id}
 
 
 # ──────────────────── 4. 四步可视化跨平台数据导入向导 (Unified Importer) ────────────────────

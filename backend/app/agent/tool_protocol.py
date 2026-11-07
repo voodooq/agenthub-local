@@ -117,6 +117,55 @@ class ToolProtocolAdapter:
                     "required": ["file_path"],
                 },
             },
+            {
+                "name": "web_fetch",
+                "description": "实时网络访问与网页正文提纯工具：抓取指定 HTTP/HTTPS 网页并自动剥离广告导航转为 Markdown 正文；秒级探测本地 localhost 端口与微服务健康状态。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "要抓取或探测的 URL 地址（如 https://github.com/... 或 http://localhost:8080/health）",
+                        },
+                        "extract_main_text": {
+                            "type": "boolean",
+                            "description": "是否对 HTML 网页进行降噪提纯提取正文 Markdown（默认 true）",
+                        },
+                    },
+                    "required": ["url"],
+                },
+            },
+            {
+                "name": "ui_action",
+                "description": "Windows 原生 UI 自动化（UIA）工具：针对无 API 封闭桌面软件（如微信、钉钉、特定行业系统、设置弹窗），穿透桌面沙箱列出窗口、提取控件树并触发原生点击、输入与聚焦，免截图且零视觉误差。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "inspect", "click", "input", "focus"],
+                            "description": "操作类型：list(列出可见窗口), inspect(分析指定窗口控件树), click(点击控件), input(输入文本), focus(置顶并聚焦)",
+                        },
+                        "target_window": {
+                            "type": "string",
+                            "description": "目标窗口标题关键词或 HWND 句柄（如 '微信'、'Chrome' 或 '131820'）。执行 inspect/click/input/focus 时必填。",
+                        },
+                        "control_selector": {
+                            "type": "string",
+                            "description": "目标控件的 AutomationId 或 Name（如 '发送'、'搜索'、'Close'）。执行 click/input/focus 时必填。",
+                        },
+                        "value": {
+                            "type": "string",
+                            "description": "当 action='input' 时要填充或发送的文本内容（自动通过剪贴板防乱码安全注入）。",
+                        },
+                        "press_enter": {
+                            "type": "boolean",
+                            "description": "当 action='input' 时，输入完成后是否自动按下 Enter 发送/确认（默认 false）。",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
         ]
 
     @classmethod
@@ -153,28 +202,41 @@ class ToolProtocolAdapter:
     @classmethod
     def _parse_tool_arguments(cls, func_name: str, raw_json: str) -> dict[str, Any]:
         """
-        鲁棒性极高的工具参数解析器：自动容忍转义不全、双引号连写及格式残缺。
+        鲁棒性极高的工具参数解析器：自动容忍转义不全、Windows反斜杠路径、双引号连写及格式残缺。
+        支持从 Markdown 代码块（```powershell ... ```）中直接提取免转义执行内容。
         """
         raw = (raw_json or "").strip()
+        # 1. 直接提取内嵌的 Markdown 代码块
+        code_block_m = re.search(r"```(?:powershell|bash|sh|cmd|python|json)?\s*\n([\s\S]*?)\n```", raw, re.IGNORECASE)
+        if code_block_m and func_name == "execute_local_command" and '"command"' not in raw:
+            return {"command": code_block_m.group(1).strip(), "reason": "执行代码块中的终端操作"}
+
         if raw.startswith("```"):
             raw = re.sub(r"^```(?:json)?\s*", "", raw)
             raw = re.sub(r"\s*```$", "", raw).strip()
 
-        # 1. 直接尝试标准 JSON 解析
+        # 2. 直接尝试标准 JSON 解析
         try:
             return json.loads(raw)
         except Exception:
             pass
 
-        # 2. 修复模型常见双引号连写（例如 \"\", 修复为 \",）
-        fixed = re.sub(r'\\""\s*,', '",', raw)
+        # 3. 自动容错修复未转义的 Windows 反斜杠（如 "E:\work\..." -> "E:\\work\\..."）与非法转义符
+        repaired = re.sub(r'(?<!\\)\\(?!["\\/bfnrtu])', r'\\\\', raw)
+        try:
+            return json.loads(repaired)
+        except Exception:
+            pass
+
+        # 4. 修复模型常见双引号连写（例如 \"\", 修复为 \",）
+        fixed = re.sub(r'\\""\s*,', '",', repaired)
         fixed = re.sub(r'\\""\s*}', '"}', fixed)
         try:
             return json.loads(fixed)
         except Exception:
             pass
 
-        # 3. 针对 execute_local_command 进行模式提取
+        # 5. 针对 execute_local_command 进行模式提取
         if func_name == "execute_local_command":
             cmd_match = re.search(r'"command"\s*:\s*"(.*?)(?:"\s*,\s*"reason"|"\s*}$)', raw, re.DOTALL)
             reason_match = re.search(r'"reason"\s*:\s*"(.*?)"\s*\}', raw, re.DOTALL)
@@ -183,7 +245,7 @@ class ToolProtocolAdapter:
                 reason = reason_match.group(1) if reason_match else "执行本地操作"
                 return {"command": cmd, "reason": reason}
 
-        # 4. 针对 write_local_file 进行模式提取
+        # 6. 针对 write_local_file 进行模式提取
         if func_name == "write_local_file":
             path_m = re.search(r'"file_path"\s*:\s*"([^"]+)"', raw)
             content_m = re.search(r'"content"\s*:\s*"(.*?)"(?:\s*,\s*"overwrite"|"\s*}$)', raw, re.DOTALL)
@@ -194,13 +256,14 @@ class ToolProtocolAdapter:
                     "overwrite": True,
                 }
 
-        # 5. 兜底包装
+        # 7. 兜底包装
         return {"command": raw} if func_name == "execute_local_command" else {}
 
     _CORE_TOOL_NAMES = (
         "execute_local_command",
         "write_local_file",
         "read_local_file",
+        "web_fetch",
         "update_working_memory",
         "load_skill_detail",
     )
@@ -245,8 +308,10 @@ class ToolProtocolAdapter:
     @classmethod
     def _extract_balanced_json_objects(cls, text: str) -> list[str]:
         """
-        从任意混杂文本中精准提取平衡花括号包裹的 JSON 字符串（支持任意层级的大括号嵌套与字符串内转义）。
-        彻底解决包含 PowerShell 脚本块（如 ForEach-Object { if (...) { ... } }）时浅层正则被截断的问题。
+        从任意混杂文本中精准提取平衡花括号包裹的 JSON 字符串。
+        增强工程防线：
+        1. 字符状态机全面支持单引号 ('...')、双引号 ("...") 与模板反引号 (`...`) 内的孤立花括号隔离；
+        2. 若模型生成被截断或存在奇异字符导致扫描至末尾 depth > 0，启用渐进式 Auto-Close 切片降级修复。
         """
         results: list[str] = []
         i = 0
@@ -255,28 +320,62 @@ class ToolProtocolAdapter:
             if text[i] == '{':
                 start = i
                 depth = 0
-                in_string = False
+                in_quote: str | None = None
                 escape = False
-                while i < n:
-                    ch = text[i]
-                    if in_string:
+                matched_idx = -1
+
+                j = i
+                while j < n:
+                    ch = text[j]
+                    if in_quote:
                         if escape:
                             escape = False
                         elif ch == '\\':
                             escape = True
-                        elif ch == '"':
-                            in_string = False
+                        elif ch == in_quote:
+                            in_quote = None
                     else:
-                        if ch == '"':
-                            in_string = True
+                        if ch in ('"', "'", '`'):
+                            in_quote = ch
                         elif ch == '{':
                             depth += 1
                         elif ch == '}':
                             depth -= 1
                             if depth == 0:
-                                results.append(text[start : i + 1])
+                                matched_idx = j
                                 break
-                    i += 1
+                    j += 1
+
+                if matched_idx != -1:
+                    results.append(text[start : matched_idx + 1])
+                    i = matched_idx + 1
+                    continue
+                else:
+                    # ⚠️ 安全红线：若字符串引号未闭合（in_quote is not None），说明命令/路径参数在网络中途被截断腰斩！
+                    # 绝对严禁自动补齐引号与括号执行，否则极可能因残缺路径产生破坏性误操作！
+                    if in_quote is not None:
+                        break
+
+                    # 仅当所有字符串参数均已合法闭合、仅缺失最外层 JSON 大括号时，才允许渐进式 Auto-Close 补齐
+                    last_close = text.rfind('}', start)
+                    if last_close > start:
+                        candidate = text[start : last_close + 1]
+                        try:
+                            json.loads(candidate)
+                            results.append(candidate)
+                            i = last_close + 1
+                            continue
+                        except Exception:
+                            # 尝试补齐缺失的闭合括号
+                            for pad in range(1, 4):
+                                try:
+                                    repaired = candidate + ("}" * pad)
+                                    json.loads(repaired)
+                                    results.append(repaired)
+                                    i = last_close + 1
+                                    break
+                                except Exception:
+                                    pass
             i += 1
         return results
 

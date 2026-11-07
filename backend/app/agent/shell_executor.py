@@ -7,6 +7,7 @@
 4. 编码容错与防绕过安全校验：UTF-8/GBK 双模解码 + 连接符(&&, |, ;, >)强制升级 CONFIRM 审批
 """
 import asyncio
+import base64
 import os
 import re
 import signal
@@ -230,14 +231,40 @@ class LocalShellExecutor:
 
         # 构造带 UTF-8 编码声明与尾部 CWD 探测标记的包装命令
         if sys.platform == "win32":
-            wrapped_cmd = (
-                f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-                f"{command} ; "
-                f"Write-Output \"`n{self._CWD_MARKER}$((Get-Location).Path)\""
+            # 智能剥离模型自发嵌套的 powershell 外层包装，避免外层 Shell 将内部 $_ 变量吞掉
+            inner_cmd = command.strip()
+            ps_unwrap_pattern = re.compile(
+                r"^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\s+(?:-(?:NoProfile|NonInteractive|ExecutionPolicy\s+\w+|Command|c)\s+)*(?:\"([\s\S]*)\"|'([\s\S]*)'|([\s\S]+))$",
+                re.IGNORECASE,
             )
-            exec_args = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", wrapped_cmd]
+            m_unwrap = ps_unwrap_pattern.match(inner_cmd)
+            if m_unwrap:
+                inner_cmd = m_unwrap.group(1) or m_unwrap.group(2) or m_unwrap.group(3) or inner_cmd
+
+            full_ps_script = (
+                f"$ProgressPreference = 'SilentlyContinue'; "
+                f"$OutputEncoding = [System.Text.Encoding]::UTF8; "
+                f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+                f"$global:LASTEXITCODE = $null; "
+                f"{inner_cmd} ; "
+                f"$__cmd_ok = $?; "
+                f"$__real_exit = if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {{ $LASTEXITCODE }} elseif (-not $__cmd_ok) {{ 1 }} else {{ 0 }}; "
+                f"Write-Output \"`n{self._CWD_MARKER}$((Get-Location).Path)\"; "
+                f"exit $__real_exit"
+            )
+            # 使用 UTF-16LE Base64 编码通过 -EncodedCommand 直通执行，彻底免疫 Shell 引号转义与 $_ 变量丢失
+            b64_payload = base64.b64encode(full_ps_script.encode("utf-16le")).decode("ascii")
+            exec_args = [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-EncodedCommand",
+                b64_payload,
+            ]
         else:
-            wrapped_cmd = f"{command} ; echo \"\n{self._CWD_MARKER}$(pwd)\""
+            wrapped_cmd = f"{command}; __real_exit=$?; echo \"\n{self._CWD_MARKER}$(pwd)\"; exit $__real_exit"
             exec_args = ["/bin/bash", "-c", wrapped_cmd]
 
         # 强制将当前 Python 虚拟环境的 Scripts 目录与 bin 目录优先注入子进程 PATH，杜绝 WindowsApps 假 Python 劫持
@@ -278,6 +305,9 @@ class LocalShellExecutor:
 
         stdout_str = self.decode_output(out_bytes)
         stderr_str = self.decode_output(err_bytes)
+        # 过滤 PowerShell 默认输出的内部 CLIXML 进度伪日志
+        if stderr_str:
+            stderr_str = re.sub(r"#<\s*CLIXML[\s\S]*?</Objs>", "", stderr_str, flags=re.IGNORECASE).strip()
 
         # 解析并剥离尾部的 CWD 标记
         new_cwd = effective_cwd
@@ -361,20 +391,28 @@ class LocalShellExecutor:
     @staticmethod
     def compress_output(command: str, raw_output: str, exit_code: int) -> str:
         """
-        Observation Masking 核心函数：
-        将可能长达数千行的终端输出浓缩为单行摘要，供后续历史轮次折叠降噪使用。
+        Observation Masking 核心微缩函数：
+        将冗长的终端输出压缩为微缩快照（Head 3 行 + Tail 3 行 + 退出码），
+        既实现 90% 以上的 Token 降噪，又确保长程多步任务在汇总阶段不丢失关键文件或实体名称。
         """
         lines = [line.strip() for line in (raw_output or "").splitlines() if line.strip()]
         line_count = len(lines)
         short_cmd = command.strip().replace("\n", " ")[:60]
 
         if line_count == 0:
-            return f"[已折叠历史命令 `{short_cmd}` 输出: 无内容, 退出码 {exit_code}]"
+            return f"[已折叠命令 `{short_cmd}` 输出: (无输出), 退出码 {exit_code}]"
 
-        first_line = lines[0][:80]
-        last_line = lines[-1][:80] if line_count > 1 else ""
-        preview = f"{first_line} ... {last_line}" if last_line else first_line
-        return f"[已折叠历史命令 `{short_cmd}` 输出: 共 {line_count} 行, 退出码 {exit_code}, 摘要: {preview}]"
+        if line_count <= 6:
+            joined = " | ".join(lines)
+            return f"[已折叠命令 `{short_cmd}` 输出: 共 {line_count} 行, 退出码 {exit_code} | 详情: {joined[:180]}]"
+
+        head_parts = [l[:50] for l in lines[:3]]
+        tail_parts = [l[:50] for l in lines[-3:]]
+        preview_text = " / ".join(head_parts) + " ... " + " / ".join(tail_parts)
+        return (
+            f"[已折叠命令 `{short_cmd}` 输出: 共 {line_count} 行, 退出码 {exit_code} | "
+            f"首尾预览: {preview_text[:200]}]"
+        )
 
 
 # 全局单例

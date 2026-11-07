@@ -523,8 +523,8 @@ export default function WorkbenchPage() {
       const stripXmlToolTags = (txt: string) =>
         txt
           .replace(/[<\[]tool_call\s+name=["']?[^"'\]>]+["']?\s*[>\]][\s\S]*?[<\[]\/tool_call[>\]]/gi, '')
-          .replace(/<(?:execute_local_command|write_local_file|read_local_file|update_working_memory|load_skill_detail)\b[^>]*?(?:\/>|>[\s\S]*?<\/(?:execute_local_command|write_local_file|read_local_file|update_working_memory|load_skill_detail)>)/gi, '')
-          .replace(/<(?:execute_local_command|write_local_file|read_local_file|update_working_memory|load_skill_detail)\b[^>]*$/gi, '')
+          .replace(/<(?:execute_local_command|write_local_file|read_local_file|web_fetch|ui_action|update_working_memory|load_skill_detail)\b[^>]*?(?:\/>|>[\s\S]*?<\/(?:execute_local_command|write_local_file|read_local_file|web_fetch|ui_action|update_working_memory|load_skill_detail)>)/gi, '')
+          .replace(/<(?:execute_local_command|write_local_file|read_local_file|web_fetch|ui_action|update_working_memory|load_skill_detail)\b[^>]*$/gi, '')
           .replace(/\[调用工具:\s*[^\]]+\]/gi, '')
           .replace(/```xml\s*```/gi, '')
           .trim();
@@ -649,6 +649,16 @@ export default function WorkbenchPage() {
                   max_steps: parsed.max_steps,
                   message: extMsg,
                 };
+              }
+              return updated;
+            });
+          } else if (parsed.type === 'stream_reset') {
+            partialText = '';
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                last.content = '';
               }
               return updated;
             });

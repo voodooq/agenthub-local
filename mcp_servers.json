@@ -1,0 +1,36 @@
+{
+  "mcpServers": {
+    "playwright-cdp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest",
+        "--cdp-endpoint",
+        "http://localhost:9222"
+      ],
+      "enabled": false,
+      "description": "接管本机已开启 --remote-debugging-port=9222 的 Edge/Chrome 浏览器（免登录操控网页、点击、填表、获取DOM）"
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "."
+      ],
+      "enabled": false,
+      "description": "本地指定目录安全读写与文件系统 MCP 扩展通道"
+    },
+    "sqlite": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-sqlite",
+        "--db-path",
+        "./data/gemini_hub_local.db"
+      ],
+      "enabled": false,
+      "description": "本地 SQLite 数据库查询与结构分析通道"
+    }
+  }
+}
+

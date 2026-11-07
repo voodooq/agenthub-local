@@ -193,11 +193,117 @@ class ProviderAdapter:
 
     @classmethod
     async def delete_provider(cls, provider_id: str) -> bool:
-        """删除指定大模型通道供应商"""
+        """删除指定大模型通道供应商（彻底放开删除权限，无任何死锁）"""
         async with db_manager.get_connection() as conn:
             cur = await conn.execute("DELETE FROM llm_providers WHERE id = ?", (provider_id,))
+            # 若属于 google_oauth，同步清理 accounts 表中的对应记录
+            if provider_id.startswith("google_oauth_"):
+                slug = provider_id.replace("google_oauth_", "")
+                await conn.execute("DELETE FROM accounts WHERE name LIKE ? OR email LIKE ?", (f"%{slug}%", f"%{slug}%"))
             await conn.commit()
             return (cur.rowcount or 0) > 0
+
+    @classmethod
+    async def test_connection(
+        cls,
+        provider_type: str,
+        base_url: str = "",
+        api_key: str = "",
+        model_name: str = "",
+    ) -> dict[str, Any]:
+        """
+        探测指定供应商或自定义 Base URL 的实时连通性、网络延迟与可用模型列表。
+        """
+        import time
+        start_t = time.time()
+        ptype = provider_type.strip().lower()
+
+        # 1. 本地 Ollama 探测 (http://127.0.0.1:11434)
+        if ptype == "ollama" or "11434" in base_url:
+            clean_host = (base_url or "http://127.0.0.1:11434").rstrip("/")
+            if clean_host.endswith("/v1"):
+                clean_host = clean_host[:-3]
+            tags_url = f"{clean_host}/api/tags"
+            try:
+                async with httpx.AsyncClient(timeout=4.0) as client:
+                    resp = await client.get(tags_url)
+                    latency = int((time.time() - start_t) * 1000)
+                    if resp.status_code == 200:
+                        data = resp.json()
+                        models = [m.get("name") for m in data.get("models", []) if m.get("name")]
+                        return {
+                            "success": True,
+                            "latency_ms": latency,
+                            "models": models,
+                            "message": f"成功连通本地 Ollama 服务！已发现 {len(models)} 个本地模型（延迟: {latency}ms）",
+                        }
+                    return {
+                        "success": False,
+                        "latency_ms": latency,
+                        "models": [],
+                        "message": f"Ollama 服务返回状态码 {resp.status_code}: {resp.text[:100]}",
+                    }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "latency_ms": int((time.time() - start_t) * 1000),
+                    "models": [],
+                    "message": f"连接本地 Ollama 服务失败 (请确认 Ollama 已启动): {str(e)}",
+                }
+
+        # 2. 通用 OpenAI 兼容 / DeepSeek / 硅基流动 / Gemini API 探测
+        effective_base = (base_url or "https://api.openai.com/v1").rstrip("/")
+        if effective_base.endswith("/chat/completions"):
+            models_url = effective_base.replace("/chat/completions", "/models")
+        else:
+            models_url = f"{effective_base}/models"
+
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        try:
+            async with httpx.AsyncClient(timeout=6.0) as client:
+                resp = await client.get(models_url, headers=headers)
+                latency = int((time.time() - start_t) * 1000)
+                if resp.status_code == 200:
+                    data = resp.json()
+                    model_list = []
+                    if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+                        model_list = [item.get("id") for item in data["data"] if item.get("id")]
+                    elif isinstance(data, list):
+                        model_list = [item.get("id") for item in data if isinstance(item, dict) and item.get("id")]
+
+                    msg = f"连接成功！延迟 {latency}ms"
+                    if model_list:
+                        msg += f"，探测到 {len(model_list)} 个可用模型"
+                    return {
+                        "success": True,
+                        "latency_ms": latency,
+                        "models": model_list[:20],
+                        "message": msg,
+                    }
+                elif resp.status_code in (401, 403):
+                    return {
+                        "success": False,
+                        "latency_ms": latency,
+                        "models": [],
+                        "message": f"认证失败 (HTTP {resp.status_code}): API Key 无效或权限不足",
+                    }
+                else:
+                    return {
+                        "success": False,
+                        "latency_ms": latency,
+                        "models": [],
+                        "message": f"端点返回状态码 {resp.status_code}: {resp.text[:100]}",
+                    }
+        except Exception as e:
+            return {
+                "success": False,
+                "latency_ms": int((time.time() - start_t) * 1000),
+                "models": [],
+                "message": f"网络连通失败: {str(e)}",
+            }
 
     @classmethod
     async def stream_openai_compatible(
