@@ -1,0 +1,37 @@
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: geminihub-backend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8686:8686"
+    volumes:
+      # 代码目录挂载：修改代码容器自动同步生效，无需重新打包
+      - ./backend:/app
+      - ./data:/app/data
+      # 挂载宿主机 Gemini CLI 账号隔离目录（自适应用户主目录）
+      - ${USERPROFILE:-~}/.gemini/geminihub-accounts:/root/.gemini/geminihub-accounts
+    environment:
+      - TZ=Asia/Shanghai
+      - DB_PATH=/app/data/gemini_hub_local.db
+      - PROFILE_PATH=/app/data/profile.md
+      - AUTO_FAILOVER_RETRY=3
+      - LOG_LEVEL=INFO
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - BACKEND_URL=http://backend:8686
+    container_name: geminihub-frontend
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3000:3000"
+    depends_on:
+      - backend
+    environment:
+      - NODE_ENV=production
+      - BACKEND_URL=http://backend:8686

@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "playwright-cdp": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@playwright/mcp@latest",
+        "--cdp-endpoint",
+        "http://127.0.0.1:9222"
+      ],
+      "env": {},
+      "description": "接管本机已开启 --remote-debugging-port=9222 的 Edge/Chrome 浏览器（按需启用）",
+      "enabled": false
+    }
+  }
+}

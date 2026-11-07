@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark light;
+  
+  /* 基础与表面颜色 (Strata 极客冷曜石墨黑 Obsidian Emerald) */
+  --bg-main: #0b0f0e;
+  --bg-sidebar: #101513;
+  --bg-card: #151b18;
+  --bg-surface-50: #1b2320;
+  --bg-surface-100: #151b18;
+  --bg-surface-200: #101513;
+  --bg-surface-300: #0b0f0e;
+
+  --color-foreground: #e6ede9;
+  --color-foreground-muted: #82948c;
+  --color-border: rgba(255, 255, 255, 0.07);
+  --color-border-hover: rgba(16, 185, 129, 0.28);
+
+  --color-primary: #10b981;
+  --color-primary-hover: #059669;
+  --color-primary-subtle: rgba(16, 185, 129, 0.12);
+
+  --glass-panel: rgba(17, 22, 20, 0.88);
+  --glass-modal: rgba(15, 20, 18, 0.96);
+  --chat-assistant-bg: #151b18;
+  --chat-user-bg: #064e3b;
+  --chat-user-text: #ecfdf5;
+}
+
+html.light {
+  color-scheme: light;
+
+  /* 浅色模式 (Strata 舒缓温润鼠尾草白 Sage Minimal) - 不刺眼、呼吸感极强 */
+  --bg-main: #f4f6f5;
+  --bg-sidebar: #ffffff;
+  --bg-card: #ffffff;
+  --bg-surface-50: #eef2f0;
+  --bg-surface-100: #ffffff;
+  --bg-surface-200: #f4f6f5;
+  --bg-surface-300: #e3eae6;
+
+  --color-foreground: #18221d;
+  --color-foreground-muted: #667870;
+  --color-border: rgba(0, 0, 0, 0.07);
+  --color-border-hover: rgba(5, 150, 105, 0.28);
+
+  --color-primary: #059669;
+  --color-primary-hover: #047857;
+  --color-primary-subtle: #e8f5f0;
+
+  --glass-panel: rgba(255, 255, 255, 0.92);
+  --glass-modal: rgba(255, 255, 255, 0.98);
+  --chat-assistant-bg: #ffffff;
+  --chat-user-bg: #e6f4ea;
+  --chat-user-text: #064e3b;
+}
+
+body {
+  background-color: var(--bg-main);
+  color: var(--color-foreground);
+  font-family: 'Google Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  overflow: hidden;
+  transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+/* 长文本防截断与自然折行 */
+.break-anywhere {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+/* Gemini 优雅滚动条 */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--color-border-hover);
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-foreground-muted);
+}
+
+/* Glassmorphism 与浮层面板 */
+.glass-panel {
+  background: var(--glass-panel);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid var(--color-border);
+}
+
+.glass-modal {
+  background: var(--glass-modal);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid var(--color-border);
+  box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.35);
+}
+
+html.light .glass-modal {
+  box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.1);
+}
+
+/* 动效光晕 */
+.glow-emerald {
+  box-shadow: 0 0 15px rgba(16, 185, 129, 0.35);
+}
+.glow-amber {
+  box-shadow: 0 0 15px rgba(245, 158, 11, 0.35);
+}
+.glow-blue {
+  box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+}

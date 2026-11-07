@@ -1,0 +1,85 @@
+# ==============================================================================
+# GeminiHub Local - Git Ignore Policy
+# 保护个人隐私、脱敏本地数据、排除测试验证代码、构建产物与过程文档
+# ==============================================================================
+
+# 1. Python 虚拟环境与依赖
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+eggs/
+*.egg-info/
+
+# 2. 测试与验证代码、诊断脚本及开发检查工具（严禁上传 Git）
+tests/
+backend/tests/
+test_*.py
+*_test.py
+*diagnose*.py
+backend/diagnose.py
+pyrightconfig.json
+*.tsbuildinfo
+frontend/tsconfig.tsbuildinfo
+
+# 3. 本地私有运行时数据与数据库（极高危隐私，绝对严禁入库：锁定整个 data/ 目录）
+data/*
+!data/.gitkeep
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+backend/data/
+*.log
+
+# 4. 环境变量与私有凭据
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+*.cert
+
+# 5. 前端依赖与临时构建产物
+node_modules/
+frontend/node_modules/
+frontend/.next/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# 6. IDE、编辑器与系统临时文件
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 7. 本地抓取与测试临时文件
+share_extracted.html
+target_script.js
+scratch/
+scripts/
+fencing_*.json
+
+# 8. 文档归档与本地知识库（公开仓库仅保留根目录 README.md，忽略本地知识库、私有技能与商业套件）
+docs/
+skills/
+suites/
+memory/
+knowledge_base/
+*.md
+!README.md
