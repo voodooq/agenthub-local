@@ -815,7 +815,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
             <Cpu className="w-4 h-4" />
             <span>账号池、多源 API 与额度监控</span>
             <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/20 text-emerald-300">
-              {(data?.summary?.total_accounts || 0) + providers.filter((p) => p.id !== 'provider_google_pool').length}
+              {(data?.summary?.total_accounts || 0) + providers.length}
             </span>
           </button>
 
@@ -1140,16 +1140,14 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         >
                           {p.is_enabled ? '已启用' : '已停用'}
                         </button>
-                        {p.id !== 'provider_google_pool' && (
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteProvider(p.id, p.name)}
-                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
-                            title="删除该自定义通道"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteProvider(p.id, p.name)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                          title="删除该通道"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     </div>
                   ))}

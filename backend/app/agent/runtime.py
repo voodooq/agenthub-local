@@ -28,7 +28,8 @@ from .context_builder import ContextBuilder
 class AgentRuntime:
     """微内核智能体双层循环编排器"""
 
-    MAX_REACT_STEPS = 12
+    DEFAULT_REACT_STEPS = 16
+    MAX_REACT_STEPS = 40  # 任务深度自愈与多步推进时的绝对动态扩展上限
 
     async def chat_stream(
         self,
@@ -116,14 +117,27 @@ class AgentRuntime:
             except Exception as e:
                 logger.warning(f"加载 MCP 工具集异常: {e}")
 
-        max_steps = self.MAX_REACT_STEPS if active_scene == "agent" else 1
+        current_max_steps = self.DEFAULT_REACT_STEPS if active_scene == "agent" else 1
         final_account: str | None = None
         accumulated_visible_text = ""
         effective_model_name = model_name
         last_step_error_info: dict[str, Any] | None = None
+        consecutive_stalls = 0
 
-        # 5. 进入单轮内 ReAct 思考与工具执行循环 (Intra-Turn Loop)
-        for step_idx in range(max_steps):
+        # 5. 进入单轮内 ReAct 思考与工具执行循环 (Intra-Turn Adaptive Loop)
+        step_idx = 0
+        while step_idx < current_max_steps:
+            # 步数自适应动态扩展检查：当步数接近预算且任务仍在深度攻坚自愈时，自动扩展步数
+            if active_scene == "agent" and step_idx >= current_max_steps - 2:
+                if current_max_steps < self.MAX_REACT_STEPS:
+                    current_max_steps = min(current_max_steps + 8, self.MAX_REACT_STEPS)
+                    yield {
+                        "type": "step_extend",
+                        "step": step_idx + 1,
+                        "max_steps": current_max_steps,
+                        "message": f"任务正在深度自主推演与闭环攻坚中，已自动扩展执行预算至第 {current_max_steps} 步...",
+                    }
+
             ctx = await ContextBuilder.build(
                 conversation_id=conv_id,
                 current_turn_id=current_turn_id,
@@ -166,24 +180,25 @@ class AgentRuntime:
                 if last_step_error_info:
                     err_msg = last_step_error_info.get("summary", "执行返回异常或报错")
                     step_prompt = (
-                        f"[🚨 系统自动排障与日志诊断自愈调度]:\n"
+                        f"[🚨 第一性原理自愈与深度推演调度]:\n"
                         f"上一步执行返回异常: {err_msg}。\n"
-                        f"【第一性原理自愈与日志纠偏铁律 - 绝不允许卡住或直接退出】:\n"
-                        f"1. 仔细阅读上方工具返回的真实报错，特别是系统已自动嗅探并回填的【📋 诊断日志自动定位与回填】中的完整错误堆栈；\n"
-                        f"2. 深度分析日志根因（例如: 是否在子目录缺少 package.json、是否需要通过 `--prefix <子目录>` 安装、是否文件未创建、是否依赖名称错误）；\n"
-                        f"3. 严禁向用户复述错误后就草率结束任务！你拥有全自动执行权限（所有工具调用均会自动确认执行），必须立即输出修正后的命令自己纠偏改错；\n"
-                        f"4. 立即输出标准工具调用标签继续自愈修复，直到问题彻底解决并验证成功：\n"
+                        f"【自主攻坚铁律 - 绝不允许卡住或直接退出】:\n"
+                        f"1. 仔细阅读上方工具返回的真实报错（特别是诊断日志与 STDERR 堆栈）；\n"
+                        f"2. 深度分析报错根因（例如: 若出现 `.Name : The term '.Name' is not recognized`，说明在 PowerShell 双引号内 `$_` 被外层提前展开丢失，应在单引号内书写脚本块，或改用标准的 Python 脚本 `python -c ...` 执行扫描与清理；若缺少依赖或文件请检查相对路径与 `--prefix`）；\n"
+                        f"3. 紧扣用户最终目标，自己构思可靠的替代解决方案；\n"
+                        f"4. 严禁向用户复述错误或只输出声明！所有工具调用均会自动确认执行，必须立即输出标准 `<tool_call>` 标签执行具体命令纠偏自愈，直到彻底达成目标：\n"
                         f"```xml\n"
                         f'<tool_call name="execute_local_command">\n'
-                        f'{{"command": "修正后的终端命令（如指定 --prefix <子路径>）", "reason": "分析诊断日志后的自愈纠偏操作"}}\n'
+                        f'{{"command": "修正后的终端命令或 Python 替代执行脚本", "reason": "分析日志与语法根因后的自愈攻坚操作"}}\n'
                         f"</tool_call>\n"
                         f"```"
                     )
                 else:
                     step_prompt = (
-                        "[系统工作流推进]: 上述工具已执行完毕并返回真实结果（见上方记录）。"
-                        "请基于真实结果继续分析：若任务尚未完成需继续操作，请继续输出 `<tool_call>`；"
-                        "若任务已完成，请直接输出面向用户的最终完整解答。"
+                        "[系统工作流推进]: 上述工具已成功执行并返回真实结果（见上方记录）。\n"
+                        "请基于上述真实结果深度思考并推进实现用户的最终目标：\n"
+                        "- 若任务尚未彻底达成（例如刚完成扫描，仍需进一步分析、删除无效项、修改文件或验证），请立即输出下一个 `<tool_call>` 继续执行；\n"
+                        "- 只有当用户的目标已经物理完成并验证通过时，才向用户输出最终完整的成果解答。"
                     )
                 step_attachments = None
 
@@ -228,8 +243,26 @@ class AgentRuntime:
             # 6. 解析本步输出是否包含工具调用 (<tool_call>)
             clean_text, tool_calls = ToolProtocolAdapter.parse_xml_tool_calls(step_raw_text)
 
-            # 情况 A：模型未发起工具调用（或非 agent 模式），直接收尾完成本轮对话
+            # ── 关键反停滞与伪调用拦截（Anti-Stall & Steer） ──
+            raw_stripped = (step_raw_text or "").strip()
+            is_pseudo_tool = bool(re.search(
+                r"(?:\[调用工具|调用工具|execute_local_command|write_local_file|read_local_file|<tool_call)",
+                raw_stripped,
+                re.IGNORECASE
+            )) and len(raw_stripped) < 220
+
+            # 情况 A：模型未发起真实工具调用
             if not tool_calls or active_scene != "agent":
+                if active_scene == "agent" and is_pseudo_tool and consecutive_stalls < 3 and step_idx < current_max_steps - 1:
+                    consecutive_stalls += 1
+                    logger.warning(f"[AgentRuntime] 捕获模型伪工具调用声明/卡顿: '{raw_stripped}'，激活强制纠偏推进器 (第{consecutive_stalls}次)")
+                    last_step_error_info = {
+                        "tool": "steering",
+                        "summary": "模型仅输出了工具声明文本，未包含系统能够执行的具体 <tool_call> 标签与有效参数",
+                    }
+                    step_idx += 1
+                    continue
+
                 final_saved_text = clean_text if clean_text else step_raw_text
                 if final_saved_text:
                     await MessageRepository.save_message(
@@ -250,12 +283,20 @@ class AgentRuntime:
                 }
                 break
 
-            # 情况 B：模型发起了工具调用 -> 先将模型的 tool_calls 消息落盘（便于断电自愈）
+            consecutive_stalls = 0
+
+            # 情况 B：模型发起了工具调用 -> 规范化工具调用 XML 示范并落盘（杜绝带偏后续历史）
             accumulated_visible_text += ("\n\n" + clean_text if (accumulated_visible_text and clean_text) else clean_text)
+            formatted_tc_xml = "\n".join(
+                f'<tool_call name="{tc.get("function", {}).get("name", "")}">{tc.get("function", {}).get("arguments", "{}")}</tool_call>'
+                for tc in tool_calls
+            )
+            saved_content = (clean_text + "\n" + formatted_tc_xml).strip() if clean_text else formatted_tc_xml
+
             await MessageRepository.save_message(
                 conversation_id=conv_id,
                 role="model",
-                content=clean_text or f"[调用工具: {', '.join(tc['function']['name'] for tc in tool_calls)}]",
+                content=saved_content,
                 executed_by_account=final_account,
                 token_count=len(step_raw_text) // 3,
                 turn_id=current_turn_id,
@@ -551,11 +592,13 @@ class AgentRuntime:
                     tool_call_id=call_id,
                 )
 
-            # 若已到达最大步数上限，给出收尾完成信号
-            if step_idx == max_steps - 1:
+            step_idx += 1
+
+            # 若已到达自适应最大步数上限（最高动态扩展至 40 步），给出收尾完成信号
+            if step_idx >= current_max_steps:
                 yield {
                     "type": "done",
-                    "full_content": accumulated_visible_text.strip() or "已达到单轮最大自动执行步数上限（12步），请确认后继续。",
+                    "full_content": accumulated_visible_text.strip() or f"已完成深度推演与自主闭环执行（共执行 {step_idx} 步）。若需进一步处理请继续告知。",
                     "account": final_account,
                 }
 

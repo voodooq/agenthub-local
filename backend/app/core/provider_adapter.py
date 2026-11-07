@@ -193,9 +193,7 @@ class ProviderAdapter:
 
     @classmethod
     async def delete_provider(cls, provider_id: str) -> bool:
-        """删除自定义供应商（内置 google_pool 禁止删除，仅可禁用）"""
-        if provider_id == "provider_google_pool":
-            return False
+        """删除指定大模型通道供应商"""
         async with db_manager.get_connection() as conn:
             cur = await conn.execute("DELETE FROM llm_providers WHERE id = ?", (provider_id,))
             await conn.commit()

@@ -319,22 +319,8 @@ class DatabaseManager:
             """)
             await self._migrate_llm_providers_table(conn)
 
-            await conn.execute("""
-            INSERT OR IGNORE INTO llm_providers
-            (id, name, provider_type, base_url, api_key_encrypted, models_json, role_binding, tool_call_mode, priority, is_enabled)
-            VALUES (
-                'provider_google_pool',
-                'Google OAuth / CLI 多账号算力池',
-                'google_pool',
-                '',
-                '',
-                '["gemini-2.5-pro", "gemini-2.5-flash", "4 Argon", "claude-sonnet-4-5"]',
-                'both',
-                'xml_prompt',
-                1,
-                1
-            );
-            """)
+            # 清理历史废弃的系统占位池记录（Google 官方账号已在统一账号池管理，无需保留此冗余占位条目）
+            await conn.execute("DELETE FROM llm_providers WHERE id = 'provider_google_pool' AND is_enabled = 0;")
 
             # 10. 导入批次记录表 (import_batches - 支持按批次一键回滚)
             await conn.execute("""

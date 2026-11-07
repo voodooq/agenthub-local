@@ -102,6 +102,11 @@ export interface Message {
     reason?: string;
     message?: string;
   };
+  step_extend_info?: {
+    step: number;
+    max_steps: number;
+    message: string;
+  };
   tool_request?: {
     tool_name: string;
     tool_input: Record<string, any>;

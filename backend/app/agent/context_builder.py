@@ -6,6 +6,7 @@
 3. 按场景 (oneshot / chat / agent) 差异化装配：长期记忆 Top 5 + 工作记忆草稿纸 + 短期 Turn 滑动窗口 + 工具协议
 """
 import json
+import re
 from typing import Any
 
 from ..core.logging_config import logger
@@ -206,10 +207,27 @@ class ContextBuilder:
                         "tool_call_id": m.tool_call_id,
                     })
                 else:
+                    raw_c = m.content or ""
+                    # 消除可能带偏大模型的模式模仿文本 [调用工具: ...]
+                    if m.role in ("assistant", "model"):
+                        raw_c = re.sub(r"\[调用工具:\s*[^\]]+\]", "", raw_c).strip()
+                        # 若消息带有 tool_calls_json，并且 content 中尚未包含 <tool_call>，补齐标准 XML 示范
+                        if m.tool_calls_json and "<tool_call" not in raw_c:
+                            try:
+                                tc_list = json.loads(m.tool_calls_json)
+                                if isinstance(tc_list, list):
+                                    xml_calls = "\n".join(
+                                        f'<tool_call name="{tc.get("function", {}).get("name", "")}">{tc.get("function", {}).get("arguments", "{}")}</tool_call>'
+                                        for tc in tc_list
+                                    )
+                                    raw_c = (raw_c + "\n" + xml_calls).strip() if raw_c else xml_calls
+                            except Exception:
+                                pass
+
                     history_list.append({
                         "role": m.role,
                         "turn_id": m.turn_id or 1,
-                        "content": m.content,
+                        "content": raw_c,
                         "tool_calls_json": m.tool_calls_json,
                     })
 

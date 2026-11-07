@@ -638,6 +638,20 @@ export default function WorkbenchPage() {
             if (targetModel) {
               setCurrentModel(targetModel);
             }
+          } else if (parsed.type === 'step_extend') {
+            const extMsg = parsed.message || `任务正在深度自主推演中，步数已自动扩展至第 ${parsed.max_steps} 步`;
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                last.step_extend_info = {
+                  step: parsed.step,
+                  max_steps: parsed.max_steps,
+                  message: extMsg,
+                };
+              }
+              return updated;
+            });
           } else if (parsed.type === 'done') {
             if (parsed.full_content) {
               partialText = parsed.full_content;
@@ -1015,6 +1029,17 @@ export default function WorkbenchPage() {
                         <span>
                           原模型 <code className="font-mono bg-amber-500/20 px-1.5 py-0.5 rounded text-[11px] font-semibold">{msg.downgrade_info.original_model}</code> 响应受限或配额耗尽，系统已自动无缝降级切换至高可用模型 <code className="font-mono bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 px-1.5 py-0.5 rounded text-[11px] font-bold">{msg.downgrade_info.current_model}</code> 继续生成。右侧模型选择器已自动同步跳至该模型！
                         </span>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* 步数自适应扩展与深度自愈横幅 */}
+                  {!isUser && msg.step_extend_info && (
+                    <div className="flex items-start space-x-2.5 px-3.5 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-800 dark:text-indigo-200 text-xs animate-fade-in shadow-xs max-w-[88%] md:max-w-[82%]">
+                      <Sparkles className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5 animate-pulse" />
+                      <div className="flex-1 leading-snug">
+                        <span className="font-bold text-indigo-600 dark:text-indigo-300 mr-1.5">[自主推演与动态扩展]:</span>
+                        <span>{msg.step_extend_info.message}</span>
                       </div>
                     </div>
                   )}

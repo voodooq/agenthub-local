@@ -243,6 +243,44 @@ class ToolProtocolAdapter:
         return args
 
     @classmethod
+    def _extract_balanced_json_objects(cls, text: str) -> list[str]:
+        """
+        从任意混杂文本中精准提取平衡花括号包裹的 JSON 字符串（支持任意层级的大括号嵌套与字符串内转义）。
+        彻底解决包含 PowerShell 脚本块（如 ForEach-Object { if (...) { ... } }）时浅层正则被截断的问题。
+        """
+        results: list[str] = []
+        i = 0
+        n = len(text)
+        while i < n:
+            if text[i] == '{':
+                start = i
+                depth = 0
+                in_string = False
+                escape = False
+                while i < n:
+                    ch = text[i]
+                    if in_string:
+                        if escape:
+                            escape = False
+                        elif ch == '\\':
+                            escape = True
+                        elif ch == '"':
+                            in_string = False
+                    else:
+                        if ch == '"':
+                            in_string = True
+                        elif ch == '{':
+                            depth += 1
+                        elif ch == '}':
+                            depth -= 1
+                            if depth == 0:
+                                results.append(text[start : i + 1])
+                                break
+                    i += 1
+            i += 1
+        return results
+
+    @classmethod
     def parse_xml_tool_calls(cls, raw_text: str) -> tuple[str, list[dict[str, Any]]]:
         """
         从模型输出文本中解析所有工具调用。
@@ -322,9 +360,9 @@ class ToolProtocolAdapter:
                 })
             clean_text = pattern_pair.sub("", clean_text)
 
-        # ── 模式 3: 隐式工具调用容错自愈（捕获裸 JSON、带有 </slot> 或残缺标签的工具调用） ──
+        # ── 模式 3: 隐式工具调用容错自愈（捕获裸 JSON、带有 </slot> 或嵌套花括号脚本块的工具调用） ──
         if not tool_calls and ('"command"' in clean_text or '"file_path"' in clean_text or '"skill_name"' in clean_text):
-            raw_json_blocks = re.findall(r'(\{(?:[^{}]|(?:\{[^{}]*\}))*\})', clean_text, re.DOTALL)
+            raw_json_blocks = cls._extract_balanced_json_objects(clean_text)
             for block in raw_json_blocks:
                 try:
                     obj = json.loads(block)
