@@ -273,7 +273,12 @@ export default function WorkbenchPage() {
                 prevModel.tool_events = [...(prevModel.tool_events || []), toolItem];
               }
             } else {
-              merged.push(m);
+              // 自动清洗历史残存的 [tool_call] 原始标签与内部落盘标记
+              const cleanContent = (m.content || '')
+                .replace(/[<\[]tool_call\s+name=["']?[^"'\]>]+["']?\s*[>\]][\s\S]*?[<\[]\/tool_call[>\]]/gi, '')
+                .replace(/\[调用工具:\s*[^\]]+\]/gi, '')
+                .trim();
+              merged.push({ ...m, content: cleanContent });
             }
           }
           setMessages(merged);
@@ -517,7 +522,10 @@ export default function WorkbenchPage() {
 
       const stripXmlToolTags = (txt: string) =>
         txt
-          .replace(/<tool_call\s+name=["'][^"']+["']\s*>[\s\S]*?<\/tool_call>/gi, '')
+          .replace(/[<\[]tool_call\s+name=["']?[^"'\]>]+["']?\s*[>\]][\s\S]*?[<\[]\/tool_call[>\]]/gi, '')
+          .replace(/<(?:execute_local_command|write_local_file|read_local_file|update_working_memory|load_skill_detail)\b[^>]*?(?:\/>|>[\s\S]*?<\/(?:execute_local_command|write_local_file|read_local_file|update_working_memory|load_skill_detail)>)/gi, '')
+          .replace(/<(?:execute_local_command|write_local_file|read_local_file|update_working_memory|load_skill_detail)\b[^>]*$/gi, '')
+          .replace(/\[调用工具:\s*[^\]]+\]/gi, '')
           .replace(/```xml\s*```/gi, '')
           .trim();
 
@@ -605,15 +613,46 @@ export default function WorkbenchPage() {
               }
               return updated;
             });
+          } else if (parsed.type === 'model_downgrade') {
+            const origModel = parsed.original_model;
+            const targetModel = parsed.current_model;
+            const downgradeMsg = parsed.message || `检测到原模型「${origModel}」当前配额或容量受限，已自动无缝切换至「${targetModel}」`;
+
+            // 1. 在当前正在生成的 model 消息上挂载降级通知条
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                last.downgrade_info = {
+                  original_model: origModel,
+                  current_model: targetModel,
+                  reason: parsed.reason,
+                  message: downgradeMsg,
+                };
+                last.model_name = targetModel;
+              }
+              return updated;
+            });
+
+            // 2. 右侧（输入框旁）的模型选择器自动联动跳到降级后的正确模型
+            if (targetModel) {
+              setCurrentModel(targetModel);
+            }
           } else if (parsed.type === 'done') {
             if (parsed.full_content) {
               partialText = parsed.full_content;
+            }
+            if (parsed.model) {
+              setCurrentModel(parsed.model);
             }
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
                 last.content = stripXmlToolTags(partialText);
+                if (parsed.model) {
+                  last.model_name = parsed.model;
+                }
               }
               return updated;
             });
@@ -874,7 +913,7 @@ export default function WorkbenchPage() {
               className="flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs text-muted-foreground hover:text-foreground hover:bg-surface-200/70 transition-all"
               title="打开长期记忆画像与 Skill/MCP 扩展中枢"
             >
-              <Brain className="w-3.5 h-3.5 text-blue-500" />
+              <Brain className="w-3.5 h-3.5 text-emerald-500" />
               <span className="text-[12px]">记忆中枢</span>
             </button>
 
@@ -883,7 +922,7 @@ export default function WorkbenchPage() {
               onClick={() => setCanvasState((prev) => ({ ...prev, isOpen: !prev.isOpen }))}
               className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs transition-all ${
                 canvasState.isOpen
-                  ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400 font-medium'
+                  ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-medium'
                   : 'text-muted-foreground hover:text-foreground hover:bg-surface-200/70'
               }`}
               title="呼出/隐藏 Canvas 画布"
@@ -948,10 +987,16 @@ export default function WorkbenchPage() {
                       <span className="font-semibold text-foreground">您</span>
                     ) : (
                       <div className="flex items-center space-x-2">
-                        <Sparkles className="w-3.5 h-3.5 text-blue-500" />
+                        <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
                         <span className="font-bold text-foreground">
-                          Gemini ({msg.model_name || currentModel})
+                          Gemini ({msg.downgrade_info?.current_model || msg.model_name || currentModel})
                         </span>
+                        {msg.downgrade_info && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 font-medium flex items-center space-x-1">
+                            <AlertTriangle className="w-2.5 h-2.5 text-amber-500" />
+                            <span>已自动降级</span>
+                          </span>
+                        )}
                         {msg.executed_by_account && (
                           <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-200 border border-border font-mono">
                             调度: {msg.executed_by_account}
@@ -960,6 +1005,19 @@ export default function WorkbenchPage() {
                       </div>
                     )}
                   </div>
+
+                  {/* 模型自动降级提示横幅 */}
+                  {!isUser && msg.downgrade_info && (
+                    <div className="flex items-start space-x-2.5 px-3.5 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-200 text-xs animate-fade-in shadow-xs max-w-[88%] md:max-w-[82%]">
+                      <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                      <div className="flex-1 leading-snug">
+                        <span className="font-bold text-amber-700 dark:text-amber-300 mr-1.5">[模型自动降级通知]:</span>
+                        <span>
+                          原模型 <code className="font-mono bg-amber-500/20 px-1.5 py-0.5 rounded text-[11px] font-semibold">{msg.downgrade_info.original_model}</code> 响应受限或配额耗尽，系统已自动无缝降级切换至高可用模型 <code className="font-mono bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 px-1.5 py-0.5 rounded text-[11px] font-bold">{msg.downgrade_info.current_model}</code> 继续生成。右侧模型选择器已自动同步跳至该模型！
+                        </span>
+                      </div>
+                    </div>
+                  )}
 
                   {/* 思考过程展开收起卡片 */}
                   {!isUser && msg.thinking && (
@@ -971,10 +1029,10 @@ export default function WorkbenchPage() {
                     <button
                       type="button"
                       onClick={() => setIsMemoryHubOpen(true)}
-                      className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-blue-500/10 hover:bg-blue-500/15 border border-blue-500/20 text-[11px] text-blue-600 dark:text-blue-400 transition-colors"
+                      className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/15 border border-emerald-500/20 text-[11px] text-emerald-600 dark:text-emerald-400 transition-colors"
                       title={msg.memory_refs.map((m) => `• ${m.content}`).join('\n')}
                     >
-                      <Brain className="w-3 h-3" />
+                      <Brain className="w-3 h-3 text-emerald-500" />
                       <span>已引用 {msg.memory_refs.length} 条长期个人偏好（点击查看或管理）</span>
                     </button>
                   )}
@@ -984,12 +1042,12 @@ export default function WorkbenchPage() {
                     <div
                       className={`max-w-[88%] md:max-w-[82%] rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] break-anywhere shadow-sm ${
                         isUser
-                          ? 'bg-blue-600 text-white rounded-tr-none shadow-blue-500/10'
-                          : 'bg-surface-card text-foreground rounded-tl-none border border-border'
+                          ? 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-950 dark:text-emerald-100 border border-emerald-300/60 dark:border-emerald-500/30 rounded-tr-none shadow-emerald-500/5'
+                          : 'bg-surface-card text-foreground rounded-tl-none border border-border/80'
                       }`}
                     >
                       {isUser ? (
-                        <div className="text-white break-anywhere">
+                        <div className="text-emerald-950 dark:text-emerald-100 break-anywhere">
                           <ReactMarkdown
                             remarkPlugins={[remarkGfm]}
                             components={{
@@ -1000,12 +1058,12 @@ export default function WorkbenchPage() {
                                     <img
                                       src={src}
                                       alt={alt || '附带图片'}
-                                      className="rounded-xl border border-white/20 max-w-full h-auto object-cover max-h-[360px] cursor-pointer shadow-md hover:opacity-95 transition-opacity"
+                                      className="rounded-xl border border-emerald-500/20 max-w-full h-auto object-cover max-h-[360px] cursor-pointer shadow-md hover:opacity-95 transition-opacity"
                                       onClick={() => handleOpenCanvas(src, 'image', alt ? `附带图片: ${alt}` : '上传图片原图预览')}
                                       {...props}
                                     />
                                     {alt && (
-                                      <span className="block text-[11px] text-blue-100 mt-1 opacity-80">
+                                      <span className="block text-[11px] text-emerald-700 dark:text-emerald-300 mt-1 opacity-80">
                                         {alt}
                                       </span>
                                     )}
@@ -1071,7 +1129,7 @@ export default function WorkbenchPage() {
                             </ReactMarkdown>
                           ) : (
                             <div className="flex items-center space-x-2 text-muted-foreground text-xs py-1">
-                              <span className="w-2 h-2 rounded-full bg-blue-500 animate-ping shrink-0" />
+                              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
                               <span>正在调度本地执行与安全分析...</span>
                             </div>
                           )}
@@ -1135,7 +1193,7 @@ export default function WorkbenchPage() {
                     {att.type === 'image' && att.dataUrl ? (
                       <img src={att.dataUrl} alt="" className="w-6 h-6 rounded object-cover border border-border shrink-0" />
                     ) : (
-                      <Paperclip className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                      <Paperclip className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                     )}
                     <span className="truncate flex-1">{att.name}</span>
                     <span className="text-[10px] text-muted-foreground shrink-0">{att.size}</span>
@@ -1190,9 +1248,9 @@ export default function WorkbenchPage() {
 
             {/* 智能防幻觉意图嗅探胶囊：当检测到写盘需求却处于非 Agent 模式时一键引导 */}
             {sceneMode !== 'agent' && /(写入|创建文件|新建文件|写到|落盘|保存到|在.*创建|新建.*目录|写代码到|写入代码)/.test(inputPrompt) && (
-              <div className="px-3.5 py-1.5 mb-2 rounded-xl bg-blue-500/10 border border-blue-500/30 flex items-center justify-between text-xs text-blue-600 dark:text-blue-300 animate-fade-in shadow-sm">
+              <div className="px-3.5 py-1.5 mb-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between text-xs text-emerald-700 dark:text-emerald-300 animate-fade-in shadow-sm">
                 <div className="flex items-center space-x-2">
-                  <Sparkles className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                   <span>
                     检测到本地写盘需求：当前处于<strong>「{sceneMode === 'chat' ? '标准对话' : '极速单次'}」</strong>模式（仅生成文本代码）。
                     需 AI 真实操作磁盘物理创建文件？
@@ -1201,7 +1259,7 @@ export default function WorkbenchPage() {
                 <button
                   type="button"
                   onClick={() => handleSwitchSceneMode('agent')}
-                  className="px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-[11px] shrink-0 ml-2 shadow-sm transition-all"
+                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-[11px] shrink-0 ml-2 shadow-sm shadow-emerald-600/20 transition-all"
                 >
                   一键切换为 Agent 任务
                 </button>
@@ -1252,7 +1310,7 @@ export default function WorkbenchPage() {
                         title={m.tip}
                         className={`px-2 py-0.5 rounded-md transition-all ${
                           sceneMode === m.id
-                            ? 'bg-blue-600 text-white font-medium shadow-sm'
+                            ? 'bg-emerald-600 text-white font-medium shadow-sm'
                             : 'text-muted-foreground hover:text-foreground'
                         }`}
                       >
@@ -1299,7 +1357,7 @@ export default function WorkbenchPage() {
                     type="button"
                     onClick={() => handleSendMessage()}
                     disabled={isStreaming || !inputPrompt.trim()}
-                    className="p-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm"
+                    className="p-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm shadow-emerald-600/20"
                     title="发送提问"
                   >
                     {isStreaming ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}

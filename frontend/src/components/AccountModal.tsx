@@ -779,13 +779,13 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
         {/* 顶部标题栏 */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-border/80 bg-surface-200/40">
           <div className="flex items-center space-x-3">
-            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-blue-500/20">
+            <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-emerald-500/20">
               <Shield className="w-5 h-5 text-white" />
             </div>
             <div>
               <div className="flex items-center space-x-2">
                 <h2 className="text-base font-bold text-white tracking-wide">账号管理与多源算力池中心</h2>
-                <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/30 font-medium">
+                <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-medium">
                   PKCE OAuth · CLI · 多协议 API · &lt;50ms 429 无感接力
                 </span>
               </div>
@@ -808,13 +808,13 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
             onClick={() => setActiveTab('accounts')}
             className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all ${
               activeTab === 'accounts'
-                ? 'border-blue-500 text-blue-400 font-semibold'
+                ? 'border-emerald-500 text-emerald-400 font-semibold'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
             <Cpu className="w-4 h-4" />
             <span>账号池、多源 API 与额度监控</span>
-            <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-blue-500/20 text-blue-300">
+            <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/20 text-emerald-300">
               {(data?.summary?.total_accounts || 0) + providers.filter((p) => p.id !== 'provider_google_pool').length}
             </span>
           </button>
@@ -826,7 +826,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
             }}
             className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all ${
               activeTab === 'add_account'
-                ? 'border-blue-500 text-blue-400 font-semibold'
+                ? 'border-emerald-500 text-emerald-400 font-semibold'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
@@ -838,7 +838,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
             onClick={() => setActiveTab('audit')}
             className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all ${
               activeTab === 'audit'
-                ? 'border-blue-500 text-blue-400 font-semibold'
+                ? 'border-emerald-500 text-emerald-400 font-semibold'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
             }`}
           >
@@ -853,13 +853,13 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
           {activeTab === 'accounts' && (
             <div className="space-y-5">
               {/* 配额与容量说明提示 */}
-              <div className="p-3.5 rounded-xl bg-blue-950/20 border border-blue-500/20 flex items-start justify-between text-xs text-slate-300 leading-relaxed">
+              <div className="p-3.5 rounded-xl bg-emerald-950/20 border border-emerald-500/20 flex items-start justify-between text-xs text-slate-300 leading-relaxed">
                 <div className="flex items-start space-x-2.5">
-                  <Sparkles className="w-4 h-4 text-blue-400 mt-0.5 shrink-0" />
+                  <Sparkles className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
                   <div>
                     <strong className="text-white">容量监控与避险说明：</strong>
                     系统对每个账号的 RPM 与每日请求进行滑动窗口实时监控。当单账号达到限流阈值时，调度器将
-                    <strong className="text-blue-300"> 自动秒级无感切换至备用就绪账号</strong>，保障对话永不断连。
+                    <strong className="text-emerald-300"> 自动秒级无感切换至备用就绪账号</strong>，保障对话永不断连。
                   </div>
                 </div>
 
@@ -873,7 +873,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     className="ml-4 px-3 py-1 rounded-lg bg-surface-200/80 hover:bg-surface-300 text-slate-300 border border-border/80 text-xs shrink-0 flex items-center space-x-1.5 transition-colors"
                     title="立即从本地 SQLite 数据库刷新各账号今日调用量与消耗 Token"
                   >
-                    <RefreshCw className="w-3.5 h-3.5 text-blue-400" />
+                    <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
                     <span>刷新用量统计</span>
                   </button>
 
@@ -908,8 +908,8 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     <div className="text-2xl font-bold text-amber-400 mt-1">{data.summary.cooldown_accounts}</div>
                   </div>
                   <div className="p-4 rounded-xl bg-surface-200/40 border border-border/80">
-                    <div className="text-xs text-blue-400 font-medium">今日累计调用 / 消耗</div>
-                    <div className="text-2xl font-bold text-blue-400 mt-1">
+                    <div className="text-xs text-emerald-400 font-medium">今日累计调用 / 消耗</div>
+                    <div className="text-2xl font-bold text-emerald-400 mt-1">
                       {data.summary.total_today_used} <span className="text-xs font-normal text-slate-400">次</span>
                     </div>
                     <div className="text-[11px] text-slate-400 mt-1">
@@ -923,7 +923,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
               <div className="space-y-3">
                 {loading && (
                   <div className="p-8 text-center text-slate-400 text-xs flex items-center justify-center space-x-2">
-                    <RefreshCw className="w-4 h-4 animate-spin text-blue-400" />
+                    <RefreshCw className="w-4 h-4 animate-spin text-emerald-400" />
                     <span>正在获取实时容量指标...</span>
                   </div>
                 )}
@@ -937,7 +937,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     </p>
                     <button
                       onClick={() => setActiveTab('add_account')}
-                      className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors inline-flex items-center space-x-1.5"
+                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors inline-flex items-center space-x-1.5"
                     >
                       <Plus className="w-4 h-4" />
                       <span>立即添加首个账号</span>
@@ -952,7 +952,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   >
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-3">
-                        <div className="w-9 h-9 rounded-full bg-slate-800 border border-border flex items-center justify-center font-bold text-xs text-blue-400 overflow-hidden">
+                        <div className="w-9 h-9 rounded-full bg-slate-800 border border-border flex items-center justify-center font-bold text-xs text-emerald-400 overflow-hidden">
                           {acc.avatar_url ? (
                             <img src={acc.avatar_url} alt="" className="w-full h-full object-cover" />
                           ) : (
@@ -1005,7 +1005,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           disabled={testingId === acc.id}
                           className="px-2.5 py-1 text-xs rounded-lg border border-border/80 text-slate-300 hover:text-white hover:bg-surface-300/40 transition-colors flex items-center space-x-1.5 disabled:opacity-50"
                         >
-                          <Activity className="w-3.5 h-3.5 text-blue-400" />
+                          <Activity className="w-3.5 h-3.5 text-emerald-400" />
                           <span>{testingId === acc.id ? '测试中...' : '探测连通性'}</span>
                         </button>
                         <button
@@ -1030,7 +1030,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
                           <div
                             className={`h-full rounded-full transition-all duration-300 ${
-                              acc.rpm_percent >= 90 ? 'bg-amber-400' : 'bg-blue-500'
+                              acc.rpm_percent >= 90 ? 'bg-amber-400' : 'bg-emerald-500'
                             }`}
                             style={{ width: `${Math.min(100, acc.rpm_percent)}%` }}
                           ></div>
@@ -1076,7 +1076,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                 <div className="flex items-center justify-between">
                   <div>
                     <h3 className="text-xs font-bold text-white flex items-center space-x-2">
-                      <Cpu className="w-4 h-4 text-blue-400" />
+                      <Cpu className="w-4 h-4 text-emerald-400" />
                       <span>多协议大模型 API 与 PKCE 授权通道 ({providers.length})</span>
                     </h3>
                     <p className="text-[11px] text-slate-400 mt-0.5">
@@ -1089,7 +1089,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                       setAddMode('custom_api');
                       setActiveTab('add_account');
                     }}
-                    className="px-3 py-1.5 rounded-xl bg-blue-600/20 hover:bg-blue-600/30 text-blue-300 border border-blue-500/30 text-xs font-medium flex items-center space-x-1 transition-colors"
+                    className="px-3 py-1.5 rounded-xl bg-emerald-600/20 hover:bg-emerald-600/30 text-emerald-300 border border-emerald-500/30 text-xs font-medium flex items-center space-x-1 transition-colors"
                   >
                     <Plus className="w-3.5 h-3.5" />
                     <span>接入自定义 API / Ollama</span>
@@ -1105,7 +1105,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                       <div className="space-y-1 min-w-0">
                         <div className="flex items-center flex-wrap gap-2">
                           <span className="text-xs font-bold text-white">{p.name}</span>
-                          <span className="px-2 py-0.5 rounded bg-blue-500/15 text-blue-300 text-[10px] font-mono">
+                          <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 text-[10px] font-mono">
                             {p.provider_type}
                           </span>
                           <span className="px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px]">
@@ -1171,7 +1171,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   }}
                   className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
                     addMode === 'pkce_oauth'
-                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                      ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
                   }`}
                 >
@@ -1190,7 +1190,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   }}
                   className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
                     addMode === 'custom_api'
-                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                      ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
                   }`}
                 >
@@ -1209,7 +1209,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   }}
                   className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
                     addMode === 'cli'
-                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                      ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
                   }`}
                 >
@@ -1228,7 +1228,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   }}
                   className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
                     addMode === 'api_key'
-                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                      ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
                   }`}
                 >
@@ -1247,7 +1247,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   }}
                   className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
                     addMode === 'standard_oauth'
-                      ? 'bg-blue-600 text-white shadow-lg shadow-blue-500/20'
+                      ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
                   }`}
                 >
@@ -1280,15 +1280,15 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
               {/* ──────────────────── 模式 A: Google 官方桌面端 PKCE OAuth (免 GCP 门槛 · 双模回调) ──────────────────── */}
               {addMode === 'pkce_oauth' && (
                 <div className="space-y-5 animate-fadeIn">
-                  <div className="p-5 rounded-2xl bg-gradient-to-r from-blue-950/40 via-surface-200/50 to-indigo-950/40 border border-blue-500/40 space-y-4">
+                  <div className="p-5 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-surface-200/50 to-indigo-950/40 border border-emerald-500/40 space-y-4">
                     <div className="flex items-center justify-between flex-wrap gap-2">
                       <div>
                         <div className="flex items-center space-x-2 text-sm font-bold text-white">
-                          <Shield className="w-4 h-4 text-blue-400" />
+                          <Shield className="w-4 h-4 text-emerald-400" />
                           <span>🔐 Google 官方 OAuth 算力池接入（免 GCP 项目门槛 · 标准 PKCE 安全流）</span>
                         </div>
                         <p className="text-xs text-slate-300 mt-1 leading-relaxed">
-                          支持本机 <code className="text-blue-300 font-mono">1455</code> 端口自动回环监听捕获 + 远程/指纹浏览器隔离环境手动粘贴回调 URL 双模兜底，遇到 HTTP 429 自动 &lt;50ms 冷却并无感接力至下一节点。
+                          支持本机 <code className="text-emerald-300 font-mono">1455</code> 端口自动回环监听捕获 + 远程/指纹浏览器隔离环境手动粘贴回调 URL 双模兜底，遇到 HTTP 429 自动 &lt;50ms 冷却并无感接力至下一节点。
                         </p>
                       </div>
                     </div>
@@ -1301,7 +1301,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           value={pkceRemark}
                           onChange={(e) => setPkceRemark(e.target.value)}
                           placeholder="如：主力号A / 工作Gmail"
-                          className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                          className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-emerald-500"
                         />
                       </div>
                       <div>
@@ -1309,7 +1309,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         <select
                           value={pkceRole}
                           onChange={(e) => setPkceRole(e.target.value as any)}
-                          className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                          className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-emerald-500"
                         >
                           <option value="both">🧠+⚡ 主力推理 + 后台记忆通用</option>
                           <option value="primary">🧠 仅作为主力对话与 Agent 推理</option>
@@ -1324,7 +1324,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           max={100}
                           value={pkcePriority}
                           onChange={(e) => setPkcePriority(Number(e.target.value))}
-                          className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                          className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-emerald-500"
                         />
                       </div>
                     </div>
@@ -1332,7 +1332,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     <button
                       type="button"
                       onClick={handleInitPkceOAuth}
-                      className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold text-xs transition-all shadow-lg shadow-blue-500/20 flex items-center justify-center space-x-2"
+                      className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 text-white font-semibold text-xs transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center space-x-2"
                     >
                       <ExternalLink className="w-4 h-4" />
                       <span>🔗 第 1 步：发起 Google OAuth 授权 (打开浏览器并启动本地 1455 端口监听)</span>
@@ -1371,7 +1371,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   <div className="flex items-center justify-between">
                     <div>
                       <h4 className="text-sm font-bold text-white flex items-center space-x-2">
-                        <Cpu className="w-4 h-4 text-blue-400" />
+                        <Cpu className="w-4 h-4 text-emerald-400" />
                         <span>接入第三方大模型 API 或本地 Ollama 引擎</span>
                       </h4>
                       <p className="text-[11px] text-slate-400 mt-0.5">
@@ -1389,7 +1389,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         value={provName}
                         onChange={(e) => setProvName(e.target.value)}
                         placeholder="如 DeepSeek 官方 / 本地 Ollama"
-                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-emerald-500"
                       />
                     </div>
                     <div>
@@ -1416,7 +1416,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                             setProvModels('gemini-2.5-pro, gemini-2.5-flash');
                           }
                         }}
-                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-emerald-500"
                       >
                         <option value="openai_compat">OpenAI 兼容 (DeepSeek / 硅基流动 / OpenAI)</option>
                         <option value="ollama">Ollama 本地模型 (http://127.0.0.1:11434/v1)</option>
@@ -1429,7 +1429,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                       <select
                         value={provRole}
                         onChange={(e) => setProvRole(e.target.value as any)}
-                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-emerald-500"
                       >
                         <option value="both">🧠+⚡ 主力推理 + 后台记忆通用</option>
                         <option value="primary">🧠 仅作为主力对话与 Agent 推理</option>
@@ -1447,7 +1447,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         type="text"
                         value={provBaseUrl}
                         onChange={(e) => setProvBaseUrl(e.target.value)}
-                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-blue-500"
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-emerald-500"
                       />
                     </div>
                     <div>
@@ -1459,7 +1459,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         value={provApiKey}
                         onChange={(e) => setProvApiKey(e.target.value)}
                         placeholder="sk-..."
-                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-blue-500"
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-emerald-500"
                       />
                     </div>
                   </div>
@@ -1474,7 +1474,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         value={provModels}
                         onChange={(e) => setProvModels(e.target.value)}
                         placeholder="deepseek-chat, qwen2.5-coder:14b, gpt-4o"
-                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-blue-500"
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-emerald-500"
                       />
                     </div>
                     <div>
@@ -1485,7 +1485,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         max={100}
                         value={provPriority}
                         onChange={(e) => setProvPriority(Number(e.target.value))}
-                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-blue-500"
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-emerald-500"
                       />
                     </div>
                   </div>
@@ -1493,7 +1493,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   <button
                     type="submit"
                     disabled={savingProvider}
-                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-semibold text-xs transition-all shadow-lg shadow-blue-500/20 flex items-center justify-center space-x-2"
+                    className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 text-white font-semibold text-xs transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center space-x-2"
                   >
                     <Plus className="w-4 h-4" />
                     <span>{savingProvider ? '正在保存...' : '保存通道并加入算力调度池'}</span>
@@ -1505,7 +1505,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
               {addMode === 'cli' && (
                 <div className="space-y-5">
                   {/* ⚡ 宿主机原生引擎一键秒纳管（免登录） */}
-                  <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-surface-200/50 to-blue-950/40 border border-emerald-500/40 space-y-2.5 animate-fadeIn">
+                  <div className="p-4 rounded-2xl bg-gradient-to-r from-emerald-950/40 via-surface-200/50 to-emerald-950/40 border border-emerald-500/40 space-y-2.5 animate-fadeIn">
                     <div className="flex items-center justify-between">
                       <div className="flex items-center space-x-2 text-xs font-bold text-emerald-300">
                         <Sparkles className="w-4 h-4 text-emerald-400" />
@@ -1541,18 +1541,18 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   <div className="p-4 rounded-2xl bg-surface-200/40 border border-border/80 space-y-3">
                     <div className="flex items-center justify-between text-xs font-semibold text-white">
                       <span className="flex items-center space-x-1.5">
-                        <Terminal className="w-4 h-4 text-blue-400" />
+                        <Terminal className="w-4 h-4 text-emerald-400" />
                         <span>操作指引：本地 CLI 官方通道完整 4 步向导</span>
                       </span>
-                      <span className="text-[11px] text-blue-300 bg-blue-500/10 px-2 py-0.5 rounded-full border border-blue-500/20">
+                      <span className="text-[11px] text-emerald-300 bg-emerald-500/10 px-2 py-0.5 rounded-full border border-emerald-500/20">
                         原生 Antigravity 引擎
                       </span>
                     </div>
 
                     <div className="grid grid-cols-4 gap-2 text-[11px]">
                       <div className="p-2.5 rounded-xl bg-surface-100 border border-border/60 space-y-1">
-                        <div className="font-bold text-blue-400 flex items-center space-x-1">
-                          <span className="w-4 h-4 rounded-full bg-blue-500/20 text-blue-300 flex items-center justify-center text-[10px]">1</span>
+                        <div className="font-bold text-emerald-400 flex items-center space-x-1">
+                          <span className="w-4 h-4 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center justify-center text-[10px]">1</span>
                           <span>填写别名</span>
                         </div>
                         <p className="text-slate-400 leading-tight">输入账号别名并点击下方蓝色拉起按钮</p>
@@ -1598,7 +1598,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           value={newAlias}
                           onChange={(e) => setNewAlias(e.target.value)}
                           disabled={addingCli}
-                          className="w-full px-3.5 py-2.5 rounded-xl bg-surface-200/50 border border-border/80 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                          className="w-full px-3.5 py-2.5 rounded-xl bg-surface-200/50 border border-border/80 text-white placeholder-slate-500 text-xs focus:outline-none focus:border-emerald-500 disabled:opacity-50"
                         />
                       </div>
 
@@ -1613,7 +1613,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           value={newPriority}
                           onChange={(e) => setNewPriority(Number(e.target.value))}
                           disabled={addingCli}
-                          className="w-full px-3.5 py-2.5 rounded-xl bg-surface-200/50 border border-border/80 text-white text-xs focus:outline-none focus:border-blue-500 disabled:opacity-50"
+                          className="w-full px-3.5 py-2.5 rounded-xl bg-surface-200/50 border border-border/80 text-white text-xs focus:outline-none focus:border-emerald-500 disabled:opacity-50"
                         />
                       </div>
                     </div>
@@ -1621,7 +1621,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     <button
                       type="submit"
                       disabled={addingCli}
-                      className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium text-xs transition-all shadow-lg shadow-blue-500/20 flex items-center justify-center space-x-2 disabled:opacity-50"
+                      className="w-full py-3 px-4 rounded-xl bg-gradient-to-r from-emerald-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 text-white font-medium text-xs transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center space-x-2 disabled:opacity-50"
                     >
                       {addingCli ? (
                         <>
@@ -1639,7 +1639,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
 
                   {/* 步骤 2 补充按钮：手动点击打开链接 */}
                   {authUrl && (
-                    <div className="p-4 rounded-xl bg-blue-950/40 border border-blue-500/40 space-y-2.5 animate-fadeIn">
+                    <div className="p-4 rounded-xl bg-emerald-950/40 border border-emerald-500/40 space-y-2.5 animate-fadeIn">
                       <div className="text-xs font-semibold text-white flex items-center space-x-2">
                         <Sparkles className="w-4 h-4 text-amber-300" />
                         <span>浏览器未自动打开？请点击下方直达链接</span>
@@ -1648,7 +1648,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         href={authUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="inline-flex items-center space-x-2 px-4 py-2 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors"
+                        className="inline-flex items-center space-x-2 px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors"
                       >
                         <span>👉 手动在新窗口中打开 Google 授权登录</span>
                         <ExternalLink className="w-3.5 h-3.5" />
@@ -1713,8 +1713,8 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
 
                   {/* 状态轮询指示 */}
                   {pollingAlias && (
-                    <div className="p-3.5 rounded-xl bg-blue-950/30 border border-blue-500/30 flex items-center space-x-3 text-xs text-blue-300">
-                      <RefreshCw className="w-4 h-4 animate-spin text-blue-400 shrink-0" />
+                    <div className="p-3.5 rounded-xl bg-emerald-950/30 border border-emerald-500/30 flex items-center space-x-3 text-xs text-emerald-300">
+                      <RefreshCw className="w-4 h-4 animate-spin text-emerald-400 shrink-0" />
                       <span>正在实时监听认证状态... 提交授权码后将自动完成绑定入池。</span>
                     </div>
                   )}
@@ -1754,8 +1754,8 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                       </div>
 
                       <div className="p-2.5 rounded-xl bg-surface-100 border border-border/60 space-y-1">
-                        <div className="font-bold text-blue-400 flex items-center space-x-1">
-                          <span className="w-4 h-4 rounded-full bg-blue-500/20 text-blue-300 flex items-center justify-center text-[10px]">3</span>
+                        <div className="font-bold text-emerald-400 flex items-center space-x-1">
+                          <span className="w-4 h-4 rounded-full bg-emerald-500/20 text-emerald-300 flex items-center justify-center text-[10px]">3</span>
                           <span>粘贴保存</span>
                         </div>
                         <p className="text-slate-400 leading-tight">粘贴至下方保存，即刻享受每日 1500 次调用</p>
@@ -1844,7 +1844,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                 <div className="space-y-5">
                   <div className="p-4 rounded-2xl bg-surface-200/40 border border-border/80 space-y-2">
                     <div className="flex items-center space-x-2 text-sm font-semibold text-white">
-                      <Globe className="w-4 h-4 text-blue-400" />
+                      <Globe className="w-4 h-4 text-emerald-400" />
                       <span>自建 Google Cloud OAuth 2.0 通道</span>
                     </div>
                     <p className="text-xs text-slate-400 leading-relaxed">
@@ -1858,7 +1858,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         type="button"
                         onClick={handleLaunchGoogleOAuth}
                         disabled={oauthLoading}
-                        className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-medium text-sm transition-all shadow-lg shadow-blue-500/20 flex items-center justify-center space-x-2 disabled:opacity-50"
+                        className="w-full py-3.5 px-6 rounded-xl bg-gradient-to-r from-emerald-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 text-white font-medium text-sm transition-all shadow-lg shadow-emerald-500/20 flex items-center justify-center space-x-2 disabled:opacity-50"
                       >
                         {oauthLoading ? (
                           <RefreshCw className="w-4 h-4 animate-spin" />
@@ -1892,7 +1892,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         在 Google Cloud Console 中创建自己的 OAuth 客户端步骤：
                       </p>
                       <ol className="text-[11px] text-slate-400 list-decimal list-inside space-y-1.5 pl-1">
-                        <li>打开 <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" className="text-blue-400 underline">Google Cloud 控制台凭据页</a>，新建一个项目并启用 Generative Language API。</li>
+                        <li>打开 <a href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer" className="text-emerald-400 underline">Google Cloud 控制台凭据页</a>，新建一个项目并启用 Generative Language API。</li>
                         <li>点击「创建凭据」-&gt;「OAuth 客户端 ID」，应用类型选择「Web 应用」。</li>
                         <li>在「已获授权的重定向 URI」中添加：<code className="text-emerald-300 font-mono">http://localhost:8686/api/v1/accounts/oauth/callback</code></li>
                         <li>将生成的客户端 ID 和密钥复制粘贴至下方并保存即可！</li>
@@ -1903,7 +1903,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   {(showConfigForm || !oauthConfig?.is_configured) && (
                     <form onSubmit={handleSaveOAuthConfig} className="p-4 rounded-xl bg-surface-200/50 border border-border/80 space-y-3">
                       <div className="text-xs font-semibold text-white flex items-center space-x-2">
-                        <Key className="w-3.5 h-3.5 text-blue-400" />
+                        <Key className="w-3.5 h-3.5 text-emerald-400" />
                         <span>配置自建 Google Cloud OAuth 客户端</span>
                       </div>
                       <div>
@@ -1916,7 +1916,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           placeholder="例如: 123456789-xxx.apps.googleusercontent.com"
                           value={clientIdInput}
                           onChange={(e) => setClientIdInput(e.target.value)}
-                          className="w-full px-3 py-2 rounded-lg bg-surface-100 border border-border/80 text-white text-xs font-mono focus:outline-none focus:border-blue-500"
+                          className="w-full px-3 py-2 rounded-lg bg-surface-100 border border-border/80 text-white text-xs font-mono focus:outline-none focus:border-emerald-500"
                         />
                       </div>
                       <div>
@@ -1929,14 +1929,14 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           placeholder="例如: GOCSPX-xxxxxx"
                           value={clientSecretInput}
                           onChange={(e) => setClientSecretInput(e.target.value)}
-                          className="w-full px-3 py-2 rounded-lg bg-surface-100 border border-border/80 text-white text-xs font-mono focus:outline-none focus:border-blue-500"
+                          className="w-full px-3 py-2 rounded-lg bg-surface-100 border border-border/80 text-white text-xs font-mono focus:outline-none focus:border-emerald-500"
                         />
                       </div>
                       <div className="pt-2">
                         <button
                           type="submit"
                           disabled={oauthLoading}
-                          className="w-full py-2.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs transition-colors flex items-center justify-center space-x-1.5"
+                          className="w-full py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs transition-colors flex items-center justify-center space-x-1.5"
                         >
                           {oauthLoading ? <RefreshCw className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
                           <span>保存并更新客户端凭据</span>

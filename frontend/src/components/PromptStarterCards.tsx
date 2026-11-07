@@ -58,11 +58,11 @@ export function PromptStarterCards({ onSelectPrompt }: PromptStarterCardsProps) 
               onClick={() => onSelectPrompt(card.prompt)}
               className="p-4 rounded-xl bg-surface-card hover:bg-surface-100 border border-border/70 hover:border-border text-left transition-all duration-150 group shadow-sm flex items-start space-x-3"
             >
-              <div className="w-8 h-8 rounded-lg bg-surface-200/80 text-muted-foreground group-hover:text-blue-500 group-hover:bg-blue-500/10 flex items-center justify-center shrink-0 mt-0.5 transition-colors">
+              <div className="w-8 h-8 rounded-lg bg-surface-200/80 text-muted-foreground group-hover:text-emerald-500 group-hover:bg-emerald-500/10 flex items-center justify-center shrink-0 mt-0.5 transition-colors">
                 <IconComponent className="w-4 h-4" />
               </div>
               <div className="flex-1 min-w-0">
-                <div className="text-xs font-medium text-foreground group-hover:text-blue-500 transition-colors">
+                <div className="text-xs font-medium text-foreground group-hover:text-emerald-500 transition-colors">
                   {card.title}
                 </div>
                 <div className="text-[12px] text-muted-foreground mt-1 leading-snug line-clamp-2">

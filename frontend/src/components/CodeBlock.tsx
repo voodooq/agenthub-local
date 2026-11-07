@@ -67,7 +67,7 @@ export function CodeBlock({ language, code, onSendToCanvas }: CodeBlockProps) {
           {isMermaid && onSendToCanvas && (
             <button
               onClick={() => onSendToCanvas(code, 'mermaid')}
-              className="flex items-center space-x-1 px-2 py-1 rounded bg-blue-500/10 hover:bg-blue-500/20 text-blue-300 border border-blue-500/30 transition-colors"
+              className="flex items-center space-x-1 px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-colors"
             >
               <Code className="w-3 h-3" />
               <span>Canvas 预览</span>
@@ -94,7 +94,7 @@ export function CodeBlock({ language, code, onSendToCanvas }: CodeBlockProps) {
       </div>
 
       {!collapsed && (
-        <div className="p-3 text-[13px] font-mono leading-relaxed overflow-x-auto selection:bg-blue-500/40">
+        <div className="p-3 text-[13px] font-mono leading-relaxed overflow-x-auto selection:bg-emerald-500/40">
           <table className="w-full border-collapse">
             <tbody>
               {code.split('\n').map((line, idx) => (

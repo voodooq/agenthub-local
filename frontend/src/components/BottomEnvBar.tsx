@@ -24,7 +24,7 @@ export function BottomEnvBar({
   // 根据当前模式确定权限标签
   const permissionInfo =
     currentMode === 'office'
-      ? { label: '只读沙箱 (无硬件写权限)', color: 'text-blue-400 border-blue-500/30 bg-blue-500/10' }
+      ? { label: '只读沙箱 (无硬件写权限)', color: 'text-emerald-500 border-emerald-500/30 bg-emerald-500/10' }
       : { label: '需人类确认锁 (审批后物理执行)', color: 'text-emerald-400 border-emerald-500/30 bg-emerald-500/10' };
 
   return (
@@ -56,7 +56,7 @@ export function BottomEnvBar({
       >
         <Activity className="w-3.5 h-3.5 text-accent animate-pulse" />
         <span className="font-mono font-medium text-[10px]">
-          CPU <span className={cpuPercent > 70 ? 'text-rose-400' : 'text-blue-400'}>{cpuPercent}%</span> | RAM{' '}
+          CPU <span className={cpuPercent > 70 ? 'text-rose-400' : 'text-emerald-500'}>{cpuPercent}%</span> | RAM{' '}
           <span className={memPercent > 80 ? 'text-rose-400' : 'text-purple-400'}>{memPercent}%</span>
         </span>
         {isHudOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}

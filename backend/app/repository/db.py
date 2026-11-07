@@ -22,14 +22,14 @@ class DatabaseManager:
     @asynccontextmanager
     async def get_connection(self) -> AsyncGenerator[aiosqlite.Connection, None]:
         """
-        获取数据库连接上下文管理器，自动开启 WAL 模式与外键，并保证用毕安全关闭
+        获取数据库连接上下文管理器，自动配置 busy_timeout 与外键，并保证用毕安全关闭
         """
         Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
-        conn = await aiosqlite.connect(self.db_path)
+        # 设置连接超时为 60.0 秒，并在连接级别开启 busy_timeout=60000ms，彻底消除 database locked
+        conn = await aiosqlite.connect(self.db_path, timeout=60.0)
         conn.row_factory = aiosqlite.Row
 
-        # NOTE: 开启 WAL 模式可提升多并发读写效率，杜绝 database locked
-        await conn.execute("PRAGMA journal_mode = WAL;")
+        await conn.execute("PRAGMA busy_timeout = 60000;")
         await conn.execute("PRAGMA synchronous = NORMAL;")
         await conn.execute("PRAGMA foreign_keys = ON;")
         try:
@@ -139,6 +139,8 @@ class DatabaseManager:
         """
         logger.info(f"正在初始化 SQLite 数据库: {self.db_path}")
         async with self.get_connection() as conn:
+            # 全局持久化开启 WAL 日志模式
+            await conn.execute("PRAGMA journal_mode = WAL;")
             # 1. 账号表
             await conn.execute("""
             CREATE TABLE IF NOT EXISTS accounts (

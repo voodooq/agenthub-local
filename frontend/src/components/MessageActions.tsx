@@ -46,7 +46,7 @@ export function MessageActions({ content, executedByAccount, onRegenerate, onMod
       {/* 好评 */}
       <button
         onClick={() => setFeedback(feedback === 'up' ? null : 'up')}
-        className={"p-1.5 rounded-full hover:bg-white/10 transition-colors " + (feedback === 'up' ? 'text-blue-400 bg-blue-500/10' : 'hover:text-slate-200')}
+        className={"p-1.5 rounded-full hover:bg-surface-200 transition-colors " + (feedback === 'up' ? 'text-emerald-500 bg-emerald-500/10' : 'hover:text-foreground')}
         title="好的回答"
       >
         <ThumbsUp className="w-3.5 h-3.5" />

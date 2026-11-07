@@ -49,17 +49,41 @@ export const REAL_MODEL_LIST: ModelOption[] = [
   {
     id: 'gemini-4-argon',
     name: 'Gemini 4 Argon',
-    provider: 'Antigravity CLI',
-    description: 'Google 最新旗舰 Argon 推理引擎 · 深度架构设计与复杂逻辑推演',
-    badge: 'CLI 旗舰 · Argon',
+    provider: 'Google Official',
+    description: 'Google 最新第 4 代 Argon 旗舰深度推理引擎 · 超深思维链与复杂架构推演',
+    badge: '最新旗舰 · 4.0 Argon',
     hasThinking: true,
   },
   {
     id: 'gemini-3.8-flash',
     name: 'Gemini 3.8 Flash',
-    provider: 'Antigravity CLI',
-    description: '宿主机 CLI 原生高推理极速引擎 · 兼顾响应速度与系统工具调度',
-    badge: 'CLI 原生 · 极速',
+    provider: 'Google Official',
+    description: 'Google 新一代 3.8 高推理极速主力模型 · 超低延迟响应与全能代码生成',
+    badge: '高阶极速 · 3.8 Flash',
+    hasThinking: true,
+  },
+  {
+    id: 'gemini-3.5-flash-lite',
+    name: 'Gemini 3.5 Flash-Lite',
+    provider: 'Google Official',
+    description: '3.5 代毫秒级轻量模型 · 极速问答、日常高频排查与工具调用',
+    badge: '毫秒轻量 · 3.5',
+    hasThinking: false,
+  },
+  {
+    id: 'gemini-2.5-flash',
+    name: 'Gemini 2.5 Flash',
+    provider: 'Google Official',
+    description: 'Google 官方全能高性价比模型 · 极低响应延迟与优秀的代码理解',
+    badge: '官方主力 · 2.5 Flash',
+    hasThinking: true,
+  },
+  {
+    id: 'gemini-2.5-pro',
+    name: 'Gemini 2.5 Pro',
+    provider: 'Google Official',
+    description: 'Google 官方成熟顶级旗舰推理模型 · 支持超长上下文与多级思维链',
+    badge: '成熟旗舰 · 2.5 Pro',
     hasThinking: true,
   },
   {
@@ -154,7 +178,7 @@ export function ModelSelector({
           className={`w-2 h-2 rounded-full shrink-0 ${
             selectedOpt?.test_status?.available
               ? 'bg-emerald-500'
-              : 'bg-blue-500 animate-pulse'
+              : 'bg-emerald-500 animate-pulse'
           }`}
         ></span>
         <span className="truncate max-w-[150px]">{getButtonLabel()}</span>
@@ -180,7 +204,7 @@ export function ModelSelector({
                 <span>实测可用 ({activeList.length})</span>
               </span>
             ) : (
-              <span className="text-[9px] text-blue-500 font-medium shrink-0">
+              <span className="text-[9px] text-emerald-600 dark:text-emerald-400 font-medium shrink-0">
                 按账号属性自适应
               </span>
             )}
@@ -214,14 +238,14 @@ export function ModelSelector({
                     }}
                     className={`w-full flex items-center justify-between p-2.5 rounded-xl text-left transition-colors ${
                       isSelected
-                        ? 'bg-blue-600/15 border border-blue-500/30 text-blue-600 dark:text-white'
+                        ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-800 dark:text-emerald-200'
                         : 'hover:bg-foreground/[0.04] text-foreground'
                     }`}
                   >
                     <div className="flex items-start space-x-2.5 min-w-0 pr-1">
                       <div className="mt-0.5 shrink-0">
                         {isSelected ? (
-                          <Check className="w-4 h-4 text-blue-500" />
+                          <Check className="w-4 h-4 text-emerald-500" />
                         ) : (
                           <div className="w-4 h-4" />
                         )}
@@ -282,12 +306,12 @@ export function ModelSelector({
                               }}
                               className={`w-full flex items-center space-x-2 p-2 rounded-xl text-left transition-colors ${
                                 isLevelSelected
-                                  ? 'bg-blue-600/20 text-blue-600 dark:text-white font-semibold'
+                                  ? 'bg-emerald-500/20 text-emerald-800 dark:text-emerald-200 font-semibold'
                                   : 'hover:bg-foreground/[0.04] text-foreground'
                               }`}
                             >
                               <div className="w-3.5 h-3.5 flex items-center justify-center">
-                                {isLevelSelected && <Check className="w-3.5 h-3.5 text-blue-500" />}
+                                {isLevelSelected && <Check className="w-3.5 h-3.5 text-emerald-500" />}
                               </div>
                               <div>
                                 <div className="text-xs font-semibold">{tl.name}</div>
@@ -314,13 +338,13 @@ export function ModelSelector({
                   setIsThinkingSubmenuOpen(false);
                   onOpenModelTest();
                 }}
-                className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-blue-500/10 hover:bg-blue-500/20 border border-blue-500/25 text-xs text-blue-600 dark:text-blue-300 font-semibold transition-colors shadow-sm"
+                className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/25 text-xs text-emerald-700 dark:text-emerald-300 font-semibold transition-colors shadow-sm"
               >
                 <span className="flex items-center space-x-1.5">
-                  <Activity className="w-3.5 h-3.5 text-blue-500" />
+                  <Activity className="w-3.5 h-3.5 text-emerald-500" />
                   <span>一键测试模型可用性并筛选</span>
                 </span>
-                <Sliders className="w-3.5 h-3.5 text-blue-500" />
+                <Sliders className="w-3.5 h-3.5 text-emerald-500" />
               </button>
             </div>
           )}

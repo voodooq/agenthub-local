@@ -68,7 +68,9 @@ export function SettingsModal({
   onModelsUpdated,
   initialTab = 'models',
 }: SettingsModalProps) {
-  const [activeTab, setActiveTab] = useState<'models' | 'context' | 'appearance' | 'personality'>(initialTab);
+  const [activeTab, setActiveTab] = useState<'appearance' | 'models' | 'context' | 'about'>(
+    initialTab === 'appearance' ? 'appearance' : initialTab === 'models' ? 'models' : 'appearance'
+  );
   const { theme, setTheme } = useTheme();
 
   // 上下文记忆轮数状态 (默认 10 轮)
@@ -163,7 +165,11 @@ export function SettingsModal({
 
   useEffect(() => {
     if (isOpen) {
-      setActiveTab(initialTab);
+      if (initialTab === 'models' || initialTab === 'appearance') {
+        setActiveTab(initialTab);
+      } else {
+        setActiveTab('appearance');
+      }
       fetchActiveModels();
       fetchSettings();
       setFeedback(null);
@@ -339,275 +345,286 @@ export function SettingsModal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn">
-      <div className="relative w-full max-w-3xl rounded-3xl bg-surface-card border border-border shadow-2xl flex flex-col max-h-[90vh] overflow-hidden text-foreground">
-        {/* 顶部标题栏 */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-surface-100">
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-xl bg-blue-500/10 border border-blue-500/20 flex items-center justify-center text-blue-500">
-              <Sliders className="w-4 h-4" />
+      <div className="relative w-full max-w-4xl h-[620px] rounded-3xl bg-surface-card border border-border shadow-2xl flex flex-row overflow-hidden text-foreground">
+        {/* 左侧 Strata 风格分类导航栏 */}
+        <div className="w-56 bg-surface-100/70 border-r border-border p-5 flex flex-col justify-between shrink-0 select-none">
+          <div className="space-y-6">
+            <div className="px-2">
+              <h2 className="text-base font-bold text-foreground tracking-tight">设置</h2>
+              <p className="text-[11px] text-muted-foreground mt-0.5">GeminiHub Local</p>
             </div>
-            <div>
-              <h2 className="text-sm font-bold text-foreground">系统全景设置中心</h2>
-              <p className="text-[11px] text-muted-foreground">
-                模型自动识别与一键测试、上下文轮数管理与浅色/深色主题外观（回复性格与 SKILL 定制已整合至「记忆中枢」）
-              </p>
-            </div>
+
+            <nav className="space-y-1.5">
+              {[
+                { id: 'appearance', label: '外观', icon: Sun },
+                {
+                  id: 'models',
+                  label: '模型',
+                  icon: Cpu,
+                  badge: modelState ? `${modelState.models.length}/${modelState.candidates.length}` : undefined,
+                },
+                { id: 'context', label: '上下文与会话', icon: Layers },
+                { id: 'about', label: '关于', icon: Shield },
+              ].map((item) => {
+                const Icon = item.icon;
+                const isSelected = activeTab === item.id;
+                return (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={() => setActiveTab(item.id as any)}
+                    className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs transition-all ${
+                      isSelected
+                        ? 'bg-emerald-500/15 text-emerald-800 dark:text-emerald-300 font-semibold shadow-xs'
+                        : 'text-muted-foreground hover:text-foreground hover:bg-surface-200/60'
+                    }`}
+                  >
+                    <div className="flex items-center space-x-2.5">
+                      <Icon
+                        className={`w-4 h-4 ${
+                          isSelected ? 'text-emerald-600 dark:text-emerald-400' : 'text-muted-foreground'
+                        }`}
+                      />
+                      <span>{item.label}</span>
+                    </div>
+                    {item.badge && (
+                      <span
+                        className={`text-[10px] px-1.5 py-0.5 rounded-full font-mono ${
+                          isSelected
+                            ? 'bg-emerald-500/20 text-emerald-700 dark:text-emerald-300'
+                            : 'bg-surface-200 text-muted-foreground'
+                        }`}
+                      >
+                        {item.badge}
+                      </span>
+                    )}
+                  </button>
+                );
+              })}
+            </nav>
           </div>
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-full text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
+
+          <div className="px-2 text-[11px] text-muted-foreground/70 font-mono">
+            v1.1.0 · Strata Edition
+          </div>
         </div>
 
-        {/* 顶部功能 Tab 切换栏 */}
-        <div className="flex items-center space-x-2 px-6 border-b border-border bg-surface-200/50">
-          <button
-            type="button"
-            onClick={() => setActiveTab('models')}
-            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all ${
-              activeTab === 'models'
-                ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <Activity className="w-4 h-4" />
-            <span>模型自动识别与一键测试</span>
-            {modelState && (
-              <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-blue-500/15 text-blue-600 dark:text-blue-400 font-bold">
-                {modelState.models.length}/{modelState.candidates.length} 可用
-              </span>
-            )}
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setActiveTab('context')}
-            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all ${
-              activeTab === 'context'
-                ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <Layers className="w-4 h-4 text-emerald-500" />
-            <span>上下文记忆与会话管理</span>
-            <span className="ml-1 px-1.5 py-0.5 rounded-full text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-bold">
-              {contextRounds > 0 ? `${contextRounds} 轮` : '无记忆'}
+        {/* 右侧主工作内容区 */}
+        <div className="flex-1 flex flex-col min-w-0 bg-surface-card">
+          {/* 右上角关闭按钮栏 */}
+          <div className="flex items-center justify-between px-6 py-3.5 border-b border-border/50 shrink-0">
+            <span className="text-xs font-semibold text-muted-foreground">
+              {activeTab === 'appearance' && '外观与主题偏好'}
+              {activeTab === 'models' && '模型自动识别与连通性测试'}
+              {activeTab === 'context' && '单次对话记忆与会话管理'}
+              {activeTab === 'about' && '关于系统与本地引擎'}
             </span>
-          </button>
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-full text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
+              title="关闭"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
 
-          <button
-            type="button"
-            onClick={() => setActiveTab('appearance')}
-            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-semibold border-b-2 transition-all ${
-              activeTab === 'appearance'
-                ? 'border-blue-500 text-blue-600 dark:text-blue-400'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <Sun className="w-4 h-4 text-amber-500" />
-            <span>界面显示外观 (主题色)</span>
-          </button>
-        </div>
-
-        {/* 主内容滚动区 */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
-          {/* ==================== TAB 1: 模型自动识别与一键测试 ==================== */}
-          {activeTab === 'models' && (
-            <div className="space-y-5">
-              {/* 当前活跃账号属性与一键测试横幅 */}
-              <div className="p-4 rounded-2xl bg-surface-100 border border-blue-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
-                <div className="space-y-1.5">
-                  <div className="flex items-center space-x-2">
-                    <Cpu className="w-4 h-4 text-blue-500" />
-                    <span className="text-xs font-bold text-foreground">
-                      当前调度账号：{modelState?.account_name || '检测中...'}
-                    </span>
-                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-600 dark:text-blue-300 border border-blue-500/25 font-bold">
-                      {modelState?.auth_label || '自动识别中'}
-                    </span>
+          {/* 主内容滚动区 */}
+          <div className="flex-1 overflow-y-auto p-6 space-y-6">
+            {/* ==================== TAB 1: 模型自动识别与一键测试 ==================== */}
+            {activeTab === 'models' && (
+              <div className="space-y-5">
+                {/* 当前活跃账号属性与一键测试横幅 */}
+                <div className="p-4 rounded-2xl bg-surface-100 border border-emerald-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-4 shadow-sm">
+                  <div className="space-y-1.5">
+                    <div className="flex items-center space-x-2">
+                      <Cpu className="w-4 h-4 text-emerald-500" />
+                      <span className="text-xs font-bold text-foreground">
+                        当前调度账号：{modelState?.account_name || '检测中...'}
+                      </span>
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/25 font-bold">
+                        {modelState?.auth_label || '自动识别中'}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-muted-foreground leading-relaxed break-anywhere">
+                      系统已根据该账号的认证属性自动筛选出匹配的候选模型库。点击右侧
+                      <strong className="text-emerald-600 dark:text-emerald-400">「一键测试可用模型」</strong>
+                      后，将自动实测每个模型并
+                      <strong className="text-emerald-600 dark:text-emerald-400">仅保留可以使用的模型显示在输入框旁边</strong>。
+                    </p>
                   </div>
-                  <p className="text-[11px] text-muted-foreground leading-relaxed break-anywhere">
-                    系统已根据该账号的认证属性自动筛选出匹配的候选模型库。点击右侧
-                    <strong className="text-blue-600 dark:text-blue-400">「一键测试可用模型」</strong>
-                    后，将自动实测每个模型并
-                    <strong className="text-emerald-600 dark:text-emerald-400">仅保留可以使用的模型显示在输入框旁边</strong>。
-                  </p>
+
+                  <button
+                    type="button"
+                    onClick={handleTestAllModels}
+                    disabled={testingAll || loadingModels}
+                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-all shadow-md shadow-emerald-500/25 flex items-center justify-center space-x-2 shrink-0 disabled:opacity-50 min-h-[38px]"
+                  >
+                    {testingAll ? (
+                      <>
+                        <RefreshCw className="w-4 h-4 animate-spin" />
+                        <span>正在实测全部模型...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Zap className="w-4 h-4 text-amber-300" />
+                        <span>一键测试可用模型</span>
+                      </>
+                    )}
+                  </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={handleTestAllModels}
-                  disabled={testingAll || loadingModels}
-                  className="px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs transition-all shadow-md shadow-blue-500/25 flex items-center justify-center space-x-2 shrink-0 disabled:opacity-50 min-h-[38px]"
-                >
-                  {testingAll ? (
-                    <>
-                      <RefreshCw className="w-4 h-4 animate-spin" />
-                      <span>正在实测全部模型...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Zap className="w-4 h-4 text-amber-300" />
-                      <span>一键测试可用模型</span>
-                    </>
-                  )}
-                </button>
-              </div>
-
-              {/* 测试结果反馈条 */}
-              {modelFeedback && (
-                <div
-                  className={`p-3.5 rounded-xl text-xs flex items-center space-x-2 animate-fadeIn ${
-                    modelFeedback.success
-                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border border-emerald-500/20'
-                      : 'bg-rose-500/10 text-rose-600 dark:text-rose-300 border border-rose-500/20'
-                  }`}
-                >
-                  {modelFeedback.success ? (
-                    <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
-                  ) : (
-                    <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
-                  )}
-                  <span className="break-anywhere leading-relaxed">{modelFeedback.msg}</span>
-                </div>
-              )}
-
-              {/* 候选模型列表与测试状态 */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold text-foreground">
-                    当前账号属性匹配的候选模型 ({modelState?.candidates.length || 0})
-                  </span>
-                  <span className="text-[11px] text-muted-foreground">
-                    勾选的模型将保留显示在输入框旁边的选择器中
-                  </span>
-                </div>
-
-                {loadingModels && !modelState ? (
-                  <div className="p-8 text-center text-muted-foreground text-xs flex items-center justify-center space-x-2">
-                    <RefreshCw className="w-4 h-4 animate-spin text-blue-500" />
-                    <span>正在根据账号属性加载模型库...</span>
-                  </div>
-                ) : (
-                  <div className="space-y-2.5">
-                    {modelState?.candidates.map((m) => {
-                      const isRetained = modelState.verified_model_ids.includes(m.id);
-                      const isTestingThis = testingAll || testingSingleId === m.id;
-                      const status = m.test_status;
-
-                      return (
-                        <div
-                          key={m.id}
-                          className={`p-3.5 rounded-2xl border transition-all flex items-center justify-between gap-4 ${
-                            isRetained
-                              ? 'bg-surface-100 border-blue-500/40 shadow-sm'
-                              : 'bg-surface-200/40 border-border opacity-70'
-                          }`}
-                        >
-                          <div className="flex items-start space-x-3 min-w-0 flex-1">
-                            {/* 复选框 */}
-                            <button
-                              type="button"
-                              disabled={savingVerified || testingAll}
-                              onClick={() => handleToggleVerifiedModel(m.id)}
-                              className={`mt-0.5 w-4 h-4 rounded flex items-center justify-center border transition-colors shrink-0 ${
-                                isRetained
-                                  ? 'bg-blue-600 border-blue-500 text-white'
-                                  : 'bg-transparent border-muted-foreground hover:border-foreground'
-                              }`}
-                              title={isRetained ? '已在输入框旁保留显示' : '点击保留到输入框旁显示'}
-                            >
-                              {isRetained && <Check className="w-3 h-3 stroke-[3]" />}
-                            </button>
-
-                            <div className="min-w-0 flex-1">
-                              <div className="flex items-center flex-wrap gap-2">
-                                <span className="text-xs font-bold text-foreground">{m.name}</span>
-                                <span className="text-[10px] font-mono text-muted-foreground bg-surface-200 px-1.5 py-0.5 rounded border border-border/60">
-                                  {m.id}
-                                </span>
-                                <span
-                                  className={`text-[9px] px-1.5 py-0.5 rounded-full border ${
-                                    m.provider === 'Antigravity CLI'
-                                      ? 'bg-purple-500/10 text-purple-600 dark:text-purple-300 border-purple-500/20'
-                                      : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border-emerald-500/20'
-                                  }`}
-                                >
-                                  {m.badge}
-                                </span>
-
-                                {isTestingThis ? (
-                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-blue-500/15 text-blue-600 dark:text-blue-300 border border-blue-500/30 flex items-center space-x-1">
-                                    <RefreshCw className="w-2.5 h-2.5 animate-spin" />
-                                    <span>测试中...</span>
-                                  </span>
-                                ) : status ? (
-                                  status.available ? (
-                                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 flex items-center space-x-1 font-medium">
-                                      <CheckCircle2 className="w-3 h-3 text-emerald-500" />
-                                      <span>可用 · {(status.latency_ms / 1000).toFixed(1)}s</span>
-                                    </span>
-                                  ) : (
-                                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-600 dark:text-rose-300 border border-rose-500/30 flex items-center space-x-1 font-medium">
-                                      <XCircle className="w-3 h-3 text-rose-500" />
-                                      <span>不可用</span>
-                                    </span>
-                                  )
-                                ) : (
-                                  <span className="text-[10px] px-2 py-0.5 rounded-full bg-surface-200 text-muted-foreground border border-border">
-                                    未测试
-                                  </span>
-                                )}
-                              </div>
-
-                              <p className="text-[11px] text-muted-foreground mt-1 leading-snug break-anywhere">
-                                {m.description}
-                              </p>
-
-                              {status && !status.available && status.error && (
-                                <p className="text-[11px] text-rose-500 mt-1 font-mono bg-rose-500/10 border border-rose-500/20 rounded-lg px-2.5 py-1 break-anywhere">
-                                  原因: {status.error}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-
-                          <div className="flex items-center space-x-2 shrink-0">
-                            <span
-                              className={`text-[10px] px-2 py-0.5 rounded-lg border font-medium ${
-                                isRetained
-                                  ? 'bg-blue-500/10 text-blue-600 dark:text-blue-300 border-blue-500/25'
-                                  : 'bg-surface-200 text-muted-foreground border-border'
-                              }`}
-                            >
-                              {isRetained ? '输入框已保留' : '已隐藏'}
-                            </span>
-
-                            <button
-                              type="button"
-                              disabled={isTestingThis}
-                              onClick={() => handleTestSingleModel(m.id)}
-                              className="px-2.5 py-1.5 rounded-xl bg-surface-200 hover:bg-surface-50 border border-border text-xs text-foreground font-medium flex items-center space-x-1 transition-colors disabled:opacity-40"
-                              title="单独测试该模型连通性"
-                            >
-                              {testingSingleId === m.id ? (
-                                <RefreshCw className="w-3 h-3 animate-spin text-blue-500" />
-                              ) : (
-                                <Play className="w-3 h-3 text-blue-500" />
-                              )}
-                              <span>测试</span>
-                            </button>
-                          </div>
-                        </div>
-                      );
-                    })}
+                {/* 测试结果反馈条 */}
+                {modelFeedback && (
+                  <div
+                    className={`p-3.5 rounded-xl text-xs flex items-center space-x-2 animate-fadeIn ${
+                      modelFeedback.success
+                        ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border border-emerald-500/20'
+                        : 'bg-rose-500/10 text-rose-600 dark:text-rose-300 border border-rose-500/20'
+                    }`}
+                  >
+                    {modelFeedback.success ? (
+                      <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
+                    ) : (
+                      <AlertTriangle className="w-4 h-4 text-rose-500 shrink-0" />
+                    )}
+                    <span className="break-anywhere leading-relaxed">{modelFeedback.msg}</span>
                   </div>
                 )}
+
+                {/* 候选模型列表与测试状态 */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-bold text-foreground">
+                      当前账号属性匹配的候选模型 ({modelState?.candidates.length || 0})
+                    </span>
+                    <span className="text-[11px] text-muted-foreground">
+                      勾选的模型将保留显示在输入框旁边的选择器中
+                    </span>
+                  </div>
+
+                  {loadingModels && !modelState ? (
+                    <div className="p-8 text-center text-muted-foreground text-xs flex items-center justify-center space-x-2">
+                      <RefreshCw className="w-4 h-4 animate-spin text-emerald-500" />
+                      <span>正在根据账号属性加载模型库...</span>
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {modelState?.candidates.map((m) => {
+                        const isRetained = modelState.verified_model_ids.includes(m.id);
+                        const isTestingThis = testingAll || testingSingleId === m.id;
+                        const status = m.test_status;
+
+                        return (
+                          <div
+                            key={m.id}
+                            className={`p-3.5 rounded-2xl border transition-all flex items-center justify-between gap-4 ${
+                              isRetained
+                                ? 'bg-surface-100 border-emerald-500/40 shadow-xs'
+                                : 'bg-surface-200/40 border-border opacity-70'
+                            }`}
+                          >
+                            <div className="flex items-start space-x-3 min-w-0 flex-1">
+                              {/* 复选框 */}
+                              <button
+                                type="button"
+                                disabled={savingVerified || testingAll}
+                                onClick={() => handleToggleVerifiedModel(m.id)}
+                                className={`mt-0.5 w-4 h-4 rounded flex items-center justify-center border transition-colors shrink-0 ${
+                                  isRetained
+                                    ? 'bg-emerald-600 border-emerald-500 text-white'
+                                    : 'bg-transparent border-muted-foreground hover:border-foreground'
+                                }`}
+                                title={isRetained ? '已在输入框旁保留显示' : '点击保留到输入框旁显示'}
+                              >
+                                {isRetained && <Check className="w-3 h-3 stroke-[3]" />}
+                              </button>
+
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center flex-wrap gap-2">
+                                  <span className="text-xs font-bold text-foreground">{m.name}</span>
+                                  <span className="text-[10px] font-mono text-muted-foreground bg-surface-200 px-1.5 py-0.5 rounded border border-border/60">
+                                    {m.id}
+                                  </span>
+                                  <span
+                                    className={`text-[9px] px-1.5 py-0.5 rounded-full border ${
+                                      m.provider === 'Antigravity CLI'
+                                        ? 'bg-purple-500/10 text-purple-600 dark:text-purple-300 border-purple-500/20'
+                                        : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border-emerald-500/20'
+                                    }`}
+                                  >
+                                    {m.badge}
+                                  </span>
+
+                                  {isTestingThis ? (
+                                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 flex items-center space-x-1">
+                                      <RefreshCw className="w-2.5 h-2.5 animate-spin" />
+                                      <span>测试中...</span>
+                                    </span>
+                                  ) : status ? (
+                                    status.available ? (
+                                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 flex items-center space-x-1 font-medium">
+                                        <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                                        <span>可用 · {(status.latency_ms / 1000).toFixed(1)}s</span>
+                                      </span>
+                                    ) : (
+                                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-rose-500/15 text-rose-600 dark:text-rose-300 border border-rose-500/30 flex items-center space-x-1 font-medium">
+                                        <XCircle className="w-3 h-3 text-rose-500" />
+                                        <span>不可用</span>
+                                      </span>
+                                    )
+                                  ) : (
+                                    <span className="text-[10px] px-2 py-0.5 rounded-full bg-surface-200 text-muted-foreground border border-border">
+                                      未测试
+                                    </span>
+                                  )}
+                                </div>
+
+                                <p className="text-[11px] text-muted-foreground mt-1 leading-snug break-anywhere">
+                                  {m.description}
+                                </p>
+
+                                {status && !status.available && status.error && (
+                                  <p className="text-[11px] text-rose-500 mt-1 font-mono bg-rose-500/10 border border-rose-500/20 rounded-lg px-2.5 py-1 break-anywhere">
+                                    原因: {status.error}
+                                  </p>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="flex items-center space-x-2 shrink-0">
+                              <span
+                                className={`text-[10px] px-2 py-0.5 rounded-lg border font-medium ${
+                                  isRetained
+                                    ? 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-300 border-emerald-500/25'
+                                    : 'bg-surface-200 text-muted-foreground border-border'
+                                }`}
+                              >
+                                {isRetained ? '输入框已保留' : '已隐藏'}
+                              </span>
+
+                              <button
+                                type="button"
+                                disabled={isTestingThis}
+                                onClick={() => handleTestSingleModel(m.id)}
+                                className="px-2.5 py-1.5 rounded-xl bg-surface-200 hover:bg-surface-50 border border-border text-xs text-foreground font-medium flex items-center space-x-1 transition-colors disabled:opacity-40"
+                                title="单独测试该模型连通性"
+                              >
+                                {testingSingleId === m.id ? (
+                                  <RefreshCw className="w-3 h-3 animate-spin text-emerald-500" />
+                                ) : (
+                                  <Play className="w-3 h-3 text-emerald-500" />
+                                )}
+                                <span>测试</span>
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
               </div>
-            </div>
-          )}
+            )}
 
           {/* ==================== TAB 2: 上下文记忆与会话管理 ==================== */}
           {activeTab === 'context' && (
@@ -664,7 +681,7 @@ export function SettingsModal({
                 <div className="flex items-center justify-between">
                   <div className="space-y-1">
                     <span className="text-xs font-bold text-foreground flex items-center space-x-2">
-                      <RefreshCw className="w-4 h-4 text-blue-500" />
+                      <RefreshCw className="w-4 h-4 text-emerald-500" />
                       <span>会话列表智能整理与去重</span>
                     </span>
                     <p className="text-[11px] text-muted-foreground">
@@ -676,7 +693,7 @@ export function SettingsModal({
                     type="button"
                     disabled={isCleaning}
                     onClick={handleCleanupDuplicates}
-                    className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-medium text-xs transition-all shadow-sm flex items-center space-x-1.5 shrink-0 disabled:opacity-50"
+                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs transition-all shadow-sm shadow-emerald-600/20 flex items-center space-x-1.5 shrink-0 disabled:opacity-50"
                   >
                     {isCleaning ? (
                       <>
@@ -690,8 +707,8 @@ export function SettingsModal({
                 </div>
 
                 {cleanupMessage && (
-                  <div className="p-2.5 rounded-lg bg-blue-500/10 border border-blue-500/20 text-blue-600 dark:text-blue-300 text-xs flex items-center space-x-2 animate-fadeIn">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-blue-500 shrink-0" />
+                  <div className="p-2.5 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-300 text-xs flex items-center space-x-2 animate-fadeIn">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                     <span>{cleanupMessage}</span>
                   </div>
                 )}
@@ -704,11 +721,11 @@ export function SettingsModal({
             <div className="space-y-6">
               <div>
                 <label className="text-xs font-bold text-foreground flex items-center space-x-2">
-                  <Sun className="w-4 h-4 text-amber-500" />
+                  <Sun className="w-4 h-4 text-emerald-500" />
                   <span>界面色彩模式 (支持浅色、深色、跟随系统三种选项)</span>
                 </label>
                 <p className="text-[11px] text-muted-foreground mt-1">
-                  采用专业语义色彩规范，保证高对比度、清晰的折行排版与夜间舒适度。
+                  参考 Strata 设计哲学：深色为黑曜翡翠 (Obsidian Emerald)，浅色为柔和鼠尾草灰白 (Sage Minimal)，护眼舒适。
                 </p>
               </div>
 
@@ -717,16 +734,16 @@ export function SettingsModal({
                   {
                     mode: 'light' as ThemeMode,
                     title: '浅色模式 (Light)',
-                    desc: '清新明亮 · 办公室与白天强光环境下更清晰',
+                    desc: 'Sage Minimal · 鼠尾草灰白，柔和不刺眼，舒适通读',
                     icon: <Sun className="w-6 h-6 text-amber-500" />,
-                    bgDemo: 'bg-slate-50 border-slate-200 text-slate-800',
+                    bgDemo: 'bg-[#f4f6f5] border-slate-300/70 text-[#18221d]',
                   },
                   {
                     mode: 'dark' as ThemeMode,
                     title: '深色模式 (Dark)',
-                    desc: '极客护眼 · OLED 纯净深黑与柔和弱光显示',
-                    icon: <Moon className="w-6 h-6 text-blue-400" />,
-                    bgDemo: 'bg-[#131314] border-white/10 text-slate-100',
+                    desc: 'Obsidian Emerald · 黑曜石与深翠绿融合，暗夜极客质感',
+                    icon: <Moon className="w-6 h-6 text-emerald-400" />,
+                    bgDemo: 'bg-[#0b0f0e] border-emerald-900/30 text-emerald-100',
                   },
                   {
                     mode: 'system' as ThemeMode,
@@ -743,7 +760,7 @@ export function SettingsModal({
                       onClick={() => setTheme(item.mode)}
                       className={`p-4 rounded-2xl border-2 transition-all cursor-pointer relative flex flex-col justify-between space-y-3 ${
                         isSelected
-                          ? 'border-blue-500 bg-blue-500/10 shadow-lg shadow-blue-500/15'
+                          ? 'border-emerald-500 bg-emerald-500/10 shadow-lg shadow-emerald-500/15'
                           : 'border-border bg-surface-100 hover:border-border-hover'
                       }`}
                     >
@@ -752,7 +769,7 @@ export function SettingsModal({
                           {item.icon}
                         </div>
                         {isSelected && (
-                          <span className="w-5 h-5 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs">
+                          <span className="w-5 h-5 rounded-full bg-emerald-600 text-white flex items-center justify-center text-xs">
                             <Check className="w-3 h-3 stroke-[3]" />
                           </span>
                         )}
@@ -783,26 +800,67 @@ export function SettingsModal({
               </div>
             </div>
           )}
+
+          {/* ==================== TAB 4: 关于系统与本地引擎 ==================== */}
+          {activeTab === 'about' && (
+            <div className="space-y-5">
+              <div className="p-5 rounded-2xl bg-surface-100 border border-border flex items-center justify-between">
+                <div className="flex items-center space-x-3.5">
+                  <div className="w-10 h-10 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-600 dark:text-emerald-400 font-bold font-mono text-sm">
+                    GH
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-bold text-foreground flex items-center space-x-2">
+                      <span>GeminiHub Local</span>
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-mono">
+                        v1.1.0 · Strata Edition
+                      </span>
+                    </h3>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      本地优先（Local-First）极客级 AI 智能工作流与 Agent 终端沙箱
+                    </p>
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-2xl bg-surface-100 border border-border space-y-3">
+                <span className="text-xs font-bold text-foreground">隐私与安全边界说明</span>
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  GeminiHub Local 遵循严格的数据驻留规范：所有会话记录、长期记忆、账号凭据以及本地生成的代码均存储于您本地的 SQLite 数据库与物理硬盘（`skills/`）中。未经沙箱确认，AI 绝不会静默覆写或执行高危命令。
+                </p>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <div className="p-3 rounded-xl bg-surface-200/50 border border-border">
+                  <div className="text-muted-foreground text-[11px]">底层渲染引擎</div>
+                  <div className="font-semibold text-foreground mt-0.5">WebView2 (Chromium) / Next.js</div>
+                </div>
+                <div className="p-3 rounded-xl bg-surface-200/50 border border-border">
+                  <div className="text-muted-foreground text-[11px]">本地存储架构</div>
+                  <div className="font-semibold text-foreground mt-0.5">SQLite WAL + Local ChromaDB</div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 底部按钮栏 */}
-        <div className="px-6 py-4 border-t border-border bg-surface-100 flex items-center justify-between">
+        <div className="px-6 py-3.5 border-t border-border bg-surface-100 flex items-center justify-between shrink-0">
           <div className="text-[11px] text-muted-foreground flex items-center space-x-1">
             <Shield className="w-3.5 h-3.5 text-emerald-500" />
             <span>设置直接写入本地持久化，跨会话与刷新自动生效</span>
           </div>
 
-          <div className="flex items-center space-x-3">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-4 py-2 rounded-xl border border-border hover:bg-surface-200 text-xs text-foreground font-medium transition-colors"
-            >
-              关闭
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="px-4 py-1.5 rounded-xl bg-surface-200 hover:bg-surface-50 border border-border text-xs text-foreground font-medium transition-colors"
+          >
+            关闭
+          </button>
         </div>
       </div>
     </div>
-  );
+  </div>
+);
 }

@@ -48,7 +48,7 @@ export function StatusPill({ data, onOpenAccounts }: StatusPillProps) {
           {data.active_account_name || '默认账号'}
         </span>
         {isGoogleOne && (
-          <span className="text-[10px] px-1 py-0.2 rounded bg-blue-500/15 text-blue-600 dark:text-blue-400 font-semibold font-mono">
+          <span className="text-[10px] px-1 py-0.2 rounded bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold font-mono">
             PRO
           </span>
         )}

@@ -24,7 +24,7 @@ export const WORK_MODES: {
     icon: FileText,
     desc: '方案润色、多语言长文档总结、智能办公沙箱',
     badge: '安全沙箱',
-    activeColor: 'bg-blue-600/15 border-blue-500/40 text-blue-600 dark:text-blue-300 shadow-sm',
+    activeColor: 'bg-emerald-600/15 border-emerald-500/40 text-emerald-600 dark:text-emerald-300 shadow-sm',
   },
   {
     id: 'dev',

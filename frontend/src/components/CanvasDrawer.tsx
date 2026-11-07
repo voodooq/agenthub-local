@@ -32,12 +32,12 @@ export function CanvasDrawer({ isOpen, onClose, title = 'Artifacts 架构画布'
   };
 
   return (
-    <aside className="fixed inset-y-0 right-0 w-full md:w-[480px] lg:w-[580px] bg-[#0c0e16] border-l border-white/10 shadow-2xl z-40 flex flex-col animate-fade-in">
-      <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-surface-100">
+    <aside className="fixed inset-y-0 right-0 w-full md:w-[480px] lg:w-[580px] bg-surface-card border-l border-border shadow-2xl z-40 flex flex-col animate-fade-in text-foreground">
+      <div className="flex items-center justify-between px-4 py-3 border-b border-border bg-surface-100">
         <div className="flex items-center space-x-2">
-          <Sparkles className="w-4 h-4 text-blue-400" />
-          <h3 className="text-sm font-semibold text-slate-100 truncate max-w-[320px]">{title}</h3>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10 text-slate-400 uppercase font-mono shrink-0">
+          <Sparkles className="w-4 h-4 text-emerald-500" />
+          <h3 className="text-sm font-semibold text-foreground truncate max-w-[320px]">{title}</h3>
+          <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-200 border border-border text-muted-foreground uppercase font-mono shrink-0">
             {type}
           </span>
         </div>
@@ -45,14 +45,14 @@ export function CanvasDrawer({ isOpen, onClose, title = 'Artifacts 架构画布'
         <div className="flex items-center space-x-2">
           <button
             onClick={handleCopy}
-            className="p-1.5 rounded hover:bg-white/10 text-slate-400 hover:text-white transition-colors"
+            className="p-1.5 rounded hover:bg-surface-200 text-muted-foreground hover:text-foreground transition-colors"
             title={type === 'image' ? '复制图片链接' : '复制源码'}
           >
             <Copy className="w-4 h-4" />
           </button>
           <button
             onClick={onClose}
-            className="p-1.5 rounded hover:bg-white/10 text-slate-400 hover:text-white transition-colors"
+            className="p-1.5 rounded hover:bg-surface-200 text-muted-foreground hover:text-foreground transition-colors"
             title="关闭画布"
           >
             <X className="w-4 h-4" />
@@ -60,7 +60,7 @@ export function CanvasDrawer({ isOpen, onClose, title = 'Artifacts 架构画布'
         </div>
       </div>
 
-      <div className="flex-1 overflow-auto p-4 bg-[#08090e]">
+      <div className="flex-1 overflow-auto p-4 bg-background">
         {type === 'image' ? (
           <div className="w-full h-full flex flex-col items-center justify-center p-2">
             {!imageError ? (
@@ -68,18 +68,18 @@ export function CanvasDrawer({ isOpen, onClose, title = 'Artifacts 架构画布'
                 src={content}
                 alt={title}
                 onError={() => setImageError(true)}
-                className="max-w-full max-h-[80vh] rounded-xl object-contain shadow-2xl border border-white/10"
+                className="max-w-full max-h-[80vh] rounded-xl object-contain shadow-2xl border border-border"
               />
             ) : (
               <div className="p-8 text-center space-y-3 rounded-2xl bg-surface-200/40 border border-border/80">
-                <div className="text-sm text-rose-400 font-semibold">图片暂时无法加载</div>
-                <div className="text-xs text-slate-400 max-w-sm">
+                <div className="text-sm text-rose-500 font-semibold">图片暂时无法加载</div>
+                <div className="text-xs text-muted-foreground max-w-sm">
                   请检查本地后端是否正在运行，或尝试在浏览器新标签页中打开。
                 </div>
                 <button
                   type="button"
                   onClick={() => setImageError(false)}
-                  className="px-3 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs"
+                  className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs transition-colors shadow-sm"
                 >
                   重试加载
                 </button>
@@ -89,7 +89,7 @@ export function CanvasDrawer({ isOpen, onClose, title = 'Artifacts 架构画布'
               href={fullUrl}
               target="_blank"
               rel="noreferrer"
-              className="mt-4 text-xs text-blue-400 hover:text-blue-300 underline flex items-center space-x-1"
+              className="mt-4 text-xs text-emerald-600 dark:text-emerald-400 hover:underline flex items-center space-x-1"
             >
               <span>在外部浏览器中查看原始大图 ↗</span>
             </a>

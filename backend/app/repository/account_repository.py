@@ -36,13 +36,20 @@ class AccountRepository:
         """
         now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
         async with db_manager.get_connection() as conn:
-            # 自动解除已过期的冷却状态
-            await conn.execute(
-                "UPDATE accounts SET status = 'active', cooldown_until = NULL "
-                "WHERE status = 'cooldown' AND cooldown_until <= ?",
+            # 先做轻量只读检查，仅在有到期需要解冻的账号时才申请写锁
+            async with conn.execute(
+                "SELECT 1 FROM accounts WHERE status = 'cooldown' AND cooldown_until <= ? LIMIT 1",
                 (now_str,)
-            )
-            await conn.commit()
+            ) as check_cursor:
+                need_unlock = await check_cursor.fetchone()
+
+            if need_unlock:
+                await conn.execute(
+                    "UPDATE accounts SET status = 'active', cooldown_until = NULL "
+                    "WHERE status = 'cooldown' AND cooldown_until <= ?",
+                    (now_str,)
+                )
+                await conn.commit()
 
             async with conn.execute(
                 "SELECT * FROM accounts WHERE status = 'active' "

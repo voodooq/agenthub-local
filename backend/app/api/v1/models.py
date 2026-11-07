@@ -80,8 +80,8 @@ CLI_MODELS: List[ModelMeta] = [
         id="gemini-4-argon",
         name="Gemini 4 Argon",
         provider="Antigravity CLI",
-        description="Google 最新旗舰 Argon 推理引擎 · 深度架构设计与复杂逻辑推演",
-        badge="CLI 旗舰 · Argon",
+        description="Google 最新第 4 代 Argon 旗舰深度推理引擎 · 超深思维链与复杂架构推演",
+        badge="CLI 旗舰 · 4.0 Argon",
         has_thinking=True,
         is_default=True,
         supported_auth_types=["gemini_cli"],
@@ -90,8 +90,28 @@ CLI_MODELS: List[ModelMeta] = [
         id="gemini-3.8-flash",
         name="Gemini 3.8 Flash",
         provider="Antigravity CLI",
-        description="宿主机 CLI 原生高推理极速引擎 · 兼顾响应速度与系统工具调度",
-        badge="CLI 原生 · 极速",
+        description="宿主机 CLI 原生高推理极速引擎 · 兼顾响应速度与全能系统工具调度",
+        badge="CLI 原生 · 3.8 极速",
+        has_thinking=True,
+        is_default=False,
+        supported_auth_types=["gemini_cli"],
+    ),
+    ModelMeta(
+        id="gemini-3.5-flash-lite",
+        name="Gemini 3.5 Flash-Lite",
+        provider="Antigravity CLI",
+        description="3.5 代毫秒级轻量模型 · 极速问答、代码纠错与敏捷检索",
+        badge="毫秒响应 · 3.5",
+        has_thinking=False,
+        is_default=False,
+        supported_auth_types=["gemini_cli"],
+    ),
+    ModelMeta(
+        id="gemini-2.5-flash",
+        name="Gemini 2.5 Flash",
+        provider="Antigravity CLI",
+        description="Google 经典高性价比高可用主力模型",
+        badge="CLI 稳定 · 2.5 Flash",
         has_thinking=True,
         is_default=False,
         supported_auth_types=["gemini_cli"],
@@ -129,25 +149,55 @@ CLI_MODELS: List[ModelMeta] = [
 ]
 
 # =====================================================================
-# 2. Google 官方 REST API 账号专属真实模型库 (API Key / 标准 OAuth)
+# 2. Google 官方 REST API / Cloud Code OAuth 账号专属真实模型库
 # =====================================================================
 OFFICIAL_API_MODELS: List[ModelMeta] = [
+    ModelMeta(
+        id="gemini-4-argon",
+        name="Gemini 4 Argon",
+        provider="Google Official",
+        description="Google 最新第 4 代 Argon 旗舰深度推理引擎 · 超深思维链与复杂架构推演",
+        badge="最新旗舰 · 4.0 Argon",
+        has_thinking=True,
+        is_default=True,
+        supported_auth_types=["api_key", "oauth_google_one", "oauth_personal"],
+    ),
+    ModelMeta(
+        id="gemini-3.8-flash",
+        name="Gemini 3.8 Flash",
+        provider="Google Official",
+        description="Google 新一代 3.8 高推理极速主力模型 · 超低延迟响应与全能代码生成",
+        badge="高阶极速 · 3.8 Flash",
+        has_thinking=True,
+        is_default=False,
+        supported_auth_types=["api_key", "oauth_google_one", "oauth_personal"],
+    ),
+    ModelMeta(
+        id="gemini-3.5-flash-lite",
+        name="Gemini 3.5 Flash-Lite",
+        provider="Google Official",
+        description="3.5 代毫秒级轻量模型 · 极速问答、日常高频排查与工具调用",
+        badge="毫秒极速 · 3.5",
+        has_thinking=False,
+        is_default=False,
+        supported_auth_types=["api_key", "oauth_google_one", "oauth_personal"],
+    ),
     ModelMeta(
         id="gemini-2.5-flash",
         name="Gemini 2.5 Flash",
         provider="Google Official",
         description="Google 官方全能高性价比模型 · 极低响应延迟与优秀的代码理解",
-        badge="官方主力 · 低延迟",
+        badge="官方主力 · 2.5 Flash",
         has_thinking=True,
-        is_default=True,
+        is_default=False,
         supported_auth_types=["api_key", "oauth_google_one", "oauth_personal"],
     ),
     ModelMeta(
         id="gemini-2.5-pro",
         name="Gemini 2.5 Pro",
         provider="Google Official",
-        description="Google 官方最新顶级旗舰推理模型 · 支持超长上下文与多级思维链",
-        badge="顶配推理 · 旗舰",
+        description="Google 官方顶级旗舰推理模型 · 支持超长上下文与多级思维链",
+        badge="顶配推理 · 2.5 Pro",
         has_thinking=True,
         is_default=False,
         supported_auth_types=["api_key", "oauth_google_one", "oauth_personal"],
@@ -157,7 +207,7 @@ OFFICIAL_API_MODELS: List[ModelMeta] = [
         name="Gemini 2.0 Flash",
         provider="Google Official",
         description="高配额稳定版官方主力模型 · 适合日常高频研发与长文档处理",
-        badge="高配额 · 稳定",
+        badge="高配额 · 2.0 Flash",
         has_thinking=False,
         is_default=False,
         supported_auth_types=["api_key", "oauth_google_one", "oauth_personal"],
@@ -166,8 +216,8 @@ OFFICIAL_API_MODELS: List[ModelMeta] = [
         id="gemini-2.0-flash-lite",
         name="Gemini 2.0 Flash-Lite",
         provider="Google Official",
-        description="毫秒级快速轻量模型 · 适合简短提问、日常纠错与极速检索",
-        badge="毫秒级响应",
+        description="基础快速轻量模型 · 适合简短提问、日常纠错与极速检索",
+        badge="轻量响应 · 2.0",
         has_thinking=False,
         is_default=False,
         supported_auth_types=["api_key", "oauth_google_one", "oauth_personal"],
@@ -266,7 +316,21 @@ async def _build_active_models_response() -> ActiveModelsResponse:
     candidate_id_set = {m.id for m in candidates}
     valid_verified_ids = [mid for mid in saved_verified_ids if mid in candidate_id_set]
 
+    # 智能代际自适应：若当前账号历史上仅保存了旧版模型（如 2.x 系列），检测到候选库包含最新代际模型（如 4.0 Argon、3.8 Flash）
+    # 且最新模型未被当前账号明确标记为不可用时，自动将其并入输入框可用列表中并置顶，避免用户被困在老旧模型中
+    latest_flagship_ids = ["gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+    available_new_ids = [
+        mid for mid in latest_flagship_ids
+        if mid in candidate_id_set and test_results_map.get(mid, {}).get("available") is not False
+    ]
+
     if valid_verified_ids:
+        # 如果当前保留列表尚未包含任何最新代际模型，自动将可用的最新模型置顶加入
+        has_any_latest = any(mid in valid_verified_ids for mid in latest_flagship_ids)
+        if not has_any_latest and available_new_ids:
+            for new_id in reversed(available_new_ids):
+                if new_id not in valid_verified_ids:
+                    valid_verified_ids.insert(0, new_id)
         active_models = [m for m in candidates if m.id in valid_verified_ids]
     else:
         # 尚未测试或无匹配记录时，默认展示该账号属性下的全部候选模型

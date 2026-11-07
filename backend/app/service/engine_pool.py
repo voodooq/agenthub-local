@@ -172,6 +172,18 @@ class EnginePoolService:
                     try:
                         if ptype == "google_oauth":
                             valid_token = await google_oauth_manager.ensure_valid_access_token(prov)
+                            custom_downgrades: list[dict[str, Any]] = []
+
+                            def on_custom_downgrade(from_m: str, to_m: str, reason: str):
+                                custom_downgrades.append({
+                                    "type": "model_downgrade",
+                                    "original_model": from_m,
+                                    "current_model": to_m,
+                                    "reason": reason,
+                                    "account": prov_name,
+                                    "message": f"检测到原模型「{from_m}」当前配额耗尽或容量不足 ({reason})，已自动切换至高可用模型「{to_m}」继续生成。",
+                                })
+
                             async for ch in GeminiClient.stream_generate_content(
                                 api_key=valid_token,
                                 model_name=target_m,
@@ -180,9 +192,15 @@ class EnginePoolService:
                                 thinking_level=thinking_level,
                                 temperature=temperature,
                                 auth_type="oauth_google_one",
+                                on_downgrade=on_custom_downgrade,
                             ):
+                                while custom_downgrades:
+                                    yield custom_downgrades.pop(0)
                                 full_custom_text += ch
                                 yield {"type": "chunk", "content": ch, "account": prov_name}
+
+                            while custom_downgrades:
+                                yield custom_downgrades.pop(0)
                         elif ptype in ("openai_compat", "ollama"):
                             async for ch in provider_adapter.stream_openai_compatible(
                                 base_url=prov.get("base_url") or ("http://127.0.0.1:11434/v1" if ptype == "ollama" else ""),
@@ -312,6 +330,21 @@ class EnginePoolService:
                         valid_token = (account.credentials or "").strip()
                         active_auth_type = "api_key"
                     
+                    downgrade_events: list[dict[str, Any]] = []
+                    actual_model = model_name
+
+                    def on_model_downgrade(from_m: str, to_m: str, reason: str):
+                        nonlocal actual_model
+                        actual_model = to_m
+                        downgrade_events.append({
+                            "type": "model_downgrade",
+                            "original_model": from_m,
+                            "current_model": to_m,
+                            "reason": reason,
+                            "account": account.name,
+                            "message": f"检测到原模型「{from_m}」当前配额耗尽或容量不足 ({reason})，已自动为您无缝切换至高可用模型「{to_m}」继续生成。",
+                        })
+
                     async for chunk in GeminiClient.stream_generate_content(
                         api_key=valid_token,
                         model_name=model_name,
@@ -319,10 +352,16 @@ class EnginePoolService:
                         system_instruction=system_instruction,
                         thinking_level=thinking_level,
                         temperature=temperature,
-                        auth_type=active_auth_type
+                        auth_type=active_auth_type,
+                        on_downgrade=on_model_downgrade,
                     ):
+                        while downgrade_events:
+                            yield downgrade_events.pop(0)
                         full_response_text += chunk
-                        yield {"type": "chunk", "content": chunk, "account": account.name}
+                        yield {"type": "chunk", "content": chunk, "account": account.name, "model": actual_model}
+
+                    while downgrade_events:
+                        yield downgrade_events.pop(0)
 
                     total_tokens = max(1, (len(user_prompt) + len(full_response_text)) // 3)
                     latency_ms = (time.time() - start_time) * 1000
@@ -332,6 +371,7 @@ class EnginePoolService:
                         "type": "done",
                         "full_content": full_response_text,
                         "account": account.name,
+                        "model": actual_model,
                         "usage": {"totalTokenCount": total_tokens}
                     }
                     return

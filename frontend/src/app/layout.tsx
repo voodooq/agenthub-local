@@ -14,7 +14,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh-CN" className="dark h-full">
-      <body className="h-full bg-background text-foreground antialiased selection:bg-accent/30 selection:text-blue-400">
+      <body className="h-full bg-background text-foreground antialiased selection:bg-accent/30 selection:text-emerald-400">
         <ThemeProvider>
           {children}
         </ThemeProvider>

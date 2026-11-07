@@ -46,7 +46,7 @@ export function HardwareHud({ isOpen, onToggle, onProposeProcessKill }: Hardware
   const memBarColor = memPercent > 85 ? 'bg-rose-500' : memPercent > 65 ? 'bg-amber-500' : 'bg-emerald-500';
 
   const cpuPercent = data?.cpu?.usage_percent || 0;
-  const cpuColor = cpuPercent > 80 ? 'text-rose-400' : cpuPercent > 50 ? 'text-amber-400' : 'text-blue-400';
+  const cpuColor = cpuPercent > 80 ? 'text-rose-400' : cpuPercent > 50 ? 'text-amber-400' : 'text-emerald-400';
 
   return (
     <div className="w-full bg-surface-100/95 backdrop-blur-md border-t border-white/10 p-4 transition-all animate-slide-up shadow-2xl z-20">
@@ -86,7 +86,7 @@ export function HardwareHud({ isOpen, onToggle, onProposeProcessKill }: Hardware
           <div className="p-3 rounded-xl bg-surface-50/50 border border-white/5 space-y-1.5">
             <div className="flex items-center justify-between text-slate-400">
               <span className="flex items-center space-x-1.5">
-                <Cpu className="w-3.5 h-3.5 text-blue-400" />
+                <Cpu className="w-3.5 h-3.5 text-emerald-400" />
                 <span>CPU 算力</span>
               </span>
               <span className="text-[10px]">{data?.cpu?.cores_logical || 0} 线程</span>
@@ -96,7 +96,7 @@ export function HardwareHud({ isOpen, onToggle, onProposeProcessKill }: Hardware
               <span className="text-[11px] text-slate-500">{data?.cpu?.frequency_mhz || 0} MHz</span>
             </div>
             <div className="w-full h-1.5 rounded-full bg-white/10 overflow-hidden">
-              <div className="h-full bg-blue-500 transition-all duration-500" style={{ width: `${Math.min(100, cpuPercent)}%` }} />
+              <div className="h-full bg-emerald-500 transition-all duration-500" style={{ width: `${Math.min(100, cpuPercent)}%` }} />
             </div>
           </div>
 
@@ -196,7 +196,7 @@ export function HardwareHud({ isOpen, onToggle, onProposeProcessKill }: Hardware
                     <span
                       className={`text-[9px] px-1.5 py-0.5 rounded ${
                         proc.category === 'dev'
-                          ? 'bg-blue-500/20 text-blue-300 border border-blue-500/30'
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
                           : proc.category === 'design'
                           ? 'bg-purple-500/20 text-purple-300 border border-purple-500/30'
                           : 'bg-white/10 text-slate-400'

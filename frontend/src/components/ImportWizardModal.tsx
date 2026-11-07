@@ -275,7 +275,7 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
               key={s.num}
               className={`px-3 py-1.5 rounded-lg font-medium flex items-center space-x-1.5 ${
                 step === s.num
-                  ? 'bg-blue-600 text-white shadow-sm'
+                  ? 'bg-emerald-600 text-white shadow-sm'
                   : step > s.num
                   ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
                   : 'bg-surface-200/50 text-muted-foreground'
@@ -337,11 +337,11 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
                       }}
                       className={`p-3.5 rounded-xl border text-left transition-all space-y-1.5 ${
                         active
-                          ? 'border-blue-500 bg-blue-500/10 shadow-sm'
+                          ? 'border-emerald-500 bg-emerald-500/10 shadow-sm'
                           : 'border-border bg-surface-100/60 hover:bg-surface-100'
                       }`}
                     >
-                      <Icon className={`w-5 h-5 ${active ? 'text-blue-500' : 'text-muted-foreground'}`} />
+                      <Icon className={`w-5 h-5 ${active ? 'text-emerald-500' : 'text-muted-foreground'}`} />
                       <div className="text-xs font-bold text-foreground">{card.title}</div>
                       <div className="text-[11px] text-muted-foreground leading-snug">{card.desc}</div>
                     </button>
@@ -372,7 +372,7 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
               </div>
 
               {!pasteMode ? (
-                <label className="flex flex-col items-center justify-center border-2 border-dashed border-border hover:border-blue-500 rounded-2xl p-8 cursor-pointer bg-surface-100/40 hover:bg-surface-100/80 transition-all">
+                <label className="flex flex-col items-center justify-center border-2 border-dashed border-border hover:border-emerald-500 rounded-2xl p-8 cursor-pointer bg-surface-100/40 hover:bg-surface-100/80 transition-all">
                   <input
                     type="file"
                     accept=".zip,.json,.md,.txt,.cursorrules,.windsurfrules"
@@ -380,13 +380,13 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
                     className="hidden"
                   />
                   {parsing ? (
-                    <div className="flex items-center space-x-2 text-xs text-blue-500">
+                    <div className="flex items-center space-x-2 text-xs text-emerald-500">
                       <Loader2 className="w-5 h-5 animate-spin" />
                       <span>正在流式解压并嗅探数据结构...</span>
                     </div>
                   ) : (
                     <>
-                      <Upload className="w-8 h-8 text-blue-500 mb-2" />
+                      <Upload className="w-8 h-8 text-emerald-500 mb-2" />
                       <span className="text-xs font-semibold text-foreground">
                         点击选择或拖拽文件到此区域上传
                       </span>
@@ -412,13 +412,13 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
                     value={pasteText}
                     onChange={(e) => setPasteText(e.target.value)}
                     placeholder="在此粘贴 GEMINI.md / .cursorrules 编码规范，或粘贴 JSON 格式对话/记忆数组..."
-                    className="w-full p-3 rounded-xl bg-surface-100 border border-border text-xs text-foreground font-mono outline-none focus:border-blue-500"
+                    className="w-full p-3 rounded-xl bg-surface-100 border border-border text-xs text-foreground font-mono outline-none focus:border-emerald-500"
                   />
                   <button
                     type="button"
                     onClick={handleParseText}
                     disabled={parsing || !pasteText.trim()}
-                    className="px-4 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium disabled:opacity-40"
+                    className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium disabled:opacity-40"
                   >
                     {parsing ? '解析中...' : '立即嗅探解析'}
                   </button>
@@ -638,7 +638,7 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
                                   onClick={() => handleResolutionChange(cand.temp_id, opt.id as any)}
                                   className={`px-2 py-0.5 rounded text-[11px] transition-colors ${
                                     cand.resolution === opt.id
-                                      ? 'bg-blue-600 text-white font-semibold'
+                                      ? 'bg-emerald-600 text-white font-semibold'
                                       : 'bg-surface-200 text-muted-foreground hover:text-foreground'
                                   }`}
                                 >
@@ -670,7 +670,7 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
             <div className="py-10 text-center space-y-4">
               {committing ? (
                 <div className="space-y-3">
-                  <Loader2 className="w-10 h-10 text-blue-500 animate-spin mx-auto" />
+                  <Loader2 className="w-10 h-10 text-emerald-500 animate-spin mx-auto" />
                   <div className="text-sm font-bold text-foreground">
                     正在执行 SQLite BEGIN IMMEDIATE 批量事务与 FTS5 索引构建...
                   </div>
@@ -689,7 +689,7 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
                     <button
                       type="button"
                       onClick={onClose}
-                      className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold"
+                      className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
                     >
                       完成并返回工作台
                     </button>
@@ -716,7 +716,7 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
               <button
                 type="button"
                 onClick={() => setStep(3)}
-                className="px-4 py-1.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold flex items-center space-x-1"
+                className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold flex items-center space-x-1"
               >
                 <span>下一步：冲突比对预览</span>
                 <ArrowRight className="w-3.5 h-3.5" />

@@ -90,7 +90,7 @@ export function SyncModal({ isOpen, onClose, onSuccess }: SyncModalProps) {
         <div className="p-5 space-y-5 text-xs text-slate-300">
           <div className="p-4 rounded-xl bg-surface-50/40 border border-white/10 space-y-2.5">
             <div className="flex items-center space-x-2 font-semibold text-slate-200">
-              <Link2 className="w-4 h-4 text-blue-400" />
+              <Link2 className="w-4 h-4 text-emerald-400" />
               <span>途径 1：公开分享链接一键克隆 (可续聊分支)</span>
             </div>
             <p className="text-slate-400 leading-relaxed">
@@ -102,7 +102,7 @@ export function SyncModal({ isOpen, onClose, onSuccess }: SyncModalProps) {
                 value={shareUrl}
                 onChange={(e) => setShareUrl(e.target.value)}
                 placeholder="https://share.gemini.google/..."
-                className="flex-1 px-3 py-2 rounded-lg bg-surface-200 border border-white/10 text-slate-100 placeholder-slate-500 outline-none focus:border-blue-500"
+                className="flex-1 px-3 py-2 rounded-lg bg-surface-200 border border-white/10 text-slate-100 placeholder-slate-500 outline-none focus:border-emerald-500"
               />
               <button
                 type="submit"

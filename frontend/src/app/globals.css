@@ -5,49 +5,57 @@
 :root {
   color-scheme: dark light;
   
-  /* 基础与表面颜色 (默认深色极客) */
-  --bg-main: #131314;
-  --bg-sidebar: #1e1f20;
-  --bg-card: #1e1f20;
-  --bg-surface-50: #2d2f31;
-  --bg-surface-100: #252628;
-  --bg-surface-200: #1a1b1c;
-  --bg-surface-300: #131314;
+  /* 基础与表面颜色 (Strata 极客冷曜石墨黑 Obsidian Emerald) */
+  --bg-main: #0b0f0e;
+  --bg-sidebar: #101513;
+  --bg-card: #151b18;
+  --bg-surface-50: #1b2320;
+  --bg-surface-100: #151b18;
+  --bg-surface-200: #101513;
+  --bg-surface-300: #0b0f0e;
 
-  --color-foreground: #f1f3f4;
-  --color-foreground-muted: #9aa0a6;
-  --color-border: rgba(255, 255, 255, 0.08);
-  --color-border-hover: rgba(255, 255, 255, 0.18);
+  --color-foreground: #e6ede9;
+  --color-foreground-muted: #82948c;
+  --color-border: rgba(255, 255, 255, 0.07);
+  --color-border-hover: rgba(16, 185, 129, 0.28);
 
-  --glass-panel: rgba(30, 31, 32, 0.85);
-  --glass-modal: rgba(24, 25, 27, 0.96);
-  --chat-assistant-bg: #1e1f20;
-  --chat-user-bg: #1a73e8;
-  --chat-user-text: #ffffff;
+  --color-primary: #10b981;
+  --color-primary-hover: #059669;
+  --color-primary-subtle: rgba(16, 185, 129, 0.12);
+
+  --glass-panel: rgba(17, 22, 20, 0.88);
+  --glass-modal: rgba(15, 20, 18, 0.96);
+  --chat-assistant-bg: #151b18;
+  --chat-user-bg: #064e3b;
+  --chat-user-text: #ecfdf5;
 }
 
 html.light {
   color-scheme: light;
 
-  /* 浅色模式 - 清新柔和科技白 (Slate / Google Clean) */
-  --bg-main: #f8fafc;
+  /* 浅色模式 (Strata 舒缓温润鼠尾草白 Sage Minimal) - 不刺眼、呼吸感极强 */
+  --bg-main: #f4f6f5;
   --bg-sidebar: #ffffff;
   --bg-card: #ffffff;
-  --bg-surface-50: #f1f5f9;
+  --bg-surface-50: #eef2f0;
   --bg-surface-100: #ffffff;
-  --bg-surface-200: #f8fafc;
-  --bg-surface-300: #e2e8f0;
+  --bg-surface-200: #f4f6f5;
+  --bg-surface-300: #e3eae6;
 
-  --color-foreground: #0f172a;
-  --color-foreground-muted: #64748b;
-  --color-border: rgba(0, 0, 0, 0.08);
-  --color-border-hover: rgba(0, 0, 0, 0.16);
+  --color-foreground: #18221d;
+  --color-foreground-muted: #667870;
+  --color-border: rgba(0, 0, 0, 0.07);
+  --color-border-hover: rgba(5, 150, 105, 0.28);
 
-  --glass-panel: rgba(255, 255, 255, 0.88);
+  --color-primary: #059669;
+  --color-primary-hover: #047857;
+  --color-primary-subtle: #e8f5f0;
+
+  --glass-panel: rgba(255, 255, 255, 0.92);
   --glass-modal: rgba(255, 255, 255, 0.98);
   --chat-assistant-bg: #ffffff;
-  --chat-user-bg: #2563eb;
-  --chat-user-text: #ffffff;
+  --chat-user-bg: #e6f4ea;
+  --chat-user-text: #064e3b;
 }
 
 body {

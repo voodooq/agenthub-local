@@ -7,6 +7,7 @@
 2. 紧凑 XML ReAct 工具协议生成与解析器 (<tool_call name="...">{"arg": "val"}</tool_call>)
 3. 原生 tool_calls 与 XML 协议的无感双向转换，保证 429 跨账号接力时工具调用不断链
 """
+import html
 import json
 import re
 import uuid
@@ -16,8 +17,9 @@ from typing import Any
 class ToolProtocolAdapter:
     """混合工具协议转换与解析器"""
 
+    # 军工级容错正则：无缝支持尖括号 <tool_call name="..."> 与方括号 [tool_call name="..."] 两种常见模型变体
     _XML_TOOL_PATTERN = re.compile(
-        r"<tool_call\s+name=[\"']([^\"']+)[\"']\s*>\s*(.*?)\s*</tool_call>",
+        r"[<\[]tool_call\s+name=[\"']?([^\"'\]>]+)[\"']?\s*[>\]](.*?)[<\[]/tool_call[>\]]",
         re.DOTALL | re.IGNORECASE,
     )
 
@@ -149,46 +151,225 @@ class ToolProtocolAdapter:
         return "\n".join(tool_Wait_lines)
 
     @classmethod
+    def _parse_tool_arguments(cls, func_name: str, raw_json: str) -> dict[str, Any]:
+        """
+        鲁棒性极高的工具参数解析器：自动容忍转义不全、双引号连写及格式残缺。
+        """
+        raw = (raw_json or "").strip()
+        if raw.startswith("```"):
+            raw = re.sub(r"^```(?:json)?\s*", "", raw)
+            raw = re.sub(r"\s*```$", "", raw).strip()
+
+        # 1. 直接尝试标准 JSON 解析
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+
+        # 2. 修复模型常见双引号连写（例如 \"\", 修复为 \",）
+        fixed = re.sub(r'\\""\s*,', '",', raw)
+        fixed = re.sub(r'\\""\s*}', '"}', fixed)
+        try:
+            return json.loads(fixed)
+        except Exception:
+            pass
+
+        # 3. 针对 execute_local_command 进行模式提取
+        if func_name == "execute_local_command":
+            cmd_match = re.search(r'"command"\s*:\s*"(.*?)(?:"\s*,\s*"reason"|"\s*}$)', raw, re.DOTALL)
+            reason_match = re.search(r'"reason"\s*:\s*"(.*?)"\s*\}', raw, re.DOTALL)
+            if cmd_match:
+                cmd = cmd_match.group(1).replace(r'\"', '"').replace(r'\\', '\\')
+                reason = reason_match.group(1) if reason_match else "执行本地操作"
+                return {"command": cmd, "reason": reason}
+
+        # 4. 针对 write_local_file 进行模式提取
+        if func_name == "write_local_file":
+            path_m = re.search(r'"file_path"\s*:\s*"([^"]+)"', raw)
+            content_m = re.search(r'"content"\s*:\s*"(.*?)"(?:\s*,\s*"overwrite"|"\s*}$)', raw, re.DOTALL)
+            if path_m and content_m:
+                return {
+                    "file_path": path_m.group(1),
+                    "content": content_m.group(1).replace(r'\"', '"').replace(r'\n', '\n').replace(r'\\', '\\'),
+                    "overwrite": True,
+                }
+
+        # 5. 兜底包装
+        return {"command": raw} if func_name == "execute_local_command" else {}
+
+    _CORE_TOOL_NAMES = (
+        "execute_local_command",
+        "write_local_file",
+        "read_local_file",
+        "update_working_memory",
+        "load_skill_detail",
+    )
+
+    _ATTR_PATTERN = re.compile(
+        r'(\w+)=(?:"((?:[^"\\]|\\.)*)"|\'((?:[^\'\\]|\\.)*)\'|\{([^}]*)\}|([^\s/>]+))',
+        re.DOTALL,
+    )
+
+    @classmethod
+    def _parse_tag_attributes(cls, attr_str: str) -> dict[str, Any]:
+        """从直接标签属性串中精准提取键值对（支持转义双引号、单引号与 JSX 花括号）"""
+        args: dict[str, Any] = {}
+        for m in cls._ATTR_PATTERN.finditer(attr_str):
+            k = m.group(1)
+            val = m.group(2) if m.group(2) is not None else (
+                m.group(3) if m.group(3) is not None else (
+                    m.group(4) if m.group(4) is not None else m.group(5)
+                )
+            )
+            val = html.unescape((val or "").strip())
+            # 处理转义引号
+            if val.startswith('"') and val.endswith('"') and len(val) >= 2:
+                val = val[1:-1]
+            val = val.replace(r'\"', '"')
+
+            if val.lower() == "true":
+                args[k] = True
+            elif val.lower() == "false":
+                args[k] = False
+            else:
+                # 尝试解析可能内嵌的 JSON 字典（例如 notes="{'step': ...}"）
+                if (val.startswith("{") and val.endswith("}")) or (val.startswith("[") and val.endswith("]")):
+                    try:
+                        args[k] = json.loads(val.replace("'", '"'))
+                    except Exception:
+                        args[k] = val
+                else:
+                    args[k] = val
+        return args
+
+    @classmethod
     def parse_xml_tool_calls(cls, raw_text: str) -> tuple[str, list[dict[str, Any]]]:
         """
-        从模型输出文本中解析所有 <tool_call name="...">...</tool_call> 标签。
-
-        Returns:
-            (clean_text, tool_calls_list)
-            - clean_text: 剥离了 <tool_call> 标签后的干净正文
-            - tool_calls_list: 标准化的工具调用列表 [{"id": "call_xxx", "function": {"name": ..., "arguments": ...}}]
+        从模型输出文本中解析所有工具调用。
+        支持：
+        1. 标准/方括号工具标签：<tool_call name="...">...</tool_call> 或 [tool_call name="..."]...[/tool_call]
+        2. 直接工具名标签（如 <execute_local_command command="..."/> 或 <write_local_file ...>...</write_local_file>）
         """
-        if not raw_text or "<tool_call" not in raw_text:
+        if not raw_text:
             return raw_text, []
 
         tool_calls: list[dict[str, Any]] = []
+        clean_text = raw_text
 
-        def _replacer(match: re.Match) -> str:
-            func_name = match.group(1).strip()
-            raw_json = match.group(2).strip()
-            # 清理可能包裹的 markdown 代码块符号
-            if raw_json.startswith("```"):
-                raw_json = re.sub(r"^```(?:json)?\s*", "", raw_json)
-                raw_json = re.sub(r"\s*```$", "", raw_json)
+        # ── 模式 1: 通用工具包装标签 (<tool_call> / [tool_call]) ──
+        if "<tool_call" in clean_text or "[tool_call" in clean_text:
+            def _replacer(match: re.Match) -> str:
+                func_name = match.group(1).strip()
+                raw_json = match.group(2).strip()
+                parsed_args = cls._parse_tool_arguments(func_name, raw_json)
 
-            try:
-                parsed_args = json.loads(raw_json) if raw_json else {}
-            except Exception:
-                # 容错：若单行命令未写成严格 JSON，尝试兜底包装
-                parsed_args = {"command": raw_json} if func_name == "execute_local_command" else {}
+                call_id = f"call_{uuid.uuid4().hex[:10]}"
+                tool_calls.append({
+                    "id": call_id,
+                    "function": {
+                        "name": func_name,
+                        "arguments": json.dumps(parsed_args, ensure_ascii=False),
+                    },
+                })
+                return ""
 
-            call_id = f"call_{uuid.uuid4().hex[:10]}"
-            tool_calls.append({
-                "id": call_id,
-                "function": {
-                    "name": func_name,
-                    "arguments": json.dumps(parsed_args, ensure_ascii=False),
-                },
-            })
-            return ""
+            clean_text = cls._XML_TOOL_PATTERN.sub(_replacer, clean_text)
 
-        clean_text = cls._XML_TOOL_PATTERN.sub(_replacer, raw_text)
-        # 清理外围可能残留的空 xml 代码块围栏
-        clean_text = re.sub(r"```xml\s*```", "", clean_text).strip()
+        # ── 模式 2: 模型自发输出的直接工具标签（如 <execute_local_command command="..."/>） ──
+        for t_name in cls._CORE_TOOL_NAMES:
+            if f"<{t_name}" not in clean_text:
+                continue
+
+            # A. 自闭合标签: <t_name attr="val" ... />
+            pattern_self = re.compile(rf"<{t_name}\s+([^>]*?)\s*/>", re.DOTALL | re.IGNORECASE)
+            for m in pattern_self.finditer(clean_text):
+                attr_str = m.group(1)
+                args = cls._parse_tag_attributes(attr_str)
+                call_id = f"call_{uuid.uuid4().hex[:10]}"
+                tool_calls.append({
+                    "id": call_id,
+                    "function": {
+                        "name": t_name,
+                        "arguments": json.dumps(args, ensure_ascii=False),
+                    },
+                })
+            clean_text = pattern_self.sub("", clean_text)
+
+            # B. 成对标签: <t_name ...>...</t_name>
+            pattern_pair = re.compile(rf"<{t_name}(?:\s+([^>]*?))?\s*>(.*?)</{t_name}>", re.DOTALL | re.IGNORECASE)
+            for m in pattern_pair.finditer(clean_text):
+                attr_str = m.group(1) or ""
+                body_str = (m.group(2) or "").strip()
+                args = cls._parse_tag_attributes(attr_str) if attr_str else {}
+                if body_str:
+                    try:
+                        body_json = json.loads(body_str)
+                        if isinstance(body_json, dict):
+                            args.update(body_json)
+                    except Exception:
+                        if t_name == "execute_local_command" and "command" not in args:
+                            args["command"] = body_str
+                        elif t_name == "write_local_file" and "content" not in args:
+                            args["content"] = body_str
+
+                call_id = f"call_{uuid.uuid4().hex[:10]}"
+                tool_calls.append({
+                    "id": call_id,
+                    "function": {
+                        "name": t_name,
+                        "arguments": json.dumps(args, ensure_ascii=False),
+                    },
+                })
+            clean_text = pattern_pair.sub("", clean_text)
+
+        # ── 模式 3: 隐式工具调用容错自愈（捕获裸 JSON、带有 </slot> 或残缺标签的工具调用） ──
+        if not tool_calls and ('"command"' in clean_text or '"file_path"' in clean_text or '"skill_name"' in clean_text):
+            raw_json_blocks = re.findall(r'(\{(?:[^{}]|(?:\{[^{}]*\}))*\})', clean_text, re.DOTALL)
+            for block in raw_json_blocks:
+                try:
+                    obj = json.loads(block)
+                    if isinstance(obj, dict):
+                        if "command" in obj and isinstance(obj["command"], str):
+                            call_id = f"call_{uuid.uuid4().hex[:10]}"
+                            tool_calls.append({
+                                "id": call_id,
+                                "function": {
+                                    "name": "execute_local_command",
+                                    "arguments": json.dumps({
+                                        "command": obj["command"],
+                                        "reason": obj.get("reason", "执行本地终端操作与异常自愈"),
+                                    }, ensure_ascii=False),
+                                },
+                            })
+                            clean_text = clean_text.replace(block, "")
+                        elif "file_path" in obj and "content" in obj:
+                            call_id = f"call_{uuid.uuid4().hex[:10]}"
+                            tool_calls.append({
+                                "id": call_id,
+                                "function": {
+                                    "name": "write_local_file",
+                                    "arguments": json.dumps(obj, ensure_ascii=False),
+                                },
+                            })
+                            clean_text = clean_text.replace(block, "")
+                        elif "skill_name" in obj:
+                            call_id = f"call_{uuid.uuid4().hex[:10]}"
+                            tool_calls.append({
+                                "id": call_id,
+                                "function": {
+                                    "name": "load_skill_detail",
+                                    "arguments": json.dumps(obj, ensure_ascii=False),
+                                },
+                            })
+                            clean_text = clean_text.replace(block, "")
+                except Exception:
+                    pass
+
+        # 彻底清洗残余的各种模型畸形标记（如 </slot>, <slot>, </tool_code>, ```xml 空围栏等）
+        clean_text = re.sub(r"</?slot\b[^>]*>", "", clean_text, flags=re.IGNORECASE)
+        clean_text = re.sub(r"</?tool_code\b[^>]*>", "", clean_text, flags=re.IGNORECASE)
+        clean_text = re.sub(r"</?tool_call\b[^>]*>", "", clean_text, flags=re.IGNORECASE)
+        clean_text = re.sub(r"```xml\s*```", "", clean_text)
+        clean_text = re.sub(r"\[调用工具:\s*[^\]]+\]", "", clean_text).strip()
         return clean_text, tool_calls
 

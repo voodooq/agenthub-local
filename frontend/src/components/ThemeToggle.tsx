@@ -29,7 +29,7 @@ export function ThemeToggle() {
     {
       mode: 'dark',
       label: '深色模式',
-      icon: <Moon className="w-4 h-4 text-blue-400" />,
+      icon: <Moon className="w-4 h-4 text-emerald-400" />,
       desc: '护眼极客 · OLED 纯净深黑',
     },
     {

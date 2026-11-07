@@ -85,21 +85,21 @@ export function Sidebar({
           </button>
           {!isCollapsed && (
             <span className="text-xs font-bold tracking-wider text-muted-foreground font-mono flex items-center space-x-1">
-              <Sparkles className="w-3.5 h-3.5 text-blue-500" />
+              <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
               <span>GEMINI-HUB</span>
             </span>
           )}
         </div>
 
-        {/* 发起新对话按钮 */}
+        {/* 发起新对话按钮 (Strata 极简薄荷胶囊) */}
         <button
           onClick={onNewChat}
-          className={`flex items-center rounded-2xl bg-surface-100 hover:bg-surface-50 text-foreground text-xs font-semibold transition-all border border-border shadow-sm ${
+          className={`flex items-center rounded-2xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-600 dark:text-emerald-400 text-xs font-semibold transition-all border border-emerald-500/30 shadow-sm ${
             isCollapsed ? 'justify-center p-2.5 w-10 h-10 mx-auto' : 'space-x-2.5 w-full px-4 py-3'
           }`}
           title="发起新对话"
         >
-          <Plus className="w-4 h-4 text-blue-500 shrink-0" />
+          <Plus className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
           {!isCollapsed && <span>新对话</span>}
         </button>
 
@@ -110,7 +110,7 @@ export function Sidebar({
             className="w-full flex items-center justify-between px-3.5 py-2 rounded-xl bg-surface-200 hover:bg-surface-50 border border-border/60 text-xs text-muted-foreground hover:text-foreground transition-colors"
           >
             <div className="flex items-center space-x-2">
-              <Search className="w-3.5 h-3.5 text-blue-500" />
+              <Search className="w-3.5 h-3.5 text-emerald-500" />
               <span>全文检索...</span>
             </div>
             <kbd className="px-1.5 py-0.5 rounded bg-surface-100 border border-border text-[10px] font-mono text-muted-foreground">
@@ -161,7 +161,7 @@ export function Sidebar({
                 <button
                   type="button"
                   onClick={onCleanupDuplicates}
-                  className="text-[10px] text-muted-foreground hover:text-blue-500 font-normal normal-case hover:bg-surface-100 px-1.5 py-0.5 rounded transition-colors"
+                  className="text-[10px] text-muted-foreground hover:text-emerald-500 font-normal normal-case hover:bg-surface-100 px-1.5 py-0.5 rounded transition-colors"
                   title="智能去重并清理空白会话"
                 >
                   去重清理
@@ -266,7 +266,7 @@ function ConversationRow({
         onClick={onSelect}
         className={`w-10 h-10 mx-auto rounded-xl flex items-center justify-center transition-colors ${
           isActive
-            ? 'bg-blue-600 text-white'
+            ? 'bg-emerald-600 text-white'
             : 'hover:bg-surface-100 text-muted-foreground'
         }`}
         title={conv.title}
@@ -281,7 +281,7 @@ function ConversationRow({
       onClick={onSelect}
       className={`group relative flex items-center justify-between px-3 py-2 rounded-xl cursor-pointer text-xs transition-all ${
         isActive
-          ? 'bg-blue-600/15 text-blue-600 dark:text-blue-300 font-semibold border border-blue-500/30'
+          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold border border-emerald-500/30'
           : 'hover:bg-surface-100 text-foreground'
       }`}
     >
@@ -298,7 +298,7 @@ function ConversationRow({
             }}
             onBlur={onFinishRename}
             autoFocus
-            className="w-full bg-surface-200 border border-blue-500 rounded px-1.5 py-0.5 text-xs text-foreground outline-none"
+            className="w-full bg-surface-200 border border-emerald-500 rounded px-1.5 py-0.5 text-xs text-foreground outline-none"
           />
         ) : (
           <span className="truncate">{conv.title}</span>

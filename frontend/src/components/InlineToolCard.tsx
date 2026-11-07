@@ -87,15 +87,15 @@ export function InlineToolCard({ events, onApprove }: InlineToolCardProps) {
           return (
             <div
               key={ev.call_id}
-              className="rounded-xl border border-blue-500/30 bg-blue-500/5 px-3.5 py-2.5 flex items-center justify-between text-xs"
+              className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 px-3.5 py-2.5 flex items-center justify-between text-xs"
             >
               <div className="flex items-center space-x-2 min-w-0">
-                <Loader2 className="w-3.5 h-3.5 text-blue-500 animate-spin shrink-0" />
+                <Loader2 className="w-3.5 h-3.5 text-emerald-500 animate-spin shrink-0" />
                 <span className="font-mono text-foreground truncate">
                   正在执行: {ev.command}
                 </span>
               </div>
-              <span className="text-[11px] text-blue-500 shrink-0 ml-2">运行中...</span>
+              <span className="text-[11px] text-emerald-600 dark:text-emerald-400 shrink-0 ml-2 font-medium">运行中...</span>
             </div>
           );
         }

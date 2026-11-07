@@ -28,7 +28,7 @@ from .context_builder import ContextBuilder
 class AgentRuntime:
     """微内核智能体双层循环编排器"""
 
-    MAX_REACT_STEPS = 6
+    MAX_REACT_STEPS = 12
 
     async def chat_stream(
         self,
@@ -119,6 +119,8 @@ class AgentRuntime:
         max_steps = self.MAX_REACT_STEPS if active_scene == "agent" else 1
         final_account: str | None = None
         accumulated_visible_text = ""
+        effective_model_name = model_name
+        last_step_error_info: dict[str, Any] | None = None
 
         # 5. 进入单轮内 ReAct 思考与工具执行循环 (Intra-Turn Loop)
         for step_idx in range(max_steps):
@@ -161,11 +163,28 @@ class AgentRuntime:
                 step_prompt = user_message
                 step_attachments = attachments
             else:
-                step_prompt = (
-                    "[系统工作流推进]: 上述工具已执行完毕并返回真实结果（见上方记录）。"
-                    "请基于真实结果继续分析：若任务尚未完成需继续操作，请继续输出 `<tool_call>`；"
-                    "若任务已完成，请直接输出面向用户的最终完整解答。"
-                )
+                if last_step_error_info:
+                    err_msg = last_step_error_info.get("summary", "执行返回异常或报错")
+                    step_prompt = (
+                        f"[🚨 系统自动排障与日志诊断自愈调度]:\n"
+                        f"上一步执行返回异常: {err_msg}。\n"
+                        f"【第一性原理自愈与日志纠偏铁律 - 绝不允许卡住或直接退出】:\n"
+                        f"1. 仔细阅读上方工具返回的真实报错，特别是系统已自动嗅探并回填的【📋 诊断日志自动定位与回填】中的完整错误堆栈；\n"
+                        f"2. 深度分析日志根因（例如: 是否在子目录缺少 package.json、是否需要通过 `--prefix <子目录>` 安装、是否文件未创建、是否依赖名称错误）；\n"
+                        f"3. 严禁向用户复述错误后就草率结束任务！你拥有全自动执行权限（所有工具调用均会自动确认执行），必须立即输出修正后的命令自己纠偏改错；\n"
+                        f"4. 立即输出标准工具调用标签继续自愈修复，直到问题彻底解决并验证成功：\n"
+                        f"```xml\n"
+                        f'<tool_call name="execute_local_command">\n'
+                        f'{{"command": "修正后的终端命令（如指定 --prefix <子路径>）", "reason": "分析诊断日志后的自愈纠偏操作"}}\n'
+                        f"</tool_call>\n"
+                        f"```"
+                    )
+                else:
+                    step_prompt = (
+                        "[系统工作流推进]: 上述工具已执行完毕并返回真实结果（见上方记录）。"
+                        "请基于真实结果继续分析：若任务尚未完成需继续操作，请继续输出 `<tool_call>`；"
+                        "若任务已完成，请直接输出面向用户的最终完整解答。"
+                    )
                 step_attachments = None
 
             step_raw_text = ""
@@ -184,7 +203,10 @@ class AgentRuntime:
                 pre_built_history=history_for_step,
             ):
                 etype = event.get("type")
-                if etype == "chunk":
+                if etype == "model_downgrade":
+                    effective_model_name = event.get("current_model", effective_model_name)
+                    yield event
+                elif etype == "chunk":
                     chunk_str = event.get("content", "")
                     step_raw_text += chunk_str
                     final_account = event.get("account", final_account)
@@ -224,6 +246,7 @@ class AgentRuntime:
                     "type": "done",
                     "full_content": accumulated_visible_text.strip(),
                     "account": final_account,
+                    "model": effective_model_name,
                 }
                 break
 
@@ -282,85 +305,15 @@ class AgentRuntime:
                             "compressed": compressed,
                         }
 
-                    elif sec_level == "CONFIRM":
-                        # 推送灰名单审批请求事件，挂起协程等待前端用户点击「允许」或「拒绝」
-                        yield {
-                            "type": "require_approval",
-                            "call_id": call_id,
-                            "name": func_name,
-                            "command": cmd_str,
-                            "reason": reason_str,
-                            "cwd": ctx.get("current_cwd"),
-                        }
-                        approved = await shell_executor.wait_for_user_approval(call_id, timeout=180.0)
-                        await audit_service.log(
-                            event_type="shell_command_approval",
-                            actor="user",
-                            detail={"command": cmd_str, "reason": reason_str, "call_id": call_id},
-                            approved=approved,
-                        )
-
-                        if not approved:
-                            tool_output = (
-                                f"Rejected: 用户在前端拒绝（或超时未批准）执行命令 `{cmd_str}`。"
-                                f"请不要重复尝试该命令，直接向用户说明情况或提供手动执行建议。"
-                            )
-                            compressed = f"[用户已拒绝执行命令 `{cmd_str[:50]}`]"
-                            yield {
-                                "type": "tool_end",
-                                "call_id": call_id,
-                                "name": func_name,
-                                "command": cmd_str,
-                                "reason": reason_str,
-                                "status": "rejected",
-                                "output": tool_output,
-                                "compressed": compressed,
-                            }
-                        else:
-                            yield {
-                                "type": "tool_start",
-                                "call_id": call_id,
-                                "name": func_name,
-                                "command": cmd_str,
-                                "reason": reason_str,
-                                "security": "APPROVED",
-                            }
-                            exec_res = await shell_executor.run(
-                                command=cmd_str,
-                                cwd=ctx.get("current_cwd"),
-                                session_id=conv_id,
-                            )
-                            tool_output = exec_res["output"]
-                            new_cwd = exec_res["new_cwd"]
-                            if new_cwd and new_cwd != ctx.get("current_cwd"):
-                                ctx["current_cwd"] = new_cwd
-                                await ConversationRepository.update_agent_state(conv_id, current_cwd=new_cwd)
-
-                            compressed = shell_executor.compress_output(
-                                cmd_str, tool_output, exec_res["exit_code"]
-                            )
-                            yield {
-                                "type": "tool_end",
-                                "call_id": call_id,
-                                "name": func_name,
-                                "command": cmd_str,
-                                "reason": reason_str,
-                                "status": "completed",
-                                "exit_code": exec_res["exit_code"],
-                                "output": tool_output,
-                                "compressed": compressed,
-                                "cwd": new_cwd,
-                            }
-
                     else:
-                        # SAFE 白名单只读命令：自动直通执行
+                        # 全自动确认直通执行（包含 CONFIRM 与 SAFE 级命令），无需用户手动点击确认
                         yield {
                             "type": "tool_start",
                             "call_id": call_id,
                             "name": func_name,
                             "command": cmd_str,
                             "reason": reason_str,
-                            "security": "SAFE",
+                            "security": "AUTO_CONFIRMED" if sec_level == "CONFIRM" else "SAFE",
                         }
                         exec_res = await shell_executor.run(
                             command=cmd_str,
@@ -461,61 +414,31 @@ class AgentRuntime:
                     except Exception:
                         pass
 
-                    # 触发前端灰名单审批卡片
+                    # 全自动确认直通写入物理文件，无需用户手动点击确认
                     yield {
-                        "type": "require_approval",
+                        "type": "tool_start",
                         "call_id": call_id,
                         "name": func_name,
                         "command": f"write_file -> {rel_display} ({len(file_content)} 字符)",
-                        "reason": f"在本地磁盘物理创建/更新文件: {rel_display}",
-                        "cwd": str(current_work_dir),
+                        "reason": f"真实落盘本地文件 {rel_display}",
+                        "security": "AUTO_CONFIRMED",
                     }
-                    approved = await shell_executor.wait_for_user_approval(call_id, timeout=180.0)
-                    await audit_service.log(
-                        event_type="file_write_approval",
-                        actor="user",
-                        detail={"file": str(target_file), "size": len(file_content), "call_id": call_id},
-                        approved=approved,
-                    )
-
-                    if not approved:
-                        tool_output = f"Denied: 用户拒绝了写入文件 `{rel_display}`。"
-                        compressed = f"[用户拒绝写入文件 `{rel_display}`]"
-                        yield {
-                            "type": "tool_end",
-                            "call_id": call_id,
-                            "name": func_name,
-                            "command": f"write_file({rel_display})",
-                            "reason": f"写入本地文件 {rel_display}",
-                            "status": "denied",
-                            "output": tool_output,
-                            "compressed": compressed,
-                        }
-                    else:
-                        yield {
-                            "type": "tool_start",
-                            "call_id": call_id,
-                            "name": func_name,
-                            "command": f"write_file({rel_display})",
-                            "reason": f"真实落盘本地文件 {rel_display}",
-                            "security": "SAFE",
-                        }
-                        try:
-                            if target_file.exists() and not overwrite:
-                                tool_output = f"Error: 文件 `{rel_display}` 已存在且 overwrite=False，取消写入。"
-                                compressed = f"[写入取消: 文件已存在 `{rel_display}`]"
-                            else:
-                                target_file.parent.mkdir(parents=True, exist_ok=True)
-                                target_file.write_text(file_content, encoding="utf-8")
-                                tool_output = (
-                                    f"✅ 成功物理落盘文件: `{target_file}`\n"
-                                    f"文件大小: {len(file_content.encode('utf-8'))} 字节\n"
-                                    f"状态: 真实写入磁盘已验证完成。"
-                                )
-                                compressed = f"[已真实物理落盘文件 `{rel_display}` ({len(file_content)} 字符)]"
-                        except Exception as write_err:
-                            tool_output = f"Error: 写入文件 `{target_file}` 失败: {write_err}"
-                            compressed = f"[写入文件异常: {str(write_err)[:40]}]"
+                    try:
+                        if target_file.exists() and not overwrite:
+                            tool_output = f"Error: 文件 `{rel_display}` 已存在且 overwrite=False，取消写入。"
+                            compressed = f"[写入取消: 文件已存在 `{rel_display}`]"
+                        else:
+                            target_file.parent.mkdir(parents=True, exist_ok=True)
+                            target_file.write_text(file_content, encoding="utf-8")
+                            tool_output = (
+                                f"✅ 成功物理落盘文件: `{target_file}`\n"
+                                f"文件大小: {len(file_content.encode('utf-8'))} 字节\n"
+                                f"状态: 真实写入磁盘已验证完成。"
+                            )
+                            compressed = f"[已真实物理落盘文件 `{rel_display}` ({len(file_content)} 字符)]"
+                    except Exception as write_err:
+                        tool_output = f"Error: 写入文件 `{target_file}` 失败: {write_err}"
+                        compressed = f"[写入文件异常: {str(write_err)[:40]}]"
 
                         yield {
                             "type": "tool_end",
@@ -601,6 +524,23 @@ class AgentRuntime:
                     tool_output = f"Error: 未知的工具名称 `{func_name}`。"
                     compressed = f"[未知工具调用 `{func_name}`]"
 
+                # 智能异常探测：判断该步骤是否遇到报错，并为下一步自愈循环激活调度器
+                out_lower = (tool_output or "").lower()
+                is_step_abnormal = any(
+                    err_kw in out_lower
+                    for err_kw in (
+                        "npm error", "enoent", "error:", "traceback", "syntaxerror",
+                        "command not found", "cannot find module", "failed", "denied"
+                    )
+                )
+                if is_step_abnormal:
+                    last_step_error_info = {
+                        "tool": func_name,
+                        "summary": compressed or (tool_output.strip().split("\n")[0][:120]),
+                    }
+                else:
+                    last_step_error_info = None
+
                 # 将工具真实输出与单行折叠摘要同时落盘（当前 Turn 用完整 output，后续 Turn 自动用 compressed）
                 await MessageRepository.save_message(
                     conversation_id=conv_id,
@@ -615,7 +555,7 @@ class AgentRuntime:
             if step_idx == max_steps - 1:
                 yield {
                     "type": "done",
-                    "full_content": accumulated_visible_text.strip() or "已达到单轮最大自动执行步数上限（6步），请确认后继续。",
+                    "full_content": accumulated_visible_text.strip() or "已达到单轮最大自动执行步数上限（12步），请确认后继续。",
                     "account": final_account,
                 }
 

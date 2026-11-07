@@ -24,12 +24,13 @@ module.exports = {
         border: 'var(--color-border)',
         'border-hover': 'var(--color-border-hover)',
         accent: {
-          DEFAULT: '#3b82f6',
-          hover: '#2563eb',
-          glow: 'rgba(59, 130, 246, 0.25)',
+          DEFAULT: 'var(--color-primary)',
+          hover: 'var(--color-primary-hover)',
+          subtle: 'var(--color-primary-subtle)',
+          glow: 'rgba(16, 185, 129, 0.25)',
         },
         emerald: {
-          glow: 'rgba(16, 185, 129, 0.2)',
+          glow: 'rgba(16, 185, 129, 0.25)',
         },
       },
       fontFamily: {

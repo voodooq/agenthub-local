@@ -47,7 +47,7 @@ const CATEGORY_MAP: Record<string, { label: string; colorClass: string }> = {
   },
   preference: {
     label: '个人偏好',
-    colorClass: 'bg-blue-500/15 text-blue-600 dark:text-blue-400 border-blue-500/30',
+    colorClass: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30',
   },
   env_info: {
     label: '本机环境',
@@ -531,7 +531,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
         {/* 顶部标题栏 */}
         <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-surface-100/60">
           <div className="flex items-center space-x-2.5">
-            <div className="p-2 rounded-xl bg-blue-500/15 text-blue-600 dark:text-blue-400">
+            <div className="p-2 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
               <Brain className="w-5 h-5" />
             </div>
             <div>
@@ -559,7 +559,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
               onClick={() => setActiveTab('memories')}
               className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
                 activeTab === 'memories'
-                  ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                  ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
               }`}
             >
@@ -571,7 +571,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
               onClick={() => setActiveTab('personality')}
               className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
                 activeTab === 'personality'
-                  ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                  ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
               }`}
             >
@@ -583,7 +583,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
               onClick={() => setActiveTab('extensions')}
               className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
                 activeTab === 'extensions'
-                  ? 'border-blue-500 text-blue-600 dark:text-blue-400'
+                  ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
               }`}
             >
@@ -596,7 +596,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
             <div className="flex items-center space-x-2 pb-2">
               <button
                 onClick={() => setIsAdding(!isAdding)}
-                className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors"
+                className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>新增画像</span>
@@ -658,12 +658,12 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                         if (e.key === 'Enter') handleAddMemory();
                       }}
                       placeholder="例如：前端状态管理统一使用 Zustand，禁止使用 Redux..."
-                      className="flex-1 px-3 py-2 rounded-xl bg-surface-card border border-border text-xs text-foreground outline-none focus:border-blue-500"
+                      className="flex-1 px-3 py-2 rounded-xl bg-surface-card border border-border text-xs text-foreground outline-none focus:border-emerald-500"
                     />
                     <button
                       type="button"
                       onClick={handleAddMemory}
-                      className="px-3.5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors"
+                      className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors"
                     >
                       保存
                     </button>
@@ -718,7 +718,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                                 type="text"
                                 value={editingContent}
                                 onChange={(e) => setEditingContent(e.target.value)}
-                                className="flex-1 px-2.5 py-1.5 rounded-lg bg-surface-card border border-blue-500 text-xs text-foreground outline-none"
+                                className="flex-1 px-2.5 py-1.5 rounded-lg bg-surface-card border border-emerald-500 text-xs text-foreground outline-none"
                               />
                               <button
                                 onClick={() => handleSaveEdit(item.id)}
@@ -812,7 +812,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                         onClick={() => setSelectedPersonaId(persona.id)}
                         className={`p-3.5 rounded-2xl border transition-all cursor-pointer relative ${
                           isSelected
-                            ? 'bg-blue-600/10 border-blue-500/60 shadow-lg shadow-blue-500/10'
+                            ? 'bg-emerald-600/10 border-emerald-500/60 shadow-lg shadow-emerald-500/10'
                             : 'bg-surface-100 border-border hover:border-border-hover'
                         }`}
                       >
@@ -823,12 +823,12 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                               <div className="text-xs font-bold text-foreground flex items-center space-x-1.5">
                                 <span>{persona.name}</span>
                                 {isSelected && (
-                                  <span className="w-4 h-4 rounded-full bg-blue-500 text-white flex items-center justify-center text-[10px]">
+                                  <span className="w-4 h-4 rounded-full bg-emerald-500 text-white flex items-center justify-center text-[10px]">
                                     <Check className="w-2.5 h-2.5 stroke-[3]" />
                                   </span>
                                 )}
                               </div>
-                              <p className="text-[10px] text-blue-500 font-mono mt-0.5">
+                              <p className="text-[10px] text-emerald-500 font-mono mt-0.5">
                                 {persona.tagline}
                               </p>
                             </div>
@@ -974,7 +974,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                   placeholder="例如：回答始终使用中文、涉及 Python 必须标注类型注解、避免长篇大论..."
                   value={customPrompt}
                   onChange={(e) => setCustomPrompt(e.target.value)}
-                  className="w-full px-3.5 py-2.5 rounded-xl bg-surface-100 border border-border text-foreground placeholder-muted-foreground text-xs focus:outline-none focus:border-blue-500 resize-none font-mono"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-surface-100 border border-border text-foreground placeholder-muted-foreground text-xs focus:outline-none focus:border-emerald-500 resize-none font-mono"
                 />
 
                 <div className="flex justify-end pt-1">
@@ -982,7 +982,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                     type="button"
                     onClick={handleSavePersonality}
                     disabled={savingPersonality}
-                    className="px-5 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs transition-colors shadow-md shadow-blue-500/20 flex items-center space-x-1.5 disabled:opacity-50"
+                    className="px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors shadow-md shadow-emerald-500/20 flex items-center space-x-1.5 disabled:opacity-50"
                   >
                     {savingPersonality ? (
                       <RefreshCw className="w-3.5 h-3.5 animate-spin" />
@@ -1023,7 +1023,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <div>
                     <h3 className="text-xs font-bold text-foreground flex items-center space-x-1.5">
-                      <Terminal className="w-3.5 h-3.5 text-blue-500" />
+                      <Terminal className="w-3.5 h-3.5 text-emerald-500" />
                       <span>按需专业技能包 (Workspace Skills · ./skills/*/SKILL.md)</span>
                     </h3>
                     <p className="text-[11px] text-muted-foreground mt-0.5">
@@ -1037,7 +1037,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                       onClick={() =>
                         setSkillFormMode(skillFormMode === 'create' ? 'none' : 'create')
                       }
-                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-medium transition-colors"
+                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors"
                     >
                       <Plus className="w-3.5 h-3.5" />
                       <span>新建 Skill</span>
@@ -1049,7 +1049,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                       }
                       className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-surface-100 hover:bg-surface-200 border border-border text-foreground text-xs font-medium transition-colors"
                     >
-                      <Upload className="w-3.5 h-3.5 text-blue-500" />
+                      <Upload className="w-3.5 h-3.5 text-emerald-500" />
                       <span>导入 SKILL.md</span>
                     </button>
                   </div>
@@ -1057,7 +1057,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
 
                 {/* 新建自定义 Skill 表单 */}
                 {skillFormMode === 'create' && (
-                  <div className="p-4 rounded-xl bg-surface-100 border border-blue-500/30 space-y-3">
+                  <div className="p-4 rounded-xl bg-surface-100 border border-emerald-500/30 space-y-3">
                     <div className="text-xs font-bold text-foreground">
                       新建自定义按需技能包 (自动生成 skills/&lt;name&gt;/SKILL.md)
                     </div>
@@ -1097,7 +1097,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                       <button
                         type="button"
                         onClick={handleCreateSkill}
-                        className="px-4 py-1.5 rounded-lg bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold"
+                        className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
                       >
                         保存并挂载 Skill
                       </button>
@@ -1107,7 +1107,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
 
                 {/* 导入 SKILL.md 表单 */}
                 {skillFormMode === 'import' && (
-                  <div className="p-4 rounded-xl bg-surface-100 border border-blue-500/30 space-y-3">
+                  <div className="p-4 rounded-xl bg-surface-100 border border-emerald-500/30 space-y-3">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-bold text-foreground">
                         导入外部 SKILL.md 文件或直接粘贴 Markdown 规程
@@ -1123,7 +1123,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                         <button
                           type="button"
                           onClick={() => skillFileInputRef.current?.click()}
-                          className="px-3 py-1 rounded-lg bg-blue-500/15 hover:bg-blue-500/25 text-blue-600 dark:text-blue-400 border border-blue-500/30 text-xs font-medium flex items-center space-x-1"
+                          className="px-3 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 text-xs font-medium flex items-center space-x-1"
                         >
                           <Upload className="w-3 h-3" />
                           <span>选择本地 SKILL.md 文件</span>
@@ -1176,7 +1176,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                                 已就绪
                               </span>
                               {sk.is_builtin && (
-                                <span className="px-1.5 py-0.5 rounded text-[10px] bg-blue-500/15 text-blue-600 dark:text-blue-400">
+                                <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
                                   内置示例
                                 </span>
                               )}

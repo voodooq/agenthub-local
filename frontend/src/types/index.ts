@@ -96,6 +96,12 @@ export interface Message {
   tool_call_id?: string | null;
   tool_events?: ToolExecutionCardItem[];
   memory_refs?: MemoryRefItem[];
+  downgrade_info?: {
+    original_model: string;
+    current_model: string;
+    reason?: string;
+    message?: string;
+  };
   tool_request?: {
     tool_name: string;
     tool_input: Record<string, any>;

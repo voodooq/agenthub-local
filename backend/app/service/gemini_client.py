@@ -28,9 +28,44 @@ class GeminiClient:
     """
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
     CLOUDCODE_BASE_URL = "https://daily-cloudcode-pa.googleapis.com/v1internal"
-    CLOUDCODE_UA = "antigravity/1.15.8 windows/amd64"
+    CLOUDCODE_UA = "antigravity/2.19.1 windows/amd64"
+    _DETECTED_UA: str | None = None
     _PROJECT_CACHE: dict[str, str] = {}
     _FALLBACK_CACHE: dict[str, Any] = {"token": "", "expires_at": 0.0, "legacy_tokens": set()}
+
+    @classmethod
+    def get_cloudcode_ua(cls) -> str:
+        """动态解析本地或官方最新版 Antigravity User-Agent，避免触发弃用拦截"""
+        if cls._DETECTED_UA:
+            return cls._DETECTED_UA
+        try:
+            import os
+            local_appdata = os.environ.get("LOCALAPPDATA", "")
+            exe_path = os.path.join(local_appdata, "Programs", "antigravity", "Antigravity.exe")
+            if os.path.exists(exe_path):
+                import subprocess
+                cmd = f"(Get-Item '{exe_path}').VersionInfo.FileVersion"
+                res = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True, timeout=3)
+                v = res.stdout.strip()
+                if v and len(v.split(".")) >= 2:
+                    cls._DETECTED_UA = f"antigravity/{v} windows/amd64"
+                    return cls._DETECTED_UA
+        except Exception:
+            pass
+        cls._DETECTED_UA = "antigravity/2.19.1 windows/amd64"
+        return cls._DETECTED_UA
+
+    @classmethod
+    def is_version_deprecation_message(cls, text: str) -> bool:
+        """检测输出是否为 Google 服务端返回的 Antigravity 版本受限/套餐不满足警告文本"""
+        if not text:
+            return False
+        indicators = [
+            "This version of Antigravity is no longer supported",
+            "download and install the latest version at https://antigravity.google/download",
+            "unlock our latest models, including Gemini 4 Argon",
+        ]
+        return any(ind in text for ind in indicators)
 
     # Cloud Code Assist (OAuth) 模型映射字典
     CLOUDCODE_MODEL_MAP = {
@@ -107,7 +142,7 @@ class GeminiClient:
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
-                    "User-Agent": cls.CLOUDCODE_UA,
+                    "User-Agent": cls.get_cloudcode_ua(),
                 },
                 json={
                     "metadata": {
@@ -212,7 +247,8 @@ class GeminiClient:
         system_instruction: str | None = None,
         thinking_level: str = "high",
         temperature: float = 0.7,
-        auth_type: str = "api_key"
+        auth_type: str = "api_key",
+        on_downgrade: Any = None,
     ) -> AsyncGenerator[str, None]:
         """
         流式生成调度入口：自适应判断走 Sidecar 网页通道还是官方 REST 通道
@@ -328,23 +364,32 @@ class GeminiClient:
                 if active_token[:32] in cls._FALLBACK_CACHE["legacy_tokens"]:
                     active_token = await cls._get_fallback_oauth_token(client) or active_token
                 project_id = await cls._resolve_cloudcode_project(active_token, client)
-                # 若 gemini-2.5-pro 遇到服务端 503 容量不足，自动降级至 gemini-3-flash / gemini-2.5-flash
+                # 若模型遇到服务端 503 容量不足、429 配额限制或版本/套餐不支持，自动降级至备选高可用模型
                 candidate_models = [cc_model_id]
-                if cc_model_id == "gemini-2.5-pro":
-                    candidate_models.extend(["gemini-3-flash", "gemini-2.5-flash"])
+                if cc_model_id in ("gemini-4-argon", "4 Argon", "gemini-2.5-pro"):
+                    candidate_models.extend(["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"])
+                elif cc_model_id == "gemini-3.8-flash":
+                    candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-flash-lite"])
+                elif cc_model_id not in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
+                    candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-flash-lite"])
 
                 for idx, target_cc_model in enumerate(candidate_models):
                     cc_url = f"{cls.CLOUDCODE_BASE_URL}:streamGenerateContent?alt=sse"
                     cc_headers = {
                         "Authorization": f"Bearer {active_token}",
                         "Content-Type": "application/json",
-                        "User-Agent": cls.CLOUDCODE_UA,
+                        "User-Agent": cls.get_cloudcode_ua(),
                     }
                     cc_payload = {
                         "model": target_cc_model,
                         "project": project_id,
                         "request": cc_request,
                     }
+                    deprecation_detected = False
+                    buffered_chunks: list[str] = []
+                    total_buffered_len = 0
+                    buffer_flushed = False
+
                     async with client.stream("POST", cc_url, headers=cc_headers, json=cc_payload) as response:
                         if response.status_code in (401, 403) and idx == 0:
                             # 尝试自动使用本机 Keyring 中的新版 Antigravity 令牌无缝接力
@@ -371,13 +416,29 @@ class GeminiClient:
                                                     continue
                                         return
 
-                        if response.status_code == 503 and idx < len(candidate_models) - 1:
-                            logger.info(f"CloudCode 模型 [{target_cc_model}] 暂时繁忙 (503)，自动无缝切换至 [{candidate_models[idx + 1]}]")
+                        # 404 / 429 / 503 场景下，若还有候选可用模型，自动无缝降级切换
+                        if response.status_code in (404, 429, 503) and idx < len(candidate_models) - 1:
+                            next_model = candidate_models[idx + 1]
+                            logger.info(f"CloudCode 模型 [{target_cc_model}] 响应 [{response.status_code}]，自动降级至 [{next_model}]")
+                            if on_downgrade:
+                                try:
+                                    on_downgrade(model_name, next_model, f"{response.status_code}_quota_or_capacity")
+                                except Exception as cb_err:
+                                    logger.warning(f"触发模型降级回调异常: {cb_err}")
                             continue
 
                         if response.status_code != 200:
                             error_text = await response.aread()
                             err_msg = error_text.decode("utf-8", errors="ignore")
+                            if cls.is_version_deprecation_message(err_msg) and idx < len(candidate_models) - 1:
+                                next_model = candidate_models[idx + 1]
+                                logger.warning(f"模型 [{target_cc_model}] 提示版本/套餐受限，自动降级至 [{next_model}]")
+                                if on_downgrade:
+                                    try:
+                                        on_downgrade(model_name, next_model, "plan_quota_unsupported")
+                                    except Exception as cb_err:
+                                        logger.warning(f"触发模型降级回调异常: {cb_err}")
+                                continue
                             raise GeminiAPIException(status_code=response.status_code, message=err_msg)
 
                         async for line in response.aiter_lines():
@@ -394,11 +455,47 @@ class GeminiClient:
                                     if candidates:
                                         parts = candidates[0].get("content", {}).get("parts", [])
                                         for part in parts:
-                                            if part.get("text") and not part.get("thought"):
-                                                yield part["text"]
+                                            text_chunk = part.get("text")
+                                            if text_chunk and not part.get("thought"):
+                                                if not buffer_flushed:
+                                                    buffered_chunks.append(text_chunk)
+                                                    total_buffered_len += len(text_chunk)
+                                                    combined_head = "".join(buffered_chunks)
+                                                    if cls.is_version_deprecation_message(combined_head):
+                                                        deprecation_detected = True
+                                                        break
+                                                    if total_buffered_len >= 120:
+                                                        buffer_flushed = True
+                                                        for bc in buffered_chunks:
+                                                            yield bc
+                                                        buffered_chunks.clear()
+                                                else:
+                                                    yield text_chunk
+                                        if deprecation_detected:
+                                            break
                                 except json.JSONDecodeError:
                                     continue
-                        return
+
+                    if deprecation_detected:
+                        if idx < len(candidate_models) - 1:
+                            next_model = candidate_models[idx + 1]
+                            logger.warning(
+                                f"模型 [{target_cc_model}] 返回版本/套餐受限提示，自动切换至候选模型 [{next_model}]"
+                            )
+                            if on_downgrade:
+                                try:
+                                    on_downgrade(model_name, next_model, "plan_quota_unsupported")
+                                except Exception as cb_err:
+                                    logger.warning(f"触发模型降级回调异常: {cb_err}")
+                            continue
+                        else:
+                            yield "【提示】：该 Google 账号当前套餐方案暂未解锁该模型的访问权限（需 Google AI Pro/Ultra 方案），已自动为您保护并建议切换至 Gemini 2.5 Flash。"
+                            return
+
+                    if not buffer_flushed and buffered_chunks:
+                        for bc in buffered_chunks:
+                            yield bc
+                    return
 
         # 3. 官方 AI Studio REST API Key 通道 (AIzaSy...)
         api_model_id = cls.resolve_model_id(model_name)
@@ -531,7 +628,7 @@ class GeminiClient:
                         cc_headers = {
                             "Authorization": f"Bearer {active_token}",
                             "Content-Type": "application/json",
-                            "User-Agent": cls.CLOUDCODE_UA,
+                            "User-Agent": cls.get_cloudcode_ua(),
                         }
                         cc_payload = {
                             "model": target_m,
@@ -553,15 +650,38 @@ class GeminiClient:
 
                         latency_ms = round((time.time() - start) * 1000, 1)
                         if resp.status_code == 200:
+                            resp_text = resp.text
+                            # 深度校验：若模型虽然返回 200 但内容是版本受限警告，标为不可用
+                            if cls.is_version_deprecation_message(resp_text):
+                                return {
+                                    "valid": False,
+                                    "latency_ms": latency_ms,
+                                    "status_code": 403,
+                                    "error": "该 Google 账号当前套餐暂未解锁此高级模型权限（需开通 Google AI Pro/Ultra 方案）",
+                                }
                             return {"valid": True, "latency_ms": latency_ms, "status_code": 200, "model": model_name}
                         if resp.status_code == 503 and idx < len(candidate_models) - 1:
                             continue
                         if resp.status_code == 429:
+                            err_msg = "该模型当前配额受限或处于频控冷却 (429)"
+                            try:
+                                raw_err = resp.json().get("error", {}).get("message", "")
+                                if raw_err:
+                                    err_msg = raw_err[:120]
+                            except Exception:
+                                pass
                             return {
-                                "valid": not strict_model,
+                                "valid": False if strict_model else True,
                                 "latency_ms": latency_ms,
                                 "status_code": 429,
-                                "error": "该模型当前配额受限或处于频控冷却 (429)",
+                                "error": err_msg,
+                            }
+                        if resp.status_code == 404:
+                            return {
+                                "valid": False,
+                                "latency_ms": latency_ms,
+                                "status_code": 404,
+                                "error": f"该模型标识 [{target_m}] 未在当前 Cloud Code 节点开放",
                             }
                         err_summary = resp.text[:160]
                         try:

@@ -59,7 +59,7 @@ export function SearchModal({ isOpen, onClose, onSelectResult }: SearchModalProp
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center px-4 py-3.5 border-b border-white/10 bg-surface-100/50">
-          <Search className="w-5 h-5 text-blue-400 mr-3" />
+          <Search className="w-5 h-5 text-emerald-500 mr-3" />
           <input
             ref={inputRef}
             type="text"
@@ -97,7 +97,7 @@ export function SearchModal({ isOpen, onClose, onSelectResult }: SearchModalProp
                 >
                   <div className="flex items-center justify-between text-xs text-slate-400">
                     <div className="flex items-center space-x-1.5 font-medium text-slate-300">
-                      <MessageSquare className="w-3.5 h-3.5 text-blue-400" />
+                      <MessageSquare className="w-3.5 h-3.5 text-emerald-500" />
                       <span>{res.conversation_title}</span>
                     </div>
                     <span className="text-[11px] text-slate-500 font-mono">{res.created_at?.slice(0, 16)}</span>
@@ -110,7 +110,7 @@ export function SearchModal({ isOpen, onClose, onSelectResult }: SearchModalProp
 
                   <div className="flex items-center justify-between text-[11px] text-slate-500 pt-1">
                     <span>来源: {res.executed_by_account || '本地记录'}</span>
-                    <span className="text-blue-400 group-hover:translate-x-1 transition-transform flex items-center space-x-0.5">
+                    <span className="text-emerald-500 group-hover:translate-x-1 transition-transform flex items-center space-x-0.5">
                       <span>跳转会话</span>
                       <ArrowRight className="w-3 h-3" />
                     </span>

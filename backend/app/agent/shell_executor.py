@@ -300,12 +300,63 @@ class LocalShellExecutor:
         elif exit_code != 0 and not combined.strip():
             combined = f"命令执行结束，退出码: {exit_code}（若命令需交互输入，请添加 -y 等非交互标志）"
 
+        # 智能诊断日志嗅探：若输出中包含指向外部 debug 日志文件的路径，自动抓取其底层关键报错
+        combined = self.sniff_and_extract_log(combined)
+
         return {
             "output": combined.strip() or "(执行成功，无控制台输出)",
             "exit_code": exit_code,
             "new_cwd": new_cwd,
             "timed_out": timed_out,
         }
+
+    @staticmethod
+    def sniff_and_extract_log(raw_output: str) -> str:
+        """
+        自动嗅探命令输出中引用的外部排错日志文件（如 npm debug log, pip log, build log 等），
+        若存在且为本地真实文件，自动抓取日志末尾关键报错堆栈并追加至输出中，供模型第一性原理自动自愈纠偏。
+        """
+        if not raw_output:
+            return raw_output
+
+        # 优先匹配形如: A complete log of this run can be found in: C:\...\debug-0.log
+        # 以及 See log at /path/to/log 或直接出现的 .log 绝对路径
+        patterns = [
+            r"(?:can be found in|See log at|Log file(?:\s*is)?|debug log at|written to|log file:\s*)\s*[:：]?\s*([a-zA-Z]:\\[^\r\n]+\.log|/[^\r\n]+\.log)",
+            r"([a-zA-Z]:\\[^\s\r\n]+\.log)",
+            r"(/[\w./-]+\.log)",
+        ]
+
+        found_path = None
+        for pat in patterns:
+            m = re.search(pat, raw_output, re.IGNORECASE)
+            if m:
+                cand = m.group(1).strip()
+                if os.path.isfile(cand):
+                    found_path = cand
+                    break
+
+        if not found_path:
+            return raw_output
+
+        try:
+            with open(found_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+
+            tail_count = 35
+            tail_lines = lines[-tail_count:] if len(lines) > tail_count else lines
+            tail_text = "".join(tail_lines).strip()
+            if tail_text:
+                logger.info(f"[ShellExecutor] 自动成功嗅探并挂载底层关联诊断日志: {found_path} (共 {len(tail_lines)} 行)")
+                return (
+                    f"{raw_output}\n\n"
+                    f"【📋 诊断日志自动定位与回填 ({found_path})】:\n"
+                    f"```log\n{tail_text}\n```"
+                )
+        except Exception as e:
+            logger.debug(f"读取嗅探到的日志文件 {found_path} 异常: {e}")
+
+        return raw_output
 
     @staticmethod
     def compress_output(command: str, raw_output: str, exit_code: int) -> str:
