@@ -8,12 +8,14 @@ class ConversationCreate(BaseModel):
     """新建会话"""
     title: str = Field(default="新会话", description="会话标题")
     model_name: str = Field(default="4 Argon", description="使用的默认 Gemini 模型")
+    workspace_id: str = Field(default="default", description="归属的工作区 ID")
 
 
 class ConversationUpdate(BaseModel):
     """修改会话属性"""
     title: str | None = None
     is_pinned: bool | None = None
+    workspace_id: str | None = None
 
 
 class MessageResponse(BaseModel):
@@ -39,6 +41,7 @@ class ConversationResponse(BaseModel):
     source_account: str | None
     model_name: str
     is_pinned: bool
+    workspace_id: str = "default"
     created_at: str
     updated_at: str
     message_count: int = 0

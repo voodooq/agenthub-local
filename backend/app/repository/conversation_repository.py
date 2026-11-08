@@ -11,17 +11,20 @@ class ConversationRepository:
     """会话数据访问对象"""
     
     @staticmethod
-    async def get_all() -> list[dict[str, Any]]:
-        """获取所有会话列表（置顶优先，时间降序），附带消息条数统计"""
+    async def get_all(workspace_id: str | None = None) -> list[dict[str, Any]]:
+        """获取所有会话列表（置顶优先，时间降序），附带消息条数统计，支持按工作区过滤"""
         async with db_manager.get_connection() as conn:
-            sql = """
+            where_clause = "WHERE c.workspace_id = ?" if workspace_id else ""
+            params = (workspace_id,) if workspace_id else ()
+            sql = f"""
             SELECT c.*, COUNT(m.id) as message_count
             FROM conversations c
             LEFT JOIN messages m ON c.id = m.conversation_id
+            {where_clause}
             GROUP BY c.id
             ORDER BY c.is_pinned DESC, c.updated_at DESC
             """
-            async with conn.execute(sql) as cursor:
+            async with conn.execute(sql, params) as cursor:
                 rows = await cursor.fetchall()
                 return [dict(row) for row in rows]
 
@@ -35,17 +38,18 @@ class ConversationRepository:
 
     @staticmethod
     async def create(data: dict[str, Any]) -> None:
-        """创建新会话记录"""
+        """创建新会话记录，支持指定工作区与工作目录"""
         import os
         default_cwd = data.get("current_cwd") or os.getcwd()
+        workspace_id = data.get("workspace_id", "default")
         async with db_manager.get_connection() as conn:
             await conn.execute(
                 """
                 INSERT INTO conversations (
                     id, title, source_type, source_account, model_name,
-                    is_pinned, scene_mode, incognito, working_memory_json, current_cwd
+                    is_pinned, scene_mode, incognito, working_memory_json, current_cwd, workspace_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     data["id"],
@@ -58,6 +62,7 @@ class ConversationRepository:
                     1 if data.get("incognito") else 0,
                     data.get("working_memory_json", "{}"),
                     default_cwd,
+                    workspace_id,
                 )
             )
             await conn.commit()
@@ -223,3 +228,13 @@ class ConversationRepository:
             cursor = await conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
             await conn.commit()
             return cursor.rowcount > 0
+
+    @staticmethod
+    async def move_to_workspace(conv_id: str, new_workspace_id: str) -> None:
+        """将已有会话迁移到指定的用户工作区"""
+        async with db_manager.get_connection() as conn:
+            await conn.execute(
+                "UPDATE conversations SET workspace_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                (new_workspace_id, conv_id),
+            )
+            await conn.commit()

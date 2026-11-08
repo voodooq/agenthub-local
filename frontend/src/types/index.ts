@@ -63,6 +63,20 @@ export interface LongTermMemoryItem {
   created_at?: string;
 }
 
+export interface Workspace {
+  id: string;
+  name: string;
+  type: 'virtual' | 'physical';
+  root_path: string;
+  context_prompt?: string | null;
+  model_preference?: string | null;
+  security_level: string;
+  fts_last_indexed_at?: string | null;
+  created_at: string;
+  conversation_count?: number;
+  is_path_accessible?: boolean;
+}
+
 export interface Conversation {
   id: string;
   title: string;
@@ -77,6 +91,7 @@ export interface Conversation {
   incognito?: number | boolean;
   working_memory_json?: string;
   current_cwd?: string | null;
+  workspace_id?: string;
 }
 
 export interface Message {
@@ -134,3 +149,77 @@ export interface AuditLogItem {
   approved: number | null;
   created_at: string;
 }
+
+export type LoopStatus =
+  | 'idle'
+  | 'planning'
+  | 'executing'
+  | 'verifying'
+  | 'reflecting'
+  | 'waiting_approval'
+  | 'completed'
+  | 'failed'
+  | 'paused';
+
+export interface PendingApprovalCall {
+  call_id: string;
+  tool_name: string;
+  arguments: Record<string, any>;
+  policy_level: 'L0' | 'L1' | 'L2';
+  risk_reason: string;
+  snapshot_path?: string | null;
+}
+
+export interface TaskLoopResponse {
+  id: string;
+  workspace_id: string;
+  conversation_id: string;
+  goal_prompt: string;
+  scratchpad_md?: string | null;
+  loop_status: LoopStatus;
+  current_iteration: number;
+  max_iterations: number;
+  pending_approval_call?: PendingApprovalCall | null;
+  error_fingerprints?: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ArtifactItem {
+  id: string;
+  workspace_id: string;
+  conversation_id?: string | null;
+  file_path: string;
+  file_name: string;
+  file_type: 'document' | 'code' | 'media' | 'report';
+  file_size: number;
+  source: string;
+  summary?: string | null;
+  created_at: string;
+}
+
+export interface ScheduledTaskItem {
+  id: string;
+  workspace_id: string;
+  name: string;
+  cron_expr: string;
+  prompt_template: string;
+  status: 'active' | 'paused' | 'running';
+  last_run_at?: string | null;
+  next_run_at?: string | null;
+  last_status?: 'success' | 'failed' | null;
+  last_output?: string | null;
+  created_at: string;
+}
+
+export interface SkillItem {
+  id: string;
+  name: string;
+  command?: string;
+  scope: 'global' | 'workspace';
+  is_override?: boolean;
+  description?: string;
+  version?: string;
+  sop_content?: string;
+}
+

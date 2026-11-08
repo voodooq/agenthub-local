@@ -19,7 +19,10 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 
-import { Sidebar } from '@/components/Sidebar';
+import { Sidebar, MainNavHub } from '@/components/Sidebar';
+import { LibraryView } from '@/components/LibraryView';
+import { ScheduledView } from '@/components/ScheduledView';
+import { SkillsView } from '@/components/SkillsView';
 import { StatusPill } from '@/components/StatusPill';
 import { ModelSelector, ThinkingLevel, ModelOption } from '@/components/ModelSelector';
 import { ThinkingBlock } from '@/components/ThinkingBlock';
@@ -40,16 +43,32 @@ import { LanguageToggle } from '@/components/LanguageToggle';
 import { MemoryHubModal } from '@/components/MemoryHubModal';
 import { InlineToolCard } from '@/components/InlineToolCard';
 import { ImportWizardModal } from '@/components/ImportWizardModal';
+import { LoopHUD } from '@/components/LoopHUD';
+import { ApprovalCard } from '@/components/ApprovalCard';
+import { SkillPickerModal } from '@/components/SkillPickerModal';
+import { SopDrawer } from '@/components/SopDrawer';
 
 import { buildActiveSystemOverride } from '@/utils/personalityHelper';
 import { generateScenarioThinking } from '@/utils/scenarioThinking';
-import { Conversation, Message, StatusPillData, SceneMode, ToolExecutionCardItem } from '@/types';
+import {
+  Conversation,
+  Message,
+  StatusPillData,
+  SceneMode,
+  ToolExecutionCardItem,
+  Workspace,
+  TaskLoopResponse,
+  SkillItem,
+} from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 
 export default function WorkbenchPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
+  const [activeLoop, setActiveLoop] = useState<TaskLoopResponse | null>(null);
+  const [isSkillPickerOpen, setIsSkillPickerOpen] = useState(false);
+  const [selectedSopSkill, setSelectedSopSkill] = useState<SkillItem | null>(null);
   const [inputPrompt, setInputPrompt] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const isStreamingRef = useRef(false);
@@ -68,6 +87,10 @@ export default function WorkbenchPage() {
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('high');
 
   // 工作模式与系统治理
+  const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>('default');
+  const [activeNavHub, setActiveNavHub] = useState<MainNavHub>('chat');
+  const [saveFileToast, setSaveFileToast] = useState<string | null>(null);
   const [workMode, setWorkMode] = useState<WorkMode>('dev');
   const [isHudOpen, setIsHudOpen] = useState(false);
   const [isActionDrawerOpen, setIsActionDrawerOpen] = useState(false);
@@ -163,9 +186,47 @@ export default function WorkbenchPage() {
     return () => clearInterval(timer);
   }, []);
 
-  const fetchConversations = async () => {
+  const fetchActiveLoop = useCallback(async () => {
+    if (!activeWorkspaceId) return;
     try {
-      const res = await apiFetch('/api/v1/conversations');
+      const res = await apiFetch(`/api/v1/loop/workspace/${activeWorkspaceId}/active`);
+      if (res.ok) {
+        const data = await res.json();
+        setActiveLoop(data);
+      } else {
+        setActiveLoop(null);
+      }
+    } catch (e) {}
+  }, [activeWorkspaceId]);
+
+  useEffect(() => {
+    fetchActiveLoop();
+    const timer = setInterval(fetchActiveLoop, 4000);
+    return () => clearInterval(timer);
+  }, [fetchActiveLoop]);
+
+
+  const fetchWorkspaces = async () => {
+    try {
+      const res = await apiFetch('/api/v1/workspaces');
+      if (res.ok) {
+        const data: Workspace[] = await res.json();
+        setWorkspaces(data);
+        if (data.length > 0 && !data.some((w) => w.id === activeWorkspaceId)) {
+          setActiveWorkspaceId(data[0].id);
+          setWorkspacePath(data[0].root_path);
+        }
+      }
+    } catch (e) {
+      console.warn('获取工作区失败:', e);
+    }
+  };
+
+  const fetchConversations = async (wsId?: string) => {
+    try {
+      const targetWsId = wsId !== undefined ? wsId : activeWorkspaceId;
+      const url = targetWsId ? `/api/v1/conversations?workspace_id=${targetWsId}` : '/api/v1/conversations';
+      const res = await apiFetch(url);
       if (res.ok) {
         const data = await res.json();
         setConversations(data);
@@ -221,12 +282,20 @@ export default function WorkbenchPage() {
   };
 
   useEffect(() => {
-    fetchConversations();
+    fetchWorkspaces();
     fetchStatusPill();
     fetchActiveModels();
     const pillTimer = setInterval(fetchStatusPill, 3000);
     return () => clearInterval(pillTimer);
   }, []);
+
+  useEffect(() => {
+    fetchConversations(activeWorkspaceId);
+    const curr = workspaces.find((w) => w.id === activeWorkspaceId);
+    if (curr) {
+      setWorkspacePath(curr.root_path);
+    }
+  }, [activeWorkspaceId, workspaces]);
 
   useEffect(() => {
     if (statusPill?.active_account_name) {
@@ -497,6 +566,25 @@ export default function WorkbenchPage() {
 
     setMessages((prev) => [...prev, tempUserMsg, tempAssistantMsg]);
 
+    if (sceneMode === 'agent') {
+      apiFetch('/api/v1/loop/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workspace_id: activeWorkspaceId,
+          conversation_id: activeConvId || 'default',
+          goal_prompt: rawPrompt,
+        }),
+      })
+        .then(async (r) => {
+          if (r.ok) {
+            const loopData = await r.json();
+            setActiveLoop(loopData);
+          }
+        })
+        .catch(() => {});
+    }
+
     try {
       // 读取用户配置的多轮对话记忆上下文轮数
       let memoryRounds = 10;
@@ -510,6 +598,7 @@ export default function WorkbenchPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           conversation_id: activeConvId,
+          workspace_id: activeWorkspaceId,
           message: promptToSend,
           model_name: currentModel,
           thinking_level: thinkingLevel,
@@ -900,12 +989,71 @@ export default function WorkbenchPage() {
     });
   };
 
+  const handleSaveCodeToWorkspace = async (code: string, language: string) => {
+    const extMap: Record<string, string> = {
+      python: 'py',
+      javascript: 'js',
+      typescript: 'ts',
+      json: 'json',
+      markdown: 'md',
+      html: 'html',
+      css: 'css',
+      sql: 'sql',
+      dockerfile: 'dockerfile',
+      yaml: 'yaml',
+      sh: 'sh',
+    };
+    const ext = extMap[language.toLowerCase()] || 'txt';
+    const defaultRelPath = `src/snippet_${Date.now()}.${ext}`;
+    const targetPath = prompt('请输入落盘到当前工作区的相对文件路径:', defaultRelPath);
+    if (!targetPath) return;
+
+    try {
+      const res = await apiFetch(`/api/v1/workspaces/${activeWorkspaceId}/files`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          rel_path: targetPath.trim(),
+          content: code,
+          overwrite: true,
+        }),
+      });
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.success) {
+          setSaveFileToast(`代码文件已成功落盘至: ${data.rel_path}`);
+          setTimeout(() => setSaveFileToast(null), 3500);
+        }
+      }
+    } catch (e: any) {
+      alert(e?.message || '文件落盘失败');
+    }
+  };
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground transition-colors duration-200">
       {/* 侧边栏 */}
       <Sidebar
         conversations={conversations}
         activeConvId={activeConvId}
+        workspaces={workspaces}
+        activeWorkspaceId={activeWorkspaceId}
+        activeNavHub={activeNavHub}
+        onSelectNavHub={(hub) => setActiveNavHub(hub)}
+        onSelectWorkspace={(wsId) => {
+          setActiveWorkspaceId(wsId);
+          setActiveConvId(null);
+          setMessages([]);
+        }}
+        onRefreshWorkspaces={fetchWorkspaces}
+        onMoveConvWorkspace={async (convId, targetWsId) => {
+          await apiFetch(`/api/v1/conversations/${convId}`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ workspace_id: targetWsId }),
+          });
+          fetchConversations(activeWorkspaceId);
+        }}
         onSelectConv={(id) => setActiveConvId(id)}
         onNewChat={() => {
           setActiveConvId(null);
@@ -1001,7 +1149,43 @@ export default function WorkbenchPage() {
           </div>
         </header>
 
-        {/* 顶部置顶任务草稿纸条 (Sticky Scratchpad Bar)：仅当 workingMemory 非空时显示 */}
+        {/* 核心主枢纽视图路由 (对齐 Gemini 库 / 已安排 / 技能与应用) */}
+        {activeNavHub === 'library' && (
+          <LibraryView
+            workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
+            onOpenCanvas={(title, content, type) => handleOpenCanvas(content, type, title)}
+          />
+        )}
+
+        {activeNavHub === 'scheduled' && (
+          <ScheduledView
+            workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
+          />
+        )}
+
+        {activeNavHub === 'skills' && (
+          <SkillsView
+            workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
+          />
+        )}
+
+        {activeNavHub === 'chat' && (
+          <>
+            {/* 顶部长程任务领航舱 (Loop HUD) 与敏感操作审批拦截卡片 */}
+            <div className="px-4 md:px-12 lg:px-24 pt-3">
+              <LoopHUD loop={activeLoop} onRefresh={fetchActiveLoop} />
+              {activeLoop &&
+                activeLoop.loop_status === 'waiting_approval' &&
+                activeLoop.pending_approval_call && (
+                  <ApprovalCard
+                    loopId={activeLoop.id}
+                    approvalCall={activeLoop.pending_approval_call}
+                    onResolved={fetchActiveLoop}
+                  />
+                )}
+            </div>
+
+            {/* 顶部置顶任务草稿纸条 (Sticky Scratchpad Bar)：仅当 workingMemory 非空时显示 */}
         {workingMemory && Object.keys(workingMemory).length > 0 && (
           <div className="px-4 md:px-12 lg:px-24 py-2 border-b border-amber-500/25 bg-amber-500/5 flex items-center justify-between text-xs animate-fade-in">
             <div className="flex items-center space-x-2 min-w-0 flex-1">
@@ -1163,6 +1347,7 @@ export default function WorkbenchPage() {
                                         code={codeString}
                                         language={language}
                                         onSendToCanvas={(c: string, l: string) => handleOpenCanvas(c, l)}
+                                        onSaveToWorkspace={handleSaveCodeToWorkspace}
                                       />
                                     );
                                   }
@@ -1317,14 +1502,14 @@ export default function WorkbenchPage() {
               </div>
             )}
 
-            {/* 智能防幻觉意图嗅探胶囊：当检测到写盘需求却处于非 Agent 模式时一键引导 */}
+            {/* 智能防幻觉意图嗅探胶囊：当检测到写盘需求却处于对话模式时一键引导 */}
             {sceneMode !== 'agent' && /(写入|创建文件|新建文件|写到|落盘|保存到|在.*创建|新建.*目录|写代码到|写入代码)/.test(inputPrompt) && (
               <div className="px-3.5 py-1.5 mb-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between text-xs text-emerald-700 dark:text-emerald-300 animate-fade-in shadow-sm">
                 <div className="flex items-center space-x-2">
                   <Sparkles className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
                   <span>
-                    检测到本地写盘需求：当前处于<strong>「{sceneMode === 'chat' ? '标准对话' : '极速单次'}」</strong>模式（仅生成文本代码）。
-                    需 AI 真实操作磁盘物理创建文件？
+                    检测到本地写盘需求：当前处于<strong>「对话模式」</strong>（仅纯文本生成）。
+                    是否一键切换至「任务模式」真实落盘执行？
                   </span>
                 </div>
                 <button
@@ -1332,7 +1517,7 @@ export default function WorkbenchPage() {
                   onClick={() => handleSwitchSceneMode('agent')}
                   className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-[11px] shrink-0 ml-2 shadow-sm shadow-emerald-600/20 transition-all"
                 >
-                  一键切换为 Agent 任务
+                  一键切换为任务模式
                 </button>
               </div>
             )}
@@ -1365,13 +1550,12 @@ export default function WorkbenchPage() {
                     <Plus className="w-4 h-4" />
                   </label>
 
-                  {/* 场景模式三档切换胶囊：极速单次 / 标准对话 / Agent 任务 */}
-                  <div className="flex items-center rounded-lg bg-surface-100 border border-border/70 p-0.5 text-[11px]">
+                  {/* 模式双态药丸切换：[💬 对话] 与 [⚡ 任务] */}
+                  <div className="flex items-center rounded-xl bg-surface-100 border border-border/70 p-0.5 text-xs">
                     {(
                       [
-                        { id: 'oneshot', label: '极速单次', tip: '极速单次：纯单次文本解答，零历史负担，不调用本地工具' },
-                        { id: 'chat', label: '标准对话', tip: '标准对话：多轮上下文问答，不操作修改本地磁盘文件' },
-                        { id: 'agent', label: 'Agent任务', tip: 'Agent任务：全功能模式，具备终端执行与本地代码真实物理写盘能力' },
+                        { id: 'chat', label: '💬 对话', tip: '对话模式：纯思维链探讨与知识推演，不执行写盘与命令' },
+                        { id: 'agent', label: '⚡ 任务', tip: '任务模式：具身执行与自主自愈，真实读写当前工作区文件并运行 Shell' },
                       ] as const
                     ).map((m) => (
                       <button
@@ -1379,9 +1563,9 @@ export default function WorkbenchPage() {
                         type="button"
                         onClick={() => handleSwitchSceneMode(m.id)}
                         title={m.tip}
-                        className={`px-2 py-0.5 rounded-md transition-all ${
+                        className={`px-3 py-1 rounded-lg transition-all ${
                           sceneMode === m.id
-                            ? 'bg-emerald-600 text-white font-medium shadow-sm'
+                            ? 'bg-emerald-600 text-white font-semibold shadow-sm'
                             : 'text-muted-foreground hover:text-foreground'
                         }`}
                       >
@@ -1403,6 +1587,17 @@ export default function WorkbenchPage() {
                   >
                     <EyeOff className="w-3 h-3" />
                     <span className="hidden sm:inline">无痕</span>
+                  </button>
+
+                  {/* 快捷技能呼出 */}
+                  <button
+                    type="button"
+                    onClick={() => setIsSkillPickerOpen(true)}
+                    title="浏览或呼出当前工作区专属技能与全局底座技能 (/)"
+                    className="flex items-center space-x-1 px-2.5 py-1 rounded-xl text-[11px] border border-zinc-700/60 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 transition-all font-mono"
+                  >
+                    <Sparkles className="w-3 h-3 text-emerald-400" />
+                    <span>/ 技能</span>
                   </button>
                 </div>
 
@@ -1438,7 +1633,17 @@ export default function WorkbenchPage() {
             </div>
           </div>
         </div>
+        </>
+        )}
       </main>
+
+      {/* 代码文件落盘浮层通知 */}
+      {saveFileToast && (
+        <div className="fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-xs font-semibold shadow-2xl flex items-center space-x-2 animate-bounce">
+          <CheckCircle2 className="w-4 h-4 shrink-0" />
+          <span>{saveFileToast}</span>
+        </div>
+      )}
 
       {/* 右侧 Canvas 预览抽屉 */}
       <CanvasDrawer
@@ -1498,6 +1703,19 @@ export default function WorkbenchPage() {
         onClose={() => setIsMemoryHubOpen(false)}
         onProvidersChanged={() => fetchActiveModels()}
       />
+
+      {/* 快捷技能呼出面板与 SOP 明文规程抽屉 */}
+      <SkillPickerModal
+        workspaceId={activeWorkspaceId}
+        isOpen={isSkillPickerOpen}
+        onClose={() => setIsSkillPickerOpen(false)}
+        onSelectSkill={(cmd) => {
+          setInputPrompt(cmd);
+          textareaRef.current?.focus();
+        }}
+        onViewSop={(sk) => setSelectedSopSkill(sk)}
+      />
+      <SopDrawer skill={selectedSopSkill} onClose={() => setSelectedSopSkill(null)} />
     </div>
   );
 }

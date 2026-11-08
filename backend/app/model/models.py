@@ -59,6 +59,7 @@ class ConversationModel:
     working_memory_json: str = "{}"
     rolling_summary: str = ""
     current_cwd: str | None = None
+    workspace_id: str = "default"
 
     @classmethod
     def from_row(cls, row: Any) -> "ConversationModel":

@@ -44,6 +44,7 @@ class AgentRuntime:
         attachments: list[Any] | None = None,
         scene_mode: str | None = None,
         incognito: bool | None = None,
+        workspace_id: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行双层循环流式推理与工具编排，向外输出标准化 SSE 字典事件流。
@@ -51,8 +52,17 @@ class AgentRuntime:
         conv_id = conversation_id
         is_new_conv = False
         short_title = (user_message or "").strip().split("\n")[0][:24] or "新会话"
+        ws_id = workspace_id or "default"
+        target_cwd = None
+        try:
+            from ..repository.workspace_repository import WorkspaceRepository
+            ws = await WorkspaceRepository.get_by_id(ws_id)
+            if ws and ws.get("root_path"):
+                target_cwd = ws["root_path"]
+        except Exception:
+            pass
 
-        # 1. 确保会话存在并同步最新场景/无痕状态
+        # 1. 确保会话存在并同步最新场景/无痕状态与工作区
         if not conv_id:
             conv_id = str(uuid.uuid4())
             is_new_conv = True
@@ -62,6 +72,8 @@ class AgentRuntime:
                 "model_name": model_name,
                 "scene_mode": scene_mode or "agent",
                 "incognito": 1 if incognito else 0,
+                "workspace_id": ws_id,
+                "current_cwd": target_cwd,
             })
         else:
             conv_existing = await ConversationRepository.get_by_id(conv_id)
@@ -73,6 +85,8 @@ class AgentRuntime:
                     "model_name": model_name,
                     "scene_mode": scene_mode or "agent",
                     "incognito": 1 if incognito else 0,
+                    "workspace_id": ws_id,
+                    "current_cwd": target_cwd,
                 })
             elif scene_mode is not None or incognito is not None:
                 await ConversationRepository.update_agent_state(

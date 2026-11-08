@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from ...schema.conversation_schema import ConversationCreate, ConversationUpdate, MessageResponse
 from ...repository.conversation_repository import ConversationRepository
 from ...repository.message_repository import MessageRepository
+from ...repository.workspace_repository import WorkspaceRepository
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
 
@@ -19,24 +20,33 @@ class AgentStateUpdateRequest(BaseModel):
     working_memory_json: str | None = None
     clear_working_memory: bool = False
     current_cwd: str | None = None
+    workspace_id: str | None = None
 
 
 @router.get("")
-async def list_conversations():
-    """获取所有会话列表"""
-    return await ConversationRepository.get_all()
+async def list_conversations(workspace_id: str | None = None):
+    """获取会话列表，支持按工作区过滤"""
+    return await ConversationRepository.get_all(workspace_id=workspace_id)
 
 
 @router.post("")
 async def create_conversation(req: ConversationCreate):
-    """创建新会话"""
+    """创建新会话，自动绑定工作区与 CWD"""
     conv_id = str(uuid.uuid4())
+    target_cwd = None
+    if req.workspace_id:
+        ws = await WorkspaceRepository.get_by_id(req.workspace_id)
+        if ws and ws.get("root_path"):
+            target_cwd = ws["root_path"]
+
     await ConversationRepository.create({
         "id": conv_id,
         "title": req.title,
-        "model_name": req.model_name
+        "model_name": req.model_name,
+        "workspace_id": req.workspace_id or "default",
+        "current_cwd": target_cwd,
     })
-    return {"id": conv_id, "title": req.title}
+    return {"id": conv_id, "title": req.title, "workspace_id": req.workspace_id or "default"}
 
 
 @router.get("/{conv_id}")
@@ -57,6 +67,7 @@ async def get_conversation_detail(conv_id: str):
         "incognito": bool(conv.incognito),
         "working_memory": wm,
         "current_cwd": conv.current_cwd,
+        "workspace_id": getattr(conv, "workspace_id", "default"),
         "updated_at": conv.updated_at,
     }
 
@@ -117,8 +128,10 @@ async def cleanup_duplicate_conversations():
 
 @router.patch("/{conv_id}")
 async def update_conversation(conv_id: str, req: ConversationUpdate):
-    """重命名或置顶会话"""
+    """重命名、置顶或移动会话到其他工作区"""
     await ConversationRepository.update(conv_id, title=req.title, is_pinned=req.is_pinned)
+    if req.workspace_id:
+        await ConversationRepository.move_to_workspace(conv_id, req.workspace_id)
     return {"message": "更新成功"}
 
 

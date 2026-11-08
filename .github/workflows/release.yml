@@ -1,0 +1,91 @@
+name: Release Build & Publish
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    name: Build Multi-Client Release Assets
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Install Frontend Dependencies & Export Static Assets
+        run: |
+          cd frontend
+          npm install
+          $env:NEXT_EXPORT="true"
+          npm run build
+        shell: powershell
+
+      - name: Install Python Backend Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+        shell: powershell
+
+      - name: Package Windows & Cross-Platform Release Archives
+        run: |
+          $TAG_NAME = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v1.1.0" }
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          
+          # 1. 准备发布目录结构
+          $PKG_DIR = "dist\AgentHub-Local-$TAG_NAME"
+          if (Test-Path $PKG_DIR) { Remove-Item -Recurse -Force $PKG_DIR }
+          New-Item -ItemType Directory -Force -Path $PKG_DIR | Out-Null
+
+          # 拷贝核心程序与静态产物
+          Copy-Item -Recurse -Force backend $PKG_DIR\backend
+          Copy-Item -Recurse -Force frontend\out $PKG_DIR\frontend\out
+          Copy-Item -Recurse -Force skills $PKG_DIR\skills
+          Copy-Item -Force desktop_app.py $PKG_DIR\
+          Copy-Item -Force requirements.txt $PKG_DIR\
+          Copy-Item -Force mcp_servers.json $PKG_DIR\
+          Copy-Item -Force README.md $PKG_DIR\
+          Copy-Item -Force LICENSE $PKG_DIR\
+          Copy-Item -Force .env.example $PKG_DIR\
+          if (Test-Path "启动AgentHub桌面版.bat") { Copy-Item -Force "启动AgentHub桌面版.bat" $PKG_DIR\ }
+          if (Test-Path "启动AgentHub_调试模式(带控制台日志).bat") { Copy-Item -Force "启动AgentHub_调试模式(带控制台日志).bat" $PKG_DIR\ }
+
+          # 2. 生成 Windows x64 压缩包
+          $ZIP_NAME = "dist\AgentHub-Local-$TAG_NAME-windows-x64.zip"
+          Compress-Archive -Path "$PKG_DIR\*" -DestinationPath $ZIP_NAME -Force
+          Write-Host "已生成 Windows 客户端包: $ZIP_NAME"
+
+          # 3. 生成通用便携包 (.tar.gz)
+          $TAR_NAME = "dist/AgentHub-Local-$TAG_NAME-portable.tar.gz"
+          tar -czf $TAR_NAME -C dist "AgentHub-Local-$TAG_NAME"
+          Write-Host "已生成跨平台便携包: $TAR_NAME"
+        shell: powershell
+
+      - name: Create GitHub Release & Upload Assets
+        uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          name: "AgentHub Local ${{ github.ref_name }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            dist/AgentHub-Local-*-windows-x64.zip
+            dist/AgentHub-Local-*-portable.tar.gz

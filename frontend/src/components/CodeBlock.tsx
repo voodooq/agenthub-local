@@ -1,15 +1,16 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Check, Copy, Download, ChevronDown, ChevronRight, Code } from 'lucide-react';
+import { Check, Copy, Download, ChevronDown, ChevronRight, Code, FolderDown } from 'lucide-react';
 
 interface CodeBlockProps {
   language: string;
   code: string;
   onSendToCanvas?: (code: string, language: string) => void;
+  onSaveToWorkspace?: (code: string, language: string) => void;
 }
 
-export function CodeBlock({ language, code, onSendToCanvas }: CodeBlockProps) {
+export function CodeBlock({ language, code, onSendToCanvas, onSaveToWorkspace }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
 
@@ -71,6 +72,17 @@ export function CodeBlock({ language, code, onSendToCanvas }: CodeBlockProps) {
             >
               <Code className="w-3 h-3" />
               <span>Canvas 预览</span>
+            </button>
+          )}
+
+          {onSaveToWorkspace && (
+            <button
+              onClick={() => onSaveToWorkspace(code, language)}
+              className="flex items-center space-x-1 px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-colors"
+              title="一键落盘到当前工作区物理目录"
+            >
+              <FolderDown className="w-3.5 h-3.5 text-emerald-400" />
+              <span>落盘到工作区</span>
             </button>
           )}
 

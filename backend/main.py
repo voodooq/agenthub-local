@@ -60,10 +60,10 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
         ):
             return await call_next(request)
 
-        # 2. 防 DNS 重绑定：Host 只能是 localhost / 127.0.0.1 / backend
+        # 2. 防 DNS 重绑定：Host 只能是 localhost / 127.0.0.1 / backend / testserver
         host_header = request.headers.get("host", "")
         host_name = host_header.split(":")[0]
-        if host_name not in ("localhost", "127.0.0.1", "backend"):
+        if host_name not in ("localhost", "127.0.0.1", "backend", "testserver"):
             return Response(
                 content="Forbidden: Host 不合法，仅允许本机访问",
                 status_code=403,

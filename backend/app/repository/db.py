@@ -75,11 +75,34 @@ class DatabaseManager:
             "last_extracted_turn_id": "INTEGER DEFAULT 0",
             "tenant_id": "TEXT DEFAULT 'default'",
             "project_id": "TEXT DEFAULT 'default'",
+            "workspace_id": "TEXT DEFAULT 'default'",
         }
         for col, col_type in new_columns.items():
             if col not in columns:
                 await conn.execute(f"ALTER TABLE conversations ADD COLUMN {col} {col_type};")
                 logger.info(f"成功为 conversations 表迁移并扩展字段: {col} ({col_type})")
+
+        await conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_conversations_workspace ON conversations(workspace_id);"
+        )
+
+    async def _migrate_workspaces_table(self, conn: aiosqlite.Connection) -> None:
+        """
+        动态平滑补全 workspaces 表结构
+        """
+        async with conn.execute("PRAGMA table_info(workspaces);") as cursor:
+            columns = [row["name"] for row in await cursor.fetchall()]
+
+        new_columns = {
+            "context_prompt": "TEXT",
+            "model_preference": "TEXT",
+            "security_level": "TEXT DEFAULT 'standard'",
+            "fts_last_indexed_at": "DATETIME",
+        }
+        for col, col_type in new_columns.items():
+            if col not in columns:
+                await conn.execute(f"ALTER TABLE workspaces ADD COLUMN {col} {col_type};")
+                logger.info(f"成功为 workspaces 表迁移并扩展字段: {col} ({col_type})")
 
     async def _migrate_messages_table(self, conn: aiosqlite.Connection) -> None:
         """
@@ -124,6 +147,23 @@ class DatabaseManager:
                 await conn.execute(f"ALTER TABLE long_term_memories ADD COLUMN {col} {col_type};")
                 logger.info(f"成功为 long_term_memories 表迁移并扩展字段: {col} ({col_type})")
 
+    async def _migrate_task_loop_runs_table(self, conn: aiosqlite.Connection) -> None:
+        """
+        动态平滑补全 task_loop_runs 表字段
+        """
+        async with conn.execute("PRAGMA table_info(task_loop_runs);") as cursor:
+            columns = [row["name"] for row in await cursor.fetchall()]
+
+        new_columns = {
+            "pending_approval_call": "TEXT",
+            "error_fingerprints": "TEXT DEFAULT '[]'",
+            "scratchpad_md": "TEXT",
+        }
+        for col, col_type in new_columns.items():
+            if col not in columns:
+                await conn.execute(f"ALTER TABLE task_loop_runs ADD COLUMN {col} {col_type};")
+                logger.info(f"成功为 task_loop_runs 表迁移并扩展字段: {col} ({col_type})")
+
     async def _migrate_llm_providers_table(self, conn: aiosqlite.Connection) -> None:
         """
         动态平滑补全 llm_providers 表字段（支持 Google OAuth refresh_token_encrypted 与 429 cooldown_until）
@@ -148,6 +188,30 @@ class DatabaseManager:
         async with self.get_connection() as conn:
             # 全局持久化开启 WAL 日志模式
             await conn.execute("PRAGMA journal_mode = WAL;")
+            # 0. 工作区表 (Workspaces)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS workspaces (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                type TEXT NOT NULL CHECK(type IN ('virtual', 'physical')),
+                root_path TEXT NOT NULL UNIQUE,
+                context_prompt TEXT,
+                model_preference TEXT,
+                security_level TEXT DEFAULT 'standard',
+                fts_last_indexed_at DATETIME,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            await self._migrate_workspaces_table(conn)
+
+            # 插入默认虚拟沙盒工作区（如果不存在）
+            default_ws_path = str((Path(self.db_path).parent / "workspaces" / "default").resolve())
+            Path(default_ws_path).mkdir(parents=True, exist_ok=True)
+            await conn.execute("""
+            INSERT OR IGNORE INTO workspaces (id, name, type, root_path, context_prompt, security_level)
+            VALUES ('default', '默认工作区', 'virtual', ?, '默认沙盒工作区，所有未指定工作区的会话与任务均沉淀于此。', 'standard');
+            """, (default_ws_path,))
+
             # 1. 账号表
             await conn.execute("""
             CREATE TABLE IF NOT EXISTS accounts (
@@ -185,6 +249,7 @@ class DatabaseManager:
                 working_memory_json TEXT DEFAULT '{}',
                 rolling_summary TEXT DEFAULT '',
                 current_cwd TEXT,
+                workspace_id TEXT DEFAULT 'default',
                 import_source TEXT DEFAULT 'local',
                 import_batch_id TEXT,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -391,8 +456,64 @@ class DatabaseManager:
             END;
             """)
 
+            # 12. 任务自主循环状态表 (task_loop_runs - 支持 Planner->Executor->Verifier->Reflector 状态机与中断审批)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS task_loop_runs (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                conversation_id TEXT NOT NULL,
+                goal_prompt TEXT NOT NULL,
+                scratchpad_md TEXT,
+                loop_status TEXT NOT NULL CHECK(loop_status IN ('idle', 'planning', 'executing', 'verifying', 'reflecting', 'waiting_approval', 'completed', 'failed', 'paused')),
+                current_iteration INTEGER DEFAULT 0,
+                max_iterations INTEGER DEFAULT 10,
+                pending_approval_call TEXT,
+                error_fingerprints TEXT DEFAULT '[]',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_loop_ws ON task_loop_runs(workspace_id);")
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_task_loop_conv ON task_loop_runs(conversation_id);")
+            await self._migrate_task_loop_runs_table(conn)
+
+            # 13. 工作区资产登记表 (workspace_artifacts - 代码落盘、报告生成与资产溯源)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS workspace_artifacts (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                conversation_id TEXT,
+                file_path TEXT NOT NULL,
+                file_name TEXT NOT NULL,
+                file_type TEXT NOT NULL,
+                file_size INTEGER DEFAULT 0,
+                source TEXT DEFAULT 'ai_generated',
+                summary TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_artifacts_ws ON workspace_artifacts(workspace_id);")
+
+            # 14. 无人值守已安排计划任务表 (scheduled_tasks - 支持 Cron/间隔调度与桌面通知)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_tasks (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                cron_expr TEXT NOT NULL,
+                prompt_template TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'paused', 'running')),
+                last_run_at DATETIME,
+                next_run_at DATETIME,
+                last_status TEXT,
+                last_output TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            await conn.execute("CREATE INDEX IF NOT EXISTS idx_sched_ws ON scheduled_tasks(workspace_id);")
+
             await conn.commit()
-            logger.info("SQLite 全景架构表 (conversations/messages/long_term_memories/skill_knowledge_chunks) 初始化完成")
+            logger.info("SQLite 全景架构表 (conversations/messages/long_term_memories/task_loop_runs/workspace_artifacts/scheduled_tasks) 初始化完成")
 
 
 db_manager = DatabaseManager(settings.db_path)
