@@ -92,6 +92,9 @@ async def handle_loop_action(
     elif ctrl_action == "abort":
         await TaskLoopRepository.update_loop_status(loop_id, "failed")
         return {"success": True, "action": "abort", "message": "循环已被人工强行终止"}
+    elif ctrl_action == "complete":
+        await runner.step_verify(True, "用户人工确认任务圆满达成并验收通过")
+        return {"success": True, "action": "complete", "message": "任务已顺利完成并归档"}
 
     raise HTTPException(status_code=400, detail="未知的操作类型")
 

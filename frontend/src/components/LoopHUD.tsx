@@ -19,7 +19,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
     return null;
   }
 
-  const handleControl = async (action: 'pause' | 'resume' | 'abort') => {
+  const handleControl = async (action: 'pause' | 'resume' | 'abort' | 'complete') => {
     setLoadingAction(action);
     try {
       await apiFetch(`/api/v1/loop/${loop.id}/action`, {
@@ -94,6 +94,17 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
         </div>
 
         <div className="flex items-center space-x-1.5 flex-shrink-0">
+          {['executing', 'planning', 'verifying', 'reflecting'].includes(loop.loop_status) && (
+            <button
+              onClick={() => handleControl('complete')}
+              disabled={loadingAction !== null}
+              className="text-[11px] px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm transition flex items-center space-x-1"
+              title={t('确认本次任务已满足预期，标记完成并归档')}
+            >
+              <span>{loadingAction === 'complete' ? '...' : t('✅ 验收通过')}</span>
+            </button>
+          )}
+
           {loop.loop_status === 'executing' && (
             <button
               onClick={() => handleControl('pause')}

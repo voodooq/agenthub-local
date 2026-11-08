@@ -4,6 +4,8 @@ import { ResolvedLocale } from '@/context/LanguageContext';
  * 全量多语种词条映射库（按字符长度自动降序排序预处理，先长句后短词，确保 100% 翻译覆盖且不被短词破坏）
  */
 export const PHRASE_DICTIONARY: Record<string, { 'zh-TW': string; en: string; ja: string }> = {
+  '✅ 验收通过': { 'zh-TW': '✅ 驗收通過', en: '✅ Mark Completed', ja: '✅ 検収完了' },
+  '确认本次任务已满足预期，标记完成并归档': { 'zh-TW': '確認本次任務已滿足預期，標記完成並歸檔', en: 'Confirm task criteria met, mark complete and archive', ja: 'タスク要件の達成を確認し完了してアーカイブ' },
   '规划子任务中': { 'zh-TW': '規劃子任務中', en: 'Planning Subtasks', ja: 'サブタスク計画中' },
   '具身执行中': { 'zh-TW': '具身執行中', en: 'Embodied Executing', ja: '実行中' },
   '客观验收中 (DoD)': { 'zh-TW': '客觀驗收中 (DoD)', en: 'Verifying (DoD)', ja: '客観的検証中 (DoD)' },

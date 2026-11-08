@@ -72,7 +72,9 @@ class TaskLoopControlAction(BaseModel):
     """
     任务循环控制指令
     """
-    action: Literal["pause", "resume", "abort"] = Field(..., description="暂停 / 恢复 / 强停")
+    action: Literal["pause", "resume", "abort", "complete"] = Field(
+        ..., description="暂停 / 恢复 / 强停 / 完成验收"
+    )
 
 
 class TaskLoopResponse(BaseModel):

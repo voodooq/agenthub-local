@@ -134,6 +134,32 @@ export default function WorkbenchPage() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  const normalizeEscapedContent = (content: string): string => {
+    if (!content) return '';
+    let res = content;
+    if (
+      res.includes('\\n') &&
+      (res.includes('\\nimport ') ||
+        res.includes('\\nfrom ') ||
+        res.includes('\\ndef ') ||
+        res.includes('\\nclass ') ||
+        res.includes('\\nasync '))
+    ) {
+      res = res.replace(/\\n/g, '\n').replace(/\\t/g, '  ');
+    }
+    if (
+      !res.trim().startsWith('```') &&
+      (res.trim().startsWith('import ') ||
+        res.trim().startsWith('from ') ||
+        res.trim().startsWith('async def ') ||
+        res.trim().startsWith('def ') ||
+        res.trim().startsWith('asyncio'))
+    ) {
+      res = '```python\n' + res.trim() + '\n```';
+    }
+    return res;
+  };
+
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
@@ -1381,7 +1407,7 @@ export default function WorkbenchPage() {
                                 },
                               }}
                             >
-                              {msg.content}
+                              {normalizeEscapedContent(msg.content)}
                             </ReactMarkdown>
                           ) : (
                             <div className="flex items-center space-x-2 text-muted-foreground text-xs py-1">
