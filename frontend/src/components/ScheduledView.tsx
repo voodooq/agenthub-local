@@ -11,10 +11,12 @@ import {
   Sparkles,
   CheckCircle2,
   AlertCircle,
+  MessageSquare,
 } from 'lucide-react';
 import { Workspace, ScheduledTaskItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 import { useLanguage } from '@/context/LanguageContext';
+import { ScheduledTaskDialogModal } from './ScheduledTaskDialogModal';
 
 interface ScheduledViewProps {
   workspace: Workspace | undefined;
@@ -22,12 +24,9 @@ interface ScheduledViewProps {
 
 export function ScheduledView({ workspace }: ScheduledViewProps) {
   const { t } = useLanguage();
-  const [taskName, setTaskName] = useState('');
-  const [cronExpr, setCronExpr] = useState('0 9 * * *');
-  const [taskPrompt, setTaskPrompt] = useState('');
   const [tasks, setTasks] = useState<ScheduledTaskItem[]>([]);
   const [loading, setLoading] = useState(false);
-  const [isCreating, setIsCreating] = useState(false);
+  const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
 
   const fetchTasks = async () => {
@@ -49,30 +48,6 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
   useEffect(() => {
     fetchTasks();
   }, [workspace?.id]);
-
-  const handleCreate = async () => {
-    if (!workspace || !taskName.trim() || !taskPrompt.trim()) return;
-    try {
-      const res = await apiFetch('/api/v1/scheduled', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workspace_id: workspace.id,
-          name: taskName.trim(),
-          cron_expr: cronExpr.trim(),
-          prompt_template: taskPrompt.trim(),
-        }),
-      });
-      if (res.ok) {
-        setTaskName('');
-        setTaskPrompt('');
-        setIsCreating(false);
-        fetchTasks();
-      }
-    } catch (e) {
-      console.error('创建任务失败:', e);
-    }
-  };
 
   const handleToggleStatus = async (task: ScheduledTaskItem) => {
     const nextStatus = task.status === 'active' ? 'paused' : 'active';
@@ -101,6 +76,7 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
   };
 
   const handleDelete = async (taskId: string) => {
+    if (!window.confirm(t('确定要删除此计划任务吗？'))) return;
     try {
       await apiFetch(`/api/v1/scheduled/${taskId}`, { method: 'DELETE' });
       fetchTasks();
@@ -132,76 +108,39 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
           </div>
 
           <button
-            onClick={() => setIsCreating(!isCreating)}
-            className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium shadow-lg shadow-emerald-950/30 transition self-start md:self-auto"
+            onClick={() => setIsDialogOpen(true)}
+            className="flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-lg shadow-emerald-950/40 transition self-start md:self-auto group"
           >
-            <Plus className="w-4 h-4" />
-            <span>{isCreating ? t('取消') : t('新建自动化任务')}</span>
+            <Plus className="w-4 h-4 group-hover:scale-110 transition-transform" />
+            <span>{t('新建自动化任务')}</span>
           </button>
         </div>
 
-        {/* 新建任务表单抽屉 */}
-        {isCreating && (
-          <div className="p-5 rounded-2xl border border-emerald-800/40 bg-zinc-900/90 shadow-xl space-y-4 animate-in fade-in duration-200">
-            <h3 className="text-sm font-semibold text-emerald-300 flex items-center space-x-2">
-              <Sparkles className="w-4 h-4" />
-              <span>{t('配置新计划任务')}</span>
-            </h3>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              <div>
-                <label className="block text-xs text-zinc-400 mb-1">{t('任务名称')}</label>
-                <input
-                  type="text"
-                  value={taskName}
-                  onChange={(e) => setTaskName(e.target.value)}
-                  placeholder={t('例如：每日代码健康度与测试自愈巡检')}
-                  className="w-full text-xs px-3 py-2 bg-black/60 border border-zinc-700 rounded-lg text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
-                />
-              </div>
-
-              <div>
-                <label className="block text-xs text-zinc-400 mb-1">
-                  {t('执行周期 (Cron 或日常标识)')}
-                </label>
-                <input
-                  type="text"
-                  value={cronExpr}
-                  onChange={(e) => setCronExpr(e.target.value)}
-                  placeholder="0 9 * * * (每天 09:00) 或 hourly / daily"
-                  className="w-full text-xs font-mono px-3 py-2 bg-black/60 border border-zinc-700 rounded-lg text-zinc-100 focus:outline-none focus:border-emerald-500"
-                />
-              </div>
+        {/* 快速自然语言对话触发横幅 (Banner) */}
+        <div
+          onClick={() => setIsDialogOpen(true)}
+          className="p-4 rounded-2xl border border-dashed border-emerald-800/60 bg-emerald-950/20 hover:bg-emerald-950/30 hover:border-emerald-600/80 transition cursor-pointer flex items-center justify-between group"
+        >
+          <div className="flex items-center space-x-3.5">
+            <div className="p-2.5 rounded-xl bg-emerald-900/40 text-emerald-400 border border-emerald-700/40 group-hover:scale-105 transition-transform">
+              <MessageSquare className="w-5 h-5" />
             </div>
-
             <div>
-              <label className="block text-xs text-zinc-400 mb-1">{t('执行目标指令 / 提示词')}</label>
-              <textarea
-                value={taskPrompt}
-                onChange={(e) => setTaskPrompt(e.target.value)}
-                placeholder={t('详细描述触发此任务时让 AI 自动执行的具身目标与落盘要求...')}
-                rows={3}
-                className="w-full text-xs p-3 bg-black/60 border border-zinc-700 rounded-lg text-zinc-100 placeholder-zinc-500 focus:outline-none focus:border-emerald-500"
-              />
-            </div>
-
-            <div className="flex justify-end space-x-2 pt-2">
-              <button
-                onClick={() => setIsCreating(false)}
-                className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-300"
-              >
-                {t('取消')}
-              </button>
-              <button
-                onClick={handleCreate}
-                disabled={!taskName.trim() || !taskPrompt.trim()}
-                className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-medium text-white disabled:opacity-50"
-              >
-                {t('确认创建')}
-              </button>
+              <h4 className="text-xs font-semibold text-emerald-300 flex items-center space-x-1.5">
+                <span>{t('对话式智能规划：告诉 AI 何时执行何种动作')}</span>
+                <span className="text-[10px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.2 rounded">
+                  {t('点此对话')}
+                </span>
+              </h4>
+              <p className="text-[11px] text-zinc-400 mt-0.5">
+                {t('例如：“工作日每天早上 9 点检查 163 邮箱未读邮件并把摘要写入资产库”')}
+              </p>
             </div>
           </div>
-        )}
+          <span className="text-xs text-emerald-400 font-medium px-3 py-1.5 rounded-lg bg-emerald-900/40 border border-emerald-700/30 group-hover:bg-emerald-800/50 transition">
+            {t('✨ 开始对话')} →
+          </span>
+        </div>
 
         {/* 计划任务列表 */}
         <div className="space-y-4">
@@ -214,11 +153,14 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
           {loading ? (
             <div className="text-center py-12 text-zinc-500 text-xs">{t('正在加载...')}</div>
           ) : tasks.length === 0 ? (
-            <div className="text-center py-16 border border-dashed border-zinc-800 rounded-2xl p-8">
+            <div
+              onClick={() => setIsDialogOpen(true)}
+              className="text-center py-16 border border-dashed border-zinc-800 rounded-2xl p-8 hover:border-zinc-700 hover:bg-zinc-900/30 transition cursor-pointer"
+            >
               <Clock className="w-10 h-10 mx-auto text-zinc-600 mb-3" />
               <p className="text-sm text-zinc-400">{t('当前工作区暂无计划任务')}</p>
               <p className="text-xs text-zinc-600 mt-1">
-                {t('点击上方「新建自动化任务」即可添加每日对账、定时巡检等后台守护任务')}
+                {t('点击此处或右上角「新建自动化任务」，用自然语言对话快速添加任务')}
               </p>
             </div>
           ) : (
@@ -253,35 +195,37 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
                     )}
                   </div>
 
-                  <div className="flex items-center space-x-2 flex-shrink-0">
+                  <div className="flex items-center space-x-2 flex-shrink-0 self-end md:self-auto">
+                    {/* 立即执行 */}
                     <button
                       onClick={() => handleRunNow(task.id)}
                       disabled={runningTaskId === task.id}
-                      className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-medium flex items-center space-x-1.5 transition disabled:opacity-50"
-                      title={t('立即在后台执行一次')}
+                      className="p-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 hover:text-white transition disabled:opacity-50"
+                      title={t('立即执行一次')}
                     >
-                      <Play className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>{runningTaskId === task.id ? '...' : t('立即测试')}</span>
+                      <Play className={`w-3.5 h-3.5 ${runningTaskId === task.id ? 'animate-spin' : ''}`} />
                     </button>
 
+                    {/* 启停状态 */}
                     <button
                       onClick={() => handleToggleStatus(task)}
-                      className="p-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-400 hover:text-zinc-200 transition"
+                      className={`p-2 rounded-lg transition ${
+                        task.status === 'active'
+                          ? 'bg-emerald-950/40 text-emerald-400 border border-emerald-800/40 hover:bg-emerald-900/40'
+                          : 'bg-zinc-800 text-zinc-500 hover:bg-zinc-700'
+                      }`}
                       title={task.status === 'active' ? t('暂停任务') : t('恢复任务')}
                     >
-                      {task.status === 'active' ? (
-                        <Pause className="w-4 h-4 text-amber-400" />
-                      ) : (
-                        <Play className="w-4 h-4 text-emerald-400" />
-                      )}
+                      <Pause className="w-3.5 h-3.5" />
                     </button>
 
+                    {/* 删除任务 */}
                     <button
                       onClick={() => handleDelete(task.id)}
-                      className="p-1.5 rounded-lg hover:bg-red-950/40 text-zinc-500 hover:text-red-400 transition"
+                      className="p-2 rounded-lg bg-zinc-800 hover:bg-red-950/40 hover:text-red-400 text-zinc-500 transition"
                       title={t('删除任务')}
                     >
-                      <Trash2 className="w-4 h-4" />
+                      <Trash2 className="w-3.5 h-3.5" />
                     </button>
                   </div>
                 </div>
@@ -290,6 +234,16 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
           )}
         </div>
       </div>
+
+      {/* 对话式计划任务模态框 */}
+      {workspace && (
+        <ScheduledTaskDialogModal
+          isOpen={isDialogOpen}
+          workspaceId={workspace.id}
+          onClose={() => setIsDialogOpen(false)}
+          onTaskCreated={() => fetchTasks()}
+        />
+      )}
     </div>
   );
 }

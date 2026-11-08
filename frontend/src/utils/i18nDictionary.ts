@@ -4,6 +4,18 @@ import { ResolvedLocale } from '@/context/LanguageContext';
  * 全量多语种词条映射库（按字符长度自动降序排序预处理，先长句后短词，确保 100% 翻译覆盖且不被短词破坏）
  */
 export const PHRASE_DICTIONARY: Record<string, { 'zh-TW': string; en: string; ja: string }> = {
+  '对话式新建自动化计划任务': { 'zh-TW': '對話式新建自動化計劃任務', en: 'Create Scheduled Task via Dialog', ja: '対話型自動タスク新規作成' },
+  '告诉 AI 需要在什么时间自动完成什么动作，自动分析并加入计划': { 'zh-TW': '告訴 AI 需要在什麼時間自動完成什麼動作，自動分析並加入計劃', en: 'Tell AI when to do what, automatically analyze and schedule', ja: '実行日時と動作をAIに伝えるだけで自動分析・スケジュール登録' },
+  '💬 自然对话分析': { 'zh-TW': '💬 自然對話分析', en: '💬 Natural Chat Analysis', ja: '💬 自然対話分析' },
+  '📋 向导分步填写': { 'zh-TW': '📋 向導分步填寫', en: '📋 Guided Steps', ja: '📋 ガイド付き入力' },
+  '👋 请告诉我：你希望在什么时间，自动完成什么动作？': { 'zh-TW': '👋 請告訴我：你希望在什麼時間，自動完成什麼動作？', en: '👋 Tell me: when do you want what action to be executed automatically?', ja: '👋 いつ・どのような動作を自動実行したいか教えてください' },
+  '✨ 智能分析': { 'zh-TW': '✨ 智能分析', en: '✨ Analyze Intent', ja: '✨ AIスマート分析' },
+  'AI 分析完成 · 自动化规划看板': { 'zh-TW': 'AI 分析完成 · 自動化規劃看板', en: 'AI Analyzed · Automation Dashboard', ja: 'AI分析完了 · 自動化ダッシュボード' },
+  '确认加入自动计划': { 'zh-TW': '確認加入自動計劃', en: 'Add to Schedule', ja: '自動スケジュールに追加' },
+  '重新输入描述': { 'zh-TW': '重新輸入描述', en: 'Re-enter Description', ja: '説明を再入力' },
+  '在什么时间执行？': { 'zh-TW': '在什麼時間執行？', en: 'When to execute?', ja: 'いつ実行しますか？' },
+  '需要完成什么具体动作？': { 'zh-TW': '需要完成什麼具體動作？', en: 'What specific action to perform?', ja: '具体的にどのような動作を行いますか？' },
+  '生成规划并预览': { 'zh-TW': '生成規劃並預覽', en: 'Generate Plan & Preview', ja: '計画を生成してプレビュー' },
   '扫描同步': { 'zh-TW': '掃描同步', en: 'Scan & Sync', ja: 'スキャン同期' },
   '同步中...': { 'zh-TW': '同步中...', en: 'Syncing...', ja: '同期中...' },
   '立即扫描物理工作区目录增量同步资产': { 'zh-TW': '立即掃描物理工作區目錄增量同步資產', en: 'Scan physical workspace folder to sync artifacts', ja: '物理ワークスペースをスキャンして資産を同期' },

@@ -19,11 +19,31 @@ class ScheduledTaskCreateRequest(BaseModel):
     prompt_template: str = Field(..., description="自动化执行提示词模板")
 
 
+class ScheduleParseRequest(BaseModel):
+    workspace_id: str = Field(..., description="归属工作区 ID")
+    user_prompt: str = Field(..., description="用户口语化自然语言需求 (如: 工作日每天早晨9点半检查未读邮件并生成报告)")
+
+
 class ScheduledTaskUpdateRequest(BaseModel):
     status: str | None = Field(None, description="active 或 paused")
     name: str | None = None
     cron_expr: str | None = None
     prompt_template: str | None = None
+
+
+@router.post("/parse")
+async def parse_schedule_intent(req: ScheduleParseRequest):
+    """
+    通过 AI / 本地语义规则深度分析用户的对话意图，
+    自动提炼「执行时间 (When)」与「执行动作 (What)」，生成结构化计划任务配置。
+    """
+    from ...scheduler.intent_parser import ScheduleIntentParser
+
+    parsed = ScheduleIntentParser.parse(req.user_prompt)
+    return {
+        "success": True,
+        "data": parsed,
+    }
 
 
 @router.get("")
