@@ -1,12 +1,13 @@
 /** @type {import('next').NextConfig} */
-const isExport = process.env.NEXT_EXPORT === 'true' || process.env.BUILD_DESKTOP === 'true';
+const isDev = process.env.NODE_ENV === 'development';
 
 const nextConfig = {
   reactStrictMode: true,
   images: {
     unoptimized: true,
   },
-  ...(isExport
+  // 生产构建必须始终执行静态导出到 out 目录，供桌面外壳 (WebView2) 与 FastAPI 直接托管
+  ...(!isDev
     ? {
         output: 'export',
         trailingSlash: true,
