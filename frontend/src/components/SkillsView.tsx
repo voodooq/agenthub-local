@@ -115,17 +115,17 @@ export function SkillsView({ workspace }: SkillsViewProps) {
   );
 
   return (
-    <div className="flex-1 h-full overflow-y-auto bg-[#131314] text-zinc-100 p-6 md:p-10 select-text">
+    <div className="flex-1 h-full overflow-y-auto bg-background text-foreground p-6 md:p-10 select-text">
       <div className="max-w-6xl mx-auto space-y-8">
         {/* 顶部三标签栏 */}
-        <div className="flex items-center justify-between border-b border-zinc-800/80 pb-4">
+        <div className="flex items-center justify-between border-b border-border pb-4">
           <div className="flex items-center space-x-6">
             <button
               onClick={() => setActiveTab('explore')}
               className={`text-sm pb-2 font-medium transition ${
                 activeTab === 'explore'
-                  ? 'text-white border-b-2 border-emerald-500'
-                  : 'text-zinc-400 hover:text-zinc-200'
+                  ? 'text-foreground border-b-2 border-emerald-500 font-semibold'
+                  : 'text-muted-foreground hover:text-foreground'
               }`}
             >
               {t('探索')}
@@ -134,8 +134,8 @@ export function SkillsView({ workspace }: SkillsViewProps) {
               onClick={() => setActiveTab('mcp')}
               className={`text-sm pb-2 font-medium transition ${
                 activeTab === 'mcp'
-                  ? 'text-white border-b-2 border-emerald-500'
-                  : 'text-zinc-400 hover:text-zinc-200'
+                  ? 'text-foreground border-b-2 border-emerald-500 font-semibold'
+                  : 'text-muted-foreground hover:text-foreground'
               }`}
             >
               {t('关联应用 (MCP)')}
@@ -144,8 +144,8 @@ export function SkillsView({ workspace }: SkillsViewProps) {
               onClick={() => setActiveTab('skills')}
               className={`text-sm pb-2 font-medium transition ${
                 activeTab === 'skills'
-                  ? 'text-white border-b-2 border-emerald-500'
-                  : 'text-zinc-400 hover:text-zinc-200'
+                  ? 'text-foreground border-b-2 border-emerald-500 font-semibold'
+                  : 'text-muted-foreground hover:text-foreground'
               }`}
             >
               {t('技能 (Skills)')}
@@ -158,9 +158,9 @@ export function SkillsView({ workspace }: SkillsViewProps) {
                 onClick={fetchSkills}
                 disabled={loading}
                 title={t('重新扫描工作区与全局底座技能')}
-                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 text-xs transition disabled:opacity-50"
+                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-foreground text-xs transition disabled:opacity-50"
               >
-                <RotateCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-emerald-400' : ''}`} />
+                <RotateCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-emerald-500' : ''}`} />
                 <span>{t('扫描同步')}</span>
               </button>
             )}
@@ -168,7 +168,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
             {activeTab === 'skills' && workspace && (
               <button
                 onClick={() => setIsCreating(!isCreating)}
-                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition"
+                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition shadow-sm"
               >
                 <Plus className="w-3.5 h-3.5" />
                 <span>{isCreating ? t('取消') : t('创建工作区专属技能')}</span>
@@ -179,69 +179,69 @@ export function SkillsView({ workspace }: SkillsViewProps) {
 
         {/* 新建工作区专属技能表单 */}
         {isCreating && (
-          <div className="p-5 rounded-2xl border border-emerald-800/40 bg-zinc-900/90 shadow-xl space-y-4 animate-in fade-in duration-200">
+          <div className="p-5 rounded-2xl border border-border bg-surface-card shadow-md space-y-4 animate-in fade-in duration-200">
             <div className="flex items-center justify-between">
-              <h3 className="text-sm font-semibold text-emerald-300">
+              <h3 className="text-sm font-semibold text-emerald-600 dark:text-emerald-400">
                 {t('在当前工作区定义 L2 专属技能')} (<code>skills/&lt;name&gt;/SKILL.md</code>)
               </h3>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <div>
-                <label className="block text-xs text-zinc-400 mb-1">{t('技能英文标识 (Folder Name)')}</label>
+                <label className="block text-xs text-muted-foreground mb-1">{t('技能英文标识 (Folder Name)')}</label>
                 <input
                   type="text"
                   value={newSkillName}
                   onChange={(e) => setNewSkillName(e.target.value)}
                   placeholder="e.g. email-assistant"
-                  className="w-full text-xs font-mono px-3 py-2 bg-black/60 border border-zinc-700 rounded-lg text-zinc-100 focus:outline-none focus:border-emerald-500"
+                  className="w-full text-xs font-mono px-3 py-2 bg-surface-200 border border-border rounded-lg text-foreground focus:outline-none focus:border-accent"
                 />
               </div>
               <div>
-                <label className="block text-xs text-zinc-400 mb-1">{t('呼出指令 (Command)')}</label>
+                <label className="block text-xs text-muted-foreground mb-1">{t('呼出指令 (Command)')}</label>
                 <input
                   type="text"
                   value={newSkillCommand}
                   onChange={(e) => setNewSkillCommand(e.target.value)}
                   placeholder="e.g. /mail-assistant"
-                  className="w-full text-xs font-mono px-3 py-2 bg-black/60 border border-zinc-700 rounded-lg text-zinc-100 focus:outline-none focus:border-emerald-500"
+                  className="w-full text-xs font-mono px-3 py-2 bg-surface-200 border border-border rounded-lg text-foreground focus:outline-none focus:border-accent"
                 />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs text-zinc-400 mb-1">{t('功能简述')}</label>
+              <label className="block text-xs text-muted-foreground mb-1">{t('功能简述')}</label>
               <input
                 type="text"
                 value={newSkillDesc}
                 onChange={(e) => setNewSkillDesc(e.target.value)}
                 placeholder={t('说明该技能在何时触发与解决什么问题...')}
-                className="w-full text-xs px-3 py-2 bg-black/60 border border-zinc-700 rounded-lg text-zinc-100 focus:outline-none focus:border-emerald-500"
+                className="w-full text-xs px-3 py-2 bg-surface-200 border border-border rounded-lg text-foreground focus:outline-none focus:border-accent"
               />
             </div>
 
             <div>
-              <label className="block text-xs text-zinc-400 mb-1">{t('SOP 明文执行规程 (Markdown)')}</label>
+              <label className="block text-xs text-muted-foreground mb-1">{t('SOP 明文执行规程 (Markdown)')}</label>
               <textarea
                 value={newSkillSop}
                 onChange={(e) => setNewSkillSop(e.target.value)}
                 placeholder="# 技能执行规程&#10;&#10;1. 检查环境变量...&#10;2. 调取数据并输出差异报告..."
                 rows={4}
-                className="w-full text-xs font-mono p-3 bg-black/60 border border-zinc-700 rounded-lg text-zinc-100 focus:outline-none focus:border-emerald-500"
+                className="w-full text-xs font-mono p-3 bg-surface-200 border border-border rounded-lg text-foreground focus:outline-none focus:border-accent"
               />
             </div>
 
             <div className="flex justify-end space-x-2 pt-2">
               <button
                 onClick={() => setIsCreating(false)}
-                className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-xs text-zinc-300"
+                className="px-3 py-1.5 rounded-lg bg-surface-100 hover:bg-surface-200 text-xs text-foreground border border-border transition"
               >
                 {t('取消')}
               </button>
               <button
                 onClick={handleCreateSkill}
                 disabled={!newSkillName.trim()}
-                className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-medium text-white disabled:opacity-50"
+                className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-medium text-white disabled:opacity-50 transition shadow-sm"
               >
                 {t('确认创建')}
               </button>
@@ -254,31 +254,31 @@ export function SkillsView({ workspace }: SkillsViewProps) {
           <div className="space-y-6">
             <div className="flex items-center justify-between">
               <div>
-                <h2 className="text-xl font-bold text-white">{t('技能中枢')}</h2>
-                <p className="text-xs text-zinc-400 mt-0.5">
+                <h2 className="text-xl font-bold text-foreground">{t('技能中枢')}</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">
                   {t('已加载 L1 全局底座技能与当前工作区 L2 专属技能 (支持同名高优覆盖)')}
                 </p>
               </div>
 
               <div className="relative">
-                <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" />
+                <Search className="w-3.5 h-3.5 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
                 <input
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder={t('搜索技能或指令...')}
-                  className="pl-8 pr-3 py-1.5 text-xs bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-zinc-700 w-52"
+                  className="pl-8 pr-3 py-1.5 text-xs bg-surface-card border border-border rounded-lg text-foreground placeholder-muted-foreground focus:outline-none focus:border-accent w-52 transition"
                 />
               </div>
             </div>
 
             {loading ? (
-              <div className="text-center py-12 text-zinc-500 text-xs flex items-center justify-center space-x-2">
-                <RotateCw className="w-4 h-4 animate-spin text-emerald-400" />
+              <div className="text-center py-12 text-muted-foreground text-xs flex items-center justify-center space-x-2">
+                <RotateCw className="w-4 h-4 animate-spin text-emerald-500" />
                 <span>{t('正在同步与加载技能列表...')}</span>
               </div>
             ) : filteredSkills.length === 0 ? (
-              <div className="text-center py-16 border border-dashed border-zinc-800 rounded-2xl text-zinc-500 text-xs">
+              <div className="text-center py-16 border border-dashed border-border rounded-2xl text-muted-foreground text-xs bg-surface-card/40">
                 {t('暂未检索到技能')}
               </div>
             ) : (
@@ -291,36 +291,36 @@ export function SkillsView({ workspace }: SkillsViewProps) {
                     <div
                       key={sk.id}
                       onClick={() => setSelectedSkill(sk)}
-                      className="group p-4 rounded-xl border border-zinc-800/80 bg-zinc-900/60 hover:bg-zinc-800/70 hover:border-zinc-700 transition flex items-start justify-between cursor-pointer relative"
+                      className="group p-4 rounded-xl border border-border bg-surface-card hover:bg-surface-50 hover:border-border-hover transition flex items-start justify-between cursor-pointer relative shadow-sm"
                     >
                       <div className="flex items-start space-x-3 min-w-0 flex-1 pr-2">
-                        <div className="p-2.5 rounded-lg bg-zinc-800 text-zinc-300 flex-shrink-0 group-hover:text-emerald-400 transition">
+                        <div className="p-2.5 rounded-lg bg-surface-200 text-foreground flex-shrink-0 group-hover:text-emerald-500 transition">
                           <BookOpen className="w-5 h-5" />
                         </div>
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center space-x-2">
-                            <h4 className="text-sm font-semibold text-zinc-100 truncate group-hover:text-emerald-300 transition">
+                            <h4 className="text-sm font-semibold text-foreground truncate group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition">
                               {sk.name}
                             </h4>
                             {sk.scope === 'workspace' ? (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex-shrink-0">
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 flex-shrink-0 font-medium">
                                 {sk.is_override ? t('工作区重写') : t('工作区专属')}
                               </span>
                             ) : (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 flex-shrink-0">
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-200 text-muted-foreground border border-border flex-shrink-0">
                                 {t('全局底座')}
                               </span>
                             )}
                           </div>
 
-                          <p className="text-xs text-zinc-400 mt-1 line-clamp-2">
+                          <p className="text-xs text-muted-foreground mt-1 line-clamp-2">
                             {sk.description || t('暂无描述')}
                           </p>
                         </div>
                       </div>
 
                       <div className="flex flex-col items-end space-y-2 flex-shrink-0">
-                        <span className="px-2 py-0.5 rounded font-mono text-xs font-semibold bg-emerald-950/60 text-emerald-400 border border-emerald-800/50 group-hover:border-emerald-600 transition">
+                        <span className="px-2 py-0.5 rounded font-mono text-xs font-semibold bg-surface-200 text-emerald-600 dark:text-emerald-400 border border-border group-hover:border-emerald-500/50 transition">
                           {displayCmd}
                         </span>
 
@@ -328,7 +328,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
                           <button
                             onClick={(e) => handleDeleteSkill(e, sk)}
                             title={t('从工作区删除此技能')}
-                            className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-950/50 text-zinc-500 hover:text-red-400 transition"
+                            className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-rose-500/15 text-muted-foreground hover:text-rose-600 transition"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -345,30 +345,30 @@ export function SkillsView({ workspace }: SkillsViewProps) {
         {/* MCP 关联应用 */}
         {activeTab === 'mcp' && (
           <div className="space-y-4">
-            <h2 className="text-xl font-bold text-white">{t('已关联应用与 MCP 服务')}</h2>
-            <p className="text-xs text-zinc-400">
+            <h2 className="text-xl font-bold text-foreground">{t('已关联应用与 MCP 服务')}</h2>
+            <p className="text-xs text-muted-foreground">
               {t('连接外部开发工具与数据协议，为 AI 具身操作赋能')}
             </p>
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-              <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-900/60 flex items-center justify-between">
+              <div className="p-4 rounded-xl border border-border bg-surface-card flex items-center justify-between shadow-sm">
                 <div className="flex items-center space-x-3">
-                  <Terminal className="w-5 h-5 text-emerald-400" />
+                  <Terminal className="w-5 h-5 text-emerald-500" />
                   <div>
-                    <h4 className="text-sm font-medium text-zinc-200">Local Shell / Terminal</h4>
-                    <p className="text-xs text-zinc-500">{t('受控本地终端执行能力')}</p>
+                    <h4 className="text-sm font-semibold text-foreground">Local Shell / Terminal</h4>
+                    <p className="text-xs text-muted-foreground">{t('受控本地终端执行能力')}</p>
                   </div>
                 </div>
-                <span className="text-xs text-emerald-400 font-mono">● {t('已启用')}</span>
+                <span className="text-xs text-emerald-600 dark:text-emerald-400 font-mono">● {t('已启用')}</span>
               </div>
-              <div className="p-4 rounded-xl border border-zinc-800 bg-zinc-900/60 flex items-center justify-between">
+              <div className="p-4 rounded-xl border border-border bg-surface-card flex items-center justify-between shadow-sm">
                 <div className="flex items-center space-x-3">
-                  <Database className="w-5 h-5 text-blue-400" />
+                  <Database className="w-5 h-5 text-blue-500" />
                   <div>
-                    <h4 className="text-sm font-medium text-zinc-200">SQLite FTS5 Local Memory</h4>
-                    <p className="text-xs text-zinc-500">{t('工作区零拷贝全文索引')}</p>
+                    <h4 className="text-sm font-semibold text-foreground">SQLite FTS5 Local Memory</h4>
+                    <p className="text-xs text-muted-foreground">{t('工作区零拷贝全文索引')}</p>
                   </div>
                 </div>
-                <span className="text-xs text-emerald-400 font-mono">● {t('已就绪')}</span>
+                <span className="text-xs text-emerald-600 dark:text-emerald-400 font-mono">● {t('已就绪')}</span>
               </div>
             </div>
           </div>
@@ -377,16 +377,16 @@ export function SkillsView({ workspace }: SkillsViewProps) {
         {/* 探索市场 */}
         {activeTab === 'explore' && (
           <div className="space-y-4">
-            <h2 className="text-xl font-bold text-white">{t('探索与扩展技能')}</h2>
-            <p className="text-xs text-zinc-400">
+            <h2 className="text-xl font-bold text-foreground">{t('探索与扩展技能')}</h2>
+            <p className="text-xs text-muted-foreground">
               {t('在当前工作区自定义技能或扩展 MCP 工具链')}
             </p>
-            <div className="p-8 border border-dashed border-zinc-800 rounded-2xl text-center">
-              <Sparkles className="w-8 h-8 text-emerald-400 mx-auto mb-2" />
-              <p className="text-sm text-zinc-300 font-medium">
+            <div className="p-8 border border-dashed border-border rounded-2xl text-center bg-surface-card/40">
+              <Sparkles className="w-8 h-8 text-emerald-500 mx-auto mb-2" />
+              <p className="text-sm text-foreground font-medium">
                 {t('支持导入 Cursor / Claude 格式的 Skill 与 MCP')}
               </p>
-              <p className="text-xs text-zinc-500 mt-1">
+              <p className="text-xs text-muted-foreground mt-1">
                 {t('在设置页面中可一键载入外部规则或扩展包')}
               </p>
             </div>

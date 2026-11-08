@@ -61,7 +61,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
   const badge = getStatusBadge(loop.loop_status);
 
   return (
-    <div className="w-full mb-3 rounded-xl border border-zinc-700/60 bg-zinc-900/90 backdrop-blur-md shadow-lg overflow-hidden transition-all duration-200">
+    <div className="w-full mb-3 rounded-xl border border-border bg-surface-card shadow-sm overflow-hidden transition-all duration-200">
       <div className="flex items-center justify-between px-4 py-2.5">
         <div className="flex items-center space-x-3 min-w-0">
           <div className="flex items-center space-x-2">
@@ -72,10 +72,10 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
               <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
                 loop.loop_status === 'waiting_approval' ? 'bg-rose-500' :
                 loop.loop_status === 'completed' ? 'bg-emerald-500' :
-                loop.loop_status === 'failed' ? 'bg-red-500' : 'bg-emerald-400'
+                loop.loop_status === 'failed' ? 'bg-red-500' : 'bg-emerald-500'
               }`}></span>
             </span>
-            <span className="text-xs font-semibold tracking-wider uppercase text-zinc-400">
+            <span className="text-xs font-semibold tracking-wider uppercase text-muted-foreground">
               {t('Loop 自主领航舱')}
             </span>
           </div>
@@ -84,11 +84,11 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
             {badge.text}
           </span>
 
-          <span className="text-[11px] text-zinc-400 bg-zinc-800/80 px-2 py-0.5 rounded border border-zinc-700/50">
+          <span className="text-[11px] text-muted-foreground bg-surface-200 px-2 py-0.5 rounded border border-border">
             {t('轮次')}: {loop.current_iteration} / {loop.max_iterations}
           </span>
 
-          <span className="text-xs text-zinc-200 truncate max-w-[280px] sm:max-w-[420px] font-mono">
+          <span className="text-xs text-foreground truncate max-w-[280px] sm:max-w-[420px] font-mono">
             {loop.goal_prompt}
           </span>
         </div>
@@ -101,7 +101,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
               className="text-[11px] px-2.5 py-1 rounded bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-sm transition flex items-center space-x-1"
               title={t('确认本次任务已满足预期，标记完成并归档')}
             >
-              <span>{loadingAction === 'complete' ? '...' : t('✅ 验收通过')}</span>
+              <span>{loadingAction === 'complete' ? '...' : t('验收通过')}</span>
             </button>
           )}
 
@@ -109,7 +109,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
             <button
               onClick={() => handleControl('pause')}
               disabled={loadingAction !== null}
-              className="text-[11px] px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition"
+              className="text-[11px] px-2.5 py-1 rounded bg-surface-100 hover:bg-surface-200 text-foreground border border-border transition"
               title={t('暂停循环')}
             >
               {loadingAction === 'pause' ? '...' : t('暂停')}
@@ -120,7 +120,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
             <button
               onClick={() => handleControl('resume')}
               disabled={loadingAction !== null}
-              className="text-[11px] px-2.5 py-1 rounded bg-emerald-600/30 hover:bg-emerald-600/50 text-emerald-300 border border-emerald-500/40 transition"
+              className="text-[11px] px-2.5 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 transition"
               title={t('继续执行')}
             >
               {loadingAction === 'resume' ? '...' : t('继续')}
@@ -131,7 +131,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
             <button
               onClick={() => handleControl('abort')}
               disabled={loadingAction !== null}
-              className="text-[11px] px-2.5 py-1 rounded bg-red-500/10 hover:bg-red-500/20 text-red-300 border border-red-500/30 transition"
+              className="text-[11px] px-2.5 py-1 rounded bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 border border-rose-500/30 transition"
               title={t('强行终止')}
             >
               {loadingAction === 'abort' ? '...' : t('终止')}
@@ -142,16 +142,16 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
             <button
               onClick={() => handleControl('archive')}
               disabled={loadingAction !== null}
-              className="text-[11px] px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition flex items-center space-x-1"
+              className="text-[11px] px-2.5 py-1 rounded bg-surface-100 hover:bg-surface-200 text-foreground border border-border transition flex items-center space-x-1"
               title={t('归档并收起此长程任务领航舱')}
             >
-              <span>{loadingAction === 'archive' ? '...' : t('✕ 归档收起')}</span>
+              <span>{loadingAction === 'archive' ? '...' : t('归档收起')}</span>
             </button>
           )}
 
           <button
             onClick={() => setIsExpanded(!isExpanded)}
-            className="text-[11px] px-2 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 transition"
+            className="text-[11px] px-2 py-1 rounded bg-surface-100 hover:bg-surface-200 text-foreground border border-border transition"
           >
             {isExpanded ? t('收起清单') : t('查看清单')}
           </button>
@@ -159,7 +159,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
       </div>
 
       {isExpanded && loop.scratchpad_md && (
-        <div className="px-4 py-3 border-t border-zinc-800/80 bg-black/40 text-xs font-mono text-zinc-300 max-h-48 overflow-y-auto whitespace-pre-wrap leading-relaxed select-text">
+        <div className="px-4 py-3 border-t border-border bg-surface-200/50 text-xs font-mono text-foreground max-h-48 overflow-y-auto whitespace-pre-wrap leading-relaxed select-text">
           {loop.scratchpad_md}
         </div>
       )}

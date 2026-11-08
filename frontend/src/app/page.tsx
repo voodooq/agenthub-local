@@ -1625,12 +1625,12 @@ export default function WorkbenchPage() {
                     <Plus className="w-4 h-4" />
                   </label>
 
-                  {/* 模式双态药丸切换：[💬 对话] 与 [⚡ 任务] */}
+                  {/* 模式双态药丸切换：[对话] 与 [任务] */}
                   <div className="flex items-center rounded-xl bg-surface-100 border border-border/70 p-0.5 text-xs">
                     {(
                       [
-                        { id: 'chat', label: '💬 对话', tip: '对话模式：纯思维链探讨与知识推演，不执行写盘与命令' },
-                        { id: 'agent', label: '⚡ 任务', tip: '任务模式：具身执行与自主自愈，真实读写当前工作区文件并运行 Shell' },
+                        { id: 'chat', label: '对话', tip: '对话模式：纯思维链探讨与知识推演，不执行写盘与命令' },
+                        { id: 'agent', label: '任务', tip: '任务模式：具身执行与自主自愈，真实读写当前工作区文件并运行 Shell' },
                       ] as const
                     ).map((m) => (
                       <button
@@ -1669,9 +1669,8 @@ export default function WorkbenchPage() {
                     type="button"
                     onClick={() => setIsSkillPickerOpen(true)}
                     title="浏览或呼出当前工作区专属技能与全局底座技能 (/)"
-                    className="flex items-center space-x-1 px-2.5 py-1 rounded-xl text-[11px] border border-zinc-700/60 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 transition-all font-mono"
+                    className="flex items-center space-x-1 px-2.5 py-1 rounded-xl text-[11px] border border-border bg-surface-100 hover:bg-surface-200 text-foreground transition-all font-mono"
                   >
-                    <Sparkles className="w-3 h-3 text-emerald-400" />
                     <span>/ 技能</span>
                   </button>
                 </div>
