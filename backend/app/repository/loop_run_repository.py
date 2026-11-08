@@ -23,20 +23,36 @@ class TaskLoopRepository:
         max_iterations: int = 10,
     ) -> TaskLoopResponse:
         """
-        初始化创建一条任务循环记录
+        初始化创建一条任务循环记录，并自动归档当前工作区历史遗留的未完结任务
         """
         loop_id = f"loop_{uuid.uuid4().hex[:12]}"
         now = datetime.now().isoformat()
-        initial_scratchpad = f"# 任务目标：{goal_prompt}\n\n- [ ] 步骤 1: 需求拆解与环境探测\n"
+        initial_scratchpad = (
+            f"# 任务目标：{goal_prompt}\n\n"
+            f"## 执行计划 (DoD 驱动)\n"
+            f"- [x] 1. 目标与工作区上下文审查 (初始化就绪)\n"
+            f"- [/] 2. 核心逻辑执行与测试用例验证 (第 0 轮待命)\n"
+            f"- [ ] 3. 客观标准验收 (DoD 判定与代码格式校验)\n"
+            f"- [ ] 4. 产出物归档到工作区资产库\n"
+        )
 
         async with db_manager.get_connection() as conn:
+            # 自动将旧的未完结活跃任务标记为 completed，避免工作区孤儿假死悬挂
+            await conn.execute(
+                """
+                UPDATE task_loop_runs
+                SET loop_status = 'completed', updated_at = ?
+                WHERE workspace_id = ? AND loop_status IN ('planning', 'executing', 'verifying', 'reflecting');
+                """,
+                (now, workspace_id),
+            )
             await conn.execute(
                 """
                 INSERT INTO task_loop_runs (
                     id, workspace_id, conversation_id, goal_prompt, scratchpad_md,
                     loop_status, current_iteration, max_iterations, pending_approval_call,
                     error_fingerprints, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, 'planning', 0, ?, NULL, '[]', ?, ?);
+                ) VALUES (?, ?, ?, ?, ?, 'executing', 0, ?, NULL, '[]', ?, ?);
                 """,
                 (
                     loop_id,
@@ -58,7 +74,7 @@ class TaskLoopRepository:
             conversation_id=conversation_id,
             goal_prompt=goal_prompt,
             scratchpad_md=initial_scratchpad,
-            loop_status="planning",
+            loop_status="executing",
             current_iteration=0,
             max_iterations=max_iterations,
             pending_approval_call=None,
@@ -116,18 +132,26 @@ class TaskLoopRepository:
                 )
 
     @staticmethod
-    async def get_active_loop_by_workspace(workspace_id: str) -> TaskLoopResponse | None:
+    async def get_active_loop_by_workspace(
+        workspace_id: str,
+        include_completed: bool = True,
+    ) -> TaskLoopResponse | None:
         """
-        获取当前工作区中正在运行或等待审批的任务循环
+        获取当前工作区中正在运行、等待审批或最新已交付的任务循环
         """
+        status_filter = (
+            "('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval', 'completed', 'failed')"
+            if include_completed
+            else "('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval')"
+        )
         async with db_manager.get_connection() as conn:
             async with conn.execute(
-                """
+                f"""
                 SELECT id, workspace_id, conversation_id, goal_prompt, scratchpad_md,
                        loop_status, current_iteration, max_iterations, pending_approval_call,
                        error_fingerprints, created_at, updated_at
                 FROM task_loop_runs 
-                WHERE workspace_id = ? AND loop_status IN ('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval')
+                WHERE workspace_id = ? AND loop_status IN {status_filter}
                 ORDER BY updated_at DESC LIMIT 1;
                 """,
                 (workspace_id,),
@@ -164,6 +188,121 @@ class TaskLoopRepository:
                     created_at=str(row["created_at"]),
                     updated_at=str(row["updated_at"]),
                 )
+
+    @staticmethod
+    async def record_tool_step(
+        loop_id: str,
+        tool_name: str,
+        summary: str,
+        is_success: bool = True,
+    ) -> TaskLoopResponse | None:
+        """
+        在微内核具身执行工具时，动态向记事板追加工具执行轨迹并递增轮次
+        """
+        loop = await TaskLoopRepository.get_loop(loop_id)
+        if not loop:
+            return None
+
+        next_iter = loop.current_iteration + 1
+        status_icon = "x" if is_success else "!"
+        clean_sum = (summary or "").strip().replace("\n", " ")[:120]
+        step_log_line = f"  - [{status_icon}] 轮次 {next_iter} [{tool_name}]: `{clean_sum}`"
+
+        cur_pad = loop.scratchpad_md or f"# 任务目标：{loop.goal_prompt}\n"
+        if "## 执行计划 (DoD 驱动)" not in cur_pad:
+            cur_pad = (
+                f"# 任务目标：{loop.goal_prompt}\n\n"
+                f"## 执行计划 (DoD 驱动)\n"
+                f"- [x] 1. 目标与工作区上下文审查 (已就绪)\n"
+                f"- [/] 2. 核心逻辑执行与测试用例验证 (第 {next_iter} 轮执行中)\n"
+                f"{step_log_line}\n"
+                f"- [ ] 3. 客观标准验收 (DoD 判定与代码格式校验)\n"
+                f"- [ ] 4. 产出物归档到工作区资产库\n"
+            )
+        else:
+            # 在步骤 2 下方插入最新执行行
+            if "- [/] 2. 核心逻辑执行" in cur_pad:
+                # 保持进行中并注入日志
+                target_str = "- [/] 2. 核心逻辑执行与测试用例验证"
+                replacement_str = f"- [/] 2. 核心逻辑执行与测试用例验证 (第 {next_iter} 轮推进中)\n{step_log_line}"
+                # 如果已经带有轮次标记，做正则或安全替换
+                lines = cur_pad.splitlines()
+                new_lines = []
+                inserted = False
+                for line in lines:
+                    if line.startswith("- [/] 2. 核心逻辑执行"):
+                        new_lines.append(f"- [/] 2. 核心逻辑执行与测试用例验证 (第 {next_iter} 轮推进中)")
+                        new_lines.append(step_log_line)
+                        inserted = True
+                    else:
+                        new_lines.append(line)
+                if not inserted:
+                    new_lines.append(step_log_line)
+                cur_pad = "\n".join(new_lines)
+            else:
+                cur_pad += f"\n{step_log_line}"
+
+        await TaskLoopRepository.update_loop_status(
+            loop_id=loop_id,
+            status="executing",
+            scratchpad_md=cur_pad,
+            iteration=next_iter,
+        )
+        return await TaskLoopRepository.get_loop(loop_id)
+
+    @staticmethod
+    async def complete_loop(
+        loop_id: str,
+        summary: str = "模型已完成自主闭环并输出最终结论",
+    ) -> TaskLoopResponse | None:
+        """
+        标记任务完成 (DoD 验收全部打勾通过并归档)
+        """
+        loop = await TaskLoopRepository.get_loop(loop_id)
+        if not loop:
+            return None
+
+        cur_pad = loop.scratchpad_md or ""
+        lines = cur_pad.splitlines()
+        new_lines = []
+        for line in lines:
+            if line.startswith("- [/] 2.") or line.startswith("- [ ] 2."):
+                new_lines.append(f"- [x] 2. 核心逻辑执行与测试用例验证 (已完成，共计 {loop.current_iteration} 轮)")
+            elif line.startswith("- [ ] 3.") or line.startswith("- [/] 3."):
+                new_lines.append(f"- [x] 3. 客观标准验收 (DoD 判定通过: {summary[:80]})")
+            elif line.startswith("- [ ] 4.") or line.startswith("- [/] 4."):
+                new_lines.append(f"- [x] 4. 产出物归档到工作区资产库 (验收完毕)")
+            else:
+                new_lines.append(line)
+
+        final_pad = "\n".join(new_lines) if new_lines else (
+            f"# 任务完成归档\n\n"
+            f"- [x] 1. 目标与工作区上下文审查 (通过)\n"
+            f"- [x] 2. 核心逻辑执行与测试用例验证 (通过)\n"
+            f"- [x] 3. 客观标准验收 (DoD 判定通过: {summary[:80]})\n"
+            f"- [x] 4. 产出物归档到工作区资产库 (已交付)\n"
+        )
+
+        await TaskLoopRepository.update_loop_status(
+            loop_id=loop_id,
+            status="completed",
+            scratchpad_md=final_pad,
+        )
+        return await TaskLoopRepository.get_loop(loop_id)
+
+    @staticmethod
+    async def archive_loop(loop_id: str) -> bool:
+        """
+        人工或系统归档已交付或终止的任务 (状态置为 idle)
+        """
+        now = datetime.now().isoformat()
+        async with db_manager.get_connection() as conn:
+            await conn.execute(
+                "UPDATE task_loop_runs SET loop_status = 'idle', updated_at = ? WHERE id = ?;",
+                (now, loop_id),
+            )
+            await conn.commit()
+        return True
 
     @staticmethod
     async def update_loop_status(

@@ -24,6 +24,7 @@ from .shell_executor import shell_executor
 from .tool_protocol import ToolProtocolAdapter
 from .context_builder import ContextBuilder
 from .ui_operator import ui_operator
+from ..repository.loop_run_repository import TaskLoopRepository
 
 
 class AgentRuntime:
@@ -140,6 +141,22 @@ class AgentRuntime:
         consecutive_stalls = 0
         allow_step_extension = True
         command_history: list[dict[str, Any]] = []
+
+        # 4.5 关联工作区长程自主领航舱 (TaskLoopRunner 闭环驱动)
+        active_loop_obj = None
+        if active_scene == "agent" and ws_id:
+            try:
+                active_loop_obj = await TaskLoopRepository.get_active_loop_by_workspace(ws_id, include_completed=False)
+                if not active_loop_obj:
+                    # 兜底自动初始化当前工作区的自主执行记录
+                    active_loop_obj = await TaskLoopRepository.create_loop(
+                        workspace_id=ws_id,
+                        conversation_id=conv_id,
+                        goal_prompt=user_message.strip().split("\n")[0][:120] or "执行自主推演任务",
+                        max_iterations=10,
+                    )
+            except Exception as e:
+                logger.warning(f"初始化任务自主领航舱实例异常: {e}")
 
         # 5. 进入单轮内 ReAct 思考与工具执行循环 (Intra-Turn Adaptive Loop)
         step_idx = 0
@@ -331,6 +348,35 @@ class AgentRuntime:
                     if conv_id and not incognito:
                         long_term_memory.schedule_extraction(conv_id, delay_seconds=180)
                 accumulated_visible_text += ("\n\n" + final_saved_text if accumulated_visible_text else final_saved_text)
+
+                # ── 任务自主闭环：模型输出最终答复且无后续工具调用，自动验收通过并归档 ──
+                if active_loop_obj:
+                    try:
+                        summary_snippet = (final_saved_text or accumulated_visible_text).strip().split("\n")[0][:80]
+                        completed_loop = await TaskLoopRepository.complete_loop(
+                            loop_id=active_loop_obj.id,
+                            summary=summary_snippet or "模型已完成自主闭环并输出交付结论",
+                        )
+                        if completed_loop:
+                            if target_cwd:
+                                try:
+                                    ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
+                                    ws_sp.parent.mkdir(parents=True, exist_ok=True)
+                                    ws_sp.write_text(completed_loop.scratchpad_md, encoding="utf-8")
+                                except Exception:
+                                    pass
+                            yield {
+                                "type": "loop_completed",
+                                "loop_id": completed_loop.id,
+                                "iteration": completed_loop.current_iteration,
+                                "max_iterations": completed_loop.max_iterations,
+                                "status": "completed",
+                                "scratchpad_md": completed_loop.scratchpad_md,
+                            }
+                            active_loop_obj = None
+                    except Exception as e:
+                        logger.warning(f"自主循环自动验收完成异常: {e}")
+
                 yield {
                     "type": "done",
                     "full_content": accumulated_visible_text.strip(),
@@ -882,10 +928,59 @@ class AgentRuntime:
                     tool_call_id=call_id,
                 )
 
+                # ── 具身状态联动：推进 Loop 轮次并动态记事板 ──
+                if active_loop_obj:
+                    try:
+                        summary_text = compressed or (str(args.get("command", "")) if func_name == "execute_local_command" else f"{func_name}")
+                        is_succ = not is_step_abnormal
+                        updated_loop = await TaskLoopRepository.record_tool_step(
+                            loop_id=active_loop_obj.id,
+                            tool_name=func_name,
+                            summary=summary_text,
+                            is_success=is_succ,
+                        )
+                        if updated_loop:
+                            active_loop_obj = updated_loop
+                            if target_cwd:
+                                try:
+                                    ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
+                                    ws_sp.parent.mkdir(parents=True, exist_ok=True)
+                                    ws_sp.write_text(updated_loop.scratchpad_md, encoding="utf-8")
+                                except Exception:
+                                    pass
+                            yield {
+                                "type": "loop_step",
+                                "loop_id": updated_loop.id,
+                                "iteration": updated_loop.current_iteration,
+                                "max_iterations": updated_loop.max_iterations,
+                                "status": updated_loop.loop_status,
+                                "scratchpad_md": updated_loop.scratchpad_md,
+                            }
+                    except Exception as e:
+                        logger.warning(f"自主循环步进同步异常: {e}")
+
             step_idx += 1
 
             # 若已到达自适应最大步数上限（最高动态扩展至 40 步），给出收尾完成信号
             if step_idx >= current_max_steps:
+                if active_loop_obj:
+                    try:
+                        completed_loop = await TaskLoopRepository.complete_loop(
+                            loop_id=active_loop_obj.id,
+                            summary=f"已达当前执行步数上限 ({step_idx} 步)，已输出阶段性成果",
+                        )
+                        if completed_loop:
+                            yield {
+                                "type": "loop_completed",
+                                "loop_id": completed_loop.id,
+                                "iteration": completed_loop.current_iteration,
+                                "max_iterations": completed_loop.max_iterations,
+                                "status": "completed",
+                                "scratchpad_md": completed_loop.scratchpad_md,
+                            }
+                            active_loop_obj = None
+                    except Exception:
+                        pass
                 yield {
                     "type": "done",
                     "full_content": accumulated_visible_text.strip() or f"已完成深度推演与自主闭环执行（共执行 {step_idx} 步）。若需进一步处理请继续告知。",

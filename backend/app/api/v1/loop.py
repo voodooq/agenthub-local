@@ -50,11 +50,14 @@ async def get_loop_detail(loop_id: str) -> TaskLoopResponse:
 
 
 @router.get("/workspace/{workspace_id}/active", response_model=TaskLoopResponse | None)
-async def get_active_loop_by_workspace(workspace_id: str) -> TaskLoopResponse | None:
+async def get_active_loop_by_workspace(
+    workspace_id: str,
+    include_completed: bool = True,
+) -> TaskLoopResponse | None:
     """
-    获取指定工作区中正在执行或等待审批的活跃任务循环
+    获取指定工作区中正在执行或最新交付的任务循环
     """
-    return await TaskLoopRepository.get_active_loop_by_workspace(workspace_id)
+    return await TaskLoopRepository.get_active_loop_by_workspace(workspace_id, include_completed=include_completed)
 
 
 @router.post("/{loop_id}/action")
@@ -63,7 +66,7 @@ async def handle_loop_action(
     action_data: TaskLoopApprovalAction | TaskLoopControlAction,
 ) -> dict:
     """
-    处理人工审批反馈 (approve_once, approve_all, modify_args, reject) 或控制指令 (pause, resume, abort)
+    处理人工审批反馈 (approve_once, approve_all, modify_args, reject) 或控制指令 (pause, resume, abort, complete, archive)
     """
     runner = await TaskLoopRunner.load(loop_id)
     if not runner:
@@ -95,6 +98,9 @@ async def handle_loop_action(
     elif ctrl_action == "complete":
         await runner.step_verify(True, "用户人工确认任务圆满达成并验收通过")
         return {"success": True, "action": "complete", "message": "任务已顺利完成并归档"}
+    elif ctrl_action == "archive":
+        await TaskLoopRepository.archive_loop(loop_id)
+        return {"success": True, "action": "archive", "message": "任务已归档收起"}
 
     raise HTTPException(status_code=400, detail="未知的操作类型")
 

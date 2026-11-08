@@ -691,6 +691,49 @@ export default function WorkbenchPage() {
             });
           } else if (parsed.type === 'scratchpad_update') {
             setWorkingMemory(parsed.working_memory || {});
+          } else if (parsed.type === 'loop_step') {
+            setActiveLoop((prev) => {
+              if (!prev) {
+                return {
+                  id: parsed.loop_id,
+                  workspace_id: activeWorkspaceId || 'default',
+                  conversation_id: activeConvId || 'default',
+                  goal_prompt: rawPrompt,
+                  scratchpad_md: parsed.scratchpad_md,
+                  loop_status: parsed.status || 'executing',
+                  current_iteration: parsed.iteration || 0,
+                  max_iterations: parsed.max_iterations || 10,
+                  pending_approval_call: null,
+                  error_fingerprints: [],
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                };
+              }
+              return {
+                ...prev,
+                current_iteration: parsed.iteration ?? prev.current_iteration,
+                loop_status: parsed.status ?? prev.loop_status,
+                scratchpad_md: parsed.scratchpad_md ?? prev.scratchpad_md,
+              };
+            });
+          } else if (parsed.type === 'loop_completed') {
+            setActiveLoop((prev) => {
+              if (!prev) return null;
+              return {
+                ...prev,
+                loop_status: 'completed',
+                current_iteration: parsed.iteration ?? prev.current_iteration,
+                scratchpad_md: parsed.scratchpad_md ?? prev.scratchpad_md,
+              };
+            });
+          } else if (parsed.type === 'loop_failed') {
+            setActiveLoop((prev) => {
+              if (!prev) return null;
+              return {
+                ...prev,
+                loop_status: 'failed',
+              };
+            });
           } else if (
             parsed.type === 'require_approval' ||
             parsed.type === 'tool_start' ||

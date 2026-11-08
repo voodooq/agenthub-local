@@ -19,7 +19,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
     return null;
   }
 
-  const handleControl = async (action: 'pause' | 'resume' | 'abort' | 'complete') => {
+  const handleControl = async (action: 'pause' | 'resume' | 'abort' | 'complete' | 'archive') => {
     setLoadingAction(action);
     try {
       await apiFetch(`/api/v1/loop/${loop.id}/action`, {
@@ -48,7 +48,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
       case 'waiting_approval':
         return { text: t('等待人工审批'), color: 'bg-rose-500/10 text-rose-400 border-rose-500/20 animate-pulse' };
       case 'completed':
-        return { text: t('任务已交付'), color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' };
+        return { text: t('任务已交付并验收'), color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' };
       case 'failed':
         return { text: t('熔断或终止'), color: 'bg-red-500/10 text-red-400 border-red-500/20' };
       case 'paused':
@@ -135,6 +135,17 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
               title={t('强行终止')}
             >
               {loadingAction === 'abort' ? '...' : t('终止')}
+            </button>
+          )}
+
+          {['completed', 'failed'].includes(loop.loop_status) && (
+            <button
+              onClick={() => handleControl('archive')}
+              disabled={loadingAction !== null}
+              className="text-[11px] px-2.5 py-1 rounded bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition flex items-center space-x-1"
+              title={t('归档并收起此长程任务领航舱')}
+            >
+              <span>{loadingAction === 'archive' ? '...' : t('✕ 归档收起')}</span>
             </button>
           )}
 

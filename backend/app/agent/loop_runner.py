@@ -166,19 +166,12 @@ class TaskLoopRunner:
         """
         await TaskLoopRepository.update_loop_status(self.loop_id, "verifying")
         if success_criteria_met:
-            # 达成 DoD，标记完成
-            loop_data = await TaskLoopRepository.get_loop(self.loop_id)
-            cur_iter = (loop_data.current_iteration if loop_data else 0) + 1
-            completed_scratchpad = (
-                f"# 任务完成归档\n\n- [x] 所有子步骤已全部通过 Verifier 验证。\n- 明细: {detail}"
-            )
-            self._sync_scratchpad_file(completed_scratchpad)
-            await TaskLoopRepository.update_loop_status(
+            completed_loop = await TaskLoopRepository.complete_loop(
                 self.loop_id,
-                status="completed",
-                scratchpad_md=completed_scratchpad,
-                iteration=cur_iter,
+                summary=detail or "所有子步骤已全部通过 Verifier 验证并输出交付物",
             )
+            if completed_loop and completed_loop.scratchpad_md:
+                self._sync_scratchpad_file(completed_loop.scratchpad_md)
             return True
         else:
             return False
