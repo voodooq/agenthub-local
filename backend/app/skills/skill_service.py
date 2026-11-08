@@ -83,28 +83,44 @@ class SkillService:
                             "sop_content": parsed.get("sop_content", ""),
                         }
 
-        # 2. 扫描 L2 工作区私有技能 (<workspace>/.agenthub/skills/)
+        # 2. 扫描 L2 工作区私有技能 (双轨扫描：优先 <workspace>/skills/，兼顾 <workspace>/.agenthub/skills/)
         if self.workspace_root and self.workspace_root.exists():
-            l2_dir = self.workspace_root / ".agenthub" / "skills"
-            if l2_dir.exists() and l2_dir.is_dir():
-                for folder in l2_dir.iterdir():
-                    if folder.is_dir() and not folder.name.startswith("."):
-                        skill_file = folder / "SKILL.md"
-                        if skill_file.exists():
-                            parsed = _parse_skill_md(skill_file)
-                            skill_name = parsed.get("name", folder.name)
-                            is_overriding = skill_name in skills_map
+            l2_dirs = [
+                self.workspace_root / "skills",
+                self.workspace_root / ".agenthub" / "skills",
+            ]
+            for l2_dir in l2_dirs:
+                if l2_dir.exists() and l2_dir.is_dir():
+                    for folder in l2_dir.iterdir():
+                        if folder.is_dir() and not folder.name.startswith("."):
+                            skill_file = folder / "SKILL.md"
+                            if skill_file.exists():
+                                parsed = _parse_skill_md(skill_file)
+                                skill_name = parsed.get("name", folder.name)
+                                skill_cmd = parsed.get("command", f"/{skill_name}")
 
-                            skills_map[skill_name] = {
-                                "id": f"l2_{skill_name}",
-                                "name": skill_name,
-                                "command": parsed.get("command", f"/{skill_name}"),
-                                "description": parsed.get("description", ""),
-                                "scope": "workspace",
-                                "is_override": is_overriding,
-                                "folder_path": str(folder),
-                                "sop_content": parsed.get("sop_content", ""),
-                            }
+                                # 若 workspace/skills 已扫描入库，不被 .agenthub 历史旧副本覆写
+                                if skill_name in skills_map and skills_map[skill_name]["scope"] == "workspace":
+                                    continue
+
+                                # 智能排除无效/残缺的历史占位技能：如果 SOP 仅包含向导未填写说明且有新技能，则略过
+                                sop_raw = parsed.get("sop_content", "").strip()
+                                if "将这段代码作为执行核心脚本说明粘贴进去" in sop_raw and len(sop_raw) < 80:
+                                    logger.info(f"忽略未完成编辑的工作区残缺占位技能: {skill_name}")
+                                    continue
+
+                                is_overriding = skill_name in skills_map
+
+                                skills_map[skill_name] = {
+                                    "id": f"l2_{skill_name}",
+                                    "name": skill_name,
+                                    "command": skill_cmd,
+                                    "description": parsed.get("description", ""),
+                                    "scope": "workspace",
+                                    "is_override": is_overriding,
+                                    "folder_path": str(folder),
+                                    "sop_content": parsed.get("sop_content", ""),
+                                }
 
         # 排序：工作区专属置顶，同层按字母排序
         sorted_skills = sorted(
@@ -115,13 +131,64 @@ class SkillService:
 
     def get_skill_detail(self, skill_name: str) -> dict[str, Any] | None:
         """
-        获取指定 Skill 的 SOP 明文与详细元数据
+        获取指定 Skill 的 SOP 明文与详细元数据（支持按 name 或 command 匹配）
         """
         all_skills = self.list_all_skills()
+        norm = skill_name.strip().lower().lstrip("/")
         for sk in all_skills:
-            if sk["name"].lower() == skill_name.lower():
+            if sk["name"].lower() == norm or sk["command"].lower().lstrip("/") == norm:
                 return sk
         return None
+
+    def delete_workspace_skill(self, skill_name: str) -> bool:
+        """
+        删除工作区私有技能目录（彻底清除物理磁盘残留，支持按名称、指令或目录名匹配）
+        """
+        if not self.workspace_root or not self.workspace_root.exists():
+            return False
+
+        import shutil
+        norm = re.sub(r"[^\w\-]", "", skill_name.strip().lower().lstrip("/"))
+        deleted = False
+
+        # 1. 尝试直接路径匹配
+        candidate_dirs = [
+            self.workspace_root / "skills" / norm,
+            self.workspace_root / ".agenthub" / "skills" / norm,
+        ]
+        for cdir in candidate_dirs:
+            if cdir.exists() and cdir.is_dir():
+                try:
+                    shutil.rmtree(cdir, ignore_errors=True)
+                    deleted = True
+                    logger.info(f"成功清理工作区专属技能目录: {cdir}")
+                except Exception as e:
+                    logger.warning(f"删除工作区技能目录失败 {cdir}: {e}")
+
+        # 2. 若直接匹配未命中，深度扫描目录内 SKILL.md 比对 command 或 name 字段
+        if not deleted:
+            l2_roots = [
+                self.workspace_root / "skills",
+                self.workspace_root / ".agenthub" / "skills",
+            ]
+            for l2_root in l2_roots:
+                if l2_root.exists() and l2_root.is_dir():
+                    for folder in l2_root.iterdir():
+                        if folder.is_dir():
+                            sk_file = folder / "SKILL.md"
+                            if sk_file.exists():
+                                parsed = _parse_skill_md(sk_file)
+                                p_name = parsed.get("name", "").strip().lower()
+                                p_cmd = parsed.get("command", "").strip().lower().lstrip("/")
+                                if norm in (p_name, p_cmd):
+                                    try:
+                                        shutil.rmtree(folder, ignore_errors=True)
+                                        deleted = True
+                                        logger.info(f"成功按元数据深度匹配并清理技能目录: {folder}")
+                                    except Exception as e:
+                                        logger.warning(f"删除工作区技能目录失败 {folder}: {e}")
+
+        return deleted
 
     def save_workspace_skill(
         self,
@@ -131,7 +198,7 @@ class SkillService:
         sop_content: str,
     ) -> dict[str, Any]:
         """
-        在当前工作区物理路径下持久化保存一个 L2 专属 Skill (<workspace>/.agenthub/skills/<name>/SKILL.md)
+        在当前工作区物理路径下持久化保存一个 L2 专属 Skill
         """
         if not self.workspace_root:
             raise ValueError("未指定工作区物理路径，无法创建工作区专属技能")
@@ -140,7 +207,8 @@ class SkillService:
         if not clean_name:
             raise ValueError("技能名称无效")
 
-        target_dir = self.workspace_root / ".agenthub" / "skills" / clean_name
+        # 优先保存在工作区主流根目录 skills/
+        target_dir = self.workspace_root / "skills" / clean_name
         target_dir.mkdir(parents=True, exist_ok=True)
         skill_file = target_dir / "SKILL.md"
 

@@ -74,3 +74,19 @@ async def create_workspace_skill(req: WorkspaceSkillCreateRequest):
         logger.error(f"创建工作区技能失败: {e}")
         raise HTTPException(status_code=400, detail=str(e))
 
+
+@router.delete("/{name}")
+async def delete_workspace_skill(name: str, workspace_id: str = Query(..., description="工作区 ID")):
+    """
+    删除指定工作区私有专属技能
+    """
+    ws = await WorkspaceRepository.get_by_id(workspace_id)
+    if not ws:
+        raise HTTPException(status_code=404, detail="工作区不存在")
+
+    service = SkillService(workspace_root=ws["root_path"])
+    deleted = service.delete_workspace_skill(name)
+    if not deleted:
+        raise HTTPException(status_code=404, detail=f"未找到可删除的工作区专属技能: {name}")
+    return {"success": True, "deleted": name}
+

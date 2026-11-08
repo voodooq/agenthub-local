@@ -1596,7 +1596,13 @@ export default function WorkbenchPage() {
               <textarea
                 ref={textareaRef}
                 value={inputPrompt}
-                onChange={(e) => setInputPrompt(e.target.value)}
+                onChange={(e) => {
+                  const val = e.target.value;
+                  setInputPrompt(val);
+                  if (val === '/') {
+                    setIsSkillPickerOpen(true);
+                  }
+                }}
                 onPaste={handlePaste}
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey) {
@@ -1784,7 +1790,11 @@ export default function WorkbenchPage() {
         }}
         onViewSop={(sk) => setSelectedSopSkill(sk)}
       />
-      <SopDrawer skill={selectedSopSkill} onClose={() => setSelectedSopSkill(null)} />
+      <SopDrawer
+        skill={selectedSopSkill}
+        workspaceId={activeWorkspaceId}
+        onClose={() => setSelectedSopSkill(null)}
+      />
     </div>
   );
 }

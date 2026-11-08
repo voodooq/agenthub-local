@@ -42,22 +42,52 @@ export function SkillPickerModal({
       }
     };
     fetchSkills();
+    setSearch('');
   }, [isOpen, workspaceId]);
 
   if (!isOpen) return null;
 
-  const filtered = skills.filter(
-    (s) =>
-      s.name.toLowerCase().includes(search.toLowerCase()) ||
-      (s.description && s.description.toLowerCase().includes(search.toLowerCase()))
-  );
+  const getDisplayCommand = (sk: SkillItem): string => {
+    if (sk.command?.trim()) {
+      return sk.command.trim().startsWith('/') ? sk.command.trim() : `/${sk.command.trim()}`;
+    }
+    return `/${sk.name}`;
+  };
+
+  const filtered = skills.filter((s) => {
+    const term = search.toLowerCase();
+    const cmd = getDisplayCommand(s).toLowerCase();
+    return (
+      s.name.toLowerCase().includes(term) ||
+      cmd.includes(term) ||
+      (s.description && s.description.toLowerCase().includes(term))
+    );
+  });
 
   const workspaceSkills = filtered.filter((s) => s.scope === 'workspace');
   const globalSkills = filtered.filter((s) => s.scope === 'global');
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === 'Escape') {
+      onClose();
+    } else if (e.key === 'Enter' && filtered.length > 0) {
+      const topSkill = filtered[0];
+      const cmd = getDisplayCommand(topSkill);
+      onSelectSkill(`${cmd} `);
+      onClose();
+    }
+  };
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150">
-      <div className="w-full max-w-lg rounded-2xl bg-zinc-900 border border-zinc-700/80 shadow-2xl overflow-hidden flex flex-col max-h-[80vh]">
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-150 select-none"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-lg rounded-2xl bg-zinc-900 border border-zinc-700/80 shadow-2xl overflow-hidden flex flex-col max-h-[80vh]"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={handleKeyDown}
+      >
         {/* 搜索头 */}
         <div className="p-3.5 border-b border-zinc-800 flex items-center space-x-2">
           <span className="text-zinc-400 font-mono text-sm pl-1">/</span>
@@ -65,7 +95,7 @@ export function SkillPickerModal({
             type="text"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder={t('搜索技能或输入指令...')}
+            placeholder={t('搜索技能或输入指令（按 Enter 快速回填第一项）...')}
             className="flex-1 bg-transparent text-sm text-zinc-100 placeholder-zinc-500 focus:outline-none"
             autoFocus
           />
@@ -94,37 +124,40 @@ export function SkillPickerModal({
                     <span>{t('当前工作区专属技能')}</span>
                   </div>
                   <div className="space-y-1">
-                    {workspaceSkills.map((sk) => (
-                      <div
-                        key={sk.id}
-                        className="group flex items-center justify-between p-2 rounded-xl hover:bg-zinc-800/80 border border-transparent hover:border-emerald-500/30 transition cursor-pointer"
-                        onClick={() => {
-                          onSelectSkill(`/${sk.name} `);
-                          onClose();
-                        }}
-                      >
-                        <div className="flex items-center space-x-2.5 min-w-0">
-                          <span className="font-mono text-xs font-semibold text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-800/40">
-                            /{sk.name}
-                          </span>
-                          <span className="text-xs text-zinc-300 truncate">{sk.description}</span>
-                          {sk.is_override && (
-                            <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.2 rounded">
-                              {t('覆盖全局')}
-                            </span>
-                          )}
-                        </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onViewSop(sk);
+                    {workspaceSkills.map((sk) => {
+                      const displayCmd = getDisplayCommand(sk);
+                      return (
+                        <div
+                          key={sk.id}
+                          className="group flex items-center justify-between p-2 rounded-xl hover:bg-zinc-800/80 border border-transparent hover:border-emerald-500/30 transition cursor-pointer"
+                          onClick={() => {
+                            onSelectSkill(`${displayCmd} `);
+                            onClose();
                           }}
-                          className="opacity-0 group-hover:opacity-100 text-[11px] px-2 py-1 rounded bg-zinc-700/80 hover:bg-zinc-700 text-zinc-200 transition"
                         >
-                          {t('📖 SOP')}
-                        </button>
-                      </div>
-                    ))}
+                          <div className="flex items-center space-x-2.5 min-w-0 pr-2">
+                            <span className="font-mono text-xs font-semibold text-emerald-400 bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-800/40 flex-shrink-0">
+                              {displayCmd}
+                            </span>
+                            <span className="text-xs text-zinc-300 truncate">{sk.description || sk.name}</span>
+                            {sk.is_override && (
+                              <span className="text-[10px] bg-amber-500/20 text-amber-300 border border-amber-500/30 px-1.5 py-0.2 rounded flex-shrink-0">
+                                {t('覆盖全局')}
+                              </span>
+                            )}
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onViewSop(sk);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 text-[11px] px-2 py-1 rounded bg-zinc-700/80 hover:bg-zinc-700 text-zinc-200 transition flex-shrink-0"
+                          >
+                            {t('📖 SOP')}
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -136,32 +169,35 @@ export function SkillPickerModal({
                     <span>{t('全局通用技能')}</span>
                   </div>
                   <div className="space-y-1">
-                    {globalSkills.map((sk) => (
-                      <div
-                        key={sk.id}
-                        className="group flex items-center justify-between p-2 rounded-xl hover:bg-zinc-800/80 border border-transparent hover:border-zinc-700/50 transition cursor-pointer"
-                        onClick={() => {
-                          onSelectSkill(`/${sk.name} `);
-                          onClose();
-                        }}
-                      >
-                        <div className="flex items-center space-x-2.5 min-w-0">
-                          <span className="font-mono text-xs font-semibold text-blue-400 bg-blue-950/40 px-2 py-0.5 rounded border border-blue-800/40">
-                            /{sk.name}
-                          </span>
-                          <span className="text-xs text-zinc-300 truncate">{sk.description}</span>
-                        </div>
-                        <button
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onViewSop(sk);
+                    {globalSkills.map((sk) => {
+                      const displayCmd = getDisplayCommand(sk);
+                      return (
+                        <div
+                          key={sk.id}
+                          className="group flex items-center justify-between p-2 rounded-xl hover:bg-zinc-800/80 border border-transparent hover:border-zinc-700/50 transition cursor-pointer"
+                          onClick={() => {
+                            onSelectSkill(`${displayCmd} `);
+                            onClose();
                           }}
-                          className="opacity-0 group-hover:opacity-100 text-[11px] px-2 py-1 rounded bg-zinc-700/80 hover:bg-zinc-700 text-zinc-200 transition"
                         >
-                          {t('📖 SOP')}
-                        </button>
-                      </div>
-                    ))}
+                          <div className="flex items-center space-x-2.5 min-w-0 pr-2">
+                            <span className="font-mono text-xs font-semibold text-blue-400 bg-blue-950/40 px-2 py-0.5 rounded border border-blue-800/40 flex-shrink-0">
+                              {displayCmd}
+                            </span>
+                            <span className="text-xs text-zinc-300 truncate">{sk.description || sk.name}</span>
+                          </div>
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onViewSop(sk);
+                            }}
+                            className="opacity-0 group-hover:opacity-100 text-[11px] px-2 py-1 rounded bg-zinc-700/80 hover:bg-zinc-700 text-zinc-200 transition flex-shrink-0"
+                          >
+                            {t('📖 SOP')}
+                          </button>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
               )}
@@ -172,4 +208,3 @@ export function SkillPickerModal({
     </div>
   );
 }
-

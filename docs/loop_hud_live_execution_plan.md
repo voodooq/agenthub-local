@@ -71,3 +71,4 @@ flowchart TD
 1. 运行自动化单元测试脚本 `scratch/test_loop_live_execution.py`，验证工具执行中轮次递增与收尾自动变为 `completed`。
 2. 运行前端构建测试与 Next.js 静态导出校验，确保 0 报错。
 3. 执行打包脚本并更新版本。
+

@@ -2,16 +2,15 @@
 
 import React, { useEffect, useState } from 'react';
 import {
-  Puzzle,
   Layers,
   Sparkles,
   Plus,
   Search,
-  ExternalLink,
-  Code2,
-  Database,
-  Terminal,
   BookOpen,
+  Terminal,
+  Database,
+  RotateCw,
+  Trash2,
 } from 'lucide-react';
 import { Workspace, SkillItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
@@ -77,16 +76,41 @@ export function SkillsView({ workspace }: SkillsViewProps) {
         setNewSkillCommand('');
         setNewSkillDesc('');
         setNewSkillSop('');
-        fetchSkills();
+        await fetchSkills();
       }
     } catch (e) {
       console.error('创建技能失败:', e);
     }
   };
 
+  const handleDeleteSkill = async (e: React.MouseEvent, skill: SkillItem) => {
+    e.stopPropagation();
+    if (!workspace || skill.scope !== 'workspace') return;
+    if (!window.confirm(t(`确定要在当前工作区永久删除技能「${skill.name}」吗？相关物理文件将被移除。`))) {
+      return;
+    }
+    try {
+      const res = await apiFetch(`/api/v1/skills/${encodeURIComponent(skill.name)}?workspace_id=${workspace.id}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        if (selectedSkill?.name === skill.name) {
+          setSelectedSkill(null);
+        }
+        await fetchSkills();
+      } else {
+        const data = await res.json().catch(() => ({}));
+        alert(data.detail || t('删除技能失败'));
+      }
+    } catch (err) {
+      console.error('删除技能失败:', err);
+    }
+  };
+
   const filteredSkills = skills.filter(
     (s) =>
       s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      (s.command && s.command.toLowerCase().includes(searchQuery.toLowerCase())) ||
       (s.description && s.description.toLowerCase().includes(searchQuery.toLowerCase()))
   );
 
@@ -128,15 +152,29 @@ export function SkillsView({ workspace }: SkillsViewProps) {
             </button>
           </div>
 
-          {activeTab === 'skills' && workspace && (
-            <button
-              onClick={() => setIsCreating(!isCreating)}
-              className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>{isCreating ? t('取消') : t('创建工作区专属技能')}</span>
-            </button>
-          )}
+          <div className="flex items-center space-x-3">
+            {activeTab === 'skills' && (
+              <button
+                onClick={fetchSkills}
+                disabled={loading}
+                title={t('重新扫描工作区与全局底座技能')}
+                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-zinc-700 bg-zinc-800/80 hover:bg-zinc-700 text-zinc-300 text-xs transition disabled:opacity-50"
+              >
+                <RotateCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-emerald-400' : ''}`} />
+                <span>{t('扫描同步')}</span>
+              </button>
+            )}
+
+            {activeTab === 'skills' && workspace && (
+              <button
+                onClick={() => setIsCreating(!isCreating)}
+                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>{isCreating ? t('取消') : t('创建工作区专属技能')}</span>
+              </button>
+            )}
+          </div>
         </div>
 
         {/* 新建工作区专属技能表单 */}
@@ -144,7 +182,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
           <div className="p-5 rounded-2xl border border-emerald-800/40 bg-zinc-900/90 shadow-xl space-y-4 animate-in fade-in duration-200">
             <div className="flex items-center justify-between">
               <h3 className="text-sm font-semibold text-emerald-300">
-                {t('在当前工作区定义 L2 专属技能')} (<code>.agenthub/skills/&lt;name&gt;/SKILL.md</code>)
+                {t('在当前工作区定义 L2 专属技能')} (<code>skills/&lt;name&gt;/SKILL.md</code>)
               </h3>
             </div>
 
@@ -155,7 +193,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
                   type="text"
                   value={newSkillName}
                   onChange={(e) => setNewSkillName(e.target.value)}
-                  placeholder="e.g. data-audit-master"
+                  placeholder="e.g. email-assistant"
                   className="w-full text-xs font-mono px-3 py-2 bg-black/60 border border-zinc-700 rounded-lg text-zinc-100 focus:outline-none focus:border-emerald-500"
                 />
               </div>
@@ -165,7 +203,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
                   type="text"
                   value={newSkillCommand}
                   onChange={(e) => setNewSkillCommand(e.target.value)}
-                  placeholder="e.g. /audit"
+                  placeholder="e.g. /mail-assistant"
                   className="w-full text-xs font-mono px-3 py-2 bg-black/60 border border-zinc-700 rounded-lg text-zinc-100 focus:outline-none focus:border-emerald-500"
                 />
               </div>
@@ -228,57 +266,77 @@ export function SkillsView({ workspace }: SkillsViewProps) {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
-                  placeholder={t('搜索技能...')}
-                  className="pl-8 pr-3 py-1.5 text-xs bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-zinc-700 w-48"
+                  placeholder={t('搜索技能或指令...')}
+                  className="pl-8 pr-3 py-1.5 text-xs bg-zinc-900 border border-zinc-800 rounded-lg text-zinc-200 placeholder-zinc-500 focus:outline-none focus:border-zinc-700 w-52"
                 />
               </div>
             </div>
 
             {loading ? (
-              <div className="text-center py-12 text-zinc-500 text-xs">{t('正在加载技能列表...')}</div>
+              <div className="text-center py-12 text-zinc-500 text-xs flex items-center justify-center space-x-2">
+                <RotateCw className="w-4 h-4 animate-spin text-emerald-400" />
+                <span>{t('正在同步与加载技能列表...')}</span>
+              </div>
             ) : filteredSkills.length === 0 ? (
               <div className="text-center py-16 border border-dashed border-zinc-800 rounded-2xl text-zinc-500 text-xs">
                 {t('暂未检索到技能')}
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {filteredSkills.map((sk) => (
-                  <div
-                    key={sk.id}
-                    onClick={() => setSelectedSkill(sk)}
-                    className="group p-4 rounded-xl border border-zinc-800/80 bg-zinc-900/60 hover:bg-zinc-800/70 hover:border-zinc-700 transition flex items-start justify-between cursor-pointer"
-                  >
-                    <div className="flex items-start space-x-3 min-w-0">
-                      <div className="p-2.5 rounded-lg bg-zinc-800 text-zinc-300 flex-shrink-0 group-hover:text-emerald-400 transition">
-                        <BookOpen className="w-5 h-5" />
-                      </div>
-                      <div className="min-w-0">
-                        <div className="flex items-center space-x-2">
-                          <h4 className="text-sm font-semibold text-zinc-100 truncate group-hover:text-emerald-300 transition">
-                            {sk.name}
-                          </h4>
-                          {sk.scope === 'workspace' ? (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex-shrink-0">
-                              {sk.is_override ? t('工作区重写') : t('工作区专属')}
-                            </span>
-                          ) : (
-                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 flex-shrink-0">
-                              {t('全局底座')}
-                            </span>
-                          )}
+                {filteredSkills.map((sk) => {
+                  const displayCmd = sk.command?.trim()
+                    ? (sk.command.startsWith('/') ? sk.command : `/${sk.command}`)
+                    : `/${sk.name}`;
+                  return (
+                    <div
+                      key={sk.id}
+                      onClick={() => setSelectedSkill(sk)}
+                      className="group p-4 rounded-xl border border-zinc-800/80 bg-zinc-900/60 hover:bg-zinc-800/70 hover:border-zinc-700 transition flex items-start justify-between cursor-pointer relative"
+                    >
+                      <div className="flex items-start space-x-3 min-w-0 flex-1 pr-2">
+                        <div className="p-2.5 rounded-lg bg-zinc-800 text-zinc-300 flex-shrink-0 group-hover:text-emerald-400 transition">
+                          <BookOpen className="w-5 h-5" />
                         </div>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center space-x-2">
+                            <h4 className="text-sm font-semibold text-zinc-100 truncate group-hover:text-emerald-300 transition">
+                              {sk.name}
+                            </h4>
+                            {sk.scope === 'workspace' ? (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 flex-shrink-0">
+                                {sk.is_override ? t('工作区重写') : t('工作区专属')}
+                              </span>
+                            ) : (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-zinc-700 flex-shrink-0">
+                                {t('全局底座')}
+                              </span>
+                            )}
+                          </div>
 
-                        <p className="text-xs text-zinc-400 mt-1 line-clamp-2">
-                          {sk.description || t('暂无描述')}
-                        </p>
+                          <p className="text-xs text-zinc-400 mt-1 line-clamp-2">
+                            {sk.description || t('暂无描述')}
+                          </p>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-col items-end space-y-2 flex-shrink-0">
+                        <span className="px-2 py-0.5 rounded font-mono text-xs font-semibold bg-emerald-950/60 text-emerald-400 border border-emerald-800/50 group-hover:border-emerald-600 transition">
+                          {displayCmd}
+                        </span>
+
+                        {sk.scope === 'workspace' && workspace && (
+                          <button
+                            onClick={(e) => handleDeleteSkill(e, sk)}
+                            title={t('从工作区删除此技能')}
+                            className="opacity-0 group-hover:opacity-100 p-1 rounded hover:bg-red-950/50 text-zinc-500 hover:text-red-400 transition"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
                       </div>
                     </div>
-
-                    <span className="text-[11px] font-mono text-zinc-500 group-hover:text-emerald-400 transition pl-2">
-                      {sk.command}
-                    </span>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
             )}
           </div>
@@ -337,7 +395,12 @@ export function SkillsView({ workspace }: SkillsViewProps) {
       </div>
 
       {/* SOP 明文抽屉 */}
-      <SopDrawer skill={selectedSkill} onClose={() => setSelectedSkill(null)} />
+      <SopDrawer
+        skill={selectedSkill}
+        workspaceId={workspace?.id}
+        onClose={() => setSelectedSkill(null)}
+        onSkillDeleted={() => fetchSkills()}
+      />
     </div>
   );
 }
