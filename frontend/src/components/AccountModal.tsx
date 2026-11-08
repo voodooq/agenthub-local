@@ -279,7 +279,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
             onRefresh?.();
           }
         }
-      } catch (e) {}
+      } catch (e) { }
     }, 1500);
     return () => clearInterval(timer);
   }, [pkceState]);
@@ -546,7 +546,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
       });
       fetchProviders();
       onRefresh?.();
-    } catch (e) {}
+    } catch (e) { }
   };
 
   const handleDeleteProvider = async (id: string, name: string) => {
@@ -557,7 +557,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
         fetchProviders();
         onRefresh?.();
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   useEffect(() => {
@@ -1004,11 +1004,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
         <div className="flex items-center space-x-2 px-6 border-b border-border/80 bg-surface-200/20">
           <button
             onClick={() => setActiveTab('accounts')}
-            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all ${
-              activeTab === 'accounts'
+            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all ${activeTab === 'accounts'
                 ? 'border-emerald-500 text-emerald-400 font-semibold'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
+              }`}
           >
             <Cpu className="w-4 h-4" />
             <span>账号池、多源 API 与额度监控</span>
@@ -1022,11 +1021,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
               setActiveTab('add_account');
               setFeedbackMsg(null);
             }}
-            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all ${
-              activeTab === 'add_account'
+            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all ${activeTab === 'add_account'
                 ? 'border-emerald-500 text-emerald-400 font-semibold'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
+              }`}
           >
             <Plus className="w-4 h-4" />
             <span>添加 Google 账号 / 接入大模型 API</span>
@@ -1034,11 +1032,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
 
           <button
             onClick={() => setActiveTab('audit')}
-            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all ${
-              activeTab === 'audit'
+            className={`flex items-center space-x-2 px-4 py-2.5 text-xs font-medium border-b-2 transition-all ${activeTab === 'audit'
                 ? 'border-emerald-500 text-emerald-400 font-semibold'
                 : 'border-transparent text-slate-400 hover:text-slate-200'
-            }`}
+              }`}
           >
             <FileText className="w-4 h-4" />
             <span>安全与审计日志</span>
@@ -1235,9 +1232,8 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         </div>
                         <div className="w-full h-1.5 rounded-full bg-slate-800 overflow-hidden">
                           <div
-                            className={`h-full rounded-full transition-all duration-300 ${
-                              acc.rpm_percent >= 90 ? 'bg-amber-400' : 'bg-emerald-500'
-                            }`}
+                            className={`h-full rounded-full transition-all duration-300 ${acc.rpm_percent >= 90 ? 'bg-amber-400' : 'bg-emerald-500'
+                              }`}
                             style={{ width: `${Math.min(100, acc.rpm_percent)}%` }}
                           ></div>
                         </div>
@@ -1259,11 +1255,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
 
                     {testResult && testResult.id === acc.id && (
                       <div
-                        className={`p-2.5 rounded-lg text-xs flex items-center space-x-2 animate-fadeIn ${
-                          testResult.success
+                        className={`p-2.5 rounded-lg text-xs flex items-center space-x-2 animate-fadeIn ${testResult.success
                             ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
                             : 'bg-rose-500/10 text-rose-300 border border-rose-500/20'
-                        }`}
+                          }`}
                       >
                         {testResult.success ? (
                           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
@@ -1364,11 +1359,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           <button
                             type="button"
                             onClick={() => handleToggleProvider(p)}
-                            className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
-                              p.is_enabled
+                            className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${p.is_enabled
                                 ? 'bg-emerald-600 text-white'
                                 : 'bg-surface-300/40 text-slate-400'
-                            }`}
+                              }`}
                           >
                             {p.is_enabled ? '已启用' : '已停用'}
                           </button>
@@ -1385,11 +1379,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
 
                       {provTestResult && provTestResult.id === p.id && (
                         <div
-                          className={`p-2 rounded-lg text-[11px] flex items-center space-x-2 animate-fadeIn ${
-                            provTestResult.success
+                          className={`p-2 rounded-lg text-[11px] flex items-center space-x-2 animate-fadeIn ${provTestResult.success
                               ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
                               : 'bg-rose-500/10 text-rose-300 border border-rose-500/20'
-                          }`}
+                            }`}
                         >
                           {provTestResult.success ? (
                             <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
@@ -1417,11 +1410,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     setAddMode('pkce_oauth');
                     setFeedbackMsg(null);
                   }}
-                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
-                    addMode === 'pkce_oauth'
+                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${addMode === 'pkce_oauth'
                       ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
-                  }`}
+                    }`}
                 >
                   <div className="flex items-center space-x-1">
                     <Shield className="w-3.5 h-3.5" />
@@ -1436,11 +1428,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     setAddMode('custom_api');
                     setFeedbackMsg(null);
                   }}
-                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
-                    addMode === 'custom_api'
+                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${addMode === 'custom_api'
                       ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
-                  }`}
+                    }`}
                 >
                   <div className="flex items-center space-x-1">
                     <Cpu className="w-3.5 h-3.5" />
@@ -1455,11 +1446,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     setAddMode('cli');
                     setFeedbackMsg(null);
                   }}
-                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
-                    addMode === 'cli'
+                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${addMode === 'cli'
                       ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
-                  }`}
+                    }`}
                 >
                   <div className="flex items-center space-x-1">
                     <Terminal className="w-3.5 h-3.5" />
@@ -1474,11 +1464,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     setAddMode('api_key');
                     setFeedbackMsg(null);
                   }}
-                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
-                    addMode === 'api_key'
+                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${addMode === 'api_key'
                       ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
-                  }`}
+                    }`}
                 >
                   <div className="flex items-center space-x-1">
                     <Key className="w-3.5 h-3.5" />
@@ -1493,11 +1482,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     setAddMode('standard_oauth');
                     setFeedbackMsg(null);
                   }}
-                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${
-                    addMode === 'standard_oauth'
+                  className={`py-2.5 px-2.5 rounded-xl text-xs font-semibold transition-all flex flex-col items-center space-y-1 ${addMode === 'standard_oauth'
                       ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-500/20'
                       : 'text-slate-400 hover:text-slate-200 hover:bg-surface-200/60'
-                  }`}
+                    }`}
                 >
                   <div className="flex items-center space-x-1">
                     <Globe className="w-3.5 h-3.5" />
@@ -1510,11 +1498,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
               {/* 实时反馈提示 */}
               {feedbackMsg && (
                 <div
-                  className={`p-4 rounded-xl text-xs flex items-start space-x-3 animate-fadeIn ${
-                    feedbackMsg.success
+                  className={`p-4 rounded-xl text-xs flex items-start space-x-3 animate-fadeIn ${feedbackMsg.success
                       ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
                       : 'bg-rose-500/10 text-rose-300 border border-rose-500/20'
-                  }`}
+                    }`}
                 >
                   {feedbackMsg.success ? (
                     <CheckCircle2 className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
@@ -1533,33 +1520,30 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     <button
                       type="button"
                       onClick={() => setGoogleSubTab('browser')}
-                      className={`flex-1 py-1.5 px-3 rounded-lg font-medium transition-all text-center ${
-                        googleSubTab === 'browser'
+                      className={`flex-1 py-1.5 px-3 rounded-lg font-medium transition-all text-center ${googleSubTab === 'browser'
                           ? 'bg-emerald-600 text-white shadow-sm font-semibold'
                           : 'text-slate-400 hover:text-slate-200'
-                      }`}
+                        }`}
                     >
                       🌐 浏览器 OAuth 授权 (自动/手动双模)
                     </button>
                     <button
                       type="button"
                       onClick={() => setGoogleSubTab('token')}
-                      className={`flex-1 py-1.5 px-3 rounded-lg font-medium transition-all text-center ${
-                        googleSubTab === 'token'
+                      className={`flex-1 py-1.5 px-3 rounded-lg font-medium transition-all text-center ${googleSubTab === 'token'
                           ? 'bg-emerald-600 text-white shadow-sm font-semibold'
                           : 'text-slate-400 hover:text-slate-200'
-                      }`}
+                        }`}
                     >
                       🔑 Refresh Token / 凭据直填
                     </button>
                     <button
                       type="button"
                       onClick={() => setGoogleSubTab('batch')}
-                      className={`flex-1 py-1.5 px-3 rounded-lg font-medium transition-all text-center ${
-                        googleSubTab === 'batch'
+                      className={`flex-1 py-1.5 px-3 rounded-lg font-medium transition-all text-center ${googleSubTab === 'batch'
                           ? 'bg-emerald-600 text-white shadow-sm font-semibold'
                           : 'text-slate-400 hover:text-slate-200'
-                      }`}
+                        }`}
                     >
                       📦 批量扫描 / CLI 凭据合并
                     </button>
@@ -1935,11 +1919,10 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
 
                   {probeResult && (
                     <div
-                      className={`p-3 rounded-xl text-xs flex items-start space-x-2 animate-fadeIn ${
-                        probeResult.success
+                      className={`p-3 rounded-xl text-xs flex items-start space-x-2 animate-fadeIn ${probeResult.success
                           ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20'
                           : 'bg-rose-500/10 text-rose-300 border border-rose-500/20'
-                      }`}
+                        }`}
                     >
                       {probeResult.success ? (
                         <CheckCircle2 className="w-4 h-4 text-emerald-400 mt-0.5 shrink-0" />
