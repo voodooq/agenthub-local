@@ -505,6 +505,28 @@ class ToolProtocolAdapter:
                         pass
             clean_text = pattern_bare_tc.sub("", clean_text)
 
+            # 模式 1C: 容错解析末尾未闭合的 <tool_call name="..."> 标签 (模型提前截断或省略了 </tool_call>)
+            pattern_unclosed = re.compile(
+                r"[<\[]tool_call\s+name=[\"']?([^\"'\]>]+)[\"']?\s*[>\]]([\s\S]*?)(?=(?:[<\[]tool_call|$))",
+                re.IGNORECASE,
+            )
+            for m in pattern_unclosed.finditer(clean_text):
+                fn_name = m.group(1).strip()
+                after_content = m.group(2).strip()
+                raw_blocks = cls._extract_balanced_json_objects(after_content)
+                if raw_blocks:
+                    first_json = raw_blocks[0]
+                    parsed_args = cls._parse_tool_arguments(fn_name, first_json)
+                    call_id = f"call_{uuid.uuid4().hex[:10]}"
+                    tool_calls.append({
+                        "id": call_id,
+                        "function": {
+                            "name": fn_name,
+                            "arguments": json.dumps(parsed_args, ensure_ascii=False),
+                        },
+                    })
+            clean_text = pattern_unclosed.sub("", clean_text)
+
         # ── 模式 2: 模型自发输出的直接工具标签（如 <execute_local_command command="..."/>） ──
         for t_name in cls._CORE_TOOL_NAMES:
             if f"<{t_name}" not in clean_text:
@@ -553,14 +575,14 @@ class ToolProtocolAdapter:
             clean_text = pattern_pair.sub("", clean_text)
 
         # ── 模式 3: 隐式工具调用容错自愈（捕获裸 JSON、带有 </slot> 或嵌套花括号脚本块的工具调用） ──
-        if not tool_calls and ('"command"' in clean_text or '"file_path"' in clean_text or '"skill_name"' in clean_text):
+        if not tool_calls and ('"command"' in clean_text or '"file_path"' in clean_text or '"skill_name"' in clean_text or '"url"' in clean_text):
             raw_json_blocks = cls._extract_balanced_json_objects(clean_text)
             for block in raw_json_blocks:
                 try:
                     obj = json.loads(block)
                     if isinstance(obj, dict):
+                        call_id = f"call_{uuid.uuid4().hex[:10]}"
                         if "command" in obj and isinstance(obj["command"], str):
-                            call_id = f"call_{uuid.uuid4().hex[:10]}"
                             tool_calls.append({
                                 "id": call_id,
                                 "function": {
@@ -573,7 +595,6 @@ class ToolProtocolAdapter:
                             })
                             clean_text = clean_text.replace(block, "")
                         elif "file_path" in obj and "content" in obj:
-                            call_id = f"call_{uuid.uuid4().hex[:10]}"
                             tool_calls.append({
                                 "id": call_id,
                                 "function": {
@@ -582,13 +603,53 @@ class ToolProtocolAdapter:
                                 },
                             })
                             clean_text = clean_text.replace(block, "")
+                        elif "file_path" in obj and isinstance(obj["file_path"], str):
+                            tool_calls.append({
+                                "id": call_id,
+                                "function": {
+                                    "name": "read_local_file",
+                                    "arguments": json.dumps({
+                                        "file_path": str(obj["file_path"]).strip(),
+                                    }, ensure_ascii=False),
+                                },
+                            })
+                            clean_text = clean_text.replace(block, "")
+                        elif "skill_name" in obj and "query" in obj:
+                            tool_calls.append({
+                                "id": call_id,
+                                "function": {
+                                    "name": "search_skill_knowledge",
+                                    "arguments": json.dumps(obj, ensure_ascii=False),
+                                },
+                            })
+                            clean_text = clean_text.replace(block, "")
+                        elif "skill_name" in obj and "script_name" in obj:
+                            tool_calls.append({
+                                "id": call_id,
+                                "function": {
+                                    "name": "run_skill_tool",
+                                    "arguments": json.dumps(obj, ensure_ascii=False),
+                                },
+                            })
+                            clean_text = clean_text.replace(block, "")
                         elif "skill_name" in obj:
-                            call_id = f"call_{uuid.uuid4().hex[:10]}"
                             tool_calls.append({
                                 "id": call_id,
                                 "function": {
                                     "name": "load_skill_detail",
                                     "arguments": json.dumps(obj, ensure_ascii=False),
+                                },
+                            })
+                            clean_text = clean_text.replace(block, "")
+                        elif "url" in obj and isinstance(obj["url"], str):
+                            tool_calls.append({
+                                "id": call_id,
+                                "function": {
+                                    "name": "web_fetch",
+                                    "arguments": json.dumps({
+                                        "url": str(obj["url"]).strip(),
+                                        "extract_main_text": bool(obj.get("extract_main_text", True)),
+                                    }, ensure_ascii=False),
                                 },
                             })
                             clean_text = clean_text.replace(block, "")

@@ -703,6 +703,12 @@ class AgentRuntime:
                     target_file = Path(raw_path)
                     if not target_file.is_absolute():
                         target_file = (current_work_dir / target_file).resolve()
+                        if not target_file.exists():
+                            # 双层寻址回退：若当前沙盒工作区内不存在，自动在 AgentHub 根目录寻找底座技能包与公共文件
+                            proj_root = Path(__file__).resolve().parent.parent.parent.parent
+                            candidate = (proj_root / raw_path).resolve()
+                            if candidate.exists() and candidate.is_file():
+                                target_file = candidate
 
                     rel_display = str(target_file)
                     try:
