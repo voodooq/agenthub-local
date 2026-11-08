@@ -4,7 +4,7 @@
 """
 import asyncio
 import subprocess
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, HTTPException, status, Query
 from ...repository.workspace_repository import WorkspaceRepository
 from ...schema.workspace_schema import (
     WorkspaceCreate,

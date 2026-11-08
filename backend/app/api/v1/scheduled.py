@@ -57,7 +57,8 @@ async def list_scheduled_tasks(workspace_id: str = Query(..., description="å·¥ä½
             (workspace_id,),
         ) as cursor:
             rows = await cursor.fetchall()
-            return {"tasks": [dict(r) for r in rows], "total": len(rows)}
+            task_list = [dict(r) for r in rows]
+            return {"tasks": task_list, "total": len(task_list)}
 
 
 @router.post("")
