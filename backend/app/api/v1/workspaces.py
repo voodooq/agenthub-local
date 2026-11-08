@@ -170,14 +170,17 @@ async def search_workspace_fts(ws_id: str, q: str = ""):
 
 
 @router.post("/{ws_id}/open")
-async def open_workspace_in_explorer(ws_id: str):
-    """在系统文件资源管理器中打开当前工作区物理根目录"""
+async def open_workspace_in_explorer(ws_id: str, subpath: str | None = Query(None)):
+    """在系统文件资源管理器中打开当前工作区物理根目录或指定子目录"""
     import os
     import subprocess
     ws = await WorkspaceRepository.get_by_id(ws_id)
     if not ws or not ws.get("root_path"):
         raise HTTPException(status_code=404, detail="未找到工作区物理路径")
     target = Path(ws["root_path"]).resolve()
+    if subpath:
+        clean_sub = subpath.strip().replace("/", "\\").lstrip("\\")
+        target = (target / clean_sub).resolve()
     target.mkdir(parents=True, exist_ok=True)
     try:
         if os.name == "nt":

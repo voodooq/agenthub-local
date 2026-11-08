@@ -4,6 +4,19 @@ import { ResolvedLocale } from '@/context/LanguageContext';
  * 全量多语种词条映射库（按字符长度自动降序排序预处理，先长句后短词，确保 100% 翻译覆盖且不被短词破坏）
  */
 export const PHRASE_DICTIONARY: Record<string, { 'zh-TW': string; en: string; ja: string }> = {
+  '在系统文件资源管理器中打开当前所在目录': { 'zh-TW': '在系統檔案總管中開啟目前所在目錄', en: 'Open current folder in file explorer', ja: 'ファイルエクスプローラーでこのフォルダーを開く' },
+  '详细信息列表视图 (Windows 列表)': { 'zh-TW': '詳細資料列表檢視 (Windows 列表)', en: 'Details List View (Windows Style)', ja: '詳細リスト表示 (Windows形式)' },
+  '平铺总览模式 · 共展示': { 'zh-TW': '平鋪總覽模式 · 共展示', en: 'Flat View · Total', ja: 'フラット表示 · 合計' },
+  '文件夹大图标卡片视图': { 'zh-TW': '資料夾大圖示卡片檢視', en: 'Folder Card Grid View', ja: 'フォルダー大アイコン表示' },
+  '平铺总览所有文件': { 'zh-TW': '平鋪總覽所有檔案', en: 'Flat View (All Files)', ja: 'すべてのファイルをフラット表示' },
+  '此目录下暂无资产文件': { 'zh-TW': '此目錄下暫無資產檔案', en: 'No files in this directory', ja: 'このディレクトリにファイルはありません' },
+  '返回上一级目录': { 'zh-TW': '返回上一層目錄', en: 'Go to parent directory', ja: '上の階層へ戻る' },
+  '此文件夹为空': { 'zh-TW': '此資料夾為空', en: 'This folder is empty', ja: 'フォルダーは空です' },
+  '根目录': { 'zh-TW': '根目錄', en: 'Root Directory', ja: 'ルート' },
+  '文件夹': { 'zh-TW': '資料夾', en: 'Folder', ja: 'フォルダー' },
+  '在本地打开': { 'zh-TW': '在本地開啟', en: 'Open Locally', ja: 'ローカルで開く' },
+  '个资产': { 'zh-TW': '個資產', en: 'artifacts', ja: '個の資産' },
+  '定位': { 'zh-TW': '定位', en: 'Locate', ja: '場所を開く' },
   '对话式新建自动化计划任务': { 'zh-TW': '對話式新建自動化計劃任務', en: 'Create Scheduled Task via Dialog', ja: '対話型自動タスク新規作成' },
   '告诉 AI 需要在什么时间自动完成什么动作，自动分析并加入计划': { 'zh-TW': '告訴 AI 需要在什麼時間自動完成什麼動作，自動分析並加入計劃', en: 'Tell AI when to do what, automatically analyze and schedule', ja: '実行日時と動作をAIに伝えるだけで自動分析・スケジュール登録' },
   '💬 自然对话分析': { 'zh-TW': '💬 自然對話分析', en: '💬 Natural Chat Analysis', ja: '💬 自然対話分析' },
