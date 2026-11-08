@@ -54,16 +54,20 @@ jobs:
           if (Test-Path $PKG_DIR) { Remove-Item -Recurse -Force $PKG_DIR }
           New-Item -ItemType Directory -Force -Path $PKG_DIR | Out-Null
 
-          # 拷贝核心程序与静态产物
-          Copy-Item -Recurse -Force backend $PKG_DIR\backend
-          Copy-Item -Recurse -Force frontend\out $PKG_DIR\frontend\out
-          Copy-Item -Recurse -Force skills $PKG_DIR\skills
-          Copy-Item -Force desktop_app.py $PKG_DIR\
-          Copy-Item -Force requirements.txt $PKG_DIR\
-          Copy-Item -Force mcp_servers.json $PKG_DIR\
-          Copy-Item -Force README.md $PKG_DIR\
-          Copy-Item -Force LICENSE $PKG_DIR\
-          Copy-Item -Force .env.example $PKG_DIR\
+          # 拷贝核心程序与静态产物 (全量安全校验)
+          if (Test-Path backend) { Copy-Item -Recurse -Force backend $PKG_DIR\backend }
+          if (Test-Path frontend\out) { Copy-Item -Recurse -Force frontend\out $PKG_DIR\frontend\out }
+          if (Test-Path skills) {
+              Copy-Item -Recurse -Force skills $PKG_DIR\skills
+          } else {
+              New-Item -ItemType Directory -Force -Path "$PKG_DIR\skills" | Out-Null
+          }
+          if (Test-Path desktop_app.py) { Copy-Item -Force desktop_app.py $PKG_DIR\ }
+          if (Test-Path requirements.txt) { Copy-Item -Force requirements.txt $PKG_DIR\ }
+          if (Test-Path mcp_servers.json) { Copy-Item -Force mcp_servers.json $PKG_DIR\ }
+          if (Test-Path README.md) { Copy-Item -Force README.md $PKG_DIR\ }
+          if (Test-Path LICENSE) { Copy-Item -Force LICENSE $PKG_DIR\ }
+          if (Test-Path .env.example) { Copy-Item -Force .env.example $PKG_DIR\ }
           if (Test-Path "启动AgentHub桌面版.bat") { Copy-Item -Force "启动AgentHub桌面版.bat" $PKG_DIR\ }
           if (Test-Path "启动AgentHub_调试模式(带控制台日志).bat") { Copy-Item -Force "启动AgentHub_调试模式(带控制台日志).bat" $PKG_DIR\ }
 
@@ -89,3 +93,4 @@ jobs:
           files: |
             dist/AgentHub-Local-*-windows-x64.zip
             dist/AgentHub-Local-*-portable.tar.gz
+
