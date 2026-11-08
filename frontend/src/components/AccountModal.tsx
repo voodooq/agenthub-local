@@ -90,6 +90,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
   const [activeTab, setActiveTab] = useState<'accounts' | 'add_account' | 'audit'>('accounts');
   const [addMode, setAddMode] = useState<'pkce_oauth' | 'custom_api' | 'cli' | 'api_key' | 'standard_oauth'>('pkce_oauth');
   const [loading, setLoading] = useState(false);
+  const [manualRefreshing, setManualRefreshing] = useState(false);
   const [testingId, setTestingId] = useState<number | null>(null);
   const [testResult, setTestResult] = useState<{ id: number; success: boolean; msg: string } | null>(null);
   const [purgingAll, setPurgingAll] = useState(false);
@@ -159,10 +160,12 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
   const [auditLogs, setAuditLogs] = useState<AuditLogItem[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
 
-  // 拉取账号列表及容量统计
-  const fetchAccounts = async () => {
+  // 拉取账号列表及容量统计 (支持 isSilent 静默增量更新，杜绝轮询导致的页面跳动)
+  const fetchAccounts = async (isSilent = false) => {
     try {
-      setLoading(true);
+      if (!isSilent && !data) {
+        setLoading(true);
+      }
       const res = await apiFetch('/api/v1/quota/stats');
       if (res.ok) {
         const stats = await res.json();
@@ -171,7 +174,9 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
     } catch (e) {
       console.error('获取账号容量统计失败:', e);
     } finally {
-      setLoading(false);
+      if (!isSilent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -188,10 +193,12 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
     }
   };
 
-  // 拉取审计日志
-  const fetchAuditLogs = async () => {
+  // 拉取审计日志 (支持 isSilent 静默刷新)
+  const fetchAuditLogs = async (isSilent = false) => {
     try {
-      setAuditLoading(true);
+      if (!isSilent && auditLogs.length === 0) {
+        setAuditLoading(true);
+      }
       const res = await apiFetch('/api/v1/audit/logs?limit=50');
       if (res.ok) {
         const logs: AuditLogItem[] = await res.json();
@@ -200,7 +207,9 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
     } catch (e) {
       console.error('获取审计日志失败:', e);
     } finally {
-      setAuditLoading(false);
+      if (!isSilent) {
+        setAuditLoading(false);
+      }
     }
   };
 
@@ -562,18 +571,18 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
     };
     window.addEventListener('keydown', handleKeyDown);
 
-    fetchAccounts();
+    fetchAccounts(false);
     fetchProviders();
     fetchOAuthConfig();
     if (activeTab === 'audit') {
-      fetchAuditLogs();
+      fetchAuditLogs(false);
     }
 
-    // 弹窗开启时，每 3 秒自动轮询一次最新的调用频次与 Token 消耗指标
+    // 弹窗开启时，每 3 秒自动静默轮询一次最新的调用频次与 Token 消耗指标 (isSilent=true，绝不触发布局跳动)
     const pollTimer = setInterval(() => {
-      fetchAccounts();
+      fetchAccounts(true);
       if (activeTab === 'audit') {
-        fetchAuditLogs();
+        fetchAuditLogs(true);
       }
     }, 3000);
 
@@ -1055,14 +1064,16 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                 <div className="flex items-center space-x-2 shrink-0">
                   <button
                     type="button"
-                    onClick={() => {
-                      fetchAccounts();
-                      fetchProviders();
+                    onClick={async () => {
+                      setManualRefreshing(true);
+                      await Promise.all([fetchAccounts(true), fetchProviders()]);
+                      setManualRefreshing(false);
                     }}
-                    className="ml-4 px-3 py-1 rounded-lg bg-surface-200/80 hover:bg-surface-300 text-slate-300 border border-border/80 text-xs shrink-0 flex items-center space-x-1.5 transition-colors"
+                    disabled={manualRefreshing}
+                    className="ml-4 px-3 py-1 rounded-lg bg-surface-200/80 hover:bg-surface-300 text-slate-300 border border-border/80 text-xs shrink-0 flex items-center space-x-1.5 transition-colors disabled:opacity-60"
                     title="立即从本地 SQLite 数据库刷新各账号今日调用量与消耗 Token"
                   >
-                    <RefreshCw className="w-3.5 h-3.5 text-emerald-400" />
+                    <RefreshCw className={`w-3.5 h-3.5 text-emerald-400 ${manualRefreshing ? 'animate-spin' : ''}`} />
                     <span>刷新用量统计</span>
                   </button>
 
@@ -1110,7 +1121,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
 
               {/* 账号列表 */}
               <div className="space-y-3">
-                {loading && (
+                {loading && !data && (
                   <div className="p-8 text-center text-slate-400 text-xs flex items-center justify-center space-x-2">
                     <RefreshCw className="w-4 h-4 animate-spin text-emerald-400" />
                     <span>正在获取实时容量指标...</span>
@@ -2455,7 +2466,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   <p className="text-xs text-slate-400">记录所有敏感管理操作与执行结果</p>
                 </div>
                 <button
-                  onClick={fetchAuditLogs}
+                  onClick={() => fetchAuditLogs(false)}
                   disabled={auditLoading}
                   className="px-3 py-1.5 text-xs rounded-lg border border-border text-slate-300 hover:text-white hover:bg-surface-200 transition-colors flex items-center space-x-1.5"
                 >

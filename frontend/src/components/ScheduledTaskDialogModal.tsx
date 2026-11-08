@@ -246,21 +246,19 @@ export function ScheduledTaskDialogModal({
             <div className="flex items-center bg-zinc-800/80 rounded-lg p-0.5 border border-zinc-700 text-xs">
               <button
                 onClick={() => setActiveTab('chat')}
-                className={`px-3 py-1 rounded-md transition ${
-                  activeTab === 'chat'
+                className={`px-3 py-1 rounded-md transition ${activeTab === 'chat'
                     ? 'bg-emerald-600 text-white font-medium shadow-sm'
                     : 'text-zinc-400 hover:text-zinc-200'
-                }`}
+                  }`}
               >
                 {t('💬 自然对话分析')}
               </button>
               <button
                 onClick={() => setActiveTab('guided')}
-                className={`px-3 py-1 rounded-md transition ${
-                  activeTab === 'guided'
+                className={`px-3 py-1 rounded-md transition ${activeTab === 'guided'
                     ? 'bg-emerald-600 text-white font-medium shadow-sm'
                     : 'text-zinc-400 hover:text-zinc-200'
-                }`}
+                  }`}
               >
                 {t('📋 向导分步填写')}
               </button>
@@ -419,11 +417,10 @@ export function ScheduledTaskDialogModal({
                             setCronExpr(sc.cron);
                             setHumanSchedule(sc.human);
                           }}
-                          className={`text-[11px] px-2.5 py-1 rounded-lg border transition ${
-                            cronExpr === sc.cron
+                          className={`text-[11px] px-2.5 py-1 rounded-lg border transition ${cronExpr === sc.cron
                               ? 'bg-emerald-950/80 border-emerald-500 text-emerald-300 font-medium'
                               : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700 hover:text-zinc-300'
-                          }`}
+                            }`}
                         >
                           {sc.label}
                         </button>
@@ -504,11 +501,10 @@ export function ScheduledTaskDialogModal({
                       key={item.id}
                       type="button"
                       onClick={() => setGuidedFreq(item.id as any)}
-                      className={`p-2.5 rounded-xl border text-xs font-medium text-center transition ${
-                        guidedFreq === item.id
+                      className={`p-2.5 rounded-xl border text-xs font-medium text-center transition ${guidedFreq === item.id
                           ? 'bg-emerald-950/60 border-emerald-500 text-emerald-300'
                           : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700'
-                      }`}
+                        }`}
                     >
                       {item.label}
                     </button>
@@ -580,3 +576,4 @@ export function ScheduledTaskDialogModal({
     </div>
   );
 }
+
