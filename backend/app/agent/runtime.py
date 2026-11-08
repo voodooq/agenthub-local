@@ -680,6 +680,23 @@ class AgentRuntime:
                                 f"状态: 真实写入磁盘已验证完成。{hotplug_note}"
                             )
                             compressed = f"[已真实物理落盘文件 `{rel_display}` ({len(file_content)} 字符)]"
+
+                            # 自动联动登记到当前工作区资产库
+                            try:
+                                from ..repository.artifact_repository import ArtifactRepository
+                                f_type = ArtifactRepository._detect_file_type(target_file)
+                                await ArtifactRepository.register_artifact(
+                                    workspace_id=ws_id,
+                                    file_path=str(target_file),
+                                    file_name=target_file.name,
+                                    file_type=f_type,
+                                    file_size=len(file_content.encode("utf-8")),
+                                    conversation_id=conv_id,
+                                    source="ai_generated",
+                                    summary=f"AI 自主编写落盘: {target_file.name}",
+                                )
+                            except Exception as art_err:
+                                logger.warning(f"资产库落盘自动登记异常: {art_err}")
                     except Exception as write_err:
                         tool_output = f"Error: 写入文件 `{target_file}` 失败: {write_err}"
                         compressed = f"[写入文件异常: {str(write_err)[:40]}]"

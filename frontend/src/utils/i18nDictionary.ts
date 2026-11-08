@@ -4,6 +4,14 @@ import { ResolvedLocale } from '@/context/LanguageContext';
  * 全量多语种词条映射库（按字符长度自动降序排序预处理，先长句后短词，确保 100% 翻译覆盖且不被短词破坏）
  */
 export const PHRASE_DICTIONARY: Record<string, { 'zh-TW': string; en: string; ja: string }> = {
+  '扫描同步': { 'zh-TW': '掃描同步', en: 'Scan & Sync', ja: 'スキャン同期' },
+  '同步中...': { 'zh-TW': '同步中...', en: 'Syncing...', ja: '同期中...' },
+  '立即扫描物理工作区目录增量同步资产': { 'zh-TW': '立即掃描物理工作區目錄增量同步資產', en: 'Scan physical workspace folder to sync artifacts', ja: '物理ワークスペースをスキャンして資産を同期' },
+  '打开文件夹': { 'zh-TW': '開啟資料夾', en: 'Open Folder', ja: 'フォルダーを開く' },
+  '重新扫描物理目录': { 'zh-TW': '重新掃描物理目錄', en: 'Rescan Workspace', ja: '物理ディレクトリを再スキャン' },
+  '打开物理文件夹': { 'zh-TW': '開啟物理資料夾', en: 'Open Workspace Folder', ja: '物理フォルダーを開く' },
+  '在画布中预览文件内容': { 'zh-TW': '在畫布中預覽文件內容', en: 'Preview content in canvas drawer', ja: 'キャンバスでファイル内容をプレビュー' },
+  '提示：若在其他沙盒工作区（如“算法推演”）中生成了代码，可在顶部切换到对应工作区查看。': { 'zh-TW': '提示：若在其他沙盒工作區（如「演算法推演」）中生成了代碼，可在頂部切換到對應工作區查看。', en: 'Tip: If files were generated in another sandbox workspace, switch to it at the top.', ja: 'ヒント: 別のサンドボックスで生成された場合は、上部でワークスペースを切り替えてください。' },
   '✅ 验收通过': { 'zh-TW': '✅ 驗收通過', en: '✅ Mark Completed', ja: '✅ 検収完了' },
   '确认本次任务已满足预期，标记完成并归档': { 'zh-TW': '確認本次任務已滿足預期，標記完成並歸檔', en: 'Confirm task criteria met, mark complete and archive', ja: 'タスク要件の達成を確認し完了してアーカイブ' },
   '规划子任务中': { 'zh-TW': '規劃子任務中', en: 'Planning Subtasks', ja: 'サブタスク計画中' },
