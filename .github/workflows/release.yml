@@ -46,7 +46,8 @@ jobs:
 
       - name: Package Windows & Cross-Platform Release Archives
         run: |
-          $TAG_NAME = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v1.1.9" }
+          $VERSION_CFG = Get-Content -Raw -Path "version.json" | ConvertFrom-Json
+          $TAG_NAME = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v$($VERSION_CFG.version)" }
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           
           # 1. 准备发布目录结构
@@ -68,6 +69,7 @@ jobs:
           } else {
               New-Item -ItemType Directory -Force -Path "$PKG_DIR\skills" | Out-Null
           }
+          if (Test-Path version.json) { Copy-Item -Force version.json $PKG_DIR\ }
           if (Test-Path desktop_app.py) { Copy-Item -Force desktop_app.py $PKG_DIR\ }
           if (Test-Path requirements.txt) { Copy-Item -Force requirements.txt $PKG_DIR\ }
           if (Test-Path mcp_servers.json) { Copy-Item -Force mcp_servers.json $PKG_DIR\ }

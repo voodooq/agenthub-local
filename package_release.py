@@ -1,6 +1,6 @@
 """
-AgentHub Local v1.1.9 本地离线发布打包脚本
-生成独立 Windows 便携包与跨平台便携运行包至 dist/ 目录
+AgentHub Local 本地离线发布打包脚本
+自动读取根目录 version.json 并同步相关清单，生成独立 Windows 便携包与跨平台便携运行包至 dist/ 目录
 """
 import os
 import shutil
@@ -9,14 +9,17 @@ import tarfile
 import zipfile
 from pathlib import Path
 
+from sync_version import load_version_config, sync_all_manifests
+
 BASE_DIR = Path(__file__).resolve().parent
 DIST_DIR = BASE_DIR / "dist"
-VERSION = "v1.1.9"
+VERSION = f"v{load_version_config(BASE_DIR)['version']}"
 PKG_NAME = f"AgentHub-Local-{VERSION}"
 STAGE_DIR = DIST_DIR / PKG_NAME
 
 
 def package():
+    sync_all_manifests(BASE_DIR)
     print(f"=== 开始打包 AgentHub Local {VERSION} ===")
     DIST_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -48,6 +51,7 @@ def package():
 
     # 4. 拷贝启动脚本与配置文件
     file_list = [
+        "version.json",
         "desktop_app.py",
         "requirements.txt",
         "mcp_servers.json",

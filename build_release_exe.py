@@ -1,10 +1,11 @@
 """
-AgentHub Local v1.1.9 独立可执行程序与离线发布包一键构建脚本 (Release EXE Builder)
+AgentHub Local 独立可执行程序与离线发布包一键构建脚本 (Release EXE Builder)
 核心目标：
-1. 使用 PyInstaller 将完整 Python 运行环境、WebView2 宿主外壳与后端 FastAPI 编译为独立的原生绿色免安装目录 (dist/AgentHub/)
-2. 内嵌最新编译的前端静态页面 (static/)、全局默认技能 (skills/) 与 MCP 初始配置 (mcp_servers.json)
-3. 严格过滤源码切片与隐私隔离，确保 0 私有数据/测试代码污染（绝对不包含 uploads、测试账号、旧数据库或历史路径，初次启动自动建全新库）
-4. 一键压缩打包为 AgentHub-Local-v1.1.9-windows-x64.zip，可直接上传发布至 GitHub Releases
+1. 从根目录唯一配置源 version.json 读取当前版本并自动同步全仓生态静态清单
+2. 使用 PyInstaller 将完整 Python 运行环境、WebView2 宿主外壳与后端 FastAPI 编译为独立的原生绿色免安装目录 (dist/AgentHub/)
+3. 内嵌最新编译的前端静态页面 (static/)、版本配置 (version.json)、全局默认技能 (skills/) 与 MCP 初始配置 (mcp_servers.json)
+4. 严格过滤源码切片与隐私隔离，确保 0 私有数据/测试代码污染（绝对不包含 uploads、测试账号、旧数据库或历史路径，初次启动自动建全新库）
+5. 一键压缩打包为 AgentHub-Local-v<version>-windows-x64.zip，可直接上传发布至 GitHub Releases
 """
 import os
 import sys
@@ -13,12 +14,15 @@ import zipfile
 import subprocess
 from pathlib import Path
 
+from sync_version import load_version_config, sync_all_manifests
+
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 FRONTEND_OUT = FRONTEND_DIR / "out"
 DIST_DIR = BASE_DIR / "dist"
 BUILD_DIR = BASE_DIR / "build"
-RELEASE_VERSION = "v1.1.9"
+VERSION_CFG = load_version_config(BASE_DIR)
+RELEASE_VERSION = f"v{VERSION_CFG['version']}"
 APP_NAME = "AgentHub"
 OUTPUT_DIR = DIST_DIR / APP_NAME
 ZIP_NAME = f"AgentHub-Local-{RELEASE_VERSION}-windows-x64.zip"
@@ -71,10 +75,11 @@ def build_pyinstaller_exe():
 
     print(f"\n>>> 正在使用 PyInstaller 编译独立桌面程序 {APP_NAME}.exe ({RELEASE_VERSION})...")
 
-    # 动态构建 PyInstaller 编译参数
+    # 动态构建 PyInstaller 编译参数（确保把根目录 version.json 一并打入 _internal 根下）
     sep = ";" if sys.platform == "win32" else ":"
     static_arg = f"{FRONTEND_OUT}{sep}static"
     backend_data_arg = f"{clean_backend_dir}{sep}backend"
+    version_data_arg = f"{BASE_DIR / 'version.json'}{sep}."
 
     pyinstaller_cmd = [
         sys.executable,
@@ -92,6 +97,8 @@ def build_pyinstaller_exe():
         static_arg,
         "--add-data",
         backend_data_arg,
+        "--add-data",
+        version_data_arg,
         "--collect-all",
         "webview",
         "--collect-all",
@@ -238,6 +245,11 @@ def assemble_standalone_package():
         shutil.copy2(src_mcp, OUTPUT_DIR / "mcp_servers.json")
         print("  -> 嵌入默认初始 mcp_servers.json ...")
 
+    # 3.5 复制全局版本配置文件至输出根目录，便于运行态直观查看与核验
+    src_ver_json = BASE_DIR / "version.json"
+    if src_ver_json.exists():
+        shutil.copy2(src_ver_json, OUTPUT_DIR / "version.json")
+
     # 4. 拷贝文档与许可
     for doc_name in ("README.md", "LICENSE"):
         doc_src = BASE_DIR / doc_name
@@ -321,6 +333,9 @@ def create_release_zip():
 
 
 if __name__ == "__main__":
+    changed_manifests = sync_all_manifests(BASE_DIR)
+    if changed_manifests:
+        print(f">>> 已从 version.json 自动同步以下生态清单: {', '.join(changed_manifests)}")
     build_pyinstaller_exe()
     assemble_standalone_package()
     create_release_zip()

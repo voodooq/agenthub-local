@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from ..core.config import settings
 from ..core.logging_config import logger
 from ..agent.shell_executor import LocalShellExecutor
 
@@ -89,7 +90,7 @@ class _StdioMCPConnection:
                 {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "AgentHub-Local", "version": "1.1.9"},
+                    "clientInfo": {"name": "AgentHub-Local", "version": settings.app_version},
                 },
                 timeout=10.0,
             )

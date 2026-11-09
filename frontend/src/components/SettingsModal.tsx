@@ -24,6 +24,7 @@ import {
 import { apiFetch } from '@/utils/apiClient';
 import { ModelOption } from './ModelSelector';
 import { useTheme, ThemeMode } from '@/context/ThemeContext';
+import { useAppVersion } from '@/config/version';
 
 export interface PersonaPreset {
   id: string;
@@ -77,6 +78,7 @@ export function SettingsModal({
     initialTab === 'appearance' ? 'appearance' : initialTab === 'models' ? 'models' : 'appearance'
   );
   const { theme, setTheme } = useTheme();
+  const { fullLabel: appVersionLabel } = useAppVersion();
 
   // 上下文记忆轮数状态 (默认 10 轮)
   const [contextRounds, setContextRounds] = useState<number>(10);
@@ -428,7 +430,7 @@ export function SettingsModal({
           </div>
 
           <div className="px-2 text-[11px] text-muted-foreground/70 font-mono">
-            v1.1.9 · Strata Edition
+            {appVersionLabel}
           </div>
         </div>
 
@@ -836,7 +838,7 @@ export function SettingsModal({
                     <h3 className="text-sm font-bold text-foreground flex items-center space-x-2">
                       <span>AgentHub Local</span>
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-mono">
-                        v1.1.9 · Strata Edition
+                        {appVersionLabel}
                       </span>
                     </h3>
                     <p className="text-xs text-muted-foreground mt-0.5">

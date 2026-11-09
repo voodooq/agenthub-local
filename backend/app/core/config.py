@@ -2,6 +2,7 @@
 系统全局核心配置模块
 基于 Pydantic Settings 实现环境变量自适应与安全校验
 """
+import json
 import os
 import sys
 import secrets
@@ -9,13 +10,53 @@ from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
+def load_version_metadata(candidates: list[Path] | None = None) -> tuple[str, str]:
+    """按优先级从统一版本配置文件读取版本号与版本后缀。
+
+    Args:
+        candidates: 可选覆盖候选路径列表（主要用于单元测试验证）。
+
+    Returns:
+        (version, edition): 例如 ("1.1.10", "Strata Edition")。
+    """
+    search_paths: list[Path]
+    if candidates is not None:
+        search_paths = list(candidates)
+    else:
+        search_paths = []
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            search_paths.append(Path(meipass) / "version.json")
+        # 源码运行或独立便携包：定位仓库根目录 version.json 与包内兜底 version.json
+        search_paths.append(Path(__file__).resolve().parent.parent.parent.parent / "version.json")
+        search_paths.append(Path(__file__).resolve().parent / "version.json")
+
+    for path in search_paths:
+        if not path.is_file():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            ver = str(data.get("version", "")).strip().lstrip("vV")
+            edition = str(data.get("edition", "")).strip() or "Strata Edition"
+            if ver:
+                return ver, edition
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            continue
+
+    return "0.0.0", "Strata Edition"
+
+
+_DEFAULT_VERSION, _DEFAULT_EDITION = load_version_metadata()
+
+
 class Settings(BaseSettings):
     """
     应用全局运行时配置项
-    # NOTE: 优先读取环境变量，未配置时自适应检测 data 目录
+    # NOTE: 优先读取环境变量，未配置时自适应检测 data 目录与全局 version.json
     """
     app_name: str = "AgentHub Local"
-    app_version: str = "1.1.9"
+    app_version: str = _DEFAULT_VERSION
+    app_edition: str = _DEFAULT_EDITION
     # NOTE: 默认仅绑定本机回环地址，防止意外对外暴露
     host: str = "127.0.0.1"
     port: int = 8686

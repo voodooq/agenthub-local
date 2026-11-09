@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.1.9-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.1.10-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -14,6 +14,20 @@
 > **数据与算力彻底解耦，告别单一模型绑定**：
 > AgentHub Local 是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、Llama.cpp、Nvidia 实例），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、SiliconFlow、Google AI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
+
+---
+
+## ⚙️ v1.1.10 统一版本配置中心架构升级
+
+彻底告别跨端版本号分散硬编码：
+1. **单一全局版本配置源 (`version.json`)**：
+   - 在仓库根目录引入 [`version.json`](version.json) 统一管理 `version` 与 `edition`；
+   - 后端 [`config.py`](backend/app/core/config.py)、`/api/v1/health`、[`mcp_manager.py`](backend/app/extensions/mcp_manager.py)、[`desktop_app.py`](desktop_app.py)、[`build_release_exe.py`](build_release_exe.py)、[`package_release.py`](package_release.py) 及 GitHub Actions 发布流水线全量改为动态读取，兼容源码开发、PyInstaller 冻结 EXE 与 Docker 分离镜像构建。
+2. **前端统一配置与运行时同步 (`@/config/version`)**：
+   - [`next.config.js`](frontend/next.config.js) 编译期自动从根目录 `version.json`（Docker 独立上下文回退 `package.json`）注入构建环境变量；
+   - 新增 [`frontend/src/config/version.ts`](frontend/src/config/version.ts) 导出 `useAppVersion()`，[`Sidebar.tsx`](frontend/src/components/Sidebar.tsx) 与 [`SettingsModal.tsx`](frontend/src/components/SettingsModal.tsx) 等页面统一引入，兼具首帧零闪烁与 `/api/v1/health` 运行时同步能力。
+3. **一键清单联动同步 (`sync_version.py`)**：
+   - 新增 [`sync_version.py`](sync_version.py)，并在打包构建前自动校验与精确同步 `frontend/package.json`、`frontend/package-lock.json`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json` 与 `backend/app/core/version.json`，实现 **“只改一处 `version.json`，全仓生效”**。
 
 ---
 
@@ -246,8 +260,8 @@ flowchart TD
 
 | 客户端版本 | 适用系统 | 包名称 | 运行方式 |
 | :--- | :--- | :--- | :--- |
-| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.9-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
-| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.9-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
+| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.10-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
+| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.10-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
 | **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
 
 ---
@@ -265,23 +279,23 @@ sequenceDiagram
     participant Actions as GitHub Actions Runner (windows-latest)
     participant Releases as GitHub Releases 页面
 
-    Dev->>Git: git tag v1.1.9
-    Dev->>GH: git push origin v1.1.9
+    Dev->>Git: git tag v1.1.10
+    Dev->>GH: git push origin v1.1.10
     GH->>Actions: 触发 release.yml 流水线
     Actions->>Actions: 安装 Node 20 & Python 3.12
     Actions->>Actions: 编译并导出 Next.js 静态前端 (out/)
     Actions->>Actions: 打包 Windows 便携包 (*-windows-x64.zip)
     Actions->>Actions: 打包跨平台源码包 (*-portable.tar.gz)
-    Actions->>Releases: 自动创建 Release v1.1.9 并上传分发产物
+    Actions->>Releases: 自动创建 Release v1.1.10 并上传分发产物
     Releases-->>Dev: 用户可在页面直接下载执行文件
 ```
 
 ### 如何发布新版本：
-只需在本地执行以下三条命令：
+只需在 `version.json` 更新版本号（或运行 `python sync_version.py <version>`），随后在本地执行以下命令：
 ```bash
-git tag v1.1.9
+git tag v1.1.10
 git push origin master
-git push origin v1.1.9
+git push origin v1.1.10
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 release 附件，几分钟内即可在 Releases 页面看到生成的下载文件！
 

@@ -18,6 +18,7 @@ sys.path.insert(0, str(BASE_DIR))
 sys.path.insert(0, str(BASE_DIR / "backend"))
 
 from backend.main import app, find_free_port
+from backend.app.core.config import settings
 from backend.app.core.logging_config import logger
 
 
@@ -79,7 +80,7 @@ def main():
 
     # 6. 调用 Windows 原生 WebView2 渲染独立原生窗口 (支持启动即自动最大化全屏、F12 开发者工具与调试模式)
     window = webview.create_window(
-        title="AgentHub Local v1.1.9 - 本地全场景多源算力与智能体工作台",
+        title=f"AgentHub Local v{settings.app_version} - 本地全场景多源算力与智能体工作台",
         url=app_url,
         width=1440,
         height=900,

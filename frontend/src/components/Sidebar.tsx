@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { Conversation, Workspace } from '@/types';
 import { WorkspaceSwitcher } from './WorkspaceSwitcher';
+import { useAppVersion } from '@/config/version';
 
 export type MainNavHub = 'chat' | 'library' | 'scheduled' | 'skills';
 
@@ -67,6 +68,7 @@ export function Sidebar({
   onOpenSettings,
   onCleanupDuplicates,
 }: SidebarProps) {
+  const { tag: appVersionTag } = useAppVersion();
   const [isCollapsed, setIsCollapsed] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
@@ -127,7 +129,7 @@ export function Sidebar({
             <span className="text-xs font-bold tracking-wider text-muted-foreground font-mono flex items-center space-x-1.5 pl-1">
               <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
               <span>AGENT-HUB</span>
-              <span className="text-[10px] text-muted-foreground/70 font-normal">v1.1.9</span>
+              <span className="text-[10px] text-muted-foreground/70 font-normal">{appVersionTag}</span>
             </span>
           )}
           <button
