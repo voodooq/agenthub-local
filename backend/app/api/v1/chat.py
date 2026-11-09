@@ -4,7 +4,7 @@
 import json
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, HTTPException
+from fastapi import APIRouter, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse
 from ...schema.chat_schema import ChatStreamRequest, ToolApprovalRequest, StopChatRequest
 from ...agent.runtime import agent_runtime
@@ -35,10 +35,13 @@ async def get_upload_rules():
 
 
 @router.post("/upload")
-async def upload_attachment(file: UploadFile = File(...)):
+async def upload_attachment(
+    file: UploadFile = File(...),
+    workspace_id: str | None = Form(default="default"),
+):
     """
-    接收前端上传或粘贴的图片/文档，经白名单、体积与文件头魔数校验后保存至 data/uploads，
-    返回本地真实物理绝对路径与前端访问静态 URL。
+    接收前端上传或粘贴的图片/文档，经白名单、体积与文件头魔数校验后直接物理落盘至目标工作区沙盒附件目录，
+    自动保留干净原名、内容去重并登记资产库，返回真实绝对路径、工作区相对路径与静态访问 URL。
     """
     raw_name = file.filename or "attachment.png"
     safe_name = attachment_service.sanitize_filename(raw_name)
@@ -76,15 +79,20 @@ async def upload_attachment(file: UploadFile = File(...)):
             content_type=file.content_type,
         )
 
-        uploads_root = get_uploads_dir()
-        unique_name = f"{uuid.uuid4().hex[:12]}_{meta['safe_name']}"
-        save_path = uploads_root / unique_name
-        save_path.write_bytes(raw_bytes)
+        saved = await attachment_service.save_bytes_to_workspace_attachments(
+            workspace_id=workspace_id,
+            safe_name=meta["safe_name"],
+            raw_bytes=raw_bytes,
+            register_artifact=True,
+        )
 
         return {
-            "name": meta["safe_name"],
-            "file_path": str(save_path.resolve()),
-            "url": f"/api/v1/chat/uploads/{unique_name}",
+            "name": saved["stored_name"],
+            "original_name": meta["safe_name"],
+            "file_path": saved["file_path"],
+            "rel_path": saved["rel_path"],
+            "url": saved["url"],
+            "workspace_id": saved["workspace_id"],
             "mime_type": meta["mime_type"],
             "size_str": meta["size_str"],
             "size_bytes": meta["size_bytes"],
@@ -99,14 +107,31 @@ async def upload_attachment(file: UploadFile = File(...)):
         raise HTTPException(status_code=500, detail=f"保存文件失败: {str(e)}")
 
 
+@router.get("/uploads/ws/{workspace_id}/{filename}")
+async def get_workspace_uploaded_attachment(workspace_id: str, filename: str):
+    """提供工作区沙盒附件的静态下载与预览服务（严格防目录穿越）"""
+    file_path = await attachment_service.resolve_workspace_attachment_file(workspace_id, filename)
+    if not file_path:
+        raise HTTPException(status_code=404, detail="工作区沙盒中未找到该附件")
+    return FileResponse(file_path)
+
+
 @router.get("/uploads/{filename}")
 async def get_uploaded_attachment(filename: str):
-    """提供本地上传图片的静态预览服务（带防目录穿越安全校验）"""
+    """兼容历史全局 uploads 目录与遗留 backend/data/uploads 目录的静态预览服务"""
     safe_filename = Path(filename).name
-    file_path = get_uploads_dir() / safe_filename
-    if not file_path.exists() or not file_path.is_file():
-        raise HTTPException(status_code=404, detail="附件不存在")
-    return FileResponse(file_path)
+    if not safe_filename or safe_filename != filename or safe_filename in (".", ".."):
+        raise HTTPException(status_code=400, detail="非法文件名")
+
+    candidates = [
+        get_uploads_dir() / safe_filename,
+        Path(__file__).resolve().parent.parent.parent.parent / "data" / "uploads" / safe_filename,
+        Path(__file__).resolve().parent.parent.parent / "data" / "uploads" / safe_filename,
+    ]
+    for cand in candidates:
+        if cand.exists() and cand.is_file():
+            return FileResponse(cand)
+    raise HTTPException(status_code=404, detail="附件不存在")
 
 
 @router.post("/stream")

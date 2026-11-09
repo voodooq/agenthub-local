@@ -26,7 +26,7 @@ export function CanvasDrawer({ isOpen, onClose, title = 'Artifacts 架构画布'
       : content;
 
   const handleCopy = async () => {
-    await navigator.clipboard.writeText(fullUrl);
+    await navigator.clipboard.writeText(type === 'image' ? fullUrl : content);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };

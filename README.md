@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.1.7-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.1.8-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -14,6 +14,23 @@
 > **数据与算力彻底解耦，告别单一模型绑定**：
 > AgentHub Local 是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、Llama.cpp、Nvidia 实例），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、SiliconFlow、Google AI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
+
+---
+
+## 🛡️ v1.1.8 工作区沙盒附件隔离、反模型幻觉红线与资产库双向同步
+
+全面重塑工作区与上传附件的物理隔离、大模型真实读取边界及资产库一致性：
+1. **工作区隔离上传与干净原始命名 (`attachment_service` & `chat.py`)**：
+   - 虚拟沙盒工作区上传直接落盘 `<workspace>/attachments/<clean_filename>`，物理挂载工程工作区自动隔离写入 `<workspace>/.agenthub/attachments/<clean_filename>`（并自动更新 `.agenthub/.gitignore` 保持宿主 Git 仓库零污染）；
+   - 同名文件基于 SHA-256 校验去重，内容不同时自动追加 `__2` 等序号后缀防覆盖，并自动同步登记到工作区「库 (Library)」；兼容跨工作区切换与 `v1.1.6/v1.1.7` 历史全球上传的按需物理迁移；
+   - 新增精确工作区静态读取路由 `GET /api/v1/chat/uploads/ws/{workspace_id}/{filename}`（保留旧 `/uploads/{filename}` 防穿越兼容）。
+2. **反模型幻觉红线与只读输入保护 (`ContextBuilder`, `AgentRuntime`, `ExperienceDistiller`)**：
+   - 在工具执行期对 `./attachments/` 与 `./.agenthub/attachments/` 实施**只读拦截**，物理阻断模型伪造生成假数据覆盖输入区；
+   - `read_local_file` 支持 `.xlsx / .docx / .pptx / .pdf` 结构化正文解析、工作区附件回退定位、真实规模标注（如 `1082 行 × 28 列`）及真实沙盒清单枚举；
+   - `ExperienceDistiller` 新增双阶段 Mock 反模式门控，彻底拦截将“文件缺失造 Mock 测试数据”等错误经验提炼为 Skill 提案。
+3. **资产库 (Library) 双向精确同步与预览修复 (`ArtifactRepository` & `LibraryView`)**：
+   - `sync_physical_workspace_artifacts` 升级为**失效清理 (Prune) + 增量发现 (Discover)** 双向同步，实时清除已在物理磁盘删除的孤儿记录，并过滤 `.pytest_cache`、`.mypy_cache`、`.ruff_cache`、`.pyc` 等缓存垃圾（例外放行 `.agenthub/attachments/`）；
+   - 修复 `.xlsx` / `.docx` / `.md` 资产在画布预览时误用 HTML `iframe` 导致换行坍塌的问题，恢复等宽原样预览与源码一键复制。
 
 ---
 
@@ -216,8 +233,8 @@ flowchart TD
 
 | 客户端版本 | 适用系统 | 包名称 | 运行方式 |
 | :--- | :--- | :--- | :--- |
-| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.7-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
-| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.7-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
+| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.8-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
+| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.8-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
 | **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
 
 ---
@@ -235,23 +252,23 @@ sequenceDiagram
     participant Actions as GitHub Actions Runner (windows-latest)
     participant Releases as GitHub Releases 页面
 
-    Dev->>Git: git tag v1.1.7
-    Dev->>GH: git push origin v1.1.7
+    Dev->>Git: git tag v1.1.8
+    Dev->>GH: git push origin v1.1.8
     GH->>Actions: 触发 release.yml 流水线
     Actions->>Actions: 安装 Node 20 & Python 3.12
     Actions->>Actions: 编译并导出 Next.js 静态前端 (out/)
     Actions->>Actions: 打包 Windows 便携包 (*-windows-x64.zip)
     Actions->>Actions: 打包跨平台源码包 (*-portable.tar.gz)
-    Actions->>Releases: 自动创建 Release v1.1.7 并上传分发产物
+    Actions->>Releases: 自动创建 Release v1.1.8 并上传分发产物
     Releases-->>Dev: 用户可在页面直接下载执行文件
 ```
 
 ### 如何发布新版本：
 只需在本地执行以下三条命令：
 ```bash
-git tag v1.1.7
+git tag v1.1.8
 git push origin master
-git push origin v1.1.7
+git push origin v1.1.8
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 release 附件，几分钟内即可在 Releases 页面看到生成的下载文件！
 

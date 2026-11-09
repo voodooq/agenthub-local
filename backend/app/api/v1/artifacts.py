@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 from ...core.logging_config import logger
 from ...repository.artifact_repository import ArtifactRepository
 from ...repository.db import db_manager
+from ...service.attachment_service import attachment_service
 
 router = APIRouter(prefix="/artifacts", tags=["Workspace Artifacts"])
 
@@ -116,7 +117,15 @@ async def get_artifact_content(artifact_id: str):
         raise HTTPException(status_code=404, detail="目标文件在磁盘上不存在")
 
     try:
-        content = target.read_text(encoding="utf-8", errors="replace")
+        ext, category, canonical_mime = attachment_service.classify_extension(file_name or target.name)
+        if category == "office" or ext in (".xlsx", ".docx", ".pptx", ".pdf"):
+            ctx_info = attachment_service.extract_attachment_context(target, canonical_mime, file_name or target.name)
+            content = ctx_info.get("preview_text") or "(未提取到可读文本内容)"
+        elif category == "image":
+            content = f"[图片资产] {file_name} ({target.stat().st_size} bytes)\n物理路径: {target}"
+        else:
+            content = attachment_service.decode_text_bytes(target.read_bytes())
+
         return {
             "artifact_id": artifact_id,
             "file_name": file_name,

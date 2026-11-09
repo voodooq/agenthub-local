@@ -17,6 +17,7 @@ export interface AttachmentValidationResult {
 export interface ParsedUserAttachment {
   name: string;
   file_path?: string;
+  rel_path?: string;
   url?: string;
   mime_type?: string;
   size_str?: string;

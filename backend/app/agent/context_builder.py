@@ -155,7 +155,11 @@ class ContextBuilder:
                 "2. 所有针对本地磁盘的文件创建、修改与终端执行，【必须且只能】通过输出标准 `<tool_call>` 标签真实调用工具完成！\n"
                 "3. 【严禁未执行先声明】：严禁在尚未输出 `<tool_call>` 或尚未收到真实的工具执行返回之前，在文本中宣称“已为你创建了某文件”、“已在本地落盘”。\n"
                 "4. 只有当工具真实执行成功并返回结果后，你才能告知用户文件已落盘并展示真实操作结果。\n"
-                "5. 【自主闭环与异常自愈铁律（严禁报错卡死退出）】：在本地开发、依赖安装、代码构建与测试运行过程中，若遇到终端命令报错（如 exit_code != 0、ENOENT 找不到 package.json、缺少路径参数等），【绝对严禁中途卡住或直接退出】！你必须基于报错信息第一性原理分析根因，主动调用工具自愈（如使用 `--prefix <相对路径>` 指定子目录执行、补全缺失文件、切换路径或执行修复脚本），直到整个功能与依赖全部完整跑通并交付验证！"
+                "5. 【自主闭环与异常自愈铁律（严禁报错卡死退出）】：在本地开发、依赖安装、代码构建与测试运行过程中，若遇到终端命令报错（如 exit_code != 0、ENOENT 找不到 package.json、缺少路径参数等），【绝对严禁中途卡住或直接退出】！你必须基于报错信息第一性原理分析根因，主动调用工具自愈（如使用 `--prefix <相对路径>` 指定子目录执行、补全缺失文件、切换路径或执行修复脚本），直到整个功能与依赖全部完整跑通并交付验证！\n"
+                "6. 【真实输入附件红线 —— 严禁伪造与 Mock 替代（零容忍违规）】：\n"
+                "   - 用户上传的原始文档/Excel/图片统一落盘在工作区只读附件目录（虚拟工作区 `./attachments/`，物理挂载工程 `./.agenthub/attachments/`）。严禁调用 `write_local_file` 或编写脚本向附件目录写入/篡改文件；\n"
+                "   - 若遇到预期输入文件缺失、路径报错、Sheet 名称不匹配或解析异常，**绝对严禁私自生成任何 Mock / 模拟 / 测试样例输入文件来“兜底”完成分析**！编写的数据处理脚本必须坚持 Fail-Fast 原则（缺失即抛 `FileNotFoundError` 并以非零码退出），严禁内嵌“不存在就造默认测试数据继续运行”的伪分支；\n"
+                "   - 确系真实文件缺失或无法解析时，必须立即停机并向用户如实报告预期路径与缺失原因。"
             )
 
         if current_cwd:
@@ -300,6 +304,39 @@ class ContextBuilder:
                 f"### 🎯 已由斜杠指令 `{matched_skill['command']}` 直接激活的四元组技能规程 (`{matched_skill['id']}`)：\n"
                 f"请严格遵循以下技能规程处理用户请求：\n{full_skill_md}"
             )
+
+        # 4.5 主动挂载当前工作区沙盒内的真实附件清单（防止路径猜测或盲目造假）
+        effective_ws_root = current_cwd
+        if not effective_ws_root and workspace_id:
+            try:
+                from ..repository.workspace_repository import WorkspaceRepository
+
+                effective_ws_root = await WorkspaceRepository.get_root_path_by_id(workspace_id)
+            except Exception:
+                effective_ws_root = None
+        if effective_ws_root:
+            try:
+                sandbox_atts = await asyncio.to_thread(
+                    attachment_service.list_workspace_sandbox_attachments,
+                    effective_ws_root,
+                    15,
+                )
+                if sandbox_atts:
+                    att_lines = [
+                        "### 📎 当前工作区沙盒已有真实附件清单（只读原料区，严禁写入或伪造）:"
+                    ]
+                    for item in sandbox_atts:
+                        att_lines.append(
+                            f"- `{item['rel_path']}` ({item['size_str']}) — 绝对路径: `{item['file_path']}`"
+                        )
+                    system_parts.append("\n".join(att_lines))
+                elif scene_mode == "agent":
+                    system_parts.append(
+                        "### 📎 当前工作区沙盒附件目录状态:\n"
+                        "- 当前沙盒 `attachments/` 目录暂为空（若需分析新文件请提示用户上传，严禁自行写入任何模拟/Mock 输入文件）。"
+                    )
+            except Exception as e:
+                logger.debug(f"[ContextBuilder] 扫描工作区沙盒附件跳过: {e}")
 
         # 5. Agent 任务模式下：挂载工作记忆草稿纸 (Working Memory Scratchpad) 与工具协议
         if scene_mode == "agent":

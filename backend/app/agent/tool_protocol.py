@@ -169,13 +169,13 @@ class ToolProtocolAdapter:
             },
             {
                 "name": "write_local_file",
-                "description": "在用户本地磁盘安全创建或写入文件（自动递归创建父目录）。所有写操作均真实落盘物理文件，拒绝幻觉。",
+                "description": "在用户本地磁盘安全创建或写入文件（自动递归创建父目录）。所有写操作均真实落盘物理文件，拒绝幻觉。注意：工作区输入附件目录 (attachments/ 与 .agenthub/attachments/) 为只读保护区，禁止写入或伪造测试数据，交付物请写入 ./output/ 等目录。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "file_path": {
                             "type": "string",
-                            "description": "目标文件相对路径或绝对路径（如 skills/my-skill/SKILL.md 或 src/main.py）",
+                            "description": "目标文件相对路径或绝对路径（如 output/report.md 或 src/main.py；禁止写入 attachments/ 目录）",
                         },
                         "content": {
                             "type": "string",
@@ -191,13 +191,13 @@ class ToolProtocolAdapter:
             },
             {
                 "name": "read_local_file",
-                "description": "安全读取本地磁盘指定文本文件的内容。",
+                "description": "安全读取本地磁盘指定文件内容。原生支持纯文本/源码以及 .xlsx / .docx / .pptx 等办公文档的结构化预览，并自动兼容工作区 attachments/ 目录查找。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "file_path": {
                             "type": "string",
-                            "description": "要读取的文件相对路径或绝对路径",
+                            "description": "要读取的文件相对路径或绝对路径（如 ./attachments/data.xlsx 或 src/main.py）",
                         },
                     },
                     "required": ["file_path"],

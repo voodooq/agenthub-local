@@ -7,14 +7,18 @@
 3. 零外部强制依赖的多格式内容提取：纯文本容错解码、.xlsx (openpyxl 优先 + zipfile/xml 兜底)、.docx/.pptx (标准库 zipfile/xml)。
 4. 跨步/跨轮路径防失忆：通过标准化 <agenthub_attachments> 锚点持久化物理绝对路径，并在历史上下文回放时展开，根治 `./attachments FileNotFoundError`。
 """
+import hashlib
 import io
 import json
+import os
 import re
 import zipfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote
 import xml.etree.ElementTree as ET
 
+from ..core.config import settings
 from ..core.logging_config import logger
 
 
@@ -355,7 +359,7 @@ class AttachmentService:
 
     @classmethod
     def _extract_xlsx_preview(cls, file_path: Path) -> tuple[str, str]:
-        """提取 .xlsx 工作表名与表格预览（openpyxl 优先，缺失时回退标准库 zipfile+xml）"""
+        """提取 .xlsx 工作表名、总行列维度与表格头部预览（openpyxl 优先，缺失时回退标准库 zipfile+xml）"""
         max_sheets = 6
         max_rows = 30
         max_cols = 20
@@ -367,17 +371,39 @@ class AttachmentService:
             try:
                 sheet_names = list(wb.sheetnames)
                 lines = [f"工作表列表 (共 {len(sheet_names)} 个): {', '.join(sheet_names)}"]
+                has_truncated_rows = False
                 for s_name in sheet_names[:max_sheets]:
                     ws = wb[s_name]
-                    lines.append(f"\n### Sheet: {s_name} (约 {ws.max_row or '?'} 行 × {ws.max_column or '?'} 列)")
+                    declared_rows = ws.max_row
+                    declared_cols = ws.max_column
+                    preview_lines: list[str] = []
                     row_count = 0
-                    for row in ws.iter_rows(max_row=max_rows, max_col=max_cols, values_only=True):
-                        row_vals = ["" if v is None else str(v).replace("\n", " ") for v in row]
-                        if any(cell != "" for cell in row_vals):
-                            lines.append(f"Row {row_count + 1}: " + " | ".join(row_vals))
+                    non_empty_cols = 0
+                    for row in ws.iter_rows(max_col=max_cols, values_only=True):
                         row_count += 1
-                    if ws.max_row and ws.max_row > max_rows:
-                        lines.append(f"... (该表共有 {ws.max_row} 行，仅预览前 {max_rows} 行) ...")
+                        if len(row) > non_empty_cols:
+                            non_empty_cols = len(row)
+                        if row_count <= max_rows:
+                            row_vals = ["" if v is None else str(v).replace("\n", " ") for v in row]
+                            if any(cell != "" for cell in row_vals):
+                                preview_lines.append(f"Row {row_count}: " + " | ".join(row_vals))
+                        elif declared_rows and row_count >= max_rows:
+                            # NOTE: 已有精确 dimension 元数据时无需遍历全表即可停止，避免大表重复扫描
+                            break
+
+                    total_rows = declared_rows or row_count
+                    total_cols = declared_cols or non_empty_cols
+                    lines.append(f"\n### Sheet: {s_name} (总规模: {total_rows} 行 × {total_cols} 列)")
+                    lines.extend(preview_lines)
+                    if total_rows > max_rows:
+                        has_truncated_rows = True
+                        lines.append(
+                            f"... (该表共有 {total_rows} 行 × {total_cols} 列，上方仅预览前 {max_rows} 行；严禁仅凭预览推断全表内容) ..."
+                        )
+                if has_truncated_rows:
+                    lines.append(
+                        "\n⚠️ [全量处理硬约束]: 本工作簿包含超出预览窗口的大量真实行数据，禁止编造数据或只基于前 30 行下结论，请用 Python 脚本直接读取上述沙盒文件路径全量解析！"
+                    )
                 return "\n".join(lines), "openpyxl"
             finally:
                 wb.close()
@@ -413,17 +439,19 @@ class AttachmentService:
             if sheet_titles:
                 lines.append(f"工作表列表 (共 {len(sheet_titles)} 个): {', '.join(sheet_titles)}")
 
+            has_truncated_rows = False
             for idx, s_file in enumerate(sheet_files[:max_sheets]):
                 title = sheet_titles[idx] if idx < len(sheet_titles) else s_file
-                lines.append(f"\n### Sheet: {title}")
                 s_root = ET.fromstring(zf.read(s_file))
+                row_elements = [
+                    row_el
+                    for row_el in s_root.iter()
+                    if (row_el.tag.endswith("}row") or row_el.tag == "row")
+                ]
+                total_row_nodes = len(row_elements)
+                lines.append(f"\n### Sheet: {title} (共 {total_row_nodes} 个数据行节点)")
                 extracted_rows = 0
-                for row_el in s_root.iter():
-                    if not (row_el.tag.endswith("}row") or row_el.tag == "row"):
-                        continue
-                    if extracted_rows >= max_rows:
-                        lines.append(f"... (已达预览上限 {max_rows} 行，完整表格请按物理路径用脚本读取) ...")
-                        break
+                for row_el in row_elements[:max_rows]:
                     cells: list[str] = []
                     for c_el in list(row_el)[:max_cols]:
                         c_type = c_el.attrib.get("t", "")
@@ -444,6 +472,15 @@ class AttachmentService:
                     if any(cell != "" for cell in cells):
                         lines.append(f"Row {extracted_rows + 1}: " + " | ".join(cells))
                         extracted_rows += 1
+                if total_row_nodes > max_rows:
+                    has_truncated_rows = True
+                    lines.append(
+                        f"... (该表共 {total_row_nodes} 行，已达预览上限 {max_rows} 行，完整表格请使用脚本读取全量数据) ..."
+                    )
+            if has_truncated_rows:
+                lines.append(
+                    "\n⚠️ [全量处理硬约束]: 本工作簿存在未完全预览的数据行，严禁仅凭头部行猜测全表结论或造假数据。"
+                )
         return "\n".join(lines) or "(空工作簿)", "stdlib_zipfile_xml"
 
     @classmethod
@@ -571,11 +608,369 @@ class AttachmentService:
 
         return result
 
+    @staticmethod
+    def _clean_workspace_id(workspace_id: str | None) -> str:
+        """规范化工作区 ID，防止非法路径段穿越"""
+        cleaned = re.sub(r"[^a-zA-Z0-9_\-]", "_", (workspace_id or "default").strip())
+        return cleaned or "default"
+
+    @staticmethod
+    def _resolve_legacy_uploads_dirs() -> list[Path]:
+        """返回历史遗留的全局 uploads 目录候选列表（兼容 v1.1.6/v1.1.7 老记录）"""
+        dirs = [Path(settings.db_path).parent / "uploads"]
+        backend_legacy = Path(__file__).resolve().parent.parent.parent / "data" / "uploads"
+        if backend_legacy not in dirs:
+            dirs.append(backend_legacy)
+        return dirs
+
+    @classmethod
+    async def resolve_workspace_attachments_dir(
+        cls,
+        workspace_id: str | None = None,
+    ) -> tuple[Path, str, str, Path]:
+        """
+        解析指定工作区的沙盒附件存储目录。
+
+        Returns:
+            (att_dir, rel_dir, effective_workspace_id, workspace_root)
+            - 虚拟沙盒工作区 (virtual): <ws_root>/attachments/
+            - 物理挂载工作区 (physical): <ws_root>/.agenthub/attachments/（避免污染本地 Git 目录）
+        """
+        eff_ws_id = cls._clean_workspace_id(workspace_id)
+        ws_data: dict[str, Any] | None = None
+        try:
+            from ..repository.workspace_repository import WorkspaceRepository
+
+            ws_data = await WorkspaceRepository.get_by_id(eff_ws_id)
+            if not ws_data and eff_ws_id != "default":
+                ws_data = await WorkspaceRepository.get_by_id("default")
+                if ws_data:
+                    eff_ws_id = str(ws_data.get("id") or "default")
+        except Exception as e:
+            logger.debug(f"[AttachmentService] 查询工作区 {eff_ws_id} 跳过: {e}")
+
+        if ws_data and ws_data.get("root_path"):
+            ws_root = Path(ws_data["root_path"]).resolve()
+            ws_type = str(ws_data.get("type") or "virtual").lower()
+            eff_ws_id = cls._clean_workspace_id(str(ws_data.get("id") or eff_ws_id))
+        else:
+            ws_root = (Path(settings.db_path).parent / "workspaces" / eff_ws_id).resolve()
+            ws_type = "virtual"
+
+        ws_root.mkdir(parents=True, exist_ok=True)
+
+        if ws_type == "physical":
+            rel_dir = ".agenthub/attachments"
+            att_dir = (ws_root / ".agenthub" / "attachments").resolve()
+            # 顺手确保物理工作区 .agenthub/.gitignore 忽略 attachments/ 防止污染宿主 Git 状态
+            try:
+                agenthub_dir = ws_root / ".agenthub"
+                agenthub_dir.mkdir(parents=True, exist_ok=True)
+                gi = agenthub_dir / ".gitignore"
+                if gi.exists():
+                    existing_gi = gi.read_text(encoding="utf-8", errors="ignore")
+                    if "attachments/" not in existing_gi:
+                        gi.write_text(existing_gi.rstrip() + "\nattachments/\n", encoding="utf-8")
+                else:
+                    gi.write_text("index.db\nsnapshots/\nlogs/\nattachments/\n", encoding="utf-8")
+            except Exception as gi_err:
+                logger.debug(f"[AttachmentService] 更新 .agenthub/.gitignore 提示: {gi_err}")
+        else:
+            rel_dir = "attachments"
+            att_dir = (ws_root / "attachments").resolve()
+
+        att_dir.mkdir(parents=True, exist_ok=True)
+        return att_dir, rel_dir, eff_ws_id, ws_root
+
+    @classmethod
+    async def resolve_workspace_attachment_file(
+        cls,
+        workspace_id: str | None,
+        filename: str,
+    ) -> Path | None:
+        """
+        在指定工作区沙盒附件目录内安全解析目标文件（含严格防路径穿越边界校验）。
+        """
+        raw_name = unquote((filename or "").strip())
+        if not raw_name or "/" in raw_name or "\\" in raw_name or raw_name in (".", ".."):
+            return None
+        safe_name = Path(raw_name).name
+        if safe_name != raw_name:
+            return None
+
+        att_dir, _, _, _ = await cls.resolve_workspace_attachments_dir(workspace_id)
+        candidate = (att_dir / safe_name).resolve()
+        try:
+            candidate.relative_to(att_dir.resolve())
+        except ValueError:
+            return None
+        if candidate.exists() and candidate.is_file():
+            return candidate
+        return None
+
+    @classmethod
+    async def save_bytes_to_workspace_attachments(
+        cls,
+        *,
+        workspace_id: str | None,
+        safe_name: str,
+        raw_bytes: bytes,
+        conversation_id: str | None = None,
+        register_artifact: bool = True,
+    ) -> dict[str, Any]:
+        """
+        将附件字节流真实落盘到目标工作区沙盒附件目录：
+        - 保留干净易读原文件名；
+        - 同名同内容 (SHA-256 一致) 直接幂等复用，不同内容自动顺延 `__2` 等序号后缀防覆盖；
+        - 自动同步登记至工作区资产库 (source="user_uploaded")。
+        """
+        att_dir, rel_dir, eff_ws_id, ws_root = await cls.resolve_workspace_attachments_dir(workspace_id)
+        clean_name = cls.sanitize_filename(safe_name)
+        incoming_hash = hashlib.sha256(raw_bytes).hexdigest()
+
+        stem = Path(clean_name).stem or "attachment"
+        suffix = Path(clean_name).suffix
+
+        target_path: Path | None = None
+        for idx in range(1, 200):
+            candidate_name = clean_name if idx == 1 else f"{stem}__{idx}{suffix}"
+            candidate = (att_dir / candidate_name).resolve()
+            try:
+                candidate.relative_to(att_dir.resolve())
+            except ValueError:
+                continue
+            if candidate.exists() and candidate.is_file():
+                try:
+                    existing_hash = hashlib.sha256(candidate.read_bytes()).hexdigest()
+                    if existing_hash == incoming_hash:
+                        target_path = candidate
+                        break
+                except OSError:
+                    continue
+            else:
+                candidate.write_bytes(raw_bytes)
+                target_path = candidate
+                break
+
+        if target_path is None:
+            fallback_name = f"{stem}_{incoming_hash[:8]}{suffix}"
+            target_path = (att_dir / fallback_name).resolve()
+            target_path.write_bytes(raw_bytes)
+
+        stored_name = target_path.name
+        rel_path = f"./{rel_dir}/{stored_name}".replace("\\", "/")
+        abs_path = str(target_path.resolve())
+        url = f"/api/v1/chat/uploads/ws/{quote(eff_ws_id, safe='')}/{quote(stored_name, safe='')}"
+
+        if register_artifact:
+            try:
+                from ..repository.artifact_repository import ArtifactRepository
+
+                f_type = ArtifactRepository._detect_file_type(target_path)
+                await ArtifactRepository.register_artifact(
+                    workspace_id=eff_ws_id,
+                    file_path=abs_path,
+                    file_name=stored_name,
+                    file_type=f_type,
+                    file_size=len(raw_bytes),
+                    conversation_id=conversation_id,
+                    source="user_uploaded",
+                    summary=f"用户上传附件 ({rel_path})",
+                )
+            except Exception as art_err:
+                logger.warning(f"[AttachmentService] 自动登记用户上传附件至资产库异常: {art_err}")
+
+        return {
+            "workspace_id": eff_ws_id,
+            "ws_root": str(ws_root),
+            "stored_name": stored_name,
+            "file_path": abs_path,
+            "rel_path": rel_path,
+            "url": url,
+        }
+
+    @classmethod
+    def _locate_existing_source_file(cls, att_dict: dict[str, Any]) -> Path | None:
+        """定位附件既有源文件（优先真实 file_path，其次兜底解析历史 uploads 静态 URL）"""
+        raw_fp = str(att_dict.get("file_path") or "").strip()
+        if raw_fp:
+            p = Path(raw_fp)
+            if p.exists() and p.is_file():
+                return p.resolve()
+
+        raw_url = str(att_dict.get("url") or "").strip()
+        if raw_url.startswith("/api/v1/chat/uploads/") and "/ws/" not in raw_url:
+            tail = unquote(raw_url.rsplit("/", 1)[-1])
+            safe_tail = Path(tail).name
+            if safe_tail and safe_tail == tail:
+                for legacy_dir in cls._resolve_legacy_uploads_dirs():
+                    cand = legacy_dir / safe_tail
+                    if cand.exists() and cand.is_file():
+                        return cand.resolve()
+        return None
+
+    @classmethod
+    async def ensure_attachments_in_workspace(
+        cls,
+        workspace_id: str | None,
+        attachments: list[Any] | None,
+        conversation_id: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        在进入推理或落库消息前，确保本轮附件 100% 物理落盘在当前目标工作区沙盒附件目录中：
+        - 若文件尚未进入目标工作区沙盒（例如用户先上传再切换工作区，或迁移旧版 v1.1.6/v1.1.7 历史消息），
+          自动将其拷贝入当前工作区沙盒（恢复干净原文件名）并同步更新 file_path / rel_path / url；
+        - 若已处于当前工作区沙盒内，则规范化补全 rel_path 与资产库登记。
+        """
+        if not attachments:
+            return []
+
+        att_dir, rel_dir, eff_ws_id, _ = await cls.resolve_workspace_attachments_dir(workspace_id)
+        att_dir_resolved = att_dir.resolve()
+        normalized_list: list[dict[str, Any]] = []
+
+        for att in attachments:
+            d = dict(att) if isinstance(att, dict) else att.model_dump()
+            src_path = cls._locate_existing_source_file(d)
+            if src_path is None:
+                normalized_list.append(d)
+                continue
+
+            already_in_target_sandbox = False
+            try:
+                src_path.resolve().relative_to(att_dir_resolved)
+                already_in_target_sandbox = True
+            except ValueError:
+                already_in_target_sandbox = False
+
+            if already_in_target_sandbox:
+                stored_name = src_path.name
+                rel_path = f"./{rel_dir}/{stored_name}".replace("\\", "/")
+                d["name"] = d.get("name") or stored_name
+                d["file_path"] = str(src_path.resolve())
+                d["rel_path"] = rel_path
+                d["url"] = f"/api/v1/chat/uploads/ws/{quote(eff_ws_id, safe='')}/{quote(stored_name, safe='')}"
+                try:
+                    from ..repository.artifact_repository import ArtifactRepository
+
+                    f_type = ArtifactRepository._detect_file_type(src_path)
+                    await ArtifactRepository.register_artifact(
+                        workspace_id=eff_ws_id,
+                        file_path=d["file_path"],
+                        file_name=stored_name,
+                        file_type=f_type,
+                        file_size=src_path.stat().st_size,
+                        conversation_id=conversation_id,
+                        source="user_uploaded",
+                        summary=f"用户上传附件 ({rel_path})",
+                    )
+                except Exception as art_err:
+                    logger.debug(f"[AttachmentService] 补齐登记工作区附件跳过: {art_err}")
+                normalized_list.append(d)
+                continue
+
+            # 跨工作区或历史全局目录来源 -> 复制入当前工作区沙盒附件目录并恢复干净文件名
+            preferred_name = str(d.get("name") or "").strip() or src_path.name
+            # 若原文件带 12 位 hex 前缀且 name 未清理，剔除前缀恢复干净文件名
+            if preferred_name == src_path.name and re.match(r"^[0-9a-f]{12}_.+", preferred_name):
+                preferred_name = preferred_name[13:]
+            raw_bytes = src_path.read_bytes()
+            saved = await cls.save_bytes_to_workspace_attachments(
+                workspace_id=eff_ws_id,
+                safe_name=preferred_name,
+                raw_bytes=raw_bytes,
+                conversation_id=conversation_id,
+                register_artifact=True,
+            )
+            d["name"] = saved["stored_name"]
+            d["file_path"] = saved["file_path"]
+            d["rel_path"] = saved["rel_path"]
+            d["url"] = saved["url"]
+            if not d.get("size_str"):
+                d["size_str"] = cls.format_size_str(len(raw_bytes))
+            logger.info(
+                f"[AttachmentService] 已自动将附件 `{preferred_name}` 迁入工作区 [{eff_ws_id}] 沙盒: {saved['file_path']}"
+            )
+            normalized_list.append(d)
+
+        return normalized_list
+
+    @staticmethod
+    def is_path_in_attachments_dir(target_path: Path, workspace_root: Path | None = None) -> bool:
+        """
+        校验给定路径是否位于工作区只读输入附件目录 (`attachments/` 或 `.agenthub/attachments/`) 内。
+        用于物理阻止 Agent 在用户输入区私自写入或伪造 Mock 测试文件。
+        """
+        resolved_target = target_path.resolve()
+        if workspace_root is not None:
+            resolved_root = workspace_root.resolve()
+            try:
+                rel = resolved_target.relative_to(resolved_root)
+                parts_lower = [p.lower() for p in rel.parts]
+                if parts_lower and parts_lower[0] == "attachments":
+                    return True
+                if len(parts_lower) >= 2 and parts_lower[0] == ".agenthub" and parts_lower[1] == "attachments":
+                    return True
+            except ValueError:
+                pass
+
+        # 兜底检查历史上或全局 uploads 目录
+        norm_str = str(resolved_target).replace("\\", "/").lower()
+        if "/data/uploads/" in norm_str:
+            return True
+        return False
+
+    @classmethod
+    def list_workspace_sandbox_attachments(
+        cls,
+        workspace_root: str | Path | None,
+        limit: int = 15,
+    ) -> list[dict[str, Any]]:
+        """
+        扫描指定工作区物理根目录下的真实沙盒附件清单 (`attachments/` 与 `.agenthub/attachments/`)，
+        供 ContextBuilder 主动展示现有原料及 read_local_file 缺失回退提示使用。
+        """
+        if not workspace_root:
+            return []
+        root = Path(workspace_root).resolve()
+        if not root.exists() or not root.is_dir():
+            return []
+
+        items: list[dict[str, Any]] = []
+        candidates = [
+            ("attachments", root / "attachments"),
+            (".agenthub/attachments", root / ".agenthub" / "attachments"),
+        ]
+        for rel_prefix, folder in candidates:
+            if not folder.exists() or not folder.is_dir():
+                continue
+            try:
+                for entry in folder.iterdir():
+                    if not entry.is_file() or entry.name.startswith("."):
+                        continue
+                    try:
+                        st = entry.stat()
+                        items.append({
+                            "name": entry.name,
+                            "rel_path": f"./{rel_prefix}/{entry.name}",
+                            "file_path": str(entry.resolve()),
+                            "size_bytes": st.st_size,
+                            "size_str": cls.format_size_str(st.st_size),
+                            "mtime": st.st_mtime,
+                        })
+                    except OSError:
+                        continue
+            except OSError:
+                continue
+
+        items.sort(key=lambda x: x["mtime"], reverse=True)
+        return items[:max(1, limit)]
+
     @classmethod
     def append_attachments_anchor(cls, user_message: str, attachments: list[Any] | None) -> str:
         """
         将附件元数据以标准锚点块持久化到用户消息正文末尾，
-        既能让前端渲染历史附件徽标与大图，又能防止多步/多轮推理丢失磁盘绝对路径。
+        既能让前端渲染历史附件徽标与大图，又能防止多步/多轮推理丢失工作区相对路径与磁盘绝对路径。
         """
         base = (user_message or "").rstrip()
         if not attachments:
@@ -586,14 +981,17 @@ class AttachmentService:
             d = att if isinstance(att, dict) else att.model_dump()
             name = str(d.get("name") or "附件")
             _, inferred_cat, _ = cls.classify_extension(name)
-            meta_list.append({
+            entry: dict[str, Any] = {
                 "name": name,
                 "file_path": d.get("file_path") or "",
                 "url": d.get("url") or "",
                 "mime_type": d.get("mime_type") or "application/octet-stream",
                 "size_str": d.get("size_str") or "",
                 "category": inferred_cat or ("image" if str(d.get("mime_type") or "").startswith("image/") else "file"),
-            })
+            }
+            if d.get("rel_path"):
+                entry["rel_path"] = d.get("rel_path")
+            meta_list.append(entry)
 
         anchor_json = json.dumps(meta_list, ensure_ascii=False)
         return f"{base}\n\n<agenthub_attachments>{anchor_json}</agenthub_attachments>".strip()
@@ -601,8 +999,8 @@ class AttachmentService:
     @classmethod
     def render_attachments_for_llm_history(cls, content: str) -> str:
         """
-        将历史用户消息中的 <agenthub_attachments> 锚点展开为 LLM 可读的真实物理路径指引，
-        彻底防止模型在多步 ReAct (step_idx > 0) 或跨轮追问中臆测 `./attachments`。
+        将历史用户消息中的 <agenthub_attachments> 锚点展开为 LLM 可读的工作区沙盒路径与绝对路径档案，
+        并重申禁止伪造或用 Mock 文件替代真实附件。
         """
         raw = content or ""
         m = cls.ANCHOR_PATTERN.search(raw)
@@ -618,14 +1016,20 @@ class AttachmentService:
             return clean_body
 
         lines = [
-            "【该轮次附带的本地附件真实路径档案 - 严禁猜想或访问不存在的 `./attachments` 目录】:"
+            "【该轮次附带的当前工作区真实附件档案 - 严禁编造或生成 Mock 数据替代真实文件】:"
         ]
         for item in att_list:
             name = item.get("name", "附件")
             fpath = item.get("file_path", "")
+            rel_path = item.get("rel_path", "")
             cat = item.get("category", "file")
             size_s = item.get("size_str", "")
-            path_part = f"真实磁盘绝对路径: `{fpath}`" if fpath else "暂未持久化物理路径"
+            loc_parts: list[str] = []
+            if rel_path:
+                loc_parts.append(f"工作区相对路径: `{rel_path}`")
+            if fpath:
+                loc_parts.append(f"磁盘绝对路径: `{fpath}`")
+            path_part = " | ".join(loc_parts) if loc_parts else "暂未持久化物理路径"
             lines.append(f"- `{name}` ({cat}, {size_s}) -> {path_part}")
 
         return f"{clean_body}\n\n" + "\n".join(lines) if clean_body else "\n".join(lines)

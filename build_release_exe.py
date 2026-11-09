@@ -1,10 +1,10 @@
 """
-AgentHub Local v1.1.7 独立可执行程序与离线发布包一键构建脚本 (Release EXE Builder)
+AgentHub Local v1.1.8 独立可执行程序与离线发布包一键构建脚本 (Release EXE Builder)
 核心目标：
 1. 使用 PyInstaller 将完整 Python 运行环境、WebView2 宿主外壳与后端 FastAPI 编译为独立的原生绿色免安装目录 (dist/AgentHub/)
 2. 内嵌最新编译的前端静态页面 (static/)、全局默认技能 (skills/) 与 MCP 初始配置 (mcp_servers.json)
 3. 严格过滤源码切片与隐私隔离，确保 0 私有数据/测试代码污染（绝对不包含 uploads、测试账号、旧数据库或历史路径，初次启动自动建全新库）
-4. 一键压缩打包为 AgentHub-Local-v1.1.7-windows-x64.zip，可直接上传发布至 GitHub Releases
+4. 一键压缩打包为 AgentHub-Local-v1.1.8-windows-x64.zip，可直接上传发布至 GitHub Releases
 """
 import os
 import sys
@@ -18,7 +18,7 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 FRONTEND_OUT = FRONTEND_DIR / "out"
 DIST_DIR = BASE_DIR / "dist"
 BUILD_DIR = BASE_DIR / "build"
-RELEASE_VERSION = "v1.1.7"
+RELEASE_VERSION = "v1.1.8"
 APP_NAME = "AgentHub"
 OUTPUT_DIR = DIST_DIR / APP_NAME
 ZIP_NAME = f"AgentHub-Local-{RELEASE_VERSION}-windows-x64.zip"
@@ -116,10 +116,14 @@ def build_pyinstaller_exe():
         "httpx",
         "--collect-all",
         "requests",
+        "--collect-all",
+        "openpyxl",
         "--hidden-import",
         "backend.main",
         "--hidden-import",
         "backend.app.api.router",
+        "--hidden-import",
+        "backend.app.api.v1.artifacts",
         "--hidden-import",
         "backend.app.api.v1.experiences",
         "--hidden-import",
@@ -142,6 +146,8 @@ def build_pyinstaller_exe():
         "backend.app.agent.ui_operator",
         "--hidden-import",
         "backend.app.repository.db",
+        "--hidden-import",
+        "backend.app.repository.artifact_repository",
         "--hidden-import",
         "backend.app.repository.conversation_repository",
         "--hidden-import",

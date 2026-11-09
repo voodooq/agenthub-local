@@ -101,7 +101,7 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
       const res = await apiFetch(`/api/v1/artifacts/${art.id}/content`);
       if (res.ok) {
         const data = await res.json();
-        const canvasType = art.file_type === 'code' ? 'code' : 'html';
+        const canvasType = /\.(html?|htm)$/i.test(art.file_name) ? 'html' : 'code';
         onOpenCanvas(art.file_name, data.content, canvasType);
       }
     } catch (e) {

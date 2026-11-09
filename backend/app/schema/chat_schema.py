@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 class AttachmentItem(BaseModel):
     name: str = Field(..., description="附件文件名")
     file_path: str | None = Field(default=None, description="后端本地物理路径")
+    rel_path: str | None = Field(default=None, description="相对当前工作区的沙盒附件路径")
     url: str | None = Field(default=None, description="前端可访问的静态 URL")
     mime_type: str = Field(default="image/png", description="MIME 类型")
     size_str: str | None = Field(default=None, description="文件大小展示")

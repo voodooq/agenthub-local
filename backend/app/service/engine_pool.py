@@ -72,24 +72,36 @@ class EnginePoolService:
         has_visual_or_pdf = False
 
         if attachments:
+            from pathlib import Path
+
             att_sections: list[str] = []
             for att in attachments:
                 att_dict = att if isinstance(att, dict) else att.model_dump()
                 file_path = att_dict.get("file_path") or ""
+                rel_path = att_dict.get("rel_path") or ""
+                if not rel_path and work_dir and file_path:
+                    try:
+                        rel_calc = Path(file_path).resolve().relative_to(Path(work_dir).resolve())
+                        rel_path = f"./{str(rel_calc).replace(chr(92), '/')}"
+                    except Exception:
+                        rel_path = ""
                 mime_type = att_dict.get("mime_type") or "application/octet-stream"
                 name = att_dict.get("name") or "附件"
                 _, inferred_cat, canonical_mime = attachment_service.classify_extension(name)
                 category = att_dict.get("category") or inferred_cat or ("image" if mime_type.startswith("image/") else "file")
                 effective_mime = canonical_mime or mime_type
 
+                rel_line = f"- 工作区相对路径: `{rel_path}`\n" if rel_path else ""
+
                 if file_path and os.path.exists(file_path):
                     if category == "image" or effective_mime.startswith("image/"):
                         has_visual_or_pdf = True
                         att_sections.append(
                             f"【用户附带上传的本地图片文件】:\n"
-                            f"- 文件名: {name}\n"
+                            f"- 文件名: `{name}`\n"
+                            f"{rel_line}"
                             f"- 磁盘绝对路径: `{file_path}`\n"
-                            f"- 指引: 请结合下方多模态图片画面进行视觉分析；如后续需通过脚本二次处理该图片，必须使用上述真实磁盘绝对路径，严禁猜测 `./attachments`。"
+                            f"- 指引: 请结合多模态图片画面分析；如后续需通过脚本二次处理该图片，必须使用上述真实沙盒路径，严禁自行生成模拟图片。"
                         )
                         try:
                             import base64
@@ -106,9 +118,10 @@ class EnginePoolService:
                         ctx_info = attachment_service.extract_attachment_context(file_path, effective_mime, name)
                         att_sections.append(
                             f"【用户附带上传的 PDF 文档附件】:\n"
-                            f"- 文件名: {name}\n"
+                            f"- 文件名: `{name}`\n"
+                            f"{rel_line}"
                             f"- 磁盘绝对路径: `{file_path}`\n"
-                            f"- 指引: 若需通过工具脚本抽取内容，必须直接使用上述磁盘绝对路径，严禁猜测或访问不存在的 `./attachments` 目录。\n"
+                            f"- 指引: 若需通过脚本抽数，必须直接读取上述真实路径，严禁自行编造文档内容或创建测试替代文件。\n"
                             f"- 说明: {ctx_info.get('preview_text', '')}"
                         )
                         try:
@@ -126,15 +139,16 @@ class EnginePoolService:
                         preview_txt = ctx_info.get("preview_text") or "(未能提取文本预览)"
                         extractor_name = ctx_info.get("extractor") or "none"
                         att_sections.append(
-                            f"【用户附带上传的本地文档附件】:\n"
+                            f"【用户附带上传的本地真实文档附件】:\n"
                             f"- 文件名: `{name}` (分类: {category}, 解析引擎: {extractor_name})\n"
+                            f"{rel_line}"
                             f"- 磁盘绝对路径: `{file_path}`\n"
-                            f"- ⚠️ 路径强约束: 该文件存放在上述真实磁盘绝对路径下，**绝不在 `./attachments` 目录中**！如需运行 Python/终端脚本操作完整文件，请直接使用上述绝对路径。\n"
+                            f"- ⚠️ 真实文件与全量读取约束: 该文件已真实落盘于上述路径。若预览仅展示前几行或大表被截断，严禁仅凭预览推断全表或自行创建 Mock/示例数据替代，必须使用脚本直接读取上述路径全量解析！\n"
                             f"- 文档内容预览:\n```text\n{preview_txt}\n```"
                         )
                 else:
                     att_sections.append(
-                        f"【用户提及附件】: `{name}` (本地磁盘暂未定位到文件 `{file_path}`)"
+                        f"【用户提及附件】: `{name}` (本地磁盘暂未定位到文件 `{file_path}`；严禁自造 Mock 文件替代，请核查沙盒清单或向用户报错确认)"
                     )
 
             if att_sections:

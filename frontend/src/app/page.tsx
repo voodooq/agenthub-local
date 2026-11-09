@@ -132,6 +132,7 @@ export default function WorkbenchPage() {
     category?: AttachmentCategory;
     dataUrl?: string;
     filePath?: string;
+    relPath?: string;
     url?: string;
     mimeType?: string;
     textContent?: string;
@@ -170,14 +171,14 @@ export default function WorkbenchPage() {
       if (savedClarify !== null) {
         setClarifyMode(savedClarify === 'true');
       }
-    } catch {}
+    } catch { }
   }, []);
 
   const handleSwitchExecStrategy = (strategy: ExecutionStrategy) => {
     setExecutionStrategy(strategy);
     try {
       localStorage.setItem('agenthub_exec_strategy', strategy);
-    } catch {}
+    } catch { }
   };
 
   const handleToggleClarifyMode = () => {
@@ -185,7 +186,7 @@ export default function WorkbenchPage() {
       const next = !prev;
       try {
         localStorage.setItem('agenthub_clarify_mode', String(next));
-      } catch {}
+      } catch { }
       return next;
     });
   };
@@ -246,7 +247,7 @@ export default function WorkbenchPage() {
         const data = await res.json();
         setPendingProposals(Array.isArray(data.proposals) ? data.proposals : []);
       }
-    } catch (e) {}
+    } catch (e) { }
   }, [activeConvId]);
 
   const [canvasState, setCanvasState] = useState<{
@@ -326,9 +327,9 @@ export default function WorkbenchPage() {
       if (e.key === 'F11') {
         e.preventDefault();
         if (!document.fullscreenElement) {
-          document.documentElement.requestFullscreen().catch(() => {});
+          document.documentElement.requestFullscreen().catch(() => { });
         } else {
-          document.exitFullscreen().catch(() => {});
+          document.exitFullscreen().catch(() => { });
         }
       }
     };
@@ -345,7 +346,7 @@ export default function WorkbenchPage() {
           setCpuPercent(json?.cpu?.usage_percent || 18);
           setMemPercent(json?.memory?.percent || 42);
         }
-      } catch (e) {}
+      } catch (e) { }
     };
     fetchQuickMetrics();
     const timer = setInterval(fetchQuickMetrics, 5000);
@@ -362,7 +363,7 @@ export default function WorkbenchPage() {
       } else {
         setActiveLoop(null);
       }
-    } catch (e) {}
+    } catch (e) { }
   }, [activeWorkspaceId]);
 
   useEffect(() => {
@@ -569,7 +570,7 @@ export default function WorkbenchPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ scene_mode: nextMode }),
         });
-      } catch (e) {}
+      } catch (e) { }
     }
   };
 
@@ -583,7 +584,7 @@ export default function WorkbenchPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ incognito: nextVal }),
         });
-      } catch (e) {}
+      } catch (e) { }
     }
   };
 
@@ -596,7 +597,7 @@ export default function WorkbenchPage() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ clear_working_memory: true }),
         });
-      } catch (e) {}
+      } catch (e) { }
     }
   };
 
@@ -641,7 +642,7 @@ export default function WorkbenchPage() {
           setPendingActionCount((prev) => prev + 1);
         }
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   const handleProposeProcessKill = async (proc: { pid: number; name: string; memory_mb: number }) => {
@@ -659,7 +660,7 @@ export default function WorkbenchPage() {
         setIsActionDrawerOpen(true);
         setPendingActionCount((prev) => prev + 1);
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   const handleSendMessage = async (
@@ -671,18 +672,19 @@ export default function WorkbenchPage() {
     const usingOverrideAttachments = Array.isArray(overrideAttachments);
     const currentAttachments: AttachmentItem[] = usingOverrideAttachments
       ? overrideAttachments.map((att) => ({
-          name: att.name,
-          size: att.size_str || '',
-          type: att.category === 'image' || Boolean(att.mime_type?.startsWith('image/'))
-            ? 'image'
-            : att.category === 'text'
+        name: att.name,
+        size: att.size_str || '',
+        type: att.category === 'image' || Boolean(att.mime_type?.startsWith('image/'))
+          ? 'image'
+          : att.category === 'text'
             ? 'text'
             : 'file',
-          category: att.category as AttachmentCategory | undefined,
-          filePath: att.file_path,
-          url: att.url,
-          mimeType: att.mime_type,
-        }))
+        category: att.category as AttachmentCategory | undefined,
+        filePath: att.file_path,
+        relPath: att.rel_path,
+        url: att.url,
+        mimeType: att.mime_type,
+      }))
       : [...attachments];
     const rawPrompt = (customPrompt || inputPrompt).trim()
       || (currentAttachments.length > 0 && !customPrompt ? '请结合附带的文件或图片内容进行分析解答。' : '');
@@ -709,6 +711,7 @@ export default function WorkbenchPage() {
       currentAttachments.map((att) => ({
         name: att.name,
         file_path: att.filePath,
+        rel_path: att.relPath,
         url: att.url || att.dataUrl,
         mime_type: att.mimeType,
         size_str: att.size,
@@ -751,7 +754,7 @@ export default function WorkbenchPage() {
           const userSuffix = promptToSend.replace(/^\/optimize-(design|dev)\s*/, '');
           promptToSend = `【${isDesign ? '设计创意显存护航' : '代码开发环境优化'}体检请求】\n用户需求：${userSuffix || '请全面分析当前系统硬件指标并给出调优建议'}\n\n<system_telemetry_snapshot>\n${JSON.stringify(snapJson, null, 2)}\n</system_telemetry_snapshot>`;
         }
-      } catch (e) {}
+      } catch (e) { }
     }
 
     if (promptToSend.includes('@hardware') && !promptToSend.includes('<system_telemetry_snapshot>')) {
@@ -761,7 +764,7 @@ export default function WorkbenchPage() {
           const snapJson = await snapRes.json();
           promptToSend += `\n\n<system_telemetry_snapshot>\n${JSON.stringify(snapJson, null, 2)}\n</system_telemetry_snapshot>`;
         }
-      } catch (e) {}
+      } catch (e) { }
     }
 
     setIsStreaming(true);
@@ -801,7 +804,7 @@ export default function WorkbenchPage() {
             setActiveLoop(loopData);
           }
         })
-        .catch(() => {});
+        .catch(() => { });
     }
 
     try {
@@ -810,7 +813,7 @@ export default function WorkbenchPage() {
       try {
         const savedRounds = localStorage.getItem('agenthub_context_rounds') || localStorage.getItem('geminihub_context_rounds');
         if (savedRounds !== null) memoryRounds = parseInt(savedRounds, 10);
-      } catch (e) {}
+      } catch (e) { }
 
       const response = await apiFetch('/api/v1/chat/stream', {
         method: 'POST',
@@ -832,6 +835,7 @@ export default function WorkbenchPage() {
           attachments: currentAttachments.map((a) => ({
             name: a.name,
             file_path: a.filePath,
+            rel_path: a.relPath,
             url: a.url,
             mime_type: a.mimeType || 'image/png',
             size_str: a.size,
@@ -962,8 +966,8 @@ export default function WorkbenchPage() {
                   parsed.type === 'require_approval'
                     ? 'require_approval'
                     : parsed.type === 'tool_start'
-                    ? 'running'
-                    : parsed.status || 'completed';
+                      ? 'running'
+                      : parsed.status || 'completed';
 
                 const nextItem: ToolExecutionCardItem = {
                   call_id: parsed.call_id,
@@ -1171,6 +1175,7 @@ export default function WorkbenchPage() {
           const { file, category, canonicalMime } = item;
           try {
             const formData = new FormData();
+            formData.append('workspace_id', activeWorkspaceId || 'default');
             formData.append('file', file);
             const res = await apiFetch('/api/v1/chat/upload', {
               method: 'POST',
@@ -1181,7 +1186,7 @@ export default function WorkbenchPage() {
               try {
                 const errJson = await res.json();
                 if (errJson?.detail) errDetail = String(errJson.detail);
-              } catch {}
+              } catch { }
               rejections.push(errDetail);
               continue;
             }
@@ -1195,6 +1200,7 @@ export default function WorkbenchPage() {
               category: (json.category || category) as AttachmentCategory,
               dataUrl,
               filePath: json.file_path,
+              relPath: json.rel_path,
               url: json.url,
               mimeType: json.mime_type || canonicalMime,
             });
@@ -1339,6 +1345,9 @@ export default function WorkbenchPage() {
     if (language === 'mermaid') {
       canvasType = 'mermaid';
       title = customTitle || 'Mermaid 架构拓扑预览';
+    } else if (language === 'html' || language === 'htm') {
+      canvasType = 'html';
+      title = customTitle || 'HTML 交互画布预览';
     } else if (language === 'image') {
       canvasType = 'image';
       if (customTitle) {
@@ -1537,11 +1546,10 @@ export default function WorkbenchPage() {
             {/* Canvas 画布极简入口 */}
             <button
               onClick={() => setCanvasState((prev) => ({ ...prev, isOpen: !prev.isOpen }))}
-              className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs transition-all ${
-                canvasState.isOpen
+              className={`flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs transition-all ${canvasState.isOpen
                   ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 font-medium'
                   : 'text-muted-foreground hover:text-foreground hover:bg-surface-200/70'
-              }`}
+                }`}
               title="呼出/隐藏 Canvas 画布"
             >
               <PanelRight className="w-3.5 h-3.5" />
@@ -1609,164 +1617,303 @@ export default function WorkbenchPage() {
             </div>
 
             {/* 顶部置顶任务草稿纸条 (Sticky Scratchpad Bar)：仅当 workingMemory 非空时显示 */}
-        {workingMemory && Object.keys(workingMemory).length > 0 && (
-          <div className="px-4 md:px-12 lg:px-24 py-2 border-b border-amber-500/25 bg-amber-500/5 flex items-center justify-between text-xs animate-fade-in">
-            <div className="flex items-center space-x-2 min-w-0 flex-1">
-              <ClipboardList className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-              <span className="font-semibold text-amber-600 dark:text-amber-400 shrink-0">
-                当前任务草稿:
-              </span>
-              <span className="text-foreground truncate font-mono text-[11px]">
-                {workingMemory.goal ? `[目标: ${workingMemory.goal}] ` : ''}
-                {workingMemory.notes ? JSON.stringify(workingMemory.notes) : JSON.stringify(workingMemory)}
-              </span>
-            </div>
-            <button
-              type="button"
-              onClick={handleClearScratchpad}
-              className="ml-3 px-2 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 text-[11px] font-medium shrink-0 transition-colors"
-              title="任务已结束？一键重置清空工作草稿纸"
-            >
-              清空草稿
-            </button>
-          </div>
-        )}
+            {workingMemory && Object.keys(workingMemory).length > 0 && (
+              <div className="px-4 md:px-12 lg:px-24 py-2 border-b border-amber-500/25 bg-amber-500/5 flex items-center justify-between text-xs animate-fade-in">
+                <div className="flex items-center space-x-2 min-w-0 flex-1">
+                  <ClipboardList className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  <span className="font-semibold text-amber-600 dark:text-amber-400 shrink-0">
+                    当前任务草稿:
+                  </span>
+                  <span className="text-foreground truncate font-mono text-[11px]">
+                    {workingMemory.goal ? `[目标: ${workingMemory.goal}] ` : ''}
+                    {workingMemory.notes ? JSON.stringify(workingMemory.notes) : JSON.stringify(workingMemory)}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleClearScratchpad}
+                  className="ml-3 px-2 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/25 text-amber-700 dark:text-amber-300 text-[11px] font-medium shrink-0 transition-colors"
+                  title="任务已结束？一键重置清空工作草稿纸"
+                >
+                  清空草稿
+                </button>
+              </div>
+            )}
 
-        {/* 聊天气泡列表 / 欢迎卡片 */}
-        <div className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-6 space-y-6">
-          {messages.length === 0 ? (
-            <PromptStarterCards onSelectPrompt={(text) => handleSendMessage(text)} />
-          ) : (
-            messages.map((msg, index) => {
-              const isUser = msg.role === 'user';
-              return (
-                <div key={msg.id || index} className={`flex flex-col space-y-2.5 group ${isUser ? 'items-end' : 'items-start'}`}>
-                  {/* 发言角色标志 */}
-                  <div className="flex items-center space-x-2 px-1 text-xs text-muted-foreground">
-                    {isUser ? (
-                      <span className="font-semibold text-foreground">您</span>
-                    ) : (
-                      <div className="flex items-center space-x-2">
-                        <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
-                        {(() => {
-                          const rawModel = msg.downgrade_info?.current_model || msg.model_name || currentModel || '';
-                          const isGemini = rawModel.toLowerCase().includes('gemini');
-                          const modelDisplayName = isGemini ? `Gemini (${rawModel})` : (rawModel || 'AI Assistant');
-                          return (
-                            <span className="font-bold text-foreground">
-                              {modelDisplayName}
+            {/* 聊天气泡列表 / 欢迎卡片 */}
+            <div className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-6 space-y-6">
+              {messages.length === 0 ? (
+                <PromptStarterCards onSelectPrompt={(text) => handleSendMessage(text)} />
+              ) : (
+                messages.map((msg, index) => {
+                  const isUser = msg.role === 'user';
+                  return (
+                    <div key={msg.id || index} className={`flex flex-col space-y-2.5 group ${isUser ? 'items-end' : 'items-start'}`}>
+                      {/* 发言角色标志 */}
+                      <div className="flex items-center space-x-2 px-1 text-xs text-muted-foreground">
+                        {isUser ? (
+                          <span className="font-semibold text-foreground">您</span>
+                        ) : (
+                          <div className="flex items-center space-x-2">
+                            <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
+                            {(() => {
+                              const rawModel = msg.downgrade_info?.current_model || msg.model_name || currentModel || '';
+                              const isGemini = rawModel.toLowerCase().includes('gemini');
+                              const modelDisplayName = isGemini ? `Gemini (${rawModel})` : (rawModel || 'AI Assistant');
+                              return (
+                                <span className="font-bold text-foreground">
+                                  {modelDisplayName}
+                                </span>
+                              );
+                            })()}
+                            {msg.downgrade_info && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 font-medium flex items-center space-x-1">
+                                <AlertTriangle className="w-2.5 h-2.5 text-amber-500" />
+                                <span>已自动降级</span>
+                              </span>
+                            )}
+                            {msg.executed_by_account && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-200 border border-border font-mono">
+                                调度: {msg.executed_by_account}
+                              </span>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 模型自动降级提示横幅 */}
+                      {!isUser && msg.downgrade_info && (
+                        <div className="flex items-start space-x-2.5 px-3.5 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-200 text-xs animate-fade-in shadow-xs max-w-[88%] md:max-w-[82%]">
+                          <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                          <div className="flex-1 leading-snug">
+                            <span className="font-bold text-amber-700 dark:text-amber-300 mr-1.5">[模型自动降级通知]:</span>
+                            <span>
+                              原模型 <code className="font-mono bg-amber-500/20 px-1.5 py-0.5 rounded text-[11px] font-semibold">{msg.downgrade_info.original_model}</code> 响应受限或配额耗尽，系统已自动无缝降级切换至高可用模型 <code className="font-mono bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 px-1.5 py-0.5 rounded text-[11px] font-bold">{msg.downgrade_info.current_model}</code> 继续生成。右侧模型选择器已自动同步跳至该模型！
                             </span>
-                          );
-                        })()}
-                        {msg.downgrade_info && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 font-medium flex items-center space-x-1">
-                            <AlertTriangle className="w-2.5 h-2.5 text-amber-500" />
-                            <span>已自动降级</span>
-                          </span>
-                        )}
-                        {msg.executed_by_account && (
-                          <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-200 border border-border font-mono">
-                            调度: {msg.executed_by_account}
-                          </span>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* 模型自动降级提示横幅 */}
-                  {!isUser && msg.downgrade_info && (
-                    <div className="flex items-start space-x-2.5 px-3.5 py-2 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-800 dark:text-amber-200 text-xs animate-fade-in shadow-xs max-w-[88%] md:max-w-[82%]">
-                      <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                      <div className="flex-1 leading-snug">
-                        <span className="font-bold text-amber-700 dark:text-amber-300 mr-1.5">[模型自动降级通知]:</span>
-                        <span>
-                          原模型 <code className="font-mono bg-amber-500/20 px-1.5 py-0.5 rounded text-[11px] font-semibold">{msg.downgrade_info.original_model}</code> 响应受限或配额耗尽，系统已自动无缝降级切换至高可用模型 <code className="font-mono bg-emerald-500/20 text-emerald-800 dark:text-emerald-300 px-1.5 py-0.5 rounded text-[11px] font-bold">{msg.downgrade_info.current_model}</code> 继续生成。右侧模型选择器已自动同步跳至该模型！
-                        </span>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* 步数自适应扩展与深度自愈横幅 */}
-                  {!isUser && msg.step_extend_info && (
-                    <div className="flex items-start space-x-2.5 px-3.5 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-800 dark:text-indigo-200 text-xs animate-fade-in shadow-xs max-w-[88%] md:max-w-[82%]">
-                      <Sparkles className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5 animate-pulse" />
-                      <div className="flex-1 leading-snug">
-                        <span className="font-bold text-indigo-600 dark:text-indigo-300 mr-1.5">[自主推演与动态扩展]:</span>
-                        <span>{msg.step_extend_info.message}</span>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* 思考过程展开收起卡片 */}
-                  {!isUser && msg.thinking && (
-                    <ThinkingBlock content={msg.thinking} isStreaming={isStreaming && index === messages.length - 1} />
-                  )}
-
-                  {/* 确定性事实视图与长期记忆引用溯源微提示 */}
-                  {!isUser && ((msg.fact_refs && msg.fact_refs.length > 0) || (msg.memory_refs && msg.memory_refs.length > 0)) && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      {msg.fact_refs && msg.fact_refs.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setMemoryHubInitialTab('facts');
-                            setIsMemoryHubOpen(true);
-                          }}
-                          className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-teal-500/10 hover:bg-teal-500/15 border border-teal-500/25 text-[11px] text-teal-700 dark:text-teal-300 transition-colors"
-                          title={msg.fact_refs.map((f) => `• [${f.scope === 'global' ? '全局' : '工作区'}] ${f.fact_key} = ${f.fact_value}`).join('\n')}
-                        >
-                          <span>📌 已激活 {msg.fact_refs.length} 项工作区确定性事实（点击查看双时间轴）</span>
-                        </button>
+                          </div>
+                        </div>
                       )}
-                      {msg.memory_refs && msg.memory_refs.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setMemoryHubInitialTab('memories');
-                            setIsMemoryHubOpen(true);
-                          }}
-                          className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/15 border border-emerald-500/20 text-[11px] text-emerald-600 dark:text-emerald-400 transition-colors"
-                          title={msg.memory_refs.map((m) => `• ${m.content}`).join('\n')}
-                        >
-                          <Brain className="w-3 h-3 text-emerald-500" />
-                          <span>已引用 {msg.memory_refs.length} 条长期个人偏好（点击查看或管理）</span>
-                        </button>
-                      )}
-                    </div>
-                  )}
 
-                  {/* 消息正文主体：大字体、高清晰度、长 Token 强制自然折行（过滤纯工具执行时的无内容空白卡片） */}
-                  {(isUser || msg.content || (isStreaming && index === messages.length - 1 && (!msg.tool_events || msg.tool_events.length === 0))) && (
-                    <div
-                      className={`max-w-[88%] md:max-w-[82%] rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] break-anywhere shadow-sm ${
-                        isUser
-                          ? 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-950 dark:text-emerald-100 border border-emerald-300/60 dark:border-emerald-500/30 rounded-tr-none shadow-emerald-500/5'
-                          : 'bg-surface-card text-foreground rounded-tl-none border border-border/80'
-                      }`}
-                    >
-                      {isUser ? (
-                        (() => {
-                          const { cleanContent: userBody, parsedAttachments } = parseMessageAttachments(msg.content);
-                          return (
-                            <div className="text-emerald-950 dark:text-emerald-100 break-anywhere space-y-2.5">
-                              {userBody && (
+                      {/* 步数自适应扩展与深度自愈横幅 */}
+                      {!isUser && msg.step_extend_info && (
+                        <div className="flex items-start space-x-2.5 px-3.5 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-800 dark:text-indigo-200 text-xs animate-fade-in shadow-xs max-w-[88%] md:max-w-[82%]">
+                          <Sparkles className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5 animate-pulse" />
+                          <div className="flex-1 leading-snug">
+                            <span className="font-bold text-indigo-600 dark:text-indigo-300 mr-1.5">[自主推演与动态扩展]:</span>
+                            <span>{msg.step_extend_info.message}</span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* 思考过程展开收起卡片 */}
+                      {!isUser && msg.thinking && (
+                        <ThinkingBlock content={msg.thinking} isStreaming={isStreaming && index === messages.length - 1} />
+                      )}
+
+                      {/* 确定性事实视图与长期记忆引用溯源微提示 */}
+                      {!isUser && ((msg.fact_refs && msg.fact_refs.length > 0) || (msg.memory_refs && msg.memory_refs.length > 0)) && (
+                        <div className="flex flex-wrap items-center gap-2">
+                          {msg.fact_refs && msg.fact_refs.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMemoryHubInitialTab('facts');
+                                setIsMemoryHubOpen(true);
+                              }}
+                              className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-teal-500/10 hover:bg-teal-500/15 border border-teal-500/25 text-[11px] text-teal-700 dark:text-teal-300 transition-colors"
+                              title={msg.fact_refs.map((f) => `• [${f.scope === 'global' ? '全局' : '工作区'}] ${f.fact_key} = ${f.fact_value}`).join('\n')}
+                            >
+                              <span>📌 已激活 {msg.fact_refs.length} 项工作区确定性事实（点击查看双时间轴）</span>
+                            </button>
+                          )}
+                          {msg.memory_refs && msg.memory_refs.length > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setMemoryHubInitialTab('memories');
+                                setIsMemoryHubOpen(true);
+                              }}
+                              className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/15 border border-emerald-500/20 text-[11px] text-emerald-600 dark:text-emerald-400 transition-colors"
+                              title={msg.memory_refs.map((m) => `• ${m.content}`).join('\n')}
+                            >
+                              <Brain className="w-3 h-3 text-emerald-500" />
+                              <span>已引用 {msg.memory_refs.length} 条长期个人偏好（点击查看或管理）</span>
+                            </button>
+                          )}
+                        </div>
+                      )}
+
+                      {/* 消息正文主体：大字体、高清晰度、长 Token 强制自然折行（过滤纯工具执行时的无内容空白卡片） */}
+                      {(isUser || msg.content || (isStreaming && index === messages.length - 1 && (!msg.tool_events || msg.tool_events.length === 0))) && (
+                        <div
+                          className={`max-w-[88%] md:max-w-[82%] rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] break-anywhere shadow-sm ${isUser
+                              ? 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-950 dark:text-emerald-100 border border-emerald-300/60 dark:border-emerald-500/30 rounded-tr-none shadow-emerald-500/5'
+                              : 'bg-surface-card text-foreground rounded-tl-none border border-border/80'
+                            }`}
+                        >
+                          {isUser ? (
+                            (() => {
+                              const { cleanContent: userBody, parsedAttachments } = parseMessageAttachments(msg.content);
+                              return (
+                                <div className="text-emerald-950 dark:text-emerald-100 break-anywhere space-y-2.5">
+                                  {userBody && (
+                                    <ReactMarkdown
+                                      remarkPlugins={[remarkGfm]}
+                                      components={{
+                                        img({ node, src, alt, ...props }: any) {
+                                          if (!src) return null;
+                                          return (
+                                            <span className="block my-2">
+                                              <img
+                                                src={src}
+                                                alt={alt || '附带图片'}
+                                                className="rounded-xl border border-emerald-500/20 max-w-full h-auto object-cover max-h-[360px] cursor-pointer shadow-md hover:opacity-95 transition-opacity"
+                                                onClick={() => handleOpenCanvas(src, 'image', alt ? `附带图片: ${alt}` : '上传图片原图预览')}
+                                                {...props}
+                                              />
+                                              {alt && (
+                                                <span className="block text-[11px] text-emerald-700 dark:text-emerald-300 mt-1 opacity-80">
+                                                  {alt}
+                                                </span>
+                                              )}
+                                            </span>
+                                          );
+                                        },
+                                      }}
+                                    >
+                                      {userBody}
+                                    </ReactMarkdown>
+                                  )}
+
+                                  {parsedAttachments.length > 0 && (
+                                    <div className="flex flex-col gap-2 pt-1">
+                                      {parsedAttachments.map((att, attIdx) => {
+                                        const isImg =
+                                          att.category === 'image' ||
+                                          Boolean(att.mime_type && att.mime_type.startsWith('image/'));
+                                        if (isImg && att.url) {
+                                          return (
+                                            <div key={attIdx} className="block">
+                                              <img
+                                                src={att.url}
+                                                alt={att.name}
+                                                className="rounded-xl border border-emerald-500/25 max-w-full h-auto object-cover max-h-[320px] cursor-pointer shadow-md hover:opacity-95 transition-opacity"
+                                                onClick={() =>
+                                                  handleOpenCanvas(att.url || '', 'image', `附带图片: ${att.name}`)
+                                                }
+                                              />
+                                              <div className="text-[11px] text-emerald-800 dark:text-emerald-300 mt-1 opacity-80 flex items-center gap-1.5">
+                                                <span>{att.name}</span>
+                                                {att.size_str && <span>· {att.size_str}</span>}
+                                              </div>
+                                            </div>
+                                          );
+                                        }
+
+                                        const isSheet = att.name.toLowerCase().endsWith('.xlsx');
+                                        const isPdf = att.name.toLowerCase().endsWith('.pdf') || att.category === 'pdf';
+                                        return (
+                                          <a
+                                            key={attIdx}
+                                            href={att.url || '#'}
+                                            target="_blank"
+                                            rel="noopener noreferrer"
+                                            onClick={(ev) => {
+                                              if (!att.url) ev.preventDefault();
+                                            }}
+                                            title={
+                                              att.rel_path
+                                                ? `工作区沙盒路径: ${att.rel_path}${att.file_path ? `\n物理路径: ${att.file_path}` : ''}`
+                                                : att.file_path
+                                                  ? `本地路径: ${att.file_path}`
+                                                  : att.name
+                                            }
+                                            className="flex items-center space-x-2.5 px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/20 border border-emerald-500/30 text-xs text-emerald-950 dark:text-emerald-100 transition-colors max-w-full"
+                                          >
+                                            {isSheet ? (
+                                              <FileSpreadsheet className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                            ) : (
+                                              <FileText
+                                                className={`w-4 h-4 shrink-0 ${isPdf
+                                                    ? 'text-rose-500 dark:text-rose-400'
+                                                    : 'text-emerald-600 dark:text-emerald-400'
+                                                  }`}
+                                              />
+                                            )}
+                                            <span className="font-medium truncate">{att.name}</span>
+                                            {att.size_str && (
+                                              <span className="text-[11px] opacity-75 shrink-0 font-mono">
+                                                {att.size_str}
+                                              </span>
+                                            )}
+                                          </a>
+                                        );
+                                      })}
+                                    </div>
+                                  )}
+                                </div>
+                              );
+                            })()
+                          ) : (
+                            <div className="prose dark:prose-invert max-w-none text-foreground break-anywhere">
+                              {msg.content ? (
                                 <ReactMarkdown
                                   remarkPlugins={[remarkGfm]}
                                   components={{
+                                    code({ node, inline, className, children, ...props }: any) {
+                                      const match = /language-(\w+)/.exec(className || '');
+                                      const language = match ? match[1] : '';
+                                      const codeString = String(children).replace(/\n$/, '');
+
+                                      if (!inline && language === 'interactive_inquiry') {
+                                        return (
+                                          <InteractiveInquiryCard
+                                            rawContent={codeString}
+                                            onSendFeedback={(feedback, confirmedFacts) =>
+                                              handleSendMessage(feedback, undefined, confirmedFacts)
+                                            }
+                                            onFillTemplate={(tmpl) => handleFillTemplateToInput(tmpl)}
+                                            onApprovePlan={(steps, feedback, confirmedFacts) =>
+                                              handleApproveAndExecutePlan(steps, feedback, confirmedFacts)
+                                            }
+                                            isStreaming={isStreaming && msg.id === messages[messages.length - 1]?.id}
+                                          />
+                                        );
+                                      }
+
+                                      if (!inline && language) {
+                                        return (
+                                          <CodeBlock
+                                            code={codeString}
+                                            language={language}
+                                            onSendToCanvas={(c: string, l: string) => handleOpenCanvas(c, l)}
+                                            onSaveToWorkspace={handleSaveCodeToWorkspace}
+                                          />
+                                        );
+                                      }
+                                      return (
+                                        <code
+                                          className="bg-surface-200 border border-border px-1.5 py-0.5 rounded font-mono text-[12px] text-amber-600 dark:text-amber-300 break-anywhere"
+                                          {...props}
+                                        >
+                                          {children}
+                                        </code>
+                                      );
+                                    },
                                     img({ node, src, alt, ...props }: any) {
                                       if (!src) return null;
                                       return (
-                                        <span className="block my-2">
+                                        <span className="block my-3">
                                           <img
                                             src={src}
-                                            alt={alt || '附带图片'}
-                                            className="rounded-xl border border-emerald-500/20 max-w-full h-auto object-cover max-h-[360px] cursor-pointer shadow-md hover:opacity-95 transition-opacity"
-                                            onClick={() => handleOpenCanvas(src, 'image', alt ? `附带图片: ${alt}` : '上传图片原图预览')}
+                                            alt={alt || 'AI 生成插画'}
+                                            className="rounded-xl border border-border shadow-lg max-w-full h-auto object-cover max-h-[512px] hover:scale-[1.01] transition-transform cursor-pointer"
+                                            onClick={() => handleOpenCanvas(src, 'image', alt ? `画作预览: ${alt}` : '生成的 AI 画作原图预览')}
                                             {...props}
                                           />
                                           {alt && (
-                                            <span className="block text-[11px] text-emerald-700 dark:text-emerald-300 mt-1 opacity-80">
-                                              {alt}
+                                            <span className="block text-xs text-muted-foreground mt-1 italic text-center">
+                                              {alt}（点击可在右侧画布全屏查看大图）
                                             </span>
                                           )}
                                         </span>
@@ -1774,580 +1921,440 @@ export default function WorkbenchPage() {
                                     },
                                   }}
                                 >
-                                  {userBody}
+                                  {normalizeEscapedContent(msg.content)}
                                 </ReactMarkdown>
-                              )}
-
-                              {parsedAttachments.length > 0 && (
-                                <div className="flex flex-col gap-2 pt-1">
-                                  {parsedAttachments.map((att, attIdx) => {
-                                    const isImg =
-                                      att.category === 'image' ||
-                                      Boolean(att.mime_type && att.mime_type.startsWith('image/'));
-                                    if (isImg && att.url) {
-                                      return (
-                                        <div key={attIdx} className="block">
-                                          <img
-                                            src={att.url}
-                                            alt={att.name}
-                                            className="rounded-xl border border-emerald-500/25 max-w-full h-auto object-cover max-h-[320px] cursor-pointer shadow-md hover:opacity-95 transition-opacity"
-                                            onClick={() =>
-                                              handleOpenCanvas(att.url || '', 'image', `附带图片: ${att.name}`)
-                                            }
-                                          />
-                                          <div className="text-[11px] text-emerald-800 dark:text-emerald-300 mt-1 opacity-80 flex items-center gap-1.5">
-                                            <span>{att.name}</span>
-                                            {att.size_str && <span>· {att.size_str}</span>}
-                                          </div>
-                                        </div>
-                                      );
-                                    }
-
-                                    const isSheet = att.name.toLowerCase().endsWith('.xlsx');
-                                    const isPdf = att.name.toLowerCase().endsWith('.pdf') || att.category === 'pdf';
-                                    return (
-                                      <a
-                                        key={attIdx}
-                                        href={att.url || '#'}
-                                        target="_blank"
-                                        rel="noopener noreferrer"
-                                        onClick={(ev) => {
-                                          if (!att.url) ev.preventDefault();
-                                        }}
-                                        title={att.file_path ? `本地路径: ${att.file_path}` : att.name}
-                                        className="flex items-center space-x-2.5 px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/20 border border-emerald-500/30 text-xs text-emerald-950 dark:text-emerald-100 transition-colors max-w-full"
-                                      >
-                                        {isSheet ? (
-                                          <FileSpreadsheet className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-                                        ) : (
-                                          <FileText
-                                            className={`w-4 h-4 shrink-0 ${
-                                              isPdf
-                                                ? 'text-rose-500 dark:text-rose-400'
-                                                : 'text-emerald-600 dark:text-emerald-400'
-                                            }`}
-                                          />
-                                        )}
-                                        <span className="font-medium truncate">{att.name}</span>
-                                        {att.size_str && (
-                                          <span className="text-[11px] opacity-75 shrink-0 font-mono">
-                                            {att.size_str}
-                                          </span>
-                                        )}
-                                      </a>
-                                    );
-                                  })}
+                              ) : (
+                                <div className="flex items-center space-x-2 text-muted-foreground text-xs py-1">
+                                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
+                                  <span>正在调度本地执行与安全分析...</span>
                                 </div>
                               )}
-                            </div>
-                          );
-                        })()
-                      ) : (
-                        <div className="prose dark:prose-invert max-w-none text-foreground break-anywhere">
-                          {msg.content ? (
-                            <ReactMarkdown
-                              remarkPlugins={[remarkGfm]}
-                              components={{
-                                code({ node, inline, className, children, ...props }: any) {
-                                  const match = /language-(\w+)/.exec(className || '');
-                                  const language = match ? match[1] : '';
-                                  const codeString = String(children).replace(/\n$/, '');
-
-                                  if (!inline && language === 'interactive_inquiry') {
-                                    return (
-                                      <InteractiveInquiryCard
-                                        rawContent={codeString}
-                                        onSendFeedback={(feedback, confirmedFacts) =>
-                                          handleSendMessage(feedback, undefined, confirmedFacts)
-                                        }
-                                        onFillTemplate={(tmpl) => handleFillTemplateToInput(tmpl)}
-                                        onApprovePlan={(steps, feedback, confirmedFacts) =>
-                                          handleApproveAndExecutePlan(steps, feedback, confirmedFacts)
-                                        }
-                                        isStreaming={isStreaming && msg.id === messages[messages.length - 1]?.id}
-                                      />
-                                    );
-                                  }
-
-                                  if (!inline && language) {
-                                    return (
-                                      <CodeBlock
-                                        code={codeString}
-                                        language={language}
-                                        onSendToCanvas={(c: string, l: string) => handleOpenCanvas(c, l)}
-                                        onSaveToWorkspace={handleSaveCodeToWorkspace}
-                                      />
-                                    );
-                                  }
-                                  return (
-                                    <code
-                                      className="bg-surface-200 border border-border px-1.5 py-0.5 rounded font-mono text-[12px] text-amber-600 dark:text-amber-300 break-anywhere"
-                                      {...props}
-                                    >
-                                      {children}
-                                    </code>
-                                  );
-                                },
-                                img({ node, src, alt, ...props }: any) {
-                                  if (!src) return null;
-                                  return (
-                                    <span className="block my-3">
-                                      <img
-                                        src={src}
-                                        alt={alt || 'AI 生成插画'}
-                                        className="rounded-xl border border-border shadow-lg max-w-full h-auto object-cover max-h-[512px] hover:scale-[1.01] transition-transform cursor-pointer"
-                                        onClick={() => handleOpenCanvas(src, 'image', alt ? `画作预览: ${alt}` : '生成的 AI 画作原图预览')}
-                                        {...props}
-                                      />
-                                      {alt && (
-                                        <span className="block text-xs text-muted-foreground mt-1 italic text-center">
-                                          {alt}（点击可在右侧画布全屏查看大图）
-                                        </span>
-                                      )}
-                                    </span>
-                                  );
-                                },
-                              }}
-                            >
-                              {normalizeEscapedContent(msg.content)}
-                            </ReactMarkdown>
-                          ) : (
-                            <div className="flex items-center space-x-2 text-muted-foreground text-xs py-1">
-                              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
-                              <span>正在调度本地执行与安全分析...</span>
                             </div>
                           )}
                         </div>
                       )}
-                    </div>
-                  )}
 
-                  {/* 内联终端工具调用与安全审批卡片：跟随在思考过程与正文输出之后的最底端，避免被上方长内容顶走 */}
-                  {!isUser && msg.tool_events && msg.tool_events.length > 0 && (
-                    <InlineToolCard
-                      events={msg.tool_events}
-                      onApprove={handleApproveToolCall}
-                    />
-                  )}
-
-                  {/* AI 消息交互底栏 */}
-                  {!isUser && msg.content && (
-                    <MessageActions
-                      content={msg.content}
-                      onModifyTone={handleModifyTone}
-                      onRegenerate={() => {
-                        const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
-                        if (lastUserMsg) {
-                          const { cleanContent, parsedAttachments } = parseMessageAttachments(lastUserMsg.content);
-                          handleSendMessage(
-                            cleanContent || (parsedAttachments.length > 0 ? '请结合附带的文件或图片内容进行分析解答。' : ''),
-                            undefined,
-                            undefined,
-                            parsedAttachments.length > 0 ? parsedAttachments : undefined
-                          );
-                        }
-                      }}
-                    />
-                  )}
-                </div>
-              );
-            })
-          )}
-          {pendingProposals.length > 0 && (
-            <div className="space-y-3 pt-2">
-              {pendingProposals.map((prop) => (
-                <ExperienceProposalCard
-                  key={prop.id}
-                  proposal={prop}
-                  onResolved={(proposalId, action, updated) => {
-                    setPendingProposals((prev) => prev.filter((item) => item.id !== proposalId));
-                    if (action === 'applied') {
-                      const skillTag = updated?.proposed_skill_name
-                        ? `/${updated.proposed_skill_name}`
-                        : 'Skill 知识库';
-                      setSaveFileToast(`✨ 经验已确认落盘并热加载至 ${skillTag}`);
-                      setTimeout(() => setSaveFileToast(null), 4000);
-                    }
-                  }}
-                />
-              ))}
-            </div>
-          )}
-          <div ref={messagesEndRef} />
-        </div>
-
-        {/* 底部折叠式硬件 HUD 仪表盘 */}
-        <HardwareHud
-          isOpen={isHudOpen}
-          onToggle={() => setIsHudOpen(!isHudOpen)}
-          onProposeProcessKill={handleProposeProcessKill}
-        />
-
-        {/* 底部悬浮输入中枢 */}
-        <div className="p-4 md:px-12 lg:px-24 bg-gradient-to-t from-background via-background/95 to-transparent">
-          <div className="max-w-4xl mx-auto space-y-2 relative">
-            <CommandAutocomplete
-              input={inputPrompt}
-              onSelect={(text) => {
-                setInputPrompt(text);
-                textareaRef.current?.focus();
-              }}
-              onClose={() => {}}
-            />
-
-            {/* 附件格式限制 / 超限 / 拒收说明横幅 */}
-            {attachmentRejectionNotices.length > 0 && (
-              <div className="px-3.5 py-2.5 rounded-2xl bg-amber-500/12 border border-amber-500/40 text-xs text-amber-900 dark:text-amber-200 animate-fade-in shadow-sm space-y-2">
-                <div className="flex items-start justify-between gap-2">
-                  <div className="flex items-start space-x-2 min-w-0">
-                    <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                    <div className="space-y-1 min-w-0">
-                      <div className="font-semibold text-amber-700 dark:text-amber-300">
-                        部分文件未加入附件列表（格式受限或超出大小限制）
-                      </div>
-                      <ul className="list-disc pl-4 space-y-0.5 text-[11px] leading-relaxed">
-                        {attachmentRejectionNotices.map((reason, rIdx) => (
-                          <li key={rIdx}>{reason}</li>
-                        ))}
-                      </ul>
-                    </div>
-                  </div>
-                  <div className="flex items-center space-x-1.5 shrink-0">
-                    <button
-                      type="button"
-                      onClick={() => setShowSupportedFormatsHelp((prev) => !prev)}
-                      className="flex items-center space-x-1 px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-800 dark:text-amber-200 text-[11px] font-medium transition-colors"
-                    >
-                      <Info className="w-3 h-3" />
-                      <span>{showSupportedFormatsHelp ? '收起格式说明' : '查看支持格式'}</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setAttachmentRejectionNotices([]);
-                        setShowSupportedFormatsHelp(false);
-                      }}
-                      className="p-1 rounded-lg hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 transition-colors"
-                      title="关闭提示"
-                    >
-                      <X className="w-3.5 h-3.5" />
-                    </button>
-                  </div>
-                </div>
-
-                {showSupportedFormatsHelp && (
-                  <div className="pt-2 border-t border-amber-500/25 grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
-                    {SUPPORTED_ATTACHMENT_GROUPS.map((grp, gIdx) => (
-                      <div key={gIdx} className="p-2 rounded-xl bg-surface-100/80 border border-border/70">
-                        <div className="font-semibold text-foreground mb-0.5">{grp.title}</div>
-                        <div className="text-muted-foreground leading-snug">{grp.items}</div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            )}
-
-            {(attachments.length > 0 || isUploadingAttachment) && (
-              <div className="flex items-center flex-wrap gap-2 px-3 pb-1">
-                {attachments.map((att, idx) => {
-                  const isSheet = att.name.toLowerCase().endsWith('.xlsx');
-                  const isPdf = att.category === 'pdf' || att.name.toLowerCase().endsWith('.pdf');
-                  return (
-                    <div
-                      key={idx}
-                      title={att.filePath ? `物理路径: ${att.filePath}` : att.name}
-                      className="flex items-center space-x-2 px-2.5 py-1.5 rounded-xl bg-surface-100 border border-border text-xs text-foreground animate-scale-in shadow-sm max-w-[260px]"
-                    >
-                      {att.type === 'image' && att.dataUrl ? (
-                        <img src={att.dataUrl} alt="" className="w-6 h-6 rounded object-cover border border-border shrink-0" />
-                      ) : isSheet ? (
-                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                      ) : isPdf ? (
-                        <FileText className="w-3.5 h-3.5 text-rose-500 shrink-0" />
-                      ) : (
-                        <Paperclip className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                      {/* 内联终端工具调用与安全审批卡片：跟随在思考过程与正文输出之后的最底端，避免被上方长内容顶走 */}
+                      {!isUser && msg.tool_events && msg.tool_events.length > 0 && (
+                        <InlineToolCard
+                          events={msg.tool_events}
+                          onApprove={handleApproveToolCall}
+                        />
                       )}
-                      <span className="truncate flex-1">{att.name}</span>
-                      <span className="text-[10px] text-muted-foreground shrink-0">{att.size}</span>
-                      <button
-                        type="button"
-                        onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
-                        className="hover:text-rose-500 p-0.5 rounded transition-colors shrink-0"
-                        title="移除附件"
-                      >
-                        <X className="w-3 h-3" />
-                      </button>
+
+                      {/* AI 消息交互底栏 */}
+                      {!isUser && msg.content && (
+                        <MessageActions
+                          content={msg.content}
+                          onModifyTone={handleModifyTone}
+                          onRegenerate={() => {
+                            const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
+                            if (lastUserMsg) {
+                              const { cleanContent, parsedAttachments } = parseMessageAttachments(lastUserMsg.content);
+                              handleSendMessage(
+                                cleanContent || (parsedAttachments.length > 0 ? '请结合附带的文件或图片内容进行分析解答。' : ''),
+                                undefined,
+                                undefined,
+                                parsedAttachments.length > 0 ? parsedAttachments : undefined
+                              );
+                            }
+                          }}
+                        />
+                      )}
                     </div>
                   );
-                })}
-                {isUploadingAttachment && (
-                  <div className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-600 dark:text-emerald-400">
-                    <RefreshCw className="w-3 h-3 animate-spin" />
-                    <span>正在校验并上传附件...</span>
+                })
+              )}
+              {pendingProposals.length > 0 && (
+                <div className="space-y-3 pt-2">
+                  {pendingProposals.map((prop) => (
+                    <ExperienceProposalCard
+                      key={prop.id}
+                      proposal={prop}
+                      onResolved={(proposalId, action, updated) => {
+                        setPendingProposals((prev) => prev.filter((item) => item.id !== proposalId));
+                        if (action === 'applied') {
+                          const skillTag = updated?.proposed_skill_name
+                            ? `/${updated.proposed_skill_name}`
+                            : 'Skill 知识库';
+                          setSaveFileToast(`✨ 经验已确认落盘并热加载至 ${skillTag}`);
+                          setTimeout(() => setSaveFileToast(null), 4000);
+                        }
+                      }}
+                    />
+                  ))}
+                </div>
+              )}
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* 底部折叠式硬件 HUD 仪表盘 */}
+            <HardwareHud
+              isOpen={isHudOpen}
+              onToggle={() => setIsHudOpen(!isHudOpen)}
+              onProposeProcessKill={handleProposeProcessKill}
+            />
+
+            {/* 底部悬浮输入中枢 */}
+            <div className="p-4 md:px-12 lg:px-24 bg-gradient-to-t from-background via-background/95 to-transparent">
+              <div className="max-w-4xl mx-auto space-y-2 relative">
+                <CommandAutocomplete
+                  input={inputPrompt}
+                  onSelect={(text) => {
+                    setInputPrompt(text);
+                    textareaRef.current?.focus();
+                  }}
+                  onClose={() => { }}
+                />
+
+                {/* 附件格式限制 / 超限 / 拒收说明横幅 */}
+                {attachmentRejectionNotices.length > 0 && (
+                  <div className="px-3.5 py-2.5 rounded-2xl bg-amber-500/12 border border-amber-500/40 text-xs text-amber-900 dark:text-amber-200 animate-fade-in shadow-sm space-y-2">
+                    <div className="flex items-start justify-between gap-2">
+                      <div className="flex items-start space-x-2 min-w-0">
+                        <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                        <div className="space-y-1 min-w-0">
+                          <div className="font-semibold text-amber-700 dark:text-amber-300">
+                            部分文件未加入附件列表（格式受限或超出大小限制）
+                          </div>
+                          <ul className="list-disc pl-4 space-y-0.5 text-[11px] leading-relaxed">
+                            {attachmentRejectionNotices.map((reason, rIdx) => (
+                              <li key={rIdx}>{reason}</li>
+                            ))}
+                          </ul>
+                        </div>
+                      </div>
+                      <div className="flex items-center space-x-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setShowSupportedFormatsHelp((prev) => !prev)}
+                          className="flex items-center space-x-1 px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-800 dark:text-amber-200 text-[11px] font-medium transition-colors"
+                        >
+                          <Info className="w-3 h-3" />
+                          <span>{showSupportedFormatsHelp ? '收起格式说明' : '查看支持格式'}</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setAttachmentRejectionNotices([]);
+                            setShowSupportedFormatsHelp(false);
+                          }}
+                          className="p-1 rounded-lg hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 transition-colors"
+                          title="关闭提示"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    {showSupportedFormatsHelp && (
+                      <div className="pt-2 border-t border-amber-500/25 grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                        {SUPPORTED_ATTACHMENT_GROUPS.map((grp, gIdx) => (
+                          <div key={gIdx} className="p-2 rounded-xl bg-surface-100/80 border border-border/70">
+                            <div className="font-semibold text-foreground mb-0.5">{grp.title}</div>
+                            <div className="text-muted-foreground leading-snug">{grp.items}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
-              </div>
-            )}
 
-            {/* 全局常驻待审批卡片：无论页面向上滚动多远或思考过程多长，始终可在输入框正上方一键点击允许或拒绝 */}
-            {pendingApprovalEvent && (
-              <div className="px-4 py-3 mb-2 rounded-2xl bg-amber-500/15 border border-amber-500/40 backdrop-blur-md flex items-center justify-between shadow-lg animate-fade-in text-xs">
-                <div className="flex items-center space-x-2.5 min-w-0 mr-3">
-                  <div className="w-7 h-7 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center shrink-0">
-                    <AlertTriangle className="w-4 h-4 text-amber-500 animate-pulse" />
+                {(attachments.length > 0 || isUploadingAttachment) && (
+                  <div className="flex items-center flex-wrap gap-2 px-3 pb-1">
+                    {attachments.map((att, idx) => {
+                      const isSheet = att.name.toLowerCase().endsWith('.xlsx');
+                      const isPdf = att.category === 'pdf' || att.name.toLowerCase().endsWith('.pdf');
+                      return (
+                        <div
+                          key={idx}
+                          title={att.filePath ? `物理路径: ${att.filePath}` : att.name}
+                          className="flex items-center space-x-2 px-2.5 py-1.5 rounded-xl bg-surface-100 border border-border text-xs text-foreground animate-scale-in shadow-sm max-w-[260px]"
+                        >
+                          {att.type === 'image' && att.dataUrl ? (
+                            <img src={att.dataUrl} alt="" className="w-6 h-6 rounded object-cover border border-border shrink-0" />
+                          ) : isSheet ? (
+                            <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                          ) : isPdf ? (
+                            <FileText className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                          ) : (
+                            <Paperclip className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                          )}
+                          <span className="truncate flex-1">{att.name}</span>
+                          <span className="text-[10px] text-muted-foreground shrink-0">{att.size}</span>
+                          <button
+                            type="button"
+                            onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
+                            className="hover:text-rose-500 p-0.5 rounded transition-colors shrink-0"
+                            title="移除附件"
+                          >
+                            <X className="w-3 h-3" />
+                          </button>
+                        </div>
+                      );
+                    })}
+                    {isUploadingAttachment && (
+                      <div className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-600 dark:text-emerald-400">
+                        <RefreshCw className="w-3 h-3 animate-spin" />
+                        <span>正在校验并上传附件...</span>
+                      </div>
+                    )}
                   </div>
-                  <div className="min-w-0">
-                    <div className="font-bold text-amber-600 dark:text-amber-400">
-                      安全沙箱拦截：Agent 申请执行操作
+                )}
+
+                {/* 全局常驻待审批卡片：无论页面向上滚动多远或思考过程多长，始终可在输入框正上方一键点击允许或拒绝 */}
+                {pendingApprovalEvent && (
+                  <div className="px-4 py-3 mb-2 rounded-2xl bg-amber-500/15 border border-amber-500/40 backdrop-blur-md flex items-center justify-between shadow-lg animate-fade-in text-xs">
+                    <div className="flex items-center space-x-2.5 min-w-0 mr-3">
+                      <div className="w-7 h-7 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center shrink-0">
+                        <AlertTriangle className="w-4 h-4 text-amber-500 animate-pulse" />
+                      </div>
+                      <div className="min-w-0">
+                        <div className="font-bold text-amber-600 dark:text-amber-400">
+                          安全沙箱拦截：Agent 申请执行操作
+                        </div>
+                        <div className="text-[11px] text-foreground/80 font-mono truncate max-w-[420px]">
+                          {pendingApprovalEvent.command}
+                        </div>
+                      </div>
                     </div>
-                    <div className="text-[11px] text-foreground/80 font-mono truncate max-w-[420px]">
-                      {pendingApprovalEvent.command}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex items-center space-x-2 shrink-0">
-                  <button
-                    type="button"
-                    onClick={() => handleApproveToolCall(pendingApprovalEvent.call_id, false)}
-                    className="px-3 py-1.5 rounded-xl bg-surface-200 hover:bg-rose-500/20 text-muted-foreground hover:text-rose-500 font-semibold text-xs transition-colors"
-                  >
-                    拒绝
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleApproveToolCall(pendingApprovalEvent.call_id, true)}
-                    className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95 flex items-center space-x-1"
-                  >
-                    <CheckCircle2 className="w-3.5 h-3.5 mr-1" />
-                    <span>允许执行</span>
-                  </button>
-                </div>
-              </div>
-            )}
-
-            {/* 智能防幻觉意图嗅探胶囊：当检测到写盘需求却处于对话模式时一键引导 */}
-            {sceneMode !== 'agent' && /(写入|创建文件|新建文件|写到|落盘|保存到|在.*创建|新建.*目录|写代码到|写入代码)/.test(inputPrompt) && (
-              <div className="px-3.5 py-1.5 mb-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between text-xs text-emerald-700 dark:text-emerald-300 animate-fade-in shadow-sm">
-                <div className="flex items-center space-x-2">
-                  <Sparkles className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                  <span>
-                    检测到本地写盘需求：当前处于<strong>「对话模式」</strong>（仅纯文本生成）。
-                    是否一键切换至「任务模式」真实落盘执行？
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => handleSwitchSceneMode('agent')}
-                  className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-[11px] shrink-0 ml-2 shadow-sm shadow-emerald-600/20 transition-all"
-                >
-                  一键切换为任务模式
-                </button>
-              </div>
-            )}
-
-            {/* 核心输入大胶囊 */}
-            <div className="rounded-2xl border border-border/80 bg-surface-card p-2 focus-within:border-accent focus-within:shadow-md transition-all shadow-sm">
-              <textarea
-                ref={textareaRef}
-                value={inputPrompt}
-                onChange={(e) => {
-                  const val = e.target.value;
-                  setInputPrompt(val);
-                  if (val === '/') {
-                    setIsSkillPickerOpen(true);
-                  }
-                }}
-                onPaste={handlePaste}
-                onKeyDown={(e) => {
-                  if (e.key === 'Tab') {
-                    // 检测输入框中是否存在 {{参数名:默认值}} 形式的填空占位符
-                    const text = inputPrompt;
-                    const matches: { start: number; end: number; placeholder: string }[] = [];
-                    const regex = /\{\{([^}]+)\}\}/g;
-                    let m: RegExpExecArray | null;
-                    while ((m = regex.exec(text)) !== null) {
-                      matches.push({ start: m.index, end: m.index + m[0].length, placeholder: m[1] });
-                    }
-
-                    if (matches.length > 0) {
-                      e.preventDefault();
-                      const textarea = textareaRef.current;
-                      if (textarea) {
-                        const currentPos = e.shiftKey ? textarea.selectionStart : textarea.selectionEnd;
-                        let targetMatch: typeof matches[0];
-                        if (e.shiftKey) {
-                          const prevMatches = matches.filter((item) => item.end < currentPos);
-                          targetMatch = prevMatches.length > 0 ? prevMatches[prevMatches.length - 1] : matches[matches.length - 1];
-                        } else {
-                          const nextMatches = matches.filter((item) => item.start >= currentPos);
-                          targetMatch = nextMatches.length > 0 ? nextMatches[0] : matches[0];
-                        }
-                        if (targetMatch) {
-                          textarea.focus();
-                          textarea.setSelectionRange(targetMatch.start, targetMatch.end);
-                        }
-                      }
-                      return;
-                    }
-                  }
-
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault();
-                    handleSendMessage();
-                  }
-                }}
-                rows={1}
-                placeholder="输入消息或指令...（支持拖拽放置文件、Ctrl+V 粘贴图片，Enter 发送，/ 唤起技能）"
-                className="w-full bg-transparent border-none outline-none text-[14px] text-foreground placeholder-muted-foreground px-3 py-1.5 resize-none leading-relaxed break-anywhere"
-              />
-
-              <div className="flex items-center justify-between pt-1 px-1 select-none">
-                <div className="flex items-center space-x-1.5">
-                  <label
-                    className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-surface-200/80 rounded-lg cursor-pointer transition-colors"
-                    title="添加常见图片 (PNG/JPG/WebP/GIF ≤10MB)、文档 (PDF ≤10MB · Word/Excel/PPT ≤5MB) 或代码/文本文件（≤5MB）；支持拖拽放置与 Ctrl+V 粘贴，最多 5 个"
-                  >
-                    <input
-                      type="file"
-                      accept={FILE_INPUT_ACCEPT}
-                      multiple
-                      onChange={handleFileUpload}
-                      className="hidden"
-                    />
-                    <Plus className="w-4 h-4" />
-                  </label>
-
-                  {/* 模式双态药丸切换：[对话] 与 [任务] */}
-                  <div className="flex items-center rounded-xl bg-surface-100 border border-border/70 p-0.5 text-xs">
-                    {(
-                      [
-                        { id: 'chat', label: '对话', tip: '对话模式：纯思维链探讨与知识推演，不执行写盘与命令' },
-                        { id: 'agent', label: '任务', tip: '任务模式：具身执行与自主自愈，真实读写当前工作区文件并运行 Shell' },
-                      ] as const
-                    ).map((m) => (
-                      <button
-                        key={m.id}
-                        type="button"
-                        onClick={() => handleSwitchSceneMode(m.id)}
-                        title={m.tip}
-                        className={`px-3 py-1 rounded-lg transition-all ${
-                          sceneMode === m.id
-                            ? 'bg-emerald-600 text-white font-semibold shadow-sm'
-                            : 'text-muted-foreground hover:text-foreground'
-                        }`}
-                      >
-                        {m.label}
-                      </button>
-                    ))}
-                  </div>
-
-                  {/* 执行策略降维切换：任务模式下 [直接执行 | 谋定而动]，对话模式下 [需求澄清] */}
-                  {sceneMode === 'agent' ? (
-                    <div className="flex items-center rounded-xl bg-surface-100 border border-border/70 p-0.5 text-xs">
+                    <div className="flex items-center space-x-2 shrink-0">
                       <button
                         type="button"
-                        onClick={() => handleSwitchExecStrategy('direct')}
-                        title="直接执行：立即执行意图与工具操作"
-                        className={`px-2.5 py-1 rounded-lg transition-all flex items-center space-x-1 ${
-                          executionStrategy === 'direct'
-                            ? 'bg-emerald-600 text-white font-semibold shadow-sm'
-                            : 'text-muted-foreground hover:text-foreground'
-                        }`}
+                        onClick={() => handleApproveToolCall(pendingApprovalEvent.call_id, false)}
+                        className="px-3 py-1.5 rounded-xl bg-surface-200 hover:bg-rose-500/20 text-muted-foreground hover:text-rose-500 font-semibold text-xs transition-colors"
                       >
-                        <span>⚡ 直接执行</span>
+                        拒绝
                       </button>
                       <button
                         type="button"
-                        onClick={() => handleSwitchExecStrategy('plan_first')}
-                        title="谋定而动：动工前先梳理方案与分步清单，确认后自愈执行，彻底杜绝返工"
-                        className={`px-2.5 py-1 rounded-lg transition-all flex items-center space-x-1 ${
-                          executionStrategy === 'plan_first'
-                            ? 'bg-emerald-600 text-white font-semibold shadow-sm'
-                            : 'text-muted-foreground hover:text-foreground'
-                        }`}
+                        onClick={() => handleApproveToolCall(pendingApprovalEvent.call_id, true)}
+                        className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-md transition-all active:scale-95 flex items-center space-x-1"
                       >
-                        <span>📋 谋定而动</span>
+                        <CheckCircle2 className="w-3.5 h-3.5 mr-1" />
+                        <span>允许执行</span>
                       </button>
                     </div>
-                  ) : (
+                  </div>
+                )}
+
+                {/* 智能防幻觉意图嗅探胶囊：当检测到写盘需求却处于对话模式时一键引导 */}
+                {sceneMode !== 'agent' && /(写入|创建文件|新建文件|写到|落盘|保存到|在.*创建|新建.*目录|写代码到|写入代码)/.test(inputPrompt) && (
+                  <div className="px-3.5 py-1.5 mb-2 rounded-xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-between text-xs text-emerald-700 dark:text-emerald-300 animate-fade-in shadow-sm">
+                    <div className="flex items-center space-x-2">
+                      <Sparkles className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                      <span>
+                        检测到本地写盘需求：当前处于<strong>「对话模式」</strong>（仅纯文本生成）。
+                        是否一键切换至「任务模式」真实落盘执行？
+                      </span>
+                    </div>
                     <button
                       type="button"
-                      onClick={handleToggleClarifyMode}
-                      title={clarifyMode ? '需求澄清模式已开启：遇到模糊问题先生成交互卡片对齐' : '点击开启需求前置澄清模式'}
-                      className={`flex items-center space-x-1 px-2.5 py-1 rounded-xl text-xs border transition-all ${
-                        clarifyMode
-                          ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-600 dark:text-emerald-400 font-semibold'
-                          : 'border-border bg-surface-100 text-muted-foreground hover:text-foreground'
-                      }`}
+                      onClick={() => handleSwitchSceneMode('agent')}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-[11px] shrink-0 ml-2 shadow-sm shadow-emerald-600/20 transition-all"
                     >
-                      <Compass className="w-3.5 h-3.5" />
-                      <span>需求澄清</span>
+                      一键切换为任务模式
                     </button>
-                  )}
+                  </div>
+                )}
 
-                  {/* 无痕模式开关 */}
-                  <button
-                    type="button"
-                    onClick={handleToggleIncognito}
-                    title={incognito ? '当前为无痕模式（不读取也不保存长期记忆）' : '点击开启无痕对话模式'}
-                    className={`flex items-center space-x-1 px-2 py-1 rounded-lg text-[11px] border transition-all ${
-                      incognito
-                        ? 'bg-purple-500/15 border-purple-500/40 text-purple-600 dark:text-purple-400 font-medium'
-                        : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-surface-200/60'
-                    }`}
-                  >
-                    <EyeOff className="w-3 h-3" />
-                    <span className="hidden sm:inline">无痕</span>
-                  </button>
-
-                  {/* 快捷技能呼出 */}
-                  <button
-                    type="button"
-                    onClick={() => setIsSkillPickerOpen(true)}
-                    title="浏览或呼出当前工作区专属技能与全局底座技能 (/)"
-                    className="flex items-center space-x-1 px-2.5 py-1 rounded-xl text-[11px] border border-border bg-surface-100 hover:bg-surface-200 text-foreground transition-all font-mono"
-                  >
-                    <span>/ 技能</span>
-                  </button>
-                </div>
-
-                <div className="flex items-center space-x-2">
-                  {/* 模型选择器：动态根据当前账号属性识别可用模型，并提供一键测试入口 */}
-                  <ModelSelector
-                    currentModel={currentModel}
-                    thinkingLevel={thinkingLevel}
-                    models={availableModels}
-                    accountName={modelAccountInfo.accountName}
-                    authLabel={modelAccountInfo.authLabel}
-                    isTested={modelAccountInfo.isTested}
-                    onSelectModel={(m) => {
-                      hasUserSelectedModelRef.current = true;
-                      setCurrentModel(m);
+                {/* 核心输入大胶囊 */}
+                <div className="rounded-2xl border border-border/80 bg-surface-card p-2 focus-within:border-accent focus-within:shadow-md transition-all shadow-sm">
+                  <textarea
+                    ref={textareaRef}
+                    value={inputPrompt}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setInputPrompt(val);
+                      if (val === '/') {
+                        setIsSkillPickerOpen(true);
+                      }
                     }}
-                    onSelectThinking={(tl) => setThinkingLevel(tl)}
-                    onOpenModelTest={() => {
-                      setSettingsInitialTab('models');
-                      setIsSettingsOpen(true);
+                    onPaste={handlePaste}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Tab') {
+                        // 检测输入框中是否存在 {{参数名:默认值}} 形式的填空占位符
+                        const text = inputPrompt;
+                        const matches: { start: number; end: number; placeholder: string }[] = [];
+                        const regex = /\{\{([^}]+)\}\}/g;
+                        let m: RegExpExecArray | null;
+                        while ((m = regex.exec(text)) !== null) {
+                          matches.push({ start: m.index, end: m.index + m[0].length, placeholder: m[1] });
+                        }
+
+                        if (matches.length > 0) {
+                          e.preventDefault();
+                          const textarea = textareaRef.current;
+                          if (textarea) {
+                            const currentPos = e.shiftKey ? textarea.selectionStart : textarea.selectionEnd;
+                            let targetMatch: typeof matches[0];
+                            if (e.shiftKey) {
+                              const prevMatches = matches.filter((item) => item.end < currentPos);
+                              targetMatch = prevMatches.length > 0 ? prevMatches[prevMatches.length - 1] : matches[matches.length - 1];
+                            } else {
+                              const nextMatches = matches.filter((item) => item.start >= currentPos);
+                              targetMatch = nextMatches.length > 0 ? nextMatches[0] : matches[0];
+                            }
+                            if (targetMatch) {
+                              textarea.focus();
+                              textarea.setSelectionRange(targetMatch.start, targetMatch.end);
+                            }
+                          }
+                          return;
+                        }
+                      }
+
+                      if (e.key === 'Enter' && !e.shiftKey) {
+                        e.preventDefault();
+                        handleSendMessage();
+                      }
                     }}
+                    rows={1}
+                    placeholder="输入消息或指令...（支持拖拽放置文件、Ctrl+V 粘贴图片，Enter 发送，/ 唤起技能）"
+                    className="w-full bg-transparent border-none outline-none text-[14px] text-foreground placeholder-muted-foreground px-3 py-1.5 resize-none leading-relaxed break-anywhere"
                   />
 
-                  {/* 发送按钮 */}
-                  <button
-                    type="button"
-                    onClick={() => handleSendMessage()}
-                    disabled={isStreaming || isUploadingAttachment || (!inputPrompt.trim() && attachments.length === 0)}
-                    className="p-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm shadow-emerald-600/20"
-                    title="发送提问"
-                  >
-                    {isStreaming ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                  </button>
+                  <div className="flex items-center justify-between pt-1 px-1 select-none">
+                    <div className="flex items-center space-x-1.5">
+                      <label
+                        className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-surface-200/80 rounded-lg cursor-pointer transition-colors"
+                        title="添加常见图片 (PNG/JPG/WebP/GIF ≤10MB)、文档 (PDF ≤10MB · Word/Excel/PPT ≤5MB) 或代码/文本文件（≤5MB）；支持拖拽放置与 Ctrl+V 粘贴，最多 5 个"
+                      >
+                        <input
+                          type="file"
+                          accept={FILE_INPUT_ACCEPT}
+                          multiple
+                          onChange={handleFileUpload}
+                          className="hidden"
+                        />
+                        <Plus className="w-4 h-4" />
+                      </label>
+
+                      {/* 模式双态药丸切换：[对话] 与 [任务] */}
+                      <div className="flex items-center rounded-xl bg-surface-100 border border-border/70 p-0.5 text-xs">
+                        {(
+                          [
+                            { id: 'chat', label: '对话', tip: '对话模式：纯思维链探讨与知识推演，不执行写盘与命令' },
+                            { id: 'agent', label: '任务', tip: '任务模式：具身执行与自主自愈，真实读写当前工作区文件并运行 Shell' },
+                          ] as const
+                        ).map((m) => (
+                          <button
+                            key={m.id}
+                            type="button"
+                            onClick={() => handleSwitchSceneMode(m.id)}
+                            title={m.tip}
+                            className={`px-3 py-1 rounded-lg transition-all ${sceneMode === m.id
+                                ? 'bg-emerald-600 text-white font-semibold shadow-sm'
+                                : 'text-muted-foreground hover:text-foreground'
+                              }`}
+                          >
+                            {m.label}
+                          </button>
+                        ))}
+                      </div>
+
+                      {/* 执行策略降维切换：任务模式下 [直接执行 | 谋定而动]，对话模式下 [需求澄清] */}
+                      {sceneMode === 'agent' ? (
+                        <div className="flex items-center rounded-xl bg-surface-100 border border-border/70 p-0.5 text-xs">
+                          <button
+                            type="button"
+                            onClick={() => handleSwitchExecStrategy('direct')}
+                            title="直接执行：立即执行意图与工具操作"
+                            className={`px-2.5 py-1 rounded-lg transition-all flex items-center space-x-1 ${executionStrategy === 'direct'
+                                ? 'bg-emerald-600 text-white font-semibold shadow-sm'
+                                : 'text-muted-foreground hover:text-foreground'
+                              }`}
+                          >
+                            <span>⚡ 直接执行</span>
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleSwitchExecStrategy('plan_first')}
+                            title="谋定而动：动工前先梳理方案与分步清单，确认后自愈执行，彻底杜绝返工"
+                            className={`px-2.5 py-1 rounded-lg transition-all flex items-center space-x-1 ${executionStrategy === 'plan_first'
+                                ? 'bg-emerald-600 text-white font-semibold shadow-sm'
+                                : 'text-muted-foreground hover:text-foreground'
+                              }`}
+                          >
+                            <span>📋 谋定而动</span>
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={handleToggleClarifyMode}
+                          title={clarifyMode ? '需求澄清模式已开启：遇到模糊问题先生成交互卡片对齐' : '点击开启需求前置澄清模式'}
+                          className={`flex items-center space-x-1 px-2.5 py-1 rounded-xl text-xs border transition-all ${clarifyMode
+                              ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-600 dark:text-emerald-400 font-semibold'
+                              : 'border-border bg-surface-100 text-muted-foreground hover:text-foreground'
+                            }`}
+                        >
+                          <Compass className="w-3.5 h-3.5" />
+                          <span>需求澄清</span>
+                        </button>
+                      )}
+
+                      {/* 无痕模式开关 */}
+                      <button
+                        type="button"
+                        onClick={handleToggleIncognito}
+                        title={incognito ? '当前为无痕模式（不读取也不保存长期记忆）' : '点击开启无痕对话模式'}
+                        className={`flex items-center space-x-1 px-2 py-1 rounded-lg text-[11px] border transition-all ${incognito
+                            ? 'bg-purple-500/15 border-purple-500/40 text-purple-600 dark:text-purple-400 font-medium'
+                            : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-surface-200/60'
+                          }`}
+                      >
+                        <EyeOff className="w-3 h-3" />
+                        <span className="hidden sm:inline">无痕</span>
+                      </button>
+
+                      {/* 快捷技能呼出 */}
+                      <button
+                        type="button"
+                        onClick={() => setIsSkillPickerOpen(true)}
+                        title="浏览或呼出当前工作区专属技能与全局底座技能 (/)"
+                        className="flex items-center space-x-1 px-2.5 py-1 rounded-xl text-[11px] border border-border bg-surface-100 hover:bg-surface-200 text-foreground transition-all font-mono"
+                      >
+                        <span>/ 技能</span>
+                      </button>
+                    </div>
+
+                    <div className="flex items-center space-x-2">
+                      {/* 模型选择器：动态根据当前账号属性识别可用模型，并提供一键测试入口 */}
+                      <ModelSelector
+                        currentModel={currentModel}
+                        thinkingLevel={thinkingLevel}
+                        models={availableModels}
+                        accountName={modelAccountInfo.accountName}
+                        authLabel={modelAccountInfo.authLabel}
+                        isTested={modelAccountInfo.isTested}
+                        onSelectModel={(m) => {
+                          hasUserSelectedModelRef.current = true;
+                          setCurrentModel(m);
+                        }}
+                        onSelectThinking={(tl) => setThinkingLevel(tl)}
+                        onOpenModelTest={() => {
+                          setSettingsInitialTab('models');
+                          setIsSettingsOpen(true);
+                        }}
+                      />
+
+                      {/* 发送按钮 */}
+                      <button
+                        type="button"
+                        onClick={() => handleSendMessage()}
+                        disabled={isStreaming || isUploadingAttachment || (!inputPrompt.trim() && attachments.length === 0)}
+                        className="p-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm shadow-emerald-600/20"
+                        title="发送提问"
+                      >
+                        {isStreaming ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
             </div>
-          </div>
-        </div>
-        </>
+          </>
         )}
       </main>
 

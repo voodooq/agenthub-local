@@ -107,8 +107,68 @@ def _serialize_proposal_row(row: Any) -> dict[str, Any]:
 class ExperienceDistiller:
     """Post-Task 经验提炼引擎（支持轻量模型提纯与确定性启发式降级）"""
 
+    _ANTI_PATTERN_REGEX = re.compile(
+        r"(?:mock_binary_content|create_mock_sheets|自动创建\s*mock|生成\s*mock\s*(?:测试)?(?:文件|数据).*兜底"
+        r"|缺失.*(?:生成|创建).*(?:模拟|mock|测试).*(?:文件|数据|excel)|模拟测试数据(?:进行)?兜底"
+        r"|创建模拟.{0,16}(?:excel|附件|数据)|工作区输入附件目录.*只读)",
+        re.IGNORECASE | re.DOTALL,
+    )
+
     def __init__(self) -> None:
         self._processed_loop_ids: set[str] = set()
+
+    @classmethod
+    def _detect_mock_antipattern(
+        cls,
+        *,
+        trace: ExecutionTrace,
+        ledger_events: list[dict[str, Any]],
+        llm_data: dict[str, Any] | None = None,
+        triple: dict[str, str] | None = None,
+    ) -> str | None:
+        """
+        检测轨迹或拟生成提案中是否包含“找不到输入文件时自行创建 Mock/模拟文件兜底”的反模式，
+        防止 AI 幻觉违规行为污染工作区或全局 Skill 知识库。
+        """
+        for evt in ledger_events:
+            etype = evt.get("event_type")
+            payload = evt.get("payload") if isinstance(evt.get("payload"), dict) else {}
+            if etype == "tool_executed":
+                tool_name = str(payload.get("tool") or "").strip()
+                args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+                out_prev = str(payload.get("output_preview") or "")
+                if tool_name == "write_local_file":
+                    fp = str(args.get("file_path") or args.get("path") or "").replace("\\", "/").lower()
+                    if re.search(r"(?:^|/)attachments/", fp):
+                        return f"禁止把向只读 attachments/ 目录写入文件的轨迹沉淀为经验 ({fp})"
+                for text_val in (
+                    out_prev,
+                    json.dumps(args, ensure_ascii=False),
+                    str(payload.get("compressed") or ""),
+                ):
+                    if cls._ANTI_PATTERN_REGEX.search(text_val):
+                        return "轨迹包含编造 Mock 替代输入兜底的违规信号"
+
+        check_texts = [trace.user_goal, trace.final_summary]
+        if llm_data:
+            check_texts.extend([
+                str(llm_data.get("title") or ""),
+                str(llm_data.get("summary") or ""),
+                str(llm_data.get("problem") or ""),
+                str(llm_data.get("root_cause") or ""),
+                str(llm_data.get("solution") or ""),
+            ])
+        if triple:
+            check_texts.extend([
+                str(triple.get("problem") or ""),
+                str(triple.get("root_cause") or ""),
+                str(triple.get("solution") or ""),
+            ])
+
+        for txt in check_texts:
+            if txt and cls._ANTI_PATTERN_REGEX.search(txt):
+                return "提炼结果命中严禁生成的 Mock 兜底反模式规范"
+        return None
 
     @staticmethod
     def evaluate_trigger(trace: ExecutionTrace) -> tuple[bool, str]:
@@ -390,6 +450,7 @@ class ExperienceDistiller:
 
         prompt = (
             "你是 AgentHub 经验自演化提炼器。请将以下执行轨迹凝练为严格合法的 JSON 对象（禁止输出多余说明文字）：\n"
+            "【反模式红线】：绝对严禁将“找不到输入文件时自行创建 Mock/模拟测试文件进行兜底”提炼为经验或解决方案！\n"
             "字段规范：\n"
             '{"title": "简短中文经验标题(<=24字)", '
             '"summary": "一句话总结沉淀收益(<=60字)", '
@@ -488,6 +549,13 @@ class ExperienceDistiller:
             loop_id=trace.loop_id,
             limit=120,
         )
+        anti_reason = self._detect_mock_antipattern(trace=trace, ledger_events=ledger_events)
+        if anti_reason and not force:
+            logger.warning(f"[ExperienceDistiller] 已拦截 Mock 造假反模式轨迹，跳过提案生成: {anti_reason}")
+            if trace.loop_id:
+                self._processed_loop_ids.add(trace.loop_id)
+            return None
+
         extracted = self._extract_effective_steps(ledger_events)
 
         # 补充 active_skill_ids 与 produced_artifacts
@@ -618,6 +686,18 @@ class ExperienceDistiller:
             "root_cause": root_cause,
             "solution": solution,
         }
+
+        anti_reason_post = self._detect_mock_antipattern(
+            trace=trace,
+            ledger_events=ledger_events,
+            llm_data=llm_data,
+            triple=triple,
+        )
+        if anti_reason_post and not force:
+            logger.warning(f"[ExperienceDistiller] 已拦截含 Mock 造假建议的提案生成: {anti_reason_post}")
+            if trace.loop_id:
+                self._processed_loop_ids.add(trace.loop_id)
+            return None
 
         if proposal_type == "skill_patch" and target_skill_id:
             proposed_skill_name = target_skill_id

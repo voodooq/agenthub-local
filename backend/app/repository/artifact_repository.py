@@ -2,6 +2,7 @@
 工作区资产库 (Workspace Artifacts) 仓储层
 实现代码落盘、AI报告与多媒体资产的统一注册、归档与双向会话溯源
 """
+import os
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -14,6 +15,26 @@ class ArtifactRepository:
     资产库数据访问对象
     """
 
+    IGNORE_DIRS = {
+        ".git", ".svn", ".hg", "node_modules", ".venv", "venv", "__pycache__",
+        ".idea", ".vscode", "dist", "build", ".next", ".agenthub",
+        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", ".nox", ".turbo", "coverage",
+    }
+    IGNORE_FILES = {".gitignore", ".DS_Store", "package-lock.json", "pnpm-lock.yaml", "Thumbs.db"}
+    IGNORE_SUFFIXES = {".pyc", ".pyo"}
+
+    @staticmethod
+    def _is_ignored_rel_path(rel: Path) -> bool:
+        """判断相对工作区根目录的路径是否应被自动扫描忽略（保留 .agenthub/attachments 上传区）"""
+        parts = rel.parts
+        if len(parts) >= 2 and parts[0].lower() == ".agenthub" and parts[1].lower() == "attachments":
+            return rel.name in ArtifactRepository.IGNORE_FILES or rel.suffix.lower() in ArtifactRepository.IGNORE_SUFFIXES
+        if any(p in ArtifactRepository.IGNORE_DIRS for p in parts[:-1]):
+            return True
+        if rel.name in ArtifactRepository.IGNORE_FILES or rel.suffix.lower() in ArtifactRepository.IGNORE_SUFFIXES:
+            return True
+        return False
+
     @staticmethod
     def _detect_file_type(file_path: Path) -> str:
         """根据文件扩展名智能推断资产类型"""
@@ -24,7 +45,10 @@ class ArtifactRepository:
             ".toml", ".ini", ".xml", ".c", ".cpp", ".h", ".rs", ".go", ".java"
         ):
             return "code"
-        elif ext in (".md", ".txt", ".doc", ".docx", ".pdf", ".rtf", ".csv", ".tsv"):
+        elif ext in (
+            ".md", ".txt", ".doc", ".docx", ".pdf", ".rtf", ".csv", ".tsv",
+            ".xlsx", ".xlsm", ".xls", ".pptx",
+        ):
             return "document"
         elif ext in (
             ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp", ".bmp", ".ico",
@@ -121,8 +145,9 @@ class ArtifactRepository:
     @staticmethod
     async def sync_physical_workspace_artifacts(workspace_id: str) -> int:
         """
-        物理工作区智能反向同步：
-        扫描工作区物理根目录下真实存在的代码、文档与产出物，自动补齐登记到 workspace_artifacts 表中。
+        物理工作区双向精确同步：
+        1. 失效清理 (Prune)：清理已在物理磁盘被删除的孤儿记录，以及历史误扫入的忽略缓存目录（如 .pytest_cache）记录；
+        2. 增量补齐 (Discover)：扫描工作区物理根目录下真实存在的文件，自动补齐登记到 workspace_artifacts 表中。
         """
         from .workspace_repository import WorkspaceRepository
 
@@ -134,23 +159,54 @@ class ArtifactRepository:
         if not root.exists() or not root.is_dir():
             return 0
 
-        # 查询当前已登记的资产列表
+        # 查询当前已登记的资产列表，并比对磁盘真实存在性与忽略规则
         existing_paths: set[str] = set()
+        stale_ids: list[str] = []
         async with db_manager.get_connection() as conn:
             async with conn.execute(
-                "SELECT file_path FROM workspace_artifacts WHERE workspace_id = ?;",
+                "SELECT id, file_path, source FROM workspace_artifacts WHERE workspace_id = ?;",
                 (workspace_id,),
             ) as cursor:
                 rows = await cursor.fetchall()
                 for r in rows:
-                    existing_paths.add(str(Path(r["file_path"]).resolve()))
+                    raw_fp = str(r["file_path"] or "").strip()
+                    if not raw_fp:
+                        stale_ids.append(r["id"])
+                        continue
+                    fp_obj = Path(raw_fp)
+                    try:
+                        exists_on_disk = fp_obj.exists() and fp_obj.is_file()
+                    except OSError:
+                        exists_on_disk = False
 
-        # 系统级忽略目录与文件
-        IGNORE_DIRS = {
-            ".git", ".svn", ".hg", "node_modules", ".venv", "venv", "__pycache__",
-            ".idea", ".vscode", "dist", "build", ".next", ".agenthub"
-        }
-        IGNORE_FILES = {".gitignore", ".DS_Store", "package-lock.json", "pnpm-lock.yaml"}
+                    if not exists_on_disk:
+                        stale_ids.append(r["id"])
+                        continue
+
+                    resolved_fp = fp_obj.resolve()
+                    # 若属于系统扫描入库 (workspace_sync) 且位于新版忽略目录/文件内，顺便清掉历史缓存脏记录
+                    if r["source"] == "workspace_sync":
+                        try:
+                            rel_existing = resolved_fp.relative_to(root)
+                            if ArtifactRepository._is_ignored_rel_path(rel_existing):
+                                stale_ids.append(r["id"])
+                                continue
+                        except ValueError:
+                            pass
+
+                    existing_paths.add(os.path.normcase(str(resolved_fp)))
+
+        if stale_ids:
+            async with db_manager.get_connection() as conn:
+                for start in range(0, len(stale_ids), 500):
+                    chunk = stale_ids[start : start + 500]
+                    placeholders = ",".join("?" for _ in chunk)
+                    await conn.execute(
+                        f"DELETE FROM workspace_artifacts WHERE id IN ({placeholders});",
+                        tuple(chunk),
+                    )
+                await conn.commit()
+            logger.info(f"工作区 [{workspace_id}] 双向同步已清理 {len(stale_ids)} 条失效/缓存资产记录")
 
         new_records = []
         now = datetime.now().isoformat()
@@ -160,19 +216,17 @@ class ArtifactRepository:
                 if not item.is_file():
                     continue
 
-                # 排除内部系统目录
                 rel = item.relative_to(root)
-                if any(p in IGNORE_DIRS for p in rel.parts[:-1]):
-                    continue
-                if item.name in IGNORE_FILES:
+                if ArtifactRepository._is_ignored_rel_path(rel):
                     continue
 
-                abs_str = str(item.resolve())
-                if abs_str not in existing_paths:
+                resolved_item = item.resolve()
+                norm_key = os.path.normcase(str(resolved_item))
+                if norm_key not in existing_paths:
                     artifact_id = f"art_{uuid.uuid4().hex[:12]}"
                     try:
                         file_size = item.stat().st_size
-                    except Exception:
+                    except OSError:
                         file_size = 0
                     file_type = ArtifactRepository._detect_file_type(item)
                     summary = f"工作区物理文件: {rel}"
@@ -180,7 +234,7 @@ class ArtifactRepository:
                         artifact_id,
                         workspace_id,
                         None,
-                        abs_str,
+                        str(resolved_item),
                         item.name,
                         file_type,
                         file_size,
@@ -188,7 +242,7 @@ class ArtifactRepository:
                         summary,
                         now,
                     ))
-                    existing_paths.add(abs_str)
+                    existing_paths.add(norm_key)
         except Exception as e:
             logger.warning(f"扫描工作区物理目录异常: {e}")
 
@@ -206,7 +260,7 @@ class ArtifactRepository:
                 await conn.commit()
             logger.info(f"工作区 [{workspace_id}] 物理同步完成，新增登记 {len(new_records)} 件资产")
 
-        return len(new_records)
+        return len(new_records) + len(stale_ids)
 
     @staticmethod
     async def list_artifacts(

@@ -362,7 +362,17 @@ class AgentRuntime:
         active_incognito = bool(conv_obj.incognito) if conv_obj else bool(incognito)
         ws_id = (getattr(conv_obj, "workspace_id", None) if conv_obj else None) or ws_id
 
-        # 2. 计算当前大轮次编号 (turn_id) 并率先落盘用户提问（带附件真实绝对路径锚点，防止多步/跨轮路径失忆）
+        # 2. 对齐当前工作区沙盒附件并率先落盘用户提问（确保无论切换工作区或重发旧消息均落盘当前沙盒）
+        if attachments:
+            try:
+                attachments = await attachment_service.ensure_attachments_in_workspace(
+                    ws_id,
+                    attachments,
+                    conversation_id=conv_id,
+                )
+            except Exception as sync_att_err:
+                logger.warning(f"[AgentRuntime] 同步工作区沙盒附件异常: {sync_att_err}")
+
         max_turn = await MessageRepository.get_max_turn_id(conv_id)
         current_turn_id = max_turn + 1
         persisted_user_content = attachment_service.append_attachments_anchor(user_message, attachments)
@@ -1088,135 +1098,242 @@ class AgentRuntime:
 
                 # ── 工具: 物理写入本地文件 (write_local_file - 绝不幻觉) ──
                 elif func_name == "write_local_file":
-                    raw_path = str(args.get("file_path", "")).strip()
+                    raw_path = str(args.get("file_path") or args.get("path") or "").strip()
                     file_content = str(args.get("content", ""))
                     overwrite = bool(args.get("overwrite", True))
                     current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
+                    ws_guard_root = Path(target_cwd or current_work_dir).resolve()
 
-                    target_file = Path(raw_path)
-                    if not target_file.is_absolute():
-                        target_file = (current_work_dir / target_file).resolve()
-
-                    rel_display = str(target_file)
-                    try:
-                        rel_display = str(target_file.relative_to(current_work_dir))
-                    except Exception:
-                        pass
-
-                    # 全自动确认直通写入物理文件，无需用户手动点击确认
-                    yield {
-                        "type": "tool_start",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"write_file -> {rel_display} ({len(file_content)} 字符)",
-                        "reason": f"真实落盘本地文件 {rel_display}",
-                        "security": "AUTO_CONFIRMED",
-                    }
-                    try:
-                        if target_file.exists() and not overwrite:
-                            tool_output = f"Error: 文件 `{rel_display}` 已存在且 overwrite=False，取消写入。"
-                            compressed = f"[写入取消: 文件已存在 `{rel_display}`]"
-                        else:
-                            target_file.parent.mkdir(parents=True, exist_ok=True)
-                            target_file.write_text(file_content, encoding="utf-8")
-                            hotplug_note = ""
-                            if target_file.name.upper() == "SKILL.MD":
-                                target_file = skill_loader.normalize_skill_file(target_file)
-                                hotplug_note = "\n🎯 [SKILL 标准校验与热插拔已激活]: 已自动规范化 YAML Frontmatter 与 kebab-case 命名，前端输入框 `/` 菜单现已可实时调用并查看该技能说明。"
-                            elif target_file.name.lower() == "mcp_servers.json":
-                                created_docs = skill_loader.ensure_mcp_companion_skills()
-                                active_tools = ToolProtocolAdapter.get_builtin_tools() + await mcp_manager.get_enabled_tools()
-                                doc_tip = f"（已自动补全 {created_docs} 个 MCP 伴生 SKILL 说明文档）" if created_docs else ""
-                                hotplug_note = f"\n🔌 [MCP 热插拔已重载]: 已重新扫描 mcp_servers.json，当前可用工具总数: {len(active_tools)}{doc_tip}。"
-                            tool_output = (
-                                f"✅ 成功物理落盘文件: `{target_file}`\n"
-                                f"文件大小: {len(file_content.encode('utf-8'))} 字节\n"
-                                f"状态: 真实写入磁盘已验证完成。{hotplug_note}"
-                            )
-                            compressed = f"[已真实物理落盘文件 `{rel_display}` ({len(file_content)} 字符)]"
-
-                            # 自动联动登记到当前工作区资产库
-                            try:
-                                from ..repository.artifact_repository import ArtifactRepository
-                                f_type = ArtifactRepository._detect_file_type(target_file)
-                                await ArtifactRepository.register_artifact(
-                                    workspace_id=ws_id,
-                                    file_path=str(target_file),
-                                    file_name=target_file.name,
-                                    file_type=f_type,
-                                    file_size=len(file_content.encode("utf-8")),
-                                    conversation_id=conv_id,
-                                    source="ai_generated",
-                                    summary=f"AI 自主编写落盘: {target_file.name}",
-                                )
-                            except Exception as art_err:
-                                logger.warning(f"资产库落盘自动登记异常: {art_err}")
-                    except Exception as write_err:
-                        tool_output = f"Error: 写入文件 `{target_file}` 失败: {write_err}"
-                        compressed = f"[写入文件异常: {str(write_err)[:40]}]"
-
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"write_file({rel_display})",
-                        "reason": f"写入本地文件 {rel_display}",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                        "cwd": str(current_work_dir),
-                    }
-
-                # ── 工具: 物理读取本地文件 (read_local_file) ──
-                elif func_name == "read_local_file":
-                    raw_path = str(args.get("file_path", "")).strip()
-                    current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
-                    target_file = Path(raw_path)
-                    if not target_file.is_absolute():
-                        target_file = (current_work_dir / target_file).resolve()
-                        if not target_file.exists():
-                            # 双层寻址回退：若当前沙盒工作区内不存在，自动在 AgentHub 根目录寻找底座技能包与公共文件
-                            proj_root = Path(__file__).resolve().parent.parent.parent.parent
-                            candidate = (proj_root / raw_path).resolve()
-                            if candidate.exists() and candidate.is_file():
-                                target_file = candidate
-
-                    rel_display = str(target_file)
-                    try:
-                        rel_display = str(target_file.relative_to(current_work_dir))
-                    except Exception:
-                        pass
-
-                    yield {
-                        "type": "tool_start",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"read_file({rel_display})",
-                        "reason": f"读取本地文件内容: {rel_display}",
-                        "security": "SAFE",
-                    }
-                    if not target_file.exists() or not target_file.is_file():
-                        tool_output = f"Error: 目标文件不存在: `{target_file}`"
-                        compressed = f"[读取失败: 文件不存在 `{rel_display}`]"
+                    if not raw_path:
+                        tool_output = "Error: 缺少必要参数 `file_path`。"
+                        compressed = "[写入失败: 未指定目标路径]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": "write_file()",
+                            "reason": "参数缺失拒绝写入",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                            "cwd": str(current_work_dir),
+                        }
                     else:
-                        try:
-                            content_text = target_file.read_text(encoding="utf-8", errors="replace")
-                            tool_output = content_text
-                            compressed = f"[成功读取文件 `{rel_display}`: 共 {len(content_text)} 字符]"
-                        except Exception as read_err:
-                            tool_output = f"Error: 读取文件失败: {read_err}"
-                            compressed = f"[读取文件异常: {str(read_err)[:40]}]"
+                        target_file = Path(raw_path)
+                        if not target_file.is_absolute():
+                            target_file = (current_work_dir / target_file).resolve()
+                        else:
+                            target_file = target_file.resolve()
 
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"read_file({rel_display})",
-                        "reason": f"读取本地文件 {rel_display}",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                    }
+                        rel_display = str(target_file)
+                        try:
+                            rel_display = str(target_file.relative_to(current_work_dir))
+                        except Exception:
+                            pass
+
+                        # 🛡️ 物理只读硬拦截：严禁向工作区用户附件目录写入或伪造 Mock 输入
+                        if (
+                            attachment_service.is_path_in_attachments_dir(target_file, workspace_root=ws_guard_root)
+                            or attachment_service.is_path_in_attachments_dir(target_file, workspace_root=current_work_dir)
+                        ):
+                            deny_att_msg = (
+                                f"Denied: 安全红线拦截！工作区输入附件目录 (`attachments/` 与 `.agenthub/attachments/`) "
+                                f"为用户原始输入只读区，严禁 Agent 写入、修改或伪造测试文件 (`{rel_display}`)。\n"
+                                "请将输出报告或中间产物写入 `./output/` 目录；若发现预期输入文件缺失，严禁生成 Mock 测试数据替代分析，必须立即向用户如实报告！"
+                            )
+                            await audit_service.log(
+                                event_type="write_attachments_denied",
+                                actor="agent",
+                                detail={"target_file": str(target_file), "reason": "read_only_attachments_guard"},
+                                approved=False,
+                            )
+                            tool_output = deny_att_msg
+                            compressed = f"[红线拦截写附件目录 `{rel_display}`]"
+                            yield {
+                                "type": "tool_end",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": f"write_file({rel_display})",
+                                "reason": f"只读附件目录保护拦截 {rel_display}",
+                                "status": "denied",
+                                "output": tool_output,
+                                "compressed": compressed,
+                                "cwd": str(current_work_dir),
+                            }
+                        else:
+                            # 全自动确认直通写入物理文件，无需用户手动点击确认
+                            yield {
+                                "type": "tool_start",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": f"write_file -> {rel_display} ({len(file_content)} 字符)",
+                                "reason": f"真实落盘本地文件 {rel_display}",
+                                "security": "AUTO_CONFIRMED",
+                            }
+                            try:
+                                if target_file.exists() and not overwrite:
+                                    tool_output = f"Error: 文件 `{rel_display}` 已存在且 overwrite=False，取消写入。"
+                                    compressed = f"[写入取消: 文件已存在 `{rel_display}`]"
+                                else:
+                                    target_file.parent.mkdir(parents=True, exist_ok=True)
+                                    target_file.write_text(file_content, encoding="utf-8")
+                                    hotplug_note = ""
+                                    if target_file.name.upper() == "SKILL.MD":
+                                        target_file = skill_loader.normalize_skill_file(target_file)
+                                        hotplug_note = "\n🎯 [SKILL 标准校验与热插拔已激活]: 已自动规范化 YAML Frontmatter 与 kebab-case 命名，前端输入框 `/` 菜单现已可实时调用并查看该技能说明。"
+                                    elif target_file.name.lower() == "mcp_servers.json":
+                                        created_docs = skill_loader.ensure_mcp_companion_skills()
+                                        active_tools = ToolProtocolAdapter.get_builtin_tools() + await mcp_manager.get_enabled_tools()
+                                        doc_tip = f"（已自动补全 {created_docs} 个 MCP 伴生 SKILL 说明文档）" if created_docs else ""
+                                        hotplug_note = f"\n🔌 [MCP 热插拔已重载]: 已重新扫描 mcp_servers.json，当前可用工具总数: {len(active_tools)}{doc_tip}。"
+                                    tool_output = (
+                                        f"✅ 成功物理落盘文件: `{target_file}`\n"
+                                        f"文件大小: {len(file_content.encode('utf-8'))} 字节\n"
+                                        f"状态: 真实写入磁盘已验证完成。{hotplug_note}"
+                                    )
+                                    compressed = f"[已真实物理落盘文件 `{rel_display}` ({len(file_content)} 字符)]"
+
+                                    # 自动联动登记到当前工作区资产库
+                                    try:
+                                        from ..repository.artifact_repository import ArtifactRepository
+                                        f_type = ArtifactRepository._detect_file_type(target_file)
+                                        await ArtifactRepository.register_artifact(
+                                            workspace_id=ws_id,
+                                            file_path=str(target_file),
+                                            file_name=target_file.name,
+                                            file_type=f_type,
+                                            file_size=len(file_content.encode("utf-8")),
+                                            conversation_id=conv_id,
+                                            source="ai_generated",
+                                            summary=f"AI 自主编写落盘: {target_file.name}",
+                                        )
+                                    except Exception as art_err:
+                                        logger.warning(f"资产库落盘自动登记异常: {art_err}")
+                            except Exception as write_err:
+                                tool_output = f"Error: 写入文件 `{target_file}` 失败: {write_err}"
+                                compressed = f"[写入文件异常: {str(write_err)[:40]}]"
+
+                            yield {
+                                "type": "tool_end",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": f"write_file({rel_display})",
+                                "reason": f"写入本地文件 {rel_display}",
+                                "status": "completed",
+                                "output": tool_output,
+                                "compressed": compressed,
+                                "cwd": str(current_work_dir),
+                            }
+
+                # ── 工具: 物理读取本地文件 (read_local_file - 原生支持文本与 Office 结构化解析) ──
+                elif func_name == "read_local_file":
+                    raw_path = str(args.get("file_path") or args.get("path") or "").strip()
+                    current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
+                    ws_search_root = Path(target_cwd or current_work_dir).resolve()
+
+                    if not raw_path:
+                        tool_output = "Error: 缺少必要参数 `file_path`。"
+                        compressed = "[读取失败: 未指定目标路径]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": "read_file()",
+                            "reason": "缺少文件路径参数",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+                    else:
+                        target_file = Path(raw_path)
+                        if not target_file.is_absolute():
+                            target_file = (current_work_dir / target_file).resolve()
+
+                        if not target_file.exists() or not target_file.is_file():
+                            # 回退检索：依次尝试工作区沙盒附件目录与项目底座根目录
+                            proj_root = Path(__file__).resolve().parent.parent.parent.parent
+                            pure_name = Path(raw_path).name
+                            fallback_candidates = [
+                                (ws_search_root / "attachments" / pure_name).resolve(),
+                                (ws_search_root / ".agenthub" / "attachments" / pure_name).resolve(),
+                                (current_work_dir / "attachments" / pure_name).resolve(),
+                                (current_work_dir / ".agenthub" / "attachments" / pure_name).resolve(),
+                                (proj_root / raw_path).resolve(),
+                            ]
+                            for cand in fallback_candidates:
+                                if cand.exists() and cand.is_file():
+                                    target_file = cand
+                                    break
+
+                        rel_display = str(target_file)
+                        try:
+                            rel_display = str(target_file.relative_to(current_work_dir))
+                        except Exception:
+                            pass
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"read_file({rel_display})",
+                            "reason": f"读取本地文件内容: {rel_display}",
+                            "security": "SAFE",
+                        }
+                        if not target_file.exists() or not target_file.is_file():
+                            sandbox_atts = attachment_service.list_workspace_sandbox_attachments(ws_search_root, limit=10)
+                            if sandbox_atts:
+                                att_hint = "\n当前工作区沙盒真实存在的附件:\n" + "\n".join(
+                                    f"- `{item['rel_path']}` ({item['size_str']}, 绝对路径: `{item['file_path']}`)"
+                                    for item in sandbox_atts
+                                )
+                            else:
+                                att_hint = "\n当前工作区附件目录暂为空。"
+                            tool_output = (
+                                f"Error: 目标文件不存在: `{target_file}`{att_hint}\n"
+                                "⚠️ 严禁在文件不存在时自行创建 Mock 或模拟数据替代！请核对上述清单或向用户报错。"
+                            )
+                            compressed = f"[读取失败: 文件不存在 `{rel_display}`]"
+                        else:
+                            try:
+                                ext, category, canonical_mime = attachment_service.classify_extension(target_file.name)
+                                if category == "office" or ext in (".xlsx", ".docx", ".pptx", ".pdf"):
+                                    ctx_info = attachment_service.extract_attachment_context(
+                                        target_file,
+                                        canonical_mime,
+                                        target_file.name,
+                                    )
+                                    preview_txt = ctx_info.get("preview_text") or "(未提取到可读内容)"
+                                    tool_output = (
+                                        f"【结构化文档读取: `{target_file.name}` (分类: {category}, 引擎: {ctx_info.get('extractor')})】\n"
+                                        f"物理路径: `{target_file}`\n\n"
+                                        f"{preview_txt}"
+                                    )
+                                    compressed = f"[已结构化读取文档 `{rel_display}` ({ctx_info.get('extractor')}): 共 {len(tool_output)} 字符]"
+                                else:
+                                    raw_bytes = target_file.read_bytes()
+                                    content_text = attachment_service.decode_text_bytes(raw_bytes)
+                                    if len(content_text) > 120000:
+                                        content_text = (
+                                            content_text[:80000]
+                                            + f"\n\n... [文件过长，中间已省略 {len(content_text) - 100000} 字符；建议用脚本分段处理] ...\n\n"
+                                            + content_text[-20000:]
+                                        )
+                                    tool_output = content_text
+                                    compressed = f"[成功读取文件 `{rel_display}`: 共 {len(content_text)} 字符]"
+                            except Exception as read_err:
+                                tool_output = f"Error: 读取文件失败: {read_err}"
+                                compressed = f"[读取文件异常: {str(read_err)[:40]}]"
+
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"read_file({rel_display})",
+                            "reason": f"读取本地文件 {rel_display}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
 
                 # ── 工具: 实时网络正文抓取与微服务健康探测 (web_fetch) ──
                 elif func_name == "web_fetch":
@@ -1399,7 +1516,7 @@ class AgentRuntime:
                     if not str(tool_output or "").startswith("Error:"):
                         total_tool_steps += 1
                         if func_name == "write_local_file":
-                            fp = str(args.get("file_path") or "").strip()
+                            fp = str(args.get("file_path") or args.get("path") or "").strip()
                             if fp and fp not in produced_artifacts:
                                 produced_artifacts.append(fp)
                         if prev_step_error is not None:
@@ -1451,7 +1568,7 @@ class AgentRuntime:
                                 actor="agent",
                                 skill_id=step_skill_id,
                                 payload={
-                                    "file_path": str(args.get("file_path") or ""),
+                                    "file_path": str(args.get("file_path") or args.get("path") or ""),
                                     "compressed": compressed,
                                 },
                                 incognito=False,
