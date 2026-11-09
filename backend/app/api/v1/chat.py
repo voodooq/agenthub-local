@@ -156,6 +156,8 @@ async def chat_stream(req: ChatStreamRequest):
             clarify_mode=req.clarify_mode,
             approved_plan_steps=req.approved_plan_steps,
             confirmed_facts=req.confirmed_facts,
+            inquiry_confirmed=req.inquiry_confirmed,
+            inquiry_action=req.inquiry_action,
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 

@@ -89,6 +89,9 @@ class ContextBuilder:
         execution_strategy: str = "direct",
         clarify_mode: bool = False,
         approved_plan_steps: list[dict[str, Any]] | None = None,
+        inquiry_confirmed: bool = False,
+        inquiry_action: str | None = None,
+        has_prior_execution_unlock: bool = False,
     ) -> dict[str, Any]:
         """
         为当前推理步骤构建完整上下文载荷。
@@ -166,19 +169,42 @@ class ContextBuilder:
             system_parts.append(f"当前本地终端持久化工作目录 (CWD): `{current_cwd}`")
 
         # ── 谋定而动 (Plan-First) 与交互对齐协议注入 ──
+        normalized_action = (inquiry_action or "").strip().lower() or None
+        explicit_execute_unlock = bool(
+            approved_plan_steps
+            or (inquiry_confirmed and normalized_action == "execute_now")
+        )
+        explicit_clarify_lock = (
+            normalized_action == "clarify_only"
+            and not approved_plan_steps
+        )
+        effective_planning_gate = (
+            scene_mode == "agent"
+            and execution_strategy == "plan_first"
+            and not explicit_execute_unlock
+            and (not has_prior_execution_unlock or explicit_clarify_lock)
+        )
+
         if scene_mode == "agent":
-            if execution_strategy == "plan_first" and not approved_plan_steps:
+            if effective_planning_gate:
+                clarify_follow_tip = (
+                    "\n0. **【上一轮澄清结论已汇入本轮上下文】**：用户上一轮选择先补充方案条件，请基于用户已确认结论完善方案；"
+                    "本轮若仍有待拍板配置或最终实施步骤，请在当前唯一一张 `interactive_inquiry` 卡片内一次性完整收口，切勿继续碎片化追问！"
+                    if explicit_clarify_lock
+                    else ""
+                )
                 system_parts.append(
                     "### 📋【谋定而后动 (Plan-First)】前置对齐与方案规划硬性铁律（强制执行）：\n"
-                    "当前任务已启用【谋定而后动】策略。动工执行任何破坏性写入、文件修改或终端命令之前，必须先完成方案梳理与用户对齐！\n"
+                    "当前任务已启用【谋定而后动】策略。动工执行任何破坏性写入、文件修改或终端命令之前，必须先完成方案梳理与用户对齐！"
+                    f"{clarify_follow_tip}\n"
                     "1. 【物理安全硬门控处于锁定态】：当前阶段系统仅挂载了只读工具（如 read_local_file、检索等），写盘与修改已被安全锁定。你可以在本阶段先静默调用只读工具查看项目文件与目录结构，以确保制定的方案严谨且精准定位真实代码。\n"
                     "2. 【输出结构规范】：\n"
                     "   - 先输出结构清晰的 Markdown【实施方案（Implementation Plan）】与【分步执行步骤清单（Step-by-Step Task List）】；\n"
                     "   - 步骤必须按序号标注（如 步骤 1、步骤 2...），并标注对应的工具安全级别（L0 只读 / L1 本地受控文件操作 / L2 终端执行与测试）；\n"
                     "3. 【交互式对齐协议规范 (```interactive_inquiry)】：\n"
-                    "   - **【按需全量列出、不人为限缩数量】**：当任务存在多个技术路线分歧、参数约束、边界策略或较多实施步骤时，**务必按问题实际需要，在 `questions` 与 `plan_steps` 中完整逐条列出全部待确认问题和全量步骤（数量不限，切勿刻意压缩为 1~2 个确认项）**，方便用户一次性核对并选择确认；\n"
-                    "   - 若需求尚存不确定点或缺少关键参数，必须在回复末尾附带如下标准 JSON 协议块（可按需同时包含多道单选/多选 `questions` 与留空模板 `fill_template`）；\n"
-                    "   - 若方案可进入审批启动阶段，请在末尾输出带 `phase: \"plan_approval\"` 的标准 JSON 协议块与完整 `plan_steps`；若批准步骤的同时仍有若干配置项/细节待用户一并拍板，允许在同一卡片内同时附带 `questions` 与 `fill_template`，前端会统一收集全部答案与勾选步骤后再启动执行：\n"
+                    "   - **【单卡一次性收集全部确认项，严禁挤牙膏二次弹卡】**：如果任务存在多个参数设置、路线分歧、填空项或待审批步骤，**必须按问题实际需要，在当前唯一一张 `interactive_inquiry` 卡片的 `questions`、`fill_template` 与 `plan_steps` 中一次性全部列出（不人为限缩数量，切勿拆多轮）**；前端会自动通过分步向导引导用户逐项确认完毕后统一点击执行；\n"
+                    "   - **【严禁编造仅有单个无意义批准选项的空转伪选择题】**：`questions` 仅在确实存在 **至少 2 个有实质差异的可选分支或配置参数** 时才使用；绝对禁止在 `questions` 中制造只有一个「确认并立即执行」选项的无意义伪问题！若仅需用户审批步骤清单而无真实多分支分歧，请设 `\"questions\": []`（或省略 `questions`）仅输出 `plan_steps`；\n"
+                    "   - 若需求尚存不确定点或缺少关键参数，可在末尾输出带 `questions` / `fill_template` 的标准 JSON 协议块；若已可直接启动实施，请在末尾输出带 `phase: \"plan_approval\"` 与完整 `plan_steps` 的协议块（可同时携带 `questions` 与 `fill_template`，前端会在向导中逐步引导用户确认完再统一开始执行）：\n"
                     "```interactive_inquiry\n"
                     "{\n"
                     '  "inquiry_id": "inq_unique_id",\n'
@@ -217,23 +243,45 @@ class ContextBuilder:
                     "  ]\n"
                     "}\n"
                     "```\n"
-                    "   - 提示：留空填空模板中，使用 `{{参数名:默认值或提示}}` 作为标准占位符，前端支持光标高亮和 Tab 键快速跳转填空；仅针对需要跨轮长期复用的规则/偏好，在 `questions` 项中附带可选字段 `\"fact_key\"`、`\"fact_category\"` (`user_pref|biz_rule|env_config`) 与 `\"fact_scope\"` (`workspace|global`)。\n"
+                    "   - 提示：留空填空模板中，使用 `{{参数名:默认值或提示}}` 作为标准占位符，前端支持分步向导内直接编辑填空与 Tab 键快捷跳转；仅针对需要跨轮长期复用的规则/偏好，在 `questions` 项中附带可选字段 `\"fact_key\"`、`\"fact_category\"` (`user_pref|biz_rule|env_config`) 与 `\"fact_scope\"` (`workspace|global`)。\n"
                     "4. 【严禁跳过方案强行写盘】：方案未获得用户在前端确认审批通过前，绝对禁止声明已落地修改！"
                 )
-            elif approved_plan_steps:
-                steps_summary = json.dumps(approved_plan_steps, ensure_ascii=False, indent=2)
+            elif explicit_execute_unlock:
+                steps_block = ""
+                if approved_plan_steps:
+                    steps_summary = json.dumps(approved_plan_steps, ensure_ascii=False, indent=2)
+                    steps_block = (
+                        "用户同时核对并批准了以下实施步骤清单：\n"
+                        f"```json\n{steps_summary}\n```\n"
+                    )
                 system_parts.append(
-                    "### 🚀【方案已获用户审批批准 - 全速具身执行指令】：\n"
-                    "用户已在前端卡片中确认批准了以下实施步骤清单，写盘与终端执行权限现已全部解锁：\n"
-                    f"```json\n{steps_summary}\n```\n"
-                    "请严格对照上述批准的步骤清单，逐一调用 `<tool_call>` 真实执行落盘、修改、测试与自愈验证，直到全量步骤彻底达成！"
+                    "### 🚀【全部前置项已分步确认完毕 - 解锁全量工具立即执行到底（强制铁律）】：\n"
+                    "用户已在前端交互向导中逐项确认完毕全部需求参数、配置选型与执行决策，写盘与本地终端执行权限现已**全部物理解锁**。\n"
+                    f"{steps_block}"
+                    "**【禁止二次弹窗确认红线】**：\n"
+                    "1. 本轮回复**严禁再次输出任何 `interactive_inquiry` 卡片**！\n"
+                    "2. 严禁停下来反问用户「是否立即执行」、「请点击确认」或重复输出实施方案征求同意！\n"
+                    "3. 你必须立即在本轮连续输出 `<tool_call>` 标签真实调用 `write_local_file`、`execute_local_command` 等工具完成全部代码编写、脚本运行、产物生成与核验验证，直到最终成果物理交付完成再向用户汇报结果！"
+                )
+            elif explicit_clarify_lock:
+                system_parts.append(
+                    "### 🧭【继续细化方案（暂未触发写盘执行）】：\n"
+                    "用户本轮选择了仅提交补充信息并先细化确认方案，请结合用户答案完善分析、澄清疑问或给出包含完整配置项与执行步骤的单张 `interactive_inquiry` 对齐卡，暂不改动业务交付文件。"
+                )
+            elif has_prior_execution_unlock:
+                system_parts.append(
+                    "### ⚡【同会话方案已解锁 - 清晰指令直接执行到底】：\n"
+                    "当前会话此前已通过方案审批并已进入具身执行阶段（全量读写与终端工具现已保持开放）。\n"
+                    "1. 若用户本轮指令目标清晰、可执行（例如：修改逻辑、补算数据、调整输出格式、重跑脚本生成文件），**请立即直接调用 `<tool_call>` 完成修改、运行与校验交付**，严禁退回规划态或输出仅有「确认并立即执行」的空转确认卡！\n"
+                    "2. 仅当新要求属于颠覆性重构且确实存在 **至少 2 项真实不可自动推断的互斥分支** 时，方可使用单张完整 `interactive_inquiry` 卡片一次性对齐所有分歧。"
                 )
         elif scene_mode == "chat" and clarify_mode:
             system_parts.append(
                 "### 🧭【需求前置主动澄清模式 (Clarify Mode)】：\n"
                 "用户开启了需求澄清模式。当用户的提问涉及多方案分歧、前提假设不明确或缺少场景约束时，切勿盲目输出长篇泛泛而谈的理论；\n"
-                "应先在正文中提炼核心考量，并在末尾输出 ```interactive_inquiry 结构化卡片（包含 phase: 'clarification' 与 questions 选择题或 fill_template 模板；"
-                "当需要确认或明确的维度较多时，务必按问题实际需要完整逐条列出全部待确认问题，数量不限，切勿强行缩减为一两个导致反复追问；可长期复用的配置问题可附加 fact_key / fact_category / fact_scope），供用户一次性对齐全部上下文后再展开深度解答。"
+                "应先在正文中提炼核心考量，并在末尾通过**唯一一张** ```interactive_inquiry 结构化卡片一次性完整列出所有待确认维度（包含 phase: 'clarification' 与 `questions` 选择题或 `fill_template` 模板；"
+                "当需要确认或明确的维度较多时，务必按问题实际需要**完整逐条列出全部待确认问题，数量不限**，切勿强行拆分成多轮追问；禁止构造只有一个无意义选项的伪选择题；可长期复用的配置问题可附加 fact_key / fact_category / fact_scope），"
+                "供用户按步骤逐项确认完毕后再统一提交解答。"
             )
 
         # 2. [L4 确定性事实视图] 挂载 Active Fact View（工作区契约严格覆盖 GLOBAL，无痕模式跳过）

@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.1.11-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.1.12-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -14,6 +14,22 @@
 > **数据与算力彻底解耦，告别单一模型绑定**：
 > AgentHub Local 是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、Llama.cpp、Nvidia 实例），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、SiliconFlow、Google AI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
+
+---
+
+## 🧭 v1.1.12 分步交互确认向导、确认即执行直通与防重复弹卡体系
+
+彻底解决多项待确认项难以一步到位、确认后模型再次弹卡停滞及 3 秒轮询导致的卡片重建回弹问题：
+1. **分步确认引导向导 ([`InteractiveInquiryCard.tsx`](frontend/src/components/InteractiveInquiryCard.tsx) & [`inquiryWorkflow.ts`](frontend/src/utils/inquiryWorkflow.ts))**：
+   - 当卡片存在 `>= 2` 项确认维度（多选题、留空参数模板 `{{KEY:VAL}}` 或 `plan_steps` 清单）时，默认进入 **「分步向导」** 模式：顶栏带交互式进度条与可点击步骤胶囊（未完成前序必选步骤前严格引导拦截定位），支持直接编辑模板占位符、末步完整回核前置选择、一键切换 `[全部总览 / 分步引导]`，并仅在最终全部确认完毕后展示唯一执行入口 **「🚀 全部确认完毕，统一开始执行」**（或可选 **「仅提交继续细化方案」**）；
+   - 彻底移除单选选项内置的 `⚡ 选此项直发` 抢跑按钮，杜绝多步骤任务在中途被提前截断锁定。
+2. **抗轮询防重建与历史卡片永久锁定 ([`AssistantMarkdownMessage.tsx`](frontend/src/components/AssistantMarkdownMessage.tsx) & [`page.tsx`](frontend/src/app/page.tsx))**：
+   - 将消息正文中的 `ReactMarkdown` 与自定义组件映射抽离至模块级恒定配置 + `MarkdownMessageRuntimeContext` + `React.memo`，结合 `latestMarkdownActionsRef` 稳定回调，彻底隔离顶栏 3 秒轮询导致的对齐卡状态重置与闪烁；
+   - 结合会话持久化存储 `agenthub_submitted_inquiries_<conv_id>` 与消息时序单调性，历史或已提交卡片自动永久切换为只读折叠回顾态（支持 `[查看详情]`），绝不二次误触。
+3. **后端单卡收口、确认后禁止二次弹卡与同会话直通解锁 ([`context_builder.py`](backend/app/agent/context_builder.py), [`runtime.py`](backend/app/agent/runtime.py), [`chat_schema.py`](backend/app/schema/chat_schema.py))**：
+   - 新增结构化请求契约 `inquiry_confirmed` 与 `inquiry_action` (`execute_now` / `clarify_only`)，规划阶段强约束大模型在单张卡片内一次问清全部问题，严禁编造仅有单个「确认并立即执行」选项的空转伪选择题；
+   - 用户确认 `execute_now` 后注入「禁止二次弹窗确认红线」，并在 `AgentRuntime` 内置 `inquiry_guard` 运行时守卫：若模型仍误吐重复 `interactive_inquiry` 卡片，立即下发 `stream_reset` 并强纠偏重试写入执行，阻断脏卡落库；
+   - 精准区分“被规划只读门控拒绝的调用”与“真实已解锁执行的非规划工具调用”（`detect_prior_execution_unlock`），同会话一旦进入执行态，后续清晰调整指令自动直通执行到底。
 
 ---
 
@@ -275,8 +291,8 @@ flowchart TD
 
 | 客户端版本 | 适用系统 | 包名称 | 运行方式 |
 | :--- | :--- | :--- | :--- |
-| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.11-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
-| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.11-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
+| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.12-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
+| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.12-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
 | **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
 
 ---
@@ -294,23 +310,23 @@ sequenceDiagram
     participant Actions as GitHub Actions Runner (windows-latest)
     participant Releases as GitHub Releases 页面
 
-    Dev->>Git: git tag v1.1.11
-    Dev->>GH: git push origin v1.1.11
+    Dev->>Git: git tag v1.1.12
+    Dev->>GH: git push origin v1.1.12
     GH->>Actions: 触发 release.yml 流水线
     Actions->>Actions: 安装 Node 20 & Python 3.12
     Actions->>Actions: 编译并导出 Next.js 静态前端 (out/)
     Actions->>Actions: 打包 Windows 便携包 (*-windows-x64.zip)
     Actions->>Actions: 打包跨平台源码包 (*-portable.tar.gz)
-    Actions->>Releases: 自动创建 Release v1.1.11 并上传分发产物
+    Actions->>Releases: 自动创建 Release v1.1.12 并上传分发产物
     Releases-->>Dev: 用户可在页面直接下载执行文件
 ```
 
 ### 如何发布新版本：
 只需在 `version.json` 更新版本号（或运行 `python sync_version.py <version>`），随后在本地执行以下命令：
 ```bash
-git tag v1.1.11
+git tag v1.1.12
 git push origin master
-git push origin v1.1.11
+git push origin v1.1.12
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 release 附件，几分钟内即可在 Releases 页面看到生成的下载文件！
 

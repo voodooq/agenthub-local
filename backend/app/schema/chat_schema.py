@@ -39,6 +39,8 @@ class ChatStreamRequest(BaseModel):
     clarify_mode: bool = Field(default=False, description="对话模式下是否开启需求前置澄清")
     approved_plan_steps: list[dict] | None = Field(default=None, description="用户在前端确认批准的步骤清单")
     confirmed_facts: list[ConfirmedFactItem] | None = Field(default=None, description="对齐卡确认的结构化事实参数列表")
+    inquiry_confirmed: bool = Field(default=False, description="用户是否已在前端交互卡片完成分步确认")
+    inquiry_action: str | None = Field(default=None, description="交互确认卡片触发动作: execute_now(确认后统一执行) | clarify_only(仅细化方案)")
 
 
 class ToolApprovalRequest(BaseModel):

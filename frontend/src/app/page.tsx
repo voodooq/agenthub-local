@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
+import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   Send,
@@ -34,7 +34,6 @@ import { ModelSelector, ThinkingLevel, ModelOption } from '@/components/ModelSel
 import { ThinkingBlock } from '@/components/ThinkingBlock';
 import { MessageActions } from '@/components/MessageActions';
 import { PromptStarterCards } from '@/components/PromptStarterCards';
-import { CodeBlock } from '@/components/CodeBlock';
 import { CanvasDrawer } from '@/components/CanvasDrawer';
 import { SearchModal } from '@/components/SearchModal';
 import { AccountModal } from '@/components/AccountModal';
@@ -53,7 +52,7 @@ import { LoopHUD } from '@/components/LoopHUD';
 import { ApprovalCard } from '@/components/ApprovalCard';
 import { SkillPickerModal } from '@/components/SkillPickerModal';
 import { SopDrawer } from '@/components/SopDrawer';
-import { InteractiveInquiryCard } from '@/components/InteractiveInquiryCard';
+import { AssistantMarkdownMessage } from '@/components/AssistantMarkdownMessage';
 import { ExperienceProposalCard } from '@/components/ExperienceProposalCard';
 
 import { GeneratedFileChip } from '@/components/GeneratedFileChip';
@@ -69,6 +68,7 @@ import {
   TaskLoopResponse,
   SkillItem,
   ExecutionStrategy,
+  InquirySubmitAction,
   PlanStepItem,
   ConfirmedFactItem,
   MemoryFactItem,
@@ -76,12 +76,14 @@ import {
 } from '@/types';
 import { apiFetch, getAccessToken } from '@/utils/apiClient';
 import {
-  AGENTHUB_FILE_SCHEME,
   cleanFilePathCandidate,
   extractGeneratedFilePaths,
   isNavigableLocalFilePath,
-  linkifyBareFilePathsInMarkdown,
 } from '@/utils/filePathDetector';
+import {
+  computeInquiryCardLocked,
+  resolveMessageInquiryKey,
+} from '@/utils/inquiryWorkflow';
 import { prefetchExtensionSkills, prefetchWorkspaceSkills } from '@/utils/skillCache';
 import {
   AttachmentCategory,
@@ -236,10 +238,58 @@ export default function WorkbenchPage() {
   const handleApproveAndExecutePlan = async (
     steps: PlanStepItem[],
     feedbackText: string,
-    confirmedFacts?: ConfirmedFactItem[]
+    confirmedFacts?: ConfirmedFactItem[],
+    loopGoalHint?: string
   ) => {
-    await handleSendMessage(feedbackText, steps, confirmedFacts);
+    await handleSendMessage(feedbackText, steps, confirmedFacts, undefined, {
+      inquiryConfirmed: true,
+      inquiryAction: 'execute_now',
+      loopGoalOverride: loopGoalHint,
+    });
   };
+
+  // 已提交确认卡片持久化锁定键集合（按会话隔离保存在 localStorage）
+  const [submittedInquiryKeys, setSubmittedInquiryKeys] = useState<Set<string>>(() => new Set());
+  const activeConvIdRef = useRef<string | null>(activeConvId);
+  activeConvIdRef.current = activeConvId;
+
+  useEffect(() => {
+    if (!activeConvId) {
+      setSubmittedInquiryKeys(new Set());
+      return;
+    }
+    try {
+      const storageKey = `agenthub_submitted_inquiries_${activeConvId}`;
+      const raw = localStorage.getItem(storageKey);
+      if (raw) {
+        const parsedKeys = JSON.parse(raw);
+        if (Array.isArray(parsedKeys)) {
+          setSubmittedInquiryKeys(new Set<string>(parsedKeys.map(String)));
+          return;
+        }
+      }
+    } catch { }
+    setSubmittedInquiryKeys(new Set());
+  }, [activeConvId]);
+
+  const handleMarkInquirySubmitted = useCallback((inquiryKey: string) => {
+    if (!inquiryKey) return;
+    setSubmittedInquiryKeys((prev) => {
+      if (prev.has(inquiryKey)) return prev;
+      const next = new Set(prev);
+      next.add(inquiryKey);
+      const cid = activeConvIdRef.current;
+      if (cid) {
+        try {
+          localStorage.setItem(
+            `agenthub_submitted_inquiries_${cid}`,
+            JSON.stringify(Array.from(next).slice(-100))
+          );
+        } catch { }
+      }
+      return next;
+    });
+  }, []);
 
   // 流式结束重载数据库消息时，保留最新一轮收到的 fact_refs 溯源状态
   const lastStreamFactRefsRef = useRef<{ convId: string; facts: MemoryFactItem[] } | null>(null);
@@ -284,32 +334,6 @@ export default function WorkbenchPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-
-  const normalizeEscapedContent = (content: string): string => {
-    if (!content) return '';
-    let res = content;
-    if (
-      res.includes('\\n') &&
-      (res.includes('\\nimport ') ||
-        res.includes('\\nfrom ') ||
-        res.includes('\\ndef ') ||
-        res.includes('\\nclass ') ||
-        res.includes('\\nasync '))
-    ) {
-      res = res.replace(/\\n/g, '\n').replace(/\\t/g, '  ');
-    }
-    if (
-      !res.trim().startsWith('```') &&
-      (res.trim().startsWith('import ') ||
-        res.trim().startsWith('from ') ||
-        res.trim().startsWith('async def ') ||
-        res.trim().startsWith('def ') ||
-        res.trim().startsWith('asyncio'))
-    ) {
-      res = '```python\n' + res.trim() + '\n```';
-    }
-    return res;
-  };
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -692,7 +716,12 @@ export default function WorkbenchPage() {
     customPrompt?: string,
     approvedStepsForRequest?: PlanStepItem[],
     confirmedFactsForRequest?: ConfirmedFactItem[],
-    overrideAttachments?: ParsedUserAttachment[]
+    overrideAttachments?: ParsedUserAttachment[],
+    options?: {
+      inquiryConfirmed?: boolean;
+      inquiryAction?: InquirySubmitAction;
+      loopGoalOverride?: string;
+    }
   ) => {
     const usingOverrideAttachments = Array.isArray(overrideAttachments);
     const currentAttachments: AttachmentItem[] = usingOverrideAttachments
@@ -813,14 +842,35 @@ export default function WorkbenchPage() {
 
     setMessages((prev) => [...prev, tempUserMsg, tempAssistantMsg]);
 
-    if (sceneMode === 'agent') {
+    const hasPriorUnlockInView = messages.some(
+      (m) =>
+        (m.role === 'model' && Array.isArray(m.tool_events) && m.tool_events.length > 0) ||
+        (m.role === 'user' &&
+          (m.content.includes('实施方案已通过用户审批') ||
+            m.content.includes('全部确认完毕')))
+    );
+    const shouldStartLoopHud =
+      sceneMode === 'agent' &&
+      options?.inquiryAction !== 'clarify_only' &&
+      (executionStrategy !== 'plan_first' ||
+        Boolean(approvedStepsForRequest && approvedStepsForRequest.length > 0) ||
+        Boolean(options?.inquiryConfirmed && options?.inquiryAction === 'execute_now') ||
+        hasPriorUnlockInView);
+
+    if (shouldStartLoopHud) {
+      const cleanFallbackGoal = rawPrompt.split('\n')[0].slice(0, 120);
+      const loopGoalPrompt =
+        (options?.loopGoalOverride || '').trim() ||
+        (cleanFallbackGoal.startsWith('已确认') || cleanFallbackGoal.startsWith('✅')
+          ? '按确认决策执行任务'
+          : cleanFallbackGoal);
       apiFetch('/api/v1/loop/start', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           workspace_id: activeWorkspaceId,
           conversation_id: activeConvId || 'default',
-          goal_prompt: rawPrompt,
+          goal_prompt: loopGoalPrompt,
         }),
       })
         .then(async (r) => {
@@ -857,6 +907,8 @@ export default function WorkbenchPage() {
           clarify_mode: sceneMode === 'chat' ? clarifyMode : false,
           approved_plan_steps: approvedStepsForRequest || null,
           confirmed_facts: confirmedFactsForRequest && confirmedFactsForRequest.length > 0 ? confirmedFactsForRequest : null,
+          inquiry_confirmed: Boolean(options?.inquiryConfirmed),
+          inquiry_action: options?.inquiryAction || null,
           attachments: currentAttachments.map((a) => ({
             name: a.name,
             file_path: a.filePath,
@@ -1525,6 +1577,107 @@ export default function WorkbenchPage() {
   const handleCloseSkillPicker = useCallback(() => setIsSkillPickerOpen(false), []);
   const handleCloseSopDrawer = useCallback(() => setSelectedSopSkill(null), []);
 
+  // 稳定 Markdown AI 消息子组件回调引用，配合 React.memo 彻底隔绝外层轮询重绘
+  const latestMarkdownActionsRef = useRef({
+    markInquirySubmitted: handleMarkInquirySubmitted,
+    sendInquiryFeedback: (
+      feedback: string,
+      confirmedFacts?: ConfirmedFactItem[],
+      inquiryAction?: InquirySubmitAction,
+      loopGoalHint?: string
+    ) => {
+      void handleSendMessage(feedback, undefined, confirmedFacts, undefined, {
+        inquiryConfirmed: true,
+        inquiryAction: inquiryAction || 'execute_now',
+        loopGoalOverride: loopGoalHint,
+      });
+    },
+    fillTemplate: handleFillTemplateToInput,
+    approvePlan: handleApproveAndExecutePlan,
+    openCanvas: handleOpenCanvas,
+    saveToWorkspace: handleSaveCodeToWorkspace,
+    openGeneratedFile: handleOpenGeneratedFile,
+    previewGeneratedFile: handlePreviewGeneratedFile,
+  });
+  latestMarkdownActionsRef.current = {
+    markInquirySubmitted: handleMarkInquirySubmitted,
+    sendInquiryFeedback: (
+      feedback: string,
+      confirmedFacts?: ConfirmedFactItem[],
+      inquiryAction?: InquirySubmitAction,
+      loopGoalHint?: string
+    ) => {
+      void handleSendMessage(feedback, undefined, confirmedFacts, undefined, {
+        inquiryConfirmed: true,
+        inquiryAction: inquiryAction || 'execute_now',
+        loopGoalOverride: loopGoalHint,
+      });
+    },
+    fillTemplate: handleFillTemplateToInput,
+    approvePlan: handleApproveAndExecutePlan,
+    openCanvas: handleOpenCanvas,
+    saveToWorkspace: handleSaveCodeToWorkspace,
+    openGeneratedFile: handleOpenGeneratedFile,
+    previewGeneratedFile: handlePreviewGeneratedFile,
+  };
+
+  const stableMarkInquirySubmitted = useCallback((key: string) => {
+    latestMarkdownActionsRef.current.markInquirySubmitted(key);
+  }, []);
+  const stableSendInquiryFeedback = useCallback(
+    (
+      feedback: string,
+      confirmedFacts?: ConfirmedFactItem[],
+      inquiryAction?: InquirySubmitAction,
+      loopGoalHint?: string
+    ) => {
+      latestMarkdownActionsRef.current.sendInquiryFeedback(
+        feedback,
+        confirmedFacts,
+        inquiryAction,
+        loopGoalHint
+      );
+    },
+    []
+  );
+  const stableFillTemplate = useCallback((tmpl: string) => {
+    latestMarkdownActionsRef.current.fillTemplate(tmpl);
+  }, []);
+  const stableApprovePlan = useCallback(
+    (
+      steps: PlanStepItem[],
+      feedback: string,
+      confirmedFacts?: ConfirmedFactItem[],
+      loopGoalHint?: string
+    ) => {
+      latestMarkdownActionsRef.current.approvePlan(
+        steps,
+        feedback,
+        confirmedFacts,
+        loopGoalHint
+      );
+    },
+    []
+  );
+  const stableOpenCanvas = useCallback(
+    (code: string, language: string, customTitle?: string) => {
+      latestMarkdownActionsRef.current.openCanvas(code, language, customTitle);
+    },
+    []
+  );
+  const stableSaveToWorkspace = useCallback((code: string, language: string) => {
+    latestMarkdownActionsRef.current.saveToWorkspace(code, language);
+  }, []);
+  const stableOpenGeneratedFile = useCallback(
+    (rawPath: string, mode: 'launch' | 'reveal') => {
+      latestMarkdownActionsRef.current.openGeneratedFile(rawPath, mode);
+    },
+    []
+  );
+  const stablePreviewGeneratedFile = useCallback((rawPath: string) => {
+    latestMarkdownActionsRef.current.previewGeneratedFile(rawPath);
+  }, []);
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground transition-colors duration-200">
       {/* 侧边栏 */}
@@ -1963,173 +2116,35 @@ export default function WorkbenchPage() {
                             })()
                           ) : (
                             (() => {
-                              const isCurrentStreamingMsg = isStreaming && msg.id === messages[messages.length - 1]?.id;
-                              const normalizedMarkdown = normalizeEscapedContent(msg.content);
-                              const renderedMarkdown = isCurrentStreamingMsg
-                                ? normalizedMarkdown
-                                : linkifyBareFilePathsInMarkdown(normalizedMarkdown);
-
-                              const extractPlainText = (childrenNode: React.ReactNode): string => {
-                                if (typeof childrenNode === 'string' || typeof childrenNode === 'number') {
-                                  return String(childrenNode);
-                                }
-                                if (Array.isArray(childrenNode)) {
-                                  return childrenNode.map(extractPlainText).join('');
-                                }
-                                if (React.isValidElement<{ children?: React.ReactNode }>(childrenNode) && childrenNode.props?.children) {
-                                  return extractPlainText(childrenNode.props.children);
-                                }
-                                return '';
-                              };
-
+                              const isCurrentStreamingMsg =
+                                isStreaming && msg.id === messages[messages.length - 1]?.id;
+                              const msgInquiryKey = resolveMessageInquiryKey(
+                                msg.content || '',
+                                msg.id,
+                                index
+                              );
+                              const isMsgInquiryLocked = computeInquiryCardLocked(
+                                messages,
+                                index,
+                                msgInquiryKey,
+                                submittedInquiryKeys
+                              );
                               return (
-                                <div className="prose dark:prose-invert max-w-none text-foreground break-anywhere">
-                                  {msg.content ? (
-                                    <ReactMarkdown
-                                      remarkPlugins={[remarkGfm]}
-                                      urlTransform={(url) => {
-                                        if (
-                                          url.startsWith(AGENTHUB_FILE_SCHEME) ||
-                                          url.toLowerCase().startsWith('file://') ||
-                                          isNavigableLocalFilePath(url)
-                                        ) {
-                                          return url;
-                                        }
-                                        return defaultUrlTransform(url);
-                                      }}
-                                      components={{
-                                        code({ node, inline, className, children, ...props }: any) {
-                                          const match = /language-(\w+)/.exec(className || '');
-                                          const language = match ? match[1] : '';
-                                          const rawChildrenText = String(children ?? '');
-                                          const codeString = rawChildrenText.replace(/\n$/, '');
-
-                                          if (!inline && language === 'interactive_inquiry') {
-                                            return (
-                                              <InteractiveInquiryCard
-                                                rawContent={codeString}
-                                                onSendFeedback={(feedback, confirmedFacts) =>
-                                                  handleSendMessage(feedback, undefined, confirmedFacts)
-                                                }
-                                                onFillTemplate={(tmpl) => handleFillTemplateToInput(tmpl)}
-                                                onApprovePlan={(steps, feedback, confirmedFacts) =>
-                                                  handleApproveAndExecutePlan(steps, feedback, confirmedFacts)
-                                                }
-                                                isStreaming={isCurrentStreamingMsg}
-                                              />
-                                            );
-                                          }
-
-                                          if (!inline && language) {
-                                            return (
-                                              <CodeBlock
-                                                code={codeString}
-                                                language={language}
-                                                onSendToCanvas={(c: string, l: string) => handleOpenCanvas(c, l)}
-                                                onSaveToWorkspace={handleSaveCodeToWorkspace}
-                                              />
-                                            );
-                                          }
-
-                                          // 仅对单行行内代码做本地文件路径直开识别（严格避开多行代码块）
-                                          if (
-                                            inline !== false &&
-                                            !language &&
-                                            !rawChildrenText.includes('\n') &&
-                                            isNavigableLocalFilePath(codeString)
-                                          ) {
-                                            return (
-                                              <GeneratedFileChip
-                                                filePath={cleanFilePathCandidate(codeString)}
-                                                variant="inline"
-                                                onLaunch={(fp) => handleOpenGeneratedFile(fp, 'launch')}
-                                                onReveal={(fp) => handleOpenGeneratedFile(fp, 'reveal')}
-                                                onPreview={(fp) => handlePreviewGeneratedFile(fp)}
-                                              />
-                                            );
-                                          }
-
-                                          return (
-                                            <code
-                                              className="bg-surface-200 border border-border px-1.5 py-0.5 rounded font-mono text-[12px] text-amber-600 dark:text-amber-300 break-anywhere"
-                                              {...props}
-                                            >
-                                              {children}
-                                            </code>
-                                          );
-                                        },
-                                        a({ node, href, children, ...props }: any) {
-                                          const hrefStr = String(href || '').trim();
-                                          if (hrefStr.startsWith(AGENTHUB_FILE_SCHEME)) {
-                                            const decodedPath = decodeURIComponent(hrefStr.slice(AGENTHUB_FILE_SCHEME.length));
-                                            return (
-                                              <GeneratedFileChip
-                                                filePath={decodedPath}
-                                                variant="inline"
-                                                onLaunch={(fp) => handleOpenGeneratedFile(fp, 'launch')}
-                                                onReveal={(fp) => handleOpenGeneratedFile(fp, 'reveal')}
-                                                onPreview={(fp) => handlePreviewGeneratedFile(fp)}
-                                              />
-                                            );
-                                          }
-                                          if (hrefStr && isNavigableLocalFilePath(hrefStr)) {
-                                            const labelText = extractPlainText(children).trim();
-                                            const customLabel =
-                                              labelText && labelText !== hrefStr ? labelText : undefined;
-                                            return (
-                                              <GeneratedFileChip
-                                                filePath={hrefStr}
-                                                label={customLabel}
-                                                variant="inline"
-                                                onLaunch={(fp) => handleOpenGeneratedFile(fp, 'launch')}
-                                                onReveal={(fp) => handleOpenGeneratedFile(fp, 'reveal')}
-                                                onPreview={(fp) => handlePreviewGeneratedFile(fp)}
-                                              />
-                                            );
-                                          }
-                                          const isAnchorOnly = hrefStr.startsWith('#');
-                                          return (
-                                            <a
-                                              href={hrefStr}
-                                              target={isAnchorOnly ? undefined : '_blank'}
-                                              rel={isAnchorOnly ? undefined : 'noopener noreferrer'}
-                                              className="text-emerald-600 dark:text-emerald-400 underline underline-offset-2 hover:text-emerald-500 transition-colors"
-                                              {...props}
-                                            >
-                                              {children}
-                                            </a>
-                                          );
-                                        },
-                                        img({ node, src, alt, ...props }: any) {
-                                          if (!src) return null;
-                                          return (
-                                            <span className="block my-3">
-                                              <img
-                                                src={src}
-                                                alt={alt || 'AI 生成插画'}
-                                                className="rounded-xl border border-border shadow-lg max-w-full h-auto object-cover max-h-[512px] hover:scale-[1.01] transition-transform cursor-pointer"
-                                                onClick={() => handleOpenCanvas(src, 'image', alt ? `画作预览: ${alt}` : '生成的 AI 画作原图预览')}
-                                                {...props}
-                                              />
-                                              {alt && (
-                                                <span className="block text-xs text-muted-foreground mt-1 italic text-center">
-                                                  {alt}（点击可在右侧画布全屏查看大图）
-                                                </span>
-                                              )}
-                                            </span>
-                                          );
-                                        },
-                                      }}
-                                    >
-                                      {renderedMarkdown}
-                                    </ReactMarkdown>
-                                  ) : (
-                                    <div className="flex items-center space-x-2 text-muted-foreground text-xs py-1">
-                                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
-                                      <span>正在调度本地执行与安全分析...</span>
-                                    </div>
-                                  )}
-                                </div>
+                                <AssistantMarkdownMessage
+                                  content={msg.content || ''}
+                                  isStreaming={isCurrentStreamingMsg}
+                                  inquiryKey={msgInquiryKey}
+                                  isInquirySubmitted={isMsgInquiryLocked}
+                                  isExecutionContext={sceneMode === 'agent'}
+                                  onMarkInquirySubmitted={stableMarkInquirySubmitted}
+                                  onSendInquiryFeedback={stableSendInquiryFeedback}
+                                  onFillTemplate={stableFillTemplate}
+                                  onApprovePlan={stableApprovePlan}
+                                  onOpenCanvas={stableOpenCanvas}
+                                  onSaveToWorkspace={stableSaveToWorkspace}
+                                  onOpenGeneratedFile={stableOpenGeneratedFile}
+                                  onPreviewGeneratedFile={stablePreviewGeneratedFile}
+                                />
                               );
                             })()
                           )}

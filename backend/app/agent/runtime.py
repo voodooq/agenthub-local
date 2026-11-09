@@ -41,6 +41,90 @@ class AgentRuntime:
     DEFAULT_REACT_STEPS = 16
     MAX_REACT_STEPS = 40  # 任务深度自愈与多步推进时的绝对动态扩展上限
 
+    PLANNING_SAFE_TOOLS = frozenset({
+        "read_local_file",
+        "search_memory_history",
+        "search_skill_knowledge",
+        "load_skill_detail",
+        "web_fetch",
+        "update_working_memory",
+    })
+
+    EXECUTION_APPROVAL_MARKERS = (
+        "实施方案已通过用户审批",
+        "批准执行以下步骤清单",
+        "全部确认完毕",
+        "解锁执行权限",
+    )
+
+    @classmethod
+    def detect_prior_execution_unlock(cls, history_messages: list[Any]) -> bool:
+        """检查当前会话既往消息中是否已完成方案审批或真实执行过非规划写盘/终端工具。
+
+        用于解除同一会话已获执行许可后，因策略仍保留在 plan_first 而产生的二次强制锁死。
+        """
+        if not history_messages:
+            return False
+
+        tool_outputs_by_id: dict[str, str] = {}
+        for msg in history_messages:
+            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", "")
+            tc_id = msg.get("tool_call_id") if isinstance(msg, dict) else getattr(msg, "tool_call_id", None)
+            content = msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")
+            if role == "tool" and tc_id:
+                tool_outputs_by_id[str(tc_id)] = str(content or "")
+
+        for msg in history_messages:
+            role = msg.get("role") if isinstance(msg, dict) else getattr(msg, "role", "")
+            content = str((msg.get("content") if isinstance(msg, dict) else getattr(msg, "content", "")) or "")
+            if role == "user" and any(marker in content for marker in cls.EXECUTION_APPROVAL_MARKERS):
+                return True
+
+            if role in ("assistant", "model"):
+                raw_tc_json = msg.get("tool_calls_json") if isinstance(msg, dict) else getattr(msg, "tool_calls_json", None)
+                if not raw_tc_json:
+                    continue
+                try:
+                    tc_list = json.loads(raw_tc_json) if isinstance(raw_tc_json, str) else raw_tc_json
+                except Exception:
+                    continue
+                if not isinstance(tc_list, list):
+                    continue
+                for tc in tc_list:
+                    func_name = str((tc.get("function") or {}).get("name") or "").strip()
+                    call_id = str(tc.get("id") or "").strip()
+                    if func_name and func_name not in cls.PLANNING_SAFE_TOOLS:
+                        out_text = tool_outputs_by_id.get(call_id, "")
+                        if out_text and not out_text.lstrip().startswith("Denied:"):
+                            return True
+        return False
+
+    @staticmethod
+    def compute_planning_phase(
+        *,
+        active_scene: str,
+        execution_strategy: str,
+        approved_plan_steps: list[dict[str, Any]] | None,
+        inquiry_confirmed: bool,
+        inquiry_action: str | None,
+        has_prior_execution_unlock: bool,
+    ) -> bool:
+        """统一计算本轮是否处于物理只读硬门控规划态。"""
+        if active_scene != "agent":
+            return False
+
+        normalized_action = (inquiry_action or "").strip().lower() or None
+        if approved_plan_steps or (inquiry_confirmed and normalized_action == "execute_now"):
+            return False
+
+        if normalized_action == "clarify_only":
+            return execution_strategy == "plan_first"
+
+        if execution_strategy == "plan_first":
+            return not has_prior_execution_unlock
+
+        return False
+
     @staticmethod
     async def _ingest_confirmed_facts(
         *,
@@ -296,6 +380,8 @@ class AgentRuntime:
         clarify_mode: bool = False,
         approved_plan_steps: list[dict[str, Any]] | None = None,
         confirmed_facts: list[Any] | None = None,
+        inquiry_confirmed: bool = False,
+        inquiry_action: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行双层循环流式推理与工具编排，向外输出标准化 SSE 字典事件流。
@@ -373,6 +459,15 @@ class AgentRuntime:
             except Exception as sync_att_err:
                 logger.warning(f"[AgentRuntime] 同步工作区沙盒附件异常: {sync_att_err}")
 
+        # 2.5 先检查既往历史轮次是否已完成方案审批或进入执行态，再落盘本轮 user 消息
+        has_prior_execution_unlock = False
+        if not is_new_conv and active_scene == "agent":
+            try:
+                prior_msgs = await MessageRepository.get_by_conversation(conv_id, limit=300)
+                has_prior_execution_unlock = self.detect_prior_execution_unlock(prior_msgs)
+            except Exception as prior_err:
+                logger.debug(f"[AgentRuntime] 检查历史执行解锁状态跳过: {prior_err}")
+
         max_turn = await MessageRepository.get_max_turn_id(conv_id)
         current_turn_id = max_turn + 1
         persisted_user_content = attachment_service.append_attachments_anchor(user_message, attachments)
@@ -385,10 +480,18 @@ class AgentRuntime:
         )
         await ConversationRepository.touch(conv_id)
 
-        is_planning_phase = (
-            active_scene == "agent"
-            and execution_strategy == "plan_first"
-            and not approved_plan_steps
+        normalized_inquiry_action = (inquiry_action or "").strip().lower() or None
+        explicit_execute_unlock = bool(
+            approved_plan_steps
+            or (inquiry_confirmed and normalized_inquiry_action == "execute_now")
+        )
+        is_planning_phase = self.compute_planning_phase(
+            active_scene=active_scene,
+            execution_strategy=execution_strategy,
+            approved_plan_steps=approved_plan_steps,
+            inquiry_confirmed=inquiry_confirmed,
+            inquiry_action=normalized_inquiry_action,
+            has_prior_execution_unlock=has_prior_execution_unlock,
         )
 
         # 2.5 非无痕且非单次模式下：追加 user_input 账本事件并执行对齐卡 confirmed_facts 0-Token 直通入库
@@ -431,14 +534,7 @@ class AgentRuntime:
             "incognito": active_incognito,
         }
 
-        PLANNING_SAFE_TOOLS = {
-            "read_local_file",
-            "search_memory_history",
-            "search_skill_knowledge",
-            "load_skill_detail",
-            "web_fetch",
-            "update_working_memory",
-        }
+        PLANNING_SAFE_TOOLS = self.PLANNING_SAFE_TOOLS
 
         # 4. 准备当前场景可用的工具集合
         active_tools: list[dict[str, Any]] = []
@@ -486,11 +582,14 @@ class AgentRuntime:
             try:
                 active_loop_obj = await TaskLoopRepository.get_active_loop_by_workspace(ws_id, include_completed=False)
                 if not active_loop_obj:
+                    raw_goal_line = user_message.strip().split("\n")[0][:120]
+                    if raw_goal_line.startswith(("已确认", "✅ 实施方案", "✅")):
+                        raw_goal_line = "按确认决策执行任务"
                     # 兜底自动初始化当前工作区的自主执行记录
                     active_loop_obj = await TaskLoopRepository.create_loop(
                         workspace_id=ws_id,
                         conversation_id=conv_id,
-                        goal_prompt=user_message.strip().split("\n")[0][:120] or "执行自主推演任务",
+                        goal_prompt=raw_goal_line or "执行自主推演任务",
                         max_iterations=10,
                     )
                 if active_loop_obj:
@@ -522,6 +621,9 @@ class AgentRuntime:
                 execution_strategy=execution_strategy,
                 clarify_mode=clarify_mode,
                 approved_plan_steps=approved_plan_steps,
+                inquiry_confirmed=inquiry_confirmed,
+                inquiry_action=normalized_inquiry_action,
+                has_prior_execution_unlock=has_prior_execution_unlock,
             )
 
             # 首步向前端推送命中的长期记忆溯源、活跃确定性事实视图与当前任务草稿纸
@@ -563,7 +665,14 @@ class AgentRuntime:
                 step_attachments = attachments
             else:
                 if last_step_error_info:
-                    if last_step_error_info.get("circuit_breaker"):
+                    if last_step_error_info.get("tool") == "inquiry_guard":
+                        step_prompt = (
+                            "[🚨 禁止二次弹卡强纠偏]:\n"
+                            "用户已经在前端交互卡片中完成全部确认并点击「统一开始执行」，全部执行工具已物理开放！\n"
+                            "1. 本轮严禁再次输出任何 `interactive_inquiry` 代码块或请求用户确认的废话；\n"
+                            "2. 立即输出标准 `<tool_call>`（如 `write_local_file` / `execute_local_command` / `read_local_file`）完成实际修改、脚本执行与验收验证！"
+                        )
+                    elif last_step_error_info.get("circuit_breaker"):
                         failed_c = last_step_error_info.get("failed_cmd", "")
                         step_prompt = (
                             f"[🚨 语义级死循环物理熔断已触发 - 强制切换执行路径]:\n"
@@ -675,6 +784,25 @@ class AgentRuntime:
 
             # 情况 A：模型未发起真实工具调用
             if not tool_calls or active_scene != "agent":
+                # 防止用户已点确认执行后，模型仍违背指令二次吐出 interactive_inquiry 卡空转
+                if (
+                    active_scene == "agent"
+                    and explicit_execute_unlock
+                    and not is_planning_phase
+                    and "interactive_inquiry" in raw_stripped
+                    and consecutive_stalls < 2
+                    and step_idx < current_max_steps - 1
+                ):
+                    consecutive_stalls += 1
+                    logger.warning(f"[AgentRuntime] 拦截确认后非法二次 interactive_inquiry 弹窗，触发执行纠正 (第{consecutive_stalls}次)")
+                    yield {"type": "stream_reset"}
+                    last_step_error_info = {
+                        "tool": "inquiry_guard",
+                        "summary": "用户已完成全部确认并点击开始执行，严禁重复输出 interactive_inquiry 确认卡",
+                    }
+                    step_idx += 1
+                    continue
+
                 if active_scene == "agent" and is_abnormal_stall and not is_user_confirmation_request and consecutive_stalls < 3 and step_idx < current_max_steps - 1:
                     consecutive_stalls += 1
                     logger.warning(f"[AgentRuntime] 捕获模型伪工具调用声明/卡顿: '{raw_stripped}'，激活强制纠偏推进器 (第{consecutive_stalls}次)")

@@ -330,6 +330,8 @@ export interface ExtensionSkillItem {
 
 export type ExecutionStrategy = 'direct' | 'plan_first';
 
+export type InquirySubmitAction = 'execute_now' | 'clarify_only';
+
 export interface InquiryOption {
   value: string;
   label: string;
