@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.1.0-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.1.2-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -14,6 +14,23 @@
 > **数据与算力彻底解耦，告别单一模型绑定**：
 > AgentHub Local 是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、Llama.cpp、Nvidia 实例），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、SiliconFlow、Google AI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
+
+---
+
+## 🚀 v1.1.2 重大升级：谋定而后动 (Plan-First) 与交互式对齐机制
+
+在 `v1.1.0` 自主循环（Loop Engineering）与工作区底座之上，`v1.1.2` 引入**前置意图对齐（Pre-Execution Alignment）**机制，彻底解决 Agent 盲目动手写盘破坏代码与来回返工痛点：
+1. **模式降维与策略切换**：
+   - ⚡ 任务模式下支持 `[⚡ 直接执行 | 📋 谋定而动]` 策略切换；
+   - 💬 对话模式下提供 `[🧭 需求澄清]` 开关；
+2. **物理只读硬门控 (Gatekeeper)**：
+   - 方案未获批准前，系统物理拦截写盘与终端执行工具，仅暴露 L0 安全只读工具，允许静默扫描代码以精准定位真实路径与行号；
+3. **交互式对齐协议 (`interactive_inquiry`) 与流式骨架屏**：
+   - 流式半包防抖渲染呼吸骨架屏；支持单选、多选与留空填空模板，支持单题点击直发与组合提交；
+4. **留空填空模板与 `Tab` 键跳跃**：
+   - 标准语法 `{{参数名:默认值}}`，一键填入输入框后按 `Tab` 键在占位符之间自动循环跳选覆盖；
+5. **无缝衔接 Loop 引擎**：
+   - 用户点击【🚀 批准方案并开始执行】后，自动将步骤清单写入 `.agenthub/scratchpad.md`，点亮 LoopHUD 并解锁具身执行。
 
 ---
 
@@ -130,8 +147,8 @@ flowchart TD
 
 | 客户端版本 | 适用系统 | 包名称 | 运行方式 |
 | :--- | :--- | :--- | :--- |
-| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.0-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
-| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.0-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
+| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.2-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
+| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.2-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
 | **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
 
 ---
@@ -149,23 +166,23 @@ sequenceDiagram
     participant Actions as GitHub Actions Runner (windows-latest)
     participant Releases as GitHub Releases 页面
 
-    Dev->>Git: git tag v1.1.0
-    Dev->>GH: git push origin v1.1.0
+    Dev->>Git: git tag v1.1.2
+    Dev->>GH: git push origin v1.1.2
     GH->>Actions: 触发 release.yml 流水线
     Actions->>Actions: 安装 Node 20 & Python 3.12
     Actions->>Actions: 编译并导出 Next.js 静态前端 (out/)
     Actions->>Actions: 打包 Windows 便携包 (*-windows-x64.zip)
     Actions->>Actions: 打包跨平台源码包 (*-portable.tar.gz)
-    Actions->>Releases: 自动创建 Release v1.1.0 并上传分发产物
+    Actions->>Releases: 自动创建 Release v1.1.2 并上传分发产物
     Releases-->>Dev: 用户可在页面直接下载执行文件
 ```
 
 ### 如何发布新版本：
 只需在本地执行以下三条命令：
 ```bash
-git tag v1.1.0
+git tag v1.1.2
 git push origin master
-git push origin v1.1.0
+git push origin v1.1.2
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 release 附件，几分钟内即可在 Releases 页面看到生成的下载文件！
 

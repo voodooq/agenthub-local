@@ -25,6 +25,9 @@ class ChatStreamRequest(BaseModel):
     scene_mode: str | None = Field(default=None, description="对话场景模式: oneshot(极速单次) | chat(标准对话) | agent(Agent任务)")
     incognito: bool | None = Field(default=None, description="是否开启无痕模式 (不读写长期记忆)")
     workspace_id: str | None = Field(default=None, description="归属的工作区 ID")
+    execution_strategy: str = Field(default="direct", description="执行策略: direct(立即执行) | plan_first(计划优先/谋定而动)")
+    clarify_mode: bool = Field(default=False, description="对话模式下是否开启需求前置澄清")
+    approved_plan_steps: list[dict] | None = Field(default=None, description="用户在前端确认批准的步骤清单")
 
 
 class ToolApprovalRequest(BaseModel):

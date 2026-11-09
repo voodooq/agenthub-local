@@ -17,6 +17,7 @@ import {
   EyeOff,
   AlertTriangle,
   CheckCircle2,
+  Compass,
 } from 'lucide-react';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
@@ -47,6 +48,7 @@ import { LoopHUD } from '@/components/LoopHUD';
 import { ApprovalCard } from '@/components/ApprovalCard';
 import { SkillPickerModal } from '@/components/SkillPickerModal';
 import { SopDrawer } from '@/components/SopDrawer';
+import { InteractiveInquiryCard } from '@/components/InteractiveInquiryCard';
 
 import { buildActiveSystemOverride } from '@/utils/personalityHelper';
 import { generateScenarioThinking } from '@/utils/scenarioThinking';
@@ -59,6 +61,8 @@ import {
   Workspace,
   TaskLoopResponse,
   SkillItem,
+  ExecutionStrategy,
+  PlanStepItem,
 } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 
@@ -123,6 +127,61 @@ export default function WorkbenchPage() {
   const [sceneMode, setSceneMode] = useState<SceneMode>('agent');
   const [incognito, setIncognito] = useState<boolean>(false);
   const [workingMemory, setWorkingMemory] = useState<Record<string, any>>({});
+
+  // v1.1.2 执行策略与交互对齐状态
+  const [executionStrategy, setExecutionStrategy] = useState<ExecutionStrategy>('direct');
+  const [clarifyMode, setClarifyMode] = useState<boolean>(false);
+
+  useEffect(() => {
+    try {
+      const savedStrategy = localStorage.getItem('geminihub_exec_strategy') as ExecutionStrategy;
+      if (savedStrategy === 'direct' || savedStrategy === 'plan_first') {
+        setExecutionStrategy(savedStrategy);
+      }
+      const savedClarify = localStorage.getItem('geminihub_clarify_mode');
+      if (savedClarify !== null) {
+        setClarifyMode(savedClarify === 'true');
+      }
+    } catch {}
+  }, []);
+
+  const handleSwitchExecStrategy = (strategy: ExecutionStrategy) => {
+    setExecutionStrategy(strategy);
+    try {
+      localStorage.setItem('geminihub_exec_strategy', strategy);
+    } catch {}
+  };
+
+  const handleToggleClarifyMode = () => {
+    setClarifyMode((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem('geminihub_clarify_mode', String(next));
+      } catch {}
+      return next;
+    });
+  };
+
+  // 留空填空模板一键填入并高亮选中第一个占位符 {{...}}
+  const handleFillTemplateToInput = (templateText: string) => {
+    setInputPrompt(templateText);
+    setTimeout(() => {
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        const match = /\{\{([^}]+)\}\}/.exec(templateText);
+        if (match) {
+          textareaRef.current.setSelectionRange(match.index, match.index + match[0].length);
+        } else {
+          textareaRef.current.setSelectionRange(templateText.length, templateText.length);
+        }
+      }
+    }, 50);
+  };
+
+  // 用户在方案卡片中确认批准步骤清单并启动自主执行
+  const handleApproveAndExecutePlan = async (steps: PlanStepItem[], feedbackText: string) => {
+    await handleSendMessage(feedbackText, steps);
+  };
 
   const [canvasState, setCanvasState] = useState<{
     isOpen: boolean;
@@ -502,7 +561,7 @@ export default function WorkbenchPage() {
     } catch (e) {}
   };
 
-  const handleSendMessage = async (customPrompt?: string) => {
+  const handleSendMessage = async (customPrompt?: string, approvedStepsForRequest?: PlanStepItem[]) => {
     const rawPrompt = customPrompt || inputPrompt;
     if (!rawPrompt.trim() || isStreaming) return;
 
@@ -632,6 +691,9 @@ export default function WorkbenchPage() {
           context_rounds: memoryRounds,
           scene_mode: sceneMode,
           incognito: incognito,
+          execution_strategy: sceneMode === 'agent' ? executionStrategy : 'direct',
+          clarify_mode: sceneMode === 'chat' ? clarifyMode : false,
+          approved_plan_steps: approvedStepsForRequest || null,
           attachments: currentAttachments.map((a) => ({
             name: a.name,
             file_path: a.filePath,
@@ -1410,6 +1472,18 @@ export default function WorkbenchPage() {
                                   const language = match ? match[1] : '';
                                   const codeString = String(children).replace(/\n$/, '');
 
+                                  if (!inline && language === 'interactive_inquiry') {
+                                    return (
+                                      <InteractiveInquiryCard
+                                        rawContent={codeString}
+                                        onSendFeedback={(feedback) => handleSendMessage(feedback)}
+                                        onFillTemplate={(tmpl) => handleFillTemplateToInput(tmpl)}
+                                        onApprovePlan={(steps, feedback) => handleApproveAndExecutePlan(steps, feedback)}
+                                        isStreaming={isStreaming && msg.id === messages[messages.length - 1]?.id}
+                                      />
+                                    );
+                                  }
+
                                   if (!inline && language) {
                                     return (
                                       <CodeBlock
@@ -1605,6 +1679,38 @@ export default function WorkbenchPage() {
                 }}
                 onPaste={handlePaste}
                 onKeyDown={(e) => {
+                  if (e.key === 'Tab') {
+                    // 检测输入框中是否存在 {{参数名:默认值}} 形式的填空占位符
+                    const text = inputPrompt;
+                    const matches: { start: number; end: number; placeholder: string }[] = [];
+                    const regex = /\{\{([^}]+)\}\}/g;
+                    let m: RegExpExecArray | null;
+                    while ((m = regex.exec(text)) !== null) {
+                      matches.push({ start: m.index, end: m.index + m[0].length, placeholder: m[1] });
+                    }
+
+                    if (matches.length > 0) {
+                      e.preventDefault();
+                      const textarea = textareaRef.current;
+                      if (textarea) {
+                        const currentPos = e.shiftKey ? textarea.selectionStart : textarea.selectionEnd;
+                        let targetMatch: typeof matches[0];
+                        if (e.shiftKey) {
+                          const prevMatches = matches.filter((item) => item.end < currentPos);
+                          targetMatch = prevMatches.length > 0 ? prevMatches[prevMatches.length - 1] : matches[matches.length - 1];
+                        } else {
+                          const nextMatches = matches.filter((item) => item.start >= currentPos);
+                          targetMatch = nextMatches.length > 0 ? nextMatches[0] : matches[0];
+                        }
+                        if (targetMatch) {
+                          textarea.focus();
+                          textarea.setSelectionRange(targetMatch.start, targetMatch.end);
+                        }
+                      }
+                      return;
+                    }
+                  }
+
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault();
                     handleSendMessage();
@@ -1648,6 +1754,50 @@ export default function WorkbenchPage() {
                       </button>
                     ))}
                   </div>
+
+                  {/* 执行策略降维切换：任务模式下 [直接执行 | 谋定而动]，对话模式下 [需求澄清] */}
+                  {sceneMode === 'agent' ? (
+                    <div className="flex items-center rounded-xl bg-surface-100 border border-border/70 p-0.5 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => handleSwitchExecStrategy('direct')}
+                        title="直接执行：立即执行意图与工具操作"
+                        className={`px-2.5 py-1 rounded-lg transition-all flex items-center space-x-1 ${
+                          executionStrategy === 'direct'
+                            ? 'bg-emerald-600 text-white font-semibold shadow-sm'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        <span>⚡ 直接执行</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleSwitchExecStrategy('plan_first')}
+                        title="谋定而动：动工前先梳理方案与分步清单，确认后自愈执行，彻底杜绝返工"
+                        className={`px-2.5 py-1 rounded-lg transition-all flex items-center space-x-1 ${
+                          executionStrategy === 'plan_first'
+                            ? 'bg-emerald-600 text-white font-semibold shadow-sm'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        <span>📋 谋定而动</span>
+                      </button>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleToggleClarifyMode}
+                      title={clarifyMode ? '需求澄清模式已开启：遇到模糊问题先生成交互卡片对齐' : '点击开启需求前置澄清模式'}
+                      className={`flex items-center space-x-1 px-2.5 py-1 rounded-xl text-xs border transition-all ${
+                        clarifyMode
+                          ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-600 dark:text-emerald-400 font-semibold'
+                          : 'border-border bg-surface-100 text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      <Compass className="w-3.5 h-3.5" />
+                      <span>需求澄清</span>
+                    </button>
+                  )}
 
                   {/* 无痕模式开关 */}
                   <button

@@ -223,3 +223,47 @@ export interface SkillItem {
   sop_content?: string;
 }
 
+export type ExecutionStrategy = 'direct' | 'plan_first';
+
+export interface InquiryOption {
+  value: string;
+  label: string;
+  desc?: string;
+}
+
+export interface InquiryQuestion {
+  id: string;
+  type: 'single_choice' | 'multi_choice';
+  label: string;
+  options: InquiryOption[];
+  default?: string | string[];
+}
+
+export interface FillTemplateInfo {
+  label: string;
+  template_text: string;
+}
+
+export interface PlanStepItem {
+  step: number;
+  title: string;
+  tool_level?: 'L0' | 'L1' | 'L2' | string;
+  description?: string;
+  selected?: boolean;
+}
+
+export interface InteractiveInquiryPayload {
+  inquiry_id?: string;
+  phase?: 'clarification' | 'plan_approval';
+  title?: string;
+  summary?: string;
+  questions?: InquiryQuestion[];
+  fill_template?: FillTemplateInfo;
+  plan_steps?: PlanStepItem[];
+  // 向下兼容旧版协议格式
+  type?: 'choices' | 'template';
+  question?: string;
+  options?: InquiryOption[];
+  template?: string;
+}
+

@@ -1,5 +1,5 @@
 """
-AgentHub Local v1.1.0 本地离线发布打包脚本
+AgentHub Local v1.1.2 本地离线发布打包脚本
 生成独立 Windows 便携包与跨平台便携运行包至 dist/ 目录
 """
 import os
@@ -11,7 +11,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 DIST_DIR = BASE_DIR / "dist"
-VERSION = "v1.1.0"
+VERSION = "v1.1.2"
 PKG_NAME = f"AgentHub-Local-{VERSION}"
 STAGE_DIR = DIST_DIR / PKG_NAME
 

@@ -423,7 +423,7 @@ export function SettingsModal({
           </div>
 
           <div className="px-2 text-[11px] text-muted-foreground/70 font-mono">
-            v1.1.0 · Strata Edition
+            v1.1.2 · Strata Edition
           </div>
         </div>
 

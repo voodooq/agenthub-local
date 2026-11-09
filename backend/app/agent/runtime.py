@@ -33,6 +33,37 @@ class AgentRuntime:
     DEFAULT_REACT_STEPS = 16
     MAX_REACT_STEPS = 40  # 任务深度自愈与多步推进时的绝对动态扩展上限
 
+    async def _persist_approved_plan(
+        self,
+        workspace_root: str | None,
+        approved_steps: list[dict[str, Any]],
+        goal_text: str,
+    ) -> None:
+        """将用户审批通过的步骤清单落盘写入工作区 .agenthub/scratchpad.md 并同步工作记忆"""
+        if not workspace_root:
+            return
+        try:
+            hub_dir = Path(workspace_root) / ".agenthub"
+            hub_dir.mkdir(parents=True, exist_ok=True)
+            scratch_file = hub_dir / "scratchpad.md"
+
+            lines = [
+                "# 任务自主推演工作草稿纸 (Task Scratchpad)",
+                f"\n**目标**: {goal_text}\n",
+                "## 经用户审批确认的实施步骤清单 (Step-by-Step Task List)\n",
+            ]
+            for idx, item in enumerate(approved_steps, 1):
+                step_no = item.get("step", idx)
+                title = item.get("title") or item.get("label") or f"步骤 {step_no}"
+                tool_lvl = item.get("tool_level", "L1")
+                lines.append(f"- [ ] 步骤 {step_no}: {title} `[{tool_lvl}]`")
+
+            lines.append("\n---\n*提示: Agent 将严格按照上述经审批的步骤推进并更新勾选状态。*\n")
+            scratch_file.write_text("\n".join(lines), encoding="utf-8")
+            logger.info(f"[AgentRuntime] 已成功将审批步骤持久化至 {scratch_file}")
+        except Exception as e:
+            logger.warning(f"[AgentRuntime] 持久化审批步骤至 scratchpad.md 失败: {e}")
+
     async def chat_stream(
         self,
         conversation_id: str | None,
@@ -46,6 +77,9 @@ class AgentRuntime:
         scene_mode: str | None = None,
         incognito: bool | None = None,
         workspace_id: str | None = None,
+        execution_strategy: str = "direct",
+        clarify_mode: bool = False,
+        approved_plan_steps: list[dict[str, Any]] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行双层循环流式推理与工具编排，向外输出标准化 SSE 字典事件流。
@@ -123,28 +157,56 @@ class AgentRuntime:
             "incognito": active_incognito,
         }
 
+        is_planning_phase = (
+            active_scene == "agent"
+            and execution_strategy == "plan_first"
+            and not approved_plan_steps
+        )
+
+        PLANNING_SAFE_TOOLS = {
+            "read_local_file",
+            "search_skill_knowledge",
+            "load_skill_detail",
+            "web_fetch",
+            "update_working_memory",
+        }
+
         # 4. 准备当前场景可用的工具集合
         active_tools: list[dict[str, Any]] = []
         if active_scene == "agent":
-            active_tools.extend(ToolProtocolAdapter.get_builtin_tools())
-            try:
-                mcp_tools = await mcp_manager.get_enabled_tools()
-                active_tools.extend(mcp_tools)
-            except Exception as e:
-                logger.warning(f"加载 MCP 工具集异常: {e}")
+            all_builtin = ToolProtocolAdapter.get_builtin_tools()
+            if is_planning_phase:
+                # 🛡️ 物理只读硬门控：规划态仅向模型暴露 L0 只读与记忆探测工具，写盘与终端完全隔离
+                active_tools.extend([t for t in all_builtin if t.get("name") in PLANNING_SAFE_TOOLS])
+            else:
+                active_tools.extend(all_builtin)
+                try:
+                    mcp_tools = await mcp_manager.get_enabled_tools()
+                    active_tools.extend(mcp_tools)
+                except Exception as e:
+                    logger.warning(f"加载 MCP 工具集异常: {e}")
 
-        current_max_steps = self.DEFAULT_REACT_STEPS if active_scene == "agent" else 1
+        # 若用户已批准方案，将执行步骤持久化写入工作区 .agenthub/scratchpad.md
+        if approved_plan_steps and target_cwd:
+            await self._persist_approved_plan(
+                workspace_root=target_cwd,
+                approved_steps=approved_plan_steps,
+                goal_text=user_message.strip().split("\n")[0][:120],
+            )
+
+        # 规划态步数收敛限制为最多 4 步，用于探测目录和输出方案卡片
+        current_max_steps = (4 if is_planning_phase else self.DEFAULT_REACT_STEPS) if active_scene == "agent" else 1
         final_account: str | None = None
         accumulated_visible_text = ""
         effective_model_name = model_name
         last_step_error_info: dict[str, Any] | None = None
         consecutive_stalls = 0
-        allow_step_extension = True
+        allow_step_extension = not is_planning_phase
         command_history: list[dict[str, Any]] = []
 
         # 4.5 关联工作区长程自主领航舱 (TaskLoopRunner 闭环驱动)
         active_loop_obj = None
-        if active_scene == "agent" and ws_id:
+        if active_scene == "agent" and ws_id and not is_planning_phase:
             try:
                 active_loop_obj = await TaskLoopRepository.get_active_loop_by_workspace(ws_id, include_completed=False)
                 if not active_loop_obj:
@@ -179,6 +241,9 @@ class AgentRuntime:
                 tools=active_tools if active_scene == "agent" else None,
                 context_rounds_override=0 if active_scene == "oneshot" else context_rounds,
                 base_system_prompt=system_override,
+                execution_strategy=execution_strategy,
+                clarify_mode=clarify_mode,
+                approved_plan_steps=approved_plan_steps,
             )
 
             # 首步向前端推送命中的长期记忆溯源与当前任务草稿纸
@@ -418,6 +483,36 @@ class AgentRuntime:
 
                 tool_output = ""
                 compressed = ""
+
+                # 🛡️ 物理只读硬门控拦截：若处于规划阶段，绝对禁止执行任何破坏性写入或终端命令
+                if is_planning_phase and func_name not in PLANNING_SAFE_TOOLS:
+                    deny_reason = (
+                        f"Denied: 【安全只读硬门控】当前处于「谋定而后动 (Plan-First)」方案规划阶段，写盘与终端执行权限已被物理锁定。"
+                        f"工具 [{func_name}] 禁止调用。请先向用户展示完整的【实施方案】与【分步执行步骤清单】，"
+                        f"并在末尾输出 ```interactive_inquiry 协议块等待用户确认批准。"
+                    )
+                    compressed = f"[只读门控硬拦截 `{func_name}`]"
+                    yield {
+                        "type": "tool_end",
+                        "call_id": call_id,
+                        "name": func_name,
+                        "status": "denied",
+                        "output": deny_reason,
+                        "compressed": compressed,
+                    }
+                    await MessageRepository.save_message(
+                        conversation_id=conv_id,
+                        turn_id=current_turn_id,
+                        role="tool",
+                        content=deny_reason,
+                        compressed_content=compressed,
+                        tool_call_id=call_id,
+                    )
+                    last_step_error_info = {
+                        "tool": func_name,
+                        "summary": deny_reason,
+                    }
+                    continue
 
                 # ── 工具 1: 受控本地终端命令 (execute_local_command) ──
                 if func_name == "execute_local_command":

@@ -78,6 +78,9 @@ async def chat_stream(req: ChatStreamRequest):
             scene_mode=req.scene_mode,
             incognito=req.incognito,
             workspace_id=req.workspace_id,
+            execution_strategy=req.execution_strategy,
+            clarify_mode=req.clarify_mode,
+            approved_plan_steps=req.approved_plan_steps,
         ):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 

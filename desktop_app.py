@@ -79,12 +79,12 @@ def main():
 
     # 6. 调用 Windows 原生 WebView2 渲染独立原生窗口 (支持启动即自动最大化全屏、F12 开发者工具与调试模式)
     window = webview.create_window(
-        title="AgentHub Local - 本地全场景多源算力与智能体工作台",
+        title="AgentHub Local v1.1.2 - 本地全场景多源算力与智能体工作台",
         url=app_url,
         width=1440,
         height=900,
         min_size=(1024, 680),
-        background_color="#131314",
+        background_color="#101513",
         text_select=True,
         maximized=True,
     )

@@ -80,6 +80,9 @@ class ContextBuilder:
         tools: list[dict[str, Any]] | None = None,
         context_rounds_override: int | None = None,
         base_system_prompt: str | None = None,
+        execution_strategy: str = "direct",
+        clarify_mode: bool = False,
+        approved_plan_steps: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         """
         为当前推理步骤构建完整上下文载荷。
@@ -148,6 +151,65 @@ class ContextBuilder:
 
         if current_cwd:
             system_parts.append(f"当前本地终端持久化工作目录 (CWD): `{current_cwd}`")
+
+        # ── 谋定而动 (Plan-First) 与交互对齐协议注入 ──
+        if scene_mode == "agent":
+            if execution_strategy == "plan_first" and not approved_plan_steps:
+                system_parts.append(
+                    "### 📋【谋定而后动 (Plan-First)】前置对齐与方案规划硬性铁律（强制执行）：\n"
+                    "当前任务已启用【谋定而后动】策略。动工执行任何破坏性写入、文件修改或终端命令之前，必须先完成方案梳理与用户对齐！\n"
+                    "1. 【物理安全硬门控处于锁定态】：当前阶段系统仅挂载了只读工具（如 read_local_file、检索等），写盘与修改已被安全锁定。你可以在本阶段先静默调用只读工具查看项目文件与目录结构，以确保制定的方案严谨且精准定位真实代码。\n"
+                    "2. 【输出结构规范】：\n"
+                    "   - 先输出结构清晰的 Markdown【实施方案（Implementation Plan）】与【分步执行步骤清单（Step-by-Step Task List）】；\n"
+                    "   - 步骤必须按序号标注（如 步骤 1、步骤 2...），并标注对应的工具安全级别（L0 只读 / L1 本地受控文件操作 / L2 终端执行与测试）；\n"
+                    "3. 【交互式对齐协议规范 (```interactive_inquiry)】：\n"
+                    "   - 若需求存在技术路线分歧、多方案选择或缺少关键参数，必须在回复末尾附带如下标准 JSON 协议块（包含单选/多选/留空模板）：\n"
+                    "   - 若方案完整无歧义，直接在末尾输出带 `phase: \"plan_approval\"` 的标准 JSON 协议块，供用户一键审批启动执行：\n"
+                    "```interactive_inquiry\n"
+                    "{\n"
+                    '  "inquiry_id": "inq_unique_id",\n'
+                    '  "phase": "clarification 或 plan_approval",\n'
+                    '  "title": "方案与意图确认标题",\n'
+                    '  "summary": "一句话核心说明",\n'
+                    '  "questions": [\n'
+                    '    {\n'
+                    '      "id": "q1",\n'
+                    '      "type": "single_choice 或 multi_choice",\n'
+                    '      "label": "选择题标题说明",\n'
+                    '      "options": [\n'
+                    '        {"value": "opt_a", "label": "选项A名称", "desc": "推荐理由或说明"},\n'
+                    '        {"value": "opt_b", "label": "选项B名称", "desc": "备选说明"}\n'
+                    "      ],\n"
+                    '      "default": "opt_a"\n'
+                    "    }\n"
+                    "  ],\n"
+                    '  "fill_template": {\n'
+                    '    "label": "若需用户补充信息，提供留空填空模板：",\n'
+                    '    "template_text": "配置参数示例：端口号为 {{PORT:8080}}，目标路径为 {{TARGET_DIR:./output}}。"\n'
+                    "  },\n"
+                    '  "plan_steps": [\n'
+                    '    {"step": 1, "title": "步骤简述", "tool_level": "L0"},\n'
+                    '    {"step": 2, "title": "步骤简述", "tool_level": "L1"}\n'
+                    "  ]\n"
+                    "}\n"
+                    "```\n"
+                    "   - 提示：留空填空模板中，使用 `{{参数名:默认值或提示}}` 作为标准占位符，前端支持光标高亮和 Tab 键快速跳转填空。\n"
+                    "4. 【严禁跳过方案强行写盘】：方案未获得用户在前端确认审批通过前，绝对禁止声明已落地修改！"
+                )
+            elif approved_plan_steps:
+                steps_summary = json.dumps(approved_plan_steps, ensure_ascii=False, indent=2)
+                system_parts.append(
+                    "### 🚀【方案已获用户审批批准 - 全速具身执行指令】：\n"
+                    "用户已在前端卡片中确认批准了以下实施步骤清单，写盘与终端执行权限现已全部解锁：\n"
+                    f"```json\n{steps_summary}\n```\n"
+                    "请严格对照上述批准的步骤清单，逐一调用 `<tool_call>` 真实执行落盘、修改、测试与自愈验证，直到全量步骤彻底达成！"
+                )
+        elif scene_mode == "chat" and clarify_mode:
+            system_parts.append(
+                "### 🧭【需求前置主动澄清模式 (Clarify Mode)】：\n"
+                "用户开启了需求澄清模式。当用户的提问涉及多方案分歧、前提假设不明确或缺少场景约束时，切勿盲目输出长篇泛泛而谈的理论；\n"
+                "应先在正文中提炼核心考量，并在末尾输出 ```interactive_inquiry 结构化卡片（包含 phase: 'clarification' 与 questions 选择题或 fill_template 模板），供用户一键对齐上下文后再展开深度解答。"
+            )
 
         # 2. 检索并挂载长期记忆 Top 5（无痕模式下跳过）
         referenced_memories: list[dict[str, Any]] = []
