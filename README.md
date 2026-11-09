@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.1.10-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.1.11-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -14,6 +14,21 @@
 > **数据与算力彻底解耦，告别单一模型绑定**：
 > AgentHub Local 是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、Llama.cpp、Nvidia 实例），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、SiliconFlow、Google AI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
+
+---
+
+## 📂 v1.1.11 生成文件直开与全链路交付体验升级
+
+打通「AI 生成交付物 -> 对话气泡一键直开 -> 资产库关联应用启动」全链路体验闭环：
+1. **后端安全直开引擎与防越界沙盒 ([`artifacts.py`](backend/app/api/v1/artifacts.py) & [`runtime.py`](backend/app/agent/runtime.py))**：
+   - 新增 `POST /api/v1/artifacts/open-by-path`、`POST /api/v1/artifacts/content-by-path` 与 `GET /api/v1/artifacts/raw-by-path`，支持相对路径（如 `./output/xxx.xlsx`）、`file:///` URI、绝对路径及行号锚点解析，并强制执行 `is_relative_to(ws_root)` 工作区边界防穿越拦截（越界返回 HTTP 403）；
+   - 新增 `mode="launch" | "reveal"` 分级执行器：`.xlsx / .docx / .pdf / .html / .png` 等交付物在 Windows 直接调用 `os.startfile` 唤起系统默认应用打开；对 `.exe / .bat / .ps1 / .cmd` 等高危可执行/脚本文件强制降级为仅打开所在文件夹并选中，杜绝误运行风险；
+   - `AgentRuntime` 在工具/脚本运行收尾阶段自动触发物理工作区增量同步，脚本产出的报告与表格无需手动点刷新即可实时检索打开。
+2. **对话流文内直开芯片与交付直达栏 ([`filePathDetector.ts`](frontend/src/utils/filePathDetector.ts), [`GeneratedFileChip.tsx`](frontend/src/components/GeneratedFileChip.tsx), [`page.tsx`](frontend/src/app/page.tsx))**：
+   - 精准识别 AI 回复中的行内路径、Markdown 本地链接及非代码块裸路径（严格保护围栏代码块与 `http(s)://` 外链零误伤），升级为带文件类型图标的交互直开芯片；
+   - 左键点击芯片或回复底部 **「📦 生成文件直达」** 胶囊立即使用本机默认程序打开，右侧随附 **「👁️ 画布预览」** 与 **「📂 所在文件夹定位」** 快捷按钮。
+3. **「库 (Library)」资产管理增强 ([`LibraryView.tsx`](frontend/src/components/LibraryView.tsx) & [`i18nDictionary.ts`](frontend/src/utils/i18nDictionary.ts))**：
+   - 列表与大图标卡片同步新增 **「打开」** 主操作与双击直开能力，放开图片/报告画布预览支持，并补全 4 语种国际化词条。
 
 ---
 
@@ -260,8 +275,8 @@ flowchart TD
 
 | 客户端版本 | 适用系统 | 包名称 | 运行方式 |
 | :--- | :--- | :--- | :--- |
-| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.10-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
-| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.10-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
+| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.11-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
+| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.11-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
 | **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
 
 ---
@@ -279,23 +294,23 @@ sequenceDiagram
     participant Actions as GitHub Actions Runner (windows-latest)
     participant Releases as GitHub Releases 页面
 
-    Dev->>Git: git tag v1.1.10
-    Dev->>GH: git push origin v1.1.10
+    Dev->>Git: git tag v1.1.11
+    Dev->>GH: git push origin v1.1.11
     GH->>Actions: 触发 release.yml 流水线
     Actions->>Actions: 安装 Node 20 & Python 3.12
     Actions->>Actions: 编译并导出 Next.js 静态前端 (out/)
     Actions->>Actions: 打包 Windows 便携包 (*-windows-x64.zip)
     Actions->>Actions: 打包跨平台源码包 (*-portable.tar.gz)
-    Actions->>Releases: 自动创建 Release v1.1.10 并上传分发产物
+    Actions->>Releases: 自动创建 Release v1.1.11 并上传分发产物
     Releases-->>Dev: 用户可在页面直接下载执行文件
 ```
 
 ### 如何发布新版本：
 只需在 `version.json` 更新版本号（或运行 `python sync_version.py <version>`），随后在本地执行以下命令：
 ```bash
-git tag v1.1.10
+git tag v1.1.11
 git push origin master
-git push origin v1.1.10
+git push origin v1.1.11
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 release 附件，几分钟内即可在 Releases 页面看到生成的下载文件！
 

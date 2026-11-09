@@ -477,6 +477,7 @@ class AgentRuntime:
         total_tool_steps = 0
         circuit_breaker_triggered = False
         produced_artifacts: list[str] = []
+        has_workspace_mutations = False
 
         # 4.5 关联工作区长程自主领航舱 (TaskLoopRunner 闭环驱动)
         active_loop_obj = None
@@ -749,6 +750,14 @@ class AgentRuntime:
                             "type": "experience_proposal",
                             "proposal": exp_proposal,
                         }
+
+                # 若本轮执行过终端命令/脚本或写盘操作，收尾增量同步一次工作区物理资产
+                if has_workspace_mutations and ws_id:
+                    try:
+                        from ..repository.artifact_repository import ArtifactRepository
+                        await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
+                    except Exception as sync_err:
+                        logger.debug(f"[AgentRuntime] 任务收尾物理资产同步跳过: {sync_err}")
 
                 yield {
                     "type": "done",
@@ -1473,6 +1482,11 @@ class AgentRuntime:
                     compressed = f"[未知工具调用 `{func_name}`]"
 
                 # 智能异常探测：判断该步骤是否遇到报错，并为下一步自愈循环激活调度器
+                if (
+                    func_name in ("execute_local_command", "write_local_file", "run_skill_tool")
+                    and not str(tool_output or "").startswith("Denied:")
+                ):
+                    has_workspace_mutations = True
                 prev_step_error = last_step_error_info
                 out_lower = (tool_output or "").lower()
                 is_step_abnormal = any(
@@ -1668,6 +1682,12 @@ class AgentRuntime:
                             "type": "experience_proposal",
                             "proposal": exp_proposal,
                         }
+                if has_workspace_mutations and ws_id:
+                    try:
+                        from ..repository.artifact_repository import ArtifactRepository
+                        await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
+                    except Exception as sync_err:
+                        logger.debug(f"[AgentRuntime] 达到步数上限时物理资产同步跳过: {sync_err}")
                 yield {
                     "type": "done",
                     "full_content": accumulated_visible_text.strip() or f"已完成深度推演与自主闭环执行（共执行 {step_idx} 步）。若需进一步处理请继续告知。",

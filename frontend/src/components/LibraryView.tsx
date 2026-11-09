@@ -1,8 +1,9 @@
 'use client';
 
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import {
   FileText,
+  FileSpreadsheet,
   Folder,
   ExternalLink,
   Search,
@@ -19,9 +20,11 @@ import {
   Layers,
   HardDrive,
   Clock,
+  CheckCircle2,
+  AlertTriangle,
 } from 'lucide-react';
 import { Workspace, ArtifactItem } from '@/types';
-import { apiFetch } from '@/utils/apiClient';
+import { apiFetch, getAccessToken } from '@/utils/apiClient';
 import { useLanguage } from '@/context/LanguageContext';
 
 interface LibraryViewProps {
@@ -42,6 +45,22 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [actionFeedback, setActionFeedback] = useState<{
+    message: string;
+    type: 'success' | 'warning' | 'error';
+  } | null>(null);
+  const feedbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const showFeedback = (message: string, type: 'success' | 'warning' | 'error' = 'success') => {
+    if (feedbackTimerRef.current) {
+      clearTimeout(feedbackTimerRef.current);
+    }
+    setActionFeedback({ message, type });
+    feedbackTimerRef.current = setTimeout(() => {
+      setActionFeedback(null);
+      feedbackTimerRef.current = null;
+    }, 4200);
+  };
 
   // 资源管理器核心状态：当前所处相对路径（"" 表示根目录）
   const [currentPath, setCurrentPath] = useState<string>('');
@@ -99,21 +118,60 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
     if (!onOpenCanvas) return;
     try {
       const res = await apiFetch(`/api/v1/artifacts/${art.id}/content`);
-      if (res.ok) {
-        const data = await res.json();
-        const canvasType = /\.(html?|htm)$/i.test(art.file_name) ? 'html' : 'code';
-        onOpenCanvas(art.file_name, data.content, canvasType);
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showFeedback(data?.detail || `预览失败: ${art.file_name}`, 'error');
+        return;
       }
-    } catch (e) {
+      if (data.canvas_type === 'image' && data.raw_url) {
+        const token = await getAccessToken();
+        const finalUrl = token
+          ? `${data.raw_url}${data.raw_url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+          : data.raw_url;
+        onOpenCanvas(art.file_name, finalUrl, 'image');
+        return;
+      }
+      const fallbackType = /\.(html?|htm)$/i.test(art.file_name) ? 'html' : 'code';
+      onOpenCanvas(art.file_name, data.content || '', data.canvas_type || fallbackType);
+    } catch (e: any) {
       console.error('预览资产失败:', e);
+      showFeedback(e?.message || `预览资产失败: ${art.file_name}`, 'error');
     }
   };
 
-  const handleOpenExplorer = async (artId: string) => {
+  const handleLaunchArtifact = async (art: ArtifactItem) => {
     try {
-      await apiFetch(`/api/v1/artifacts/${artId}/open`, { method: 'POST' });
-    } catch (e) {
+      const res = await apiFetch(`/api/v1/artifacts/${art.id}/open?mode=launch`, {
+        method: 'POST',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showFeedback(data?.detail || `无法打开文件: ${art.file_name}`, 'error');
+        return;
+      }
+      if (data.downgraded) {
+        showFeedback(data.message || data.downgraded_reason || '出于安全防护已自动打开所在文件夹定位', 'warning');
+      } else {
+        showFeedback(data.message || `已在默认应用中打开 ${art.file_name}`, 'success');
+      }
+    } catch (e: any) {
+      console.error('直接打开资产失败:', e);
+      showFeedback(e?.message || `无法打开文件: ${art.file_name}`, 'error');
+    }
+  };
+
+  const handleOpenExplorer = async (artId: string, fileName?: string) => {
+    try {
+      const res = await apiFetch(`/api/v1/artifacts/${artId}/open?mode=reveal`, { method: 'POST' });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        showFeedback(data?.detail || `定位文件失败${fileName ? `: ${fileName}` : ''}`, 'error');
+        return;
+      }
+      showFeedback(data.message || `已在系统文件管理器中定位${fileName ? ` ${fileName}` : ''}`, 'success');
+    } catch (e: any) {
       console.error('打开资源管理器失败:', e);
+      showFeedback(e?.message || '打开资源管理器失败', 'error');
     }
   };
 
@@ -336,6 +394,26 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
           </div>
         )}
 
+        {/* 操作结果内联反馈条（直接打开 / 安全降级 / 定位提示） */}
+        {actionFeedback && (
+          <div
+            className={`px-3.5 py-2.5 rounded-xl border text-xs flex items-center space-x-2 animate-fade-in shadow-xs ${
+              actionFeedback.type === 'error'
+                ? 'bg-rose-500/10 border-rose-500/30 text-rose-600 dark:text-rose-300'
+                : actionFeedback.type === 'warning'
+                ? 'bg-amber-500/10 border-amber-500/30 text-amber-700 dark:text-amber-300'
+                : 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+            }`}
+          >
+            {actionFeedback.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 shrink-0" />
+            ) : (
+              <AlertTriangle className="w-4 h-4 shrink-0" />
+            )}
+            <span className="leading-snug">{actionFeedback.message}</span>
+          </div>
+        )}
+
         {/* Windows 资源管理器风格：面包屑导航栏与视图切换器 */}
         <div className="p-2.5 rounded-xl bg-surface-card border border-border flex items-center justify-between gap-3 shadow-sm select-none">
           {/* 地址栏 / 面包屑 */}
@@ -472,8 +550,9 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
                   art={art}
                   relativePath={getRelativePath(art.file_path)}
                   t={t}
+                  onLaunch={() => handleLaunchArtifact(art)}
                   onPreview={() => handlePreviewArtifact(art)}
-                  onOpenExplorer={() => handleOpenExplorer(art.id)}
+                  onOpenExplorer={() => handleOpenExplorer(art.id, art.file_name)}
                   onOpenCanvas={Boolean(onOpenCanvas)}
                 />
               ))}
@@ -489,7 +568,7 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
                   <th className="py-2.5 px-3 w-28">{t('类型')}</th>
                   <th className="py-2.5 px-3 w-24">{t('大小')}</th>
                   <th className="py-2.5 px-3 w-40">{t('修改时间')}</th>
-                  <th className="py-2.5 px-4 text-right w-36">{t('操作')}</th>
+                  <th className="py-2.5 px-4 text-right w-56">{t('操作')}</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-border/50">
@@ -526,11 +605,16 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
 
                 {/* 2. 直接文件列表 */}
                 {currentFiles.map((art) => (
-                  <tr key={art.id} className="hover:bg-surface-50 transition">
+                  <tr
+                    key={art.id}
+                    onDoubleClick={() => handleLaunchArtifact(art)}
+                    title={t('双击可直接用默认程序打开')}
+                    className="hover:bg-surface-50 transition cursor-pointer"
+                  >
                     <td className="py-2.5 px-4">
                       <div className="flex items-center space-x-2.5">
-                        <FileIcon type={art.file_type} />
-                        <span className="font-medium text-foreground truncate max-w-xs md:max-w-md">
+                        <FileIcon type={art.file_type} fileName={art.file_name} />
+                        <span data-no-i18n="true" className="font-medium text-foreground truncate max-w-xs md:max-w-md">
                           {art.file_name}
                         </span>
                       </div>
@@ -544,9 +628,17 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
                     <td className="py-2.5 px-3 text-muted-foreground text-[11px] font-mono">
                       {new Date(art.created_at).toLocaleString()}
                     </td>
-                    <td className="py-2.5 px-4 text-right">
+                    <td className="py-2.5 px-4 text-right" onClick={(e) => e.stopPropagation()}>
                       <div className="flex items-center justify-end space-x-1.5">
-                        {onOpenCanvas && (art.file_type === 'code' || art.file_type === 'document') && (
+                        <button
+                          onClick={() => handleLaunchArtifact(art)}
+                          className="px-2 py-1 rounded bg-emerald-600/12 hover:bg-emerald-600/20 text-emerald-700 dark:text-emerald-300 text-[11px] font-medium transition inline-flex items-center space-x-1 border border-emerald-500/30"
+                          title={t('在默认应用中打开')}
+                        >
+                          <ExternalLink className="w-3 h-3" />
+                          <span>{t('打开')}</span>
+                        </button>
+                        {onOpenCanvas && (
                           <button
                             onClick={() => handlePreviewArtifact(art)}
                             className="px-2 py-1 rounded bg-surface-100 hover:bg-surface-200 text-foreground text-[11px] transition inline-flex items-center space-x-1 border border-border"
@@ -557,11 +649,11 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
                           </button>
                         )}
                         <button
-                          onClick={() => handleOpenExplorer(art.id)}
+                          onClick={() => handleOpenExplorer(art.id, art.file_name)}
                           className="px-2 py-1 rounded bg-surface-100 hover:bg-surface-200 text-foreground text-[11px] transition inline-flex items-center space-x-1 border border-border"
                           title={t('定位文件')}
                         >
-                          <ExternalLink className="w-3 h-3 text-blue-500" />
+                          <FolderOpen className="w-3 h-3 text-blue-500" />
                           <span>{t('定位')}</span>
                         </button>
                       </div>
@@ -645,8 +737,9 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
                       art={art}
                       relativePath={getRelativePath(art.file_path)}
                       t={t}
+                      onLaunch={() => handleLaunchArtifact(art)}
                       onPreview={() => handlePreviewArtifact(art)}
-                      onOpenExplorer={() => handleOpenExplorer(art.id)}
+                      onOpenExplorer={() => handleOpenExplorer(art.id, art.file_name)}
                       onOpenCanvas={Boolean(onOpenCanvas)}
                     />
                   ))}
@@ -665,6 +758,7 @@ function ArtifactCard({
   art,
   relativePath,
   t,
+  onLaunch,
   onPreview,
   onOpenExplorer,
   onOpenCanvas,
@@ -672,23 +766,28 @@ function ArtifactCard({
   art: ArtifactItem;
   relativePath: string;
   t: (k: string) => string;
+  onLaunch: () => void;
   onPreview: () => void;
   onOpenExplorer: () => void;
   onOpenCanvas: boolean;
 }) {
   return (
-    <div className="group p-4 rounded-xl border border-border bg-surface-card hover:bg-surface-50 hover:border-border-hover transition flex flex-col justify-between shadow-sm">
+    <div
+      onDoubleClick={onLaunch}
+      title={t('双击可直接用默认程序打开')}
+      className="group p-4 rounded-xl border border-border bg-surface-card hover:bg-surface-50 hover:border-border-hover transition flex flex-col justify-between shadow-sm cursor-pointer"
+    >
       <div>
         <div className="flex items-start justify-between">
           <div className="flex items-center space-x-2.5 min-w-0 pr-2">
             <div className="p-2 rounded-lg bg-surface-200 text-foreground shrink-0">
-              <FileIcon type={art.file_type} />
+              <FileIcon type={art.file_type} fileName={art.file_name} />
             </div>
             <div className="min-w-0">
-              <h3 className="text-sm font-semibold text-foreground truncate group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition">
+              <h3 data-no-i18n="true" className="text-sm font-semibold text-foreground truncate group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition">
                 {art.file_name}
               </h3>
-              <p className="text-[11px] font-mono text-muted-foreground truncate max-w-xs mt-0.5">
+              <p data-no-i18n="true" className="text-[11px] font-mono text-muted-foreground truncate max-w-xs mt-0.5">
                 {relativePath}
               </p>
             </div>
@@ -705,10 +804,21 @@ function ArtifactCard({
         )}
       </div>
 
-      <div className="mt-4 pt-3 border-t border-border flex items-center justify-between text-xs text-muted-foreground">
+      <div
+        className="mt-4 pt-3 border-t border-border flex items-center justify-between text-xs text-muted-foreground"
+        onDoubleClick={(e) => e.stopPropagation()}
+      >
         <span className="font-mono text-[11px]">{new Date(art.created_at).toLocaleString()}</span>
-        <div className="flex items-center space-x-2">
-          {onOpenCanvas && (art.file_type === 'code' || art.file_type === 'document') && (
+        <div className="flex items-center space-x-1.5">
+          <button
+            onClick={onLaunch}
+            className="px-2.5 py-1 rounded bg-emerald-600/12 hover:bg-emerald-600/20 text-emerald-700 dark:text-emerald-300 transition text-[11px] font-medium flex items-center space-x-1 border border-emerald-500/30"
+            title={t('在默认应用中打开')}
+          >
+            <ExternalLink className="w-3 h-3" />
+            <span>{t('打开')}</span>
+          </button>
+          {onOpenCanvas && (
             <button
               onClick={onPreview}
               className="px-2.5 py-1 rounded bg-surface-100 hover:bg-surface-200 text-foreground transition text-[11px] flex items-center space-x-1 border border-border"
@@ -723,8 +833,8 @@ function ArtifactCard({
             className="px-2.5 py-1 rounded bg-surface-100 hover:bg-surface-200 text-foreground transition text-[11px] flex items-center space-x-1 border border-border"
             title={t('在系统文件资源管理器中定位')}
           >
-            <ExternalLink className="w-3 h-3 text-blue-500" />
-            <span>{t('定位文件')}</span>
+            <FolderOpen className="w-3 h-3 text-blue-500" />
+            <span>{t('定位')}</span>
           </button>
         </div>
       </div>
@@ -732,8 +842,11 @@ function ArtifactCard({
   );
 }
 
-// 辅助组件：根据文件类型渲染图标
-function FileIcon({ type }: { type: string }) {
+// 辅助组件：根据文件类型与扩展名渲染图标
+function FileIcon({ type, fileName }: { type: string; fileName?: string }) {
+  if (fileName && /\.(xlsx?|xlsm|csv|tsv)$/i.test(fileName)) {
+    return <FileSpreadsheet className="w-4 h-4 text-emerald-500" />;
+  }
   if (type === 'code') return <FileCode className="w-4 h-4 text-blue-500" />;
   if (type === 'media') return <ImageIcon className="w-4 h-4 text-purple-500" />;
   return <FileText className="w-4 h-4 text-emerald-500" />;

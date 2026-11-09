@@ -4,6 +4,20 @@ import { ResolvedLocale } from '@/context/LanguageContext';
  * 全量多语种词条映射库（按字符长度自动降序排序预处理，先长句后短词，确保 100% 翻译覆盖且不被短词破坏）
  */
 export const PHRASE_DICTIONARY: Record<string, { 'zh-TW': string; en: string; ja: string }> = {
+  // ──────────── v1.1.11 生成文件直接打开、交付直达栏与 Library 直开 ────────────
+  '出于安全防护限制，高危可执行/脚本文件禁止直接运行，已自动打开所在文件夹并选中该文件': { 'zh-TW': '出於安全防護限制，高危可執行/腳本檔案禁止直接執行，已自動開啟所在資料夾並選取該檔案', en: 'For safety, executable/script files cannot be launched directly; opened the containing folder instead.', ja: 'セキュリティ保護のため実行可能ファイルやスクリプトは直接起動できません。保存先フォルダーを開きました。' },
+  '点击直接在系统默认应用中打开': { 'zh-TW': '點擊直接在系統預設應用中開啟', en: 'Click to open in default system app', ja: 'クリックして既定のアプリで開く' },
+  '双击可直接用默认程序打开': { 'zh-TW': '雙擊可直接用預設程式開啟', en: 'Double-click to open with default app', ja: 'ダブルクリックで既定のアプリで開きます' },
+  '打开所在文件夹并选中': { 'zh-TW': '開啟所在資料夾並選取', en: 'Reveal in File Explorer', ja: '保存先フォルダーで表示' },
+  '已在系统默认应用中打开': { 'zh-TW': '已在系統預設應用中開啟', en: 'Opened in default app:', ja: '既定のアプリで開きました:' },
+  '已在系统文件管理器中定位': { 'zh-TW': '已在系統檔案總管中定位', en: 'Revealed in file manager:', ja: 'エクスプローラーで表示しました:' },
+  '在右侧画布中预览': { 'zh-TW': '在右側畫布中預覽', en: 'Preview in right canvas', ja: '右側のキャンバスでプレビュー' },
+  '在默认应用中打开': { 'zh-TW': '在預設應用中開啟', en: 'Open in default app', ja: '既定のアプリで開く' },
+  '已在默认应用中打开': { 'zh-TW': '已在預設應用中開啟', en: 'Opened in default app:', ja: '既定のアプリで開きました:' },
+  '在画布中预览': { 'zh-TW': '在畫布中預覽', en: 'Preview in canvas', ja: 'キャンバスでプレビュー' },
+  '生成文件直达': { 'zh-TW': '生成檔案直達', en: 'Generated Files', ja: '生成ファイル' },
+  '无法打开文件': { 'zh-TW': '無法開啟檔案', en: 'Failed to open file', ja: 'ファイルを開けません' },
+
   // ──────────── v1.1.9 多项确认全量展示与混合交互对齐卡增强 ────────────
   '请逐项确认上述问题并勾选实施步骤后批准执行': { 'zh-TW': '請逐項確認上述問題並勾選實施步驟後批准執行', en: 'Please confirm all items above and check execution steps to approve', ja: '上記の項目を確認し、実行ステップを選択して承認してください' },
   '请逐项选择以上全部待确认项后统一提交': { 'zh-TW': '請逐項選擇以上全部待確認項後統一提交', en: 'Please select options for all items above and submit together', ja: '上記の確認事項をすべて選択して一括送信してください' },

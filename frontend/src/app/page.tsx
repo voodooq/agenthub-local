@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import ReactMarkdown from 'react-markdown';
+import ReactMarkdown, { defaultUrlTransform } from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   Send,
@@ -22,6 +22,7 @@ import {
   FileText,
   FileSpreadsheet,
   Info,
+  PackageOpen,
 } from 'lucide-react';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
@@ -55,6 +56,7 @@ import { SopDrawer } from '@/components/SopDrawer';
 import { InteractiveInquiryCard } from '@/components/InteractiveInquiryCard';
 import { ExperienceProposalCard } from '@/components/ExperienceProposalCard';
 
+import { GeneratedFileChip } from '@/components/GeneratedFileChip';
 import { buildActiveSystemOverride } from '@/utils/personalityHelper';
 import { generateScenarioThinking } from '@/utils/scenarioThinking';
 import {
@@ -72,7 +74,14 @@ import {
   MemoryFactItem,
   ExperienceProposalItem,
 } from '@/types';
-import { apiFetch } from '@/utils/apiClient';
+import { apiFetch, getAccessToken } from '@/utils/apiClient';
+import {
+  AGENTHUB_FILE_SCHEME,
+  cleanFilePathCandidate,
+  extractGeneratedFilePaths,
+  isNavigableLocalFilePath,
+  linkifyBareFilePathsInMarkdown,
+} from '@/utils/filePathDetector';
 import { prefetchExtensionSkills, prefetchWorkspaceSkills } from '@/utils/skillCache';
 import {
   AttachmentCategory,
@@ -116,6 +125,22 @@ export default function WorkbenchPage() {
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>('default');
   const [activeNavHub, setActiveNavHub] = useState<MainNavHub>('chat');
   const [saveFileToast, setSaveFileToast] = useState<string | null>(null);
+  const [saveFileToastType, setSaveFileToastType] = useState<'success' | 'warning' | 'error'>('success');
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const showFloatingToast = useCallback(
+    (msg: string, variant: 'success' | 'warning' | 'error' = 'success', durationMs = 3800) => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
+      setSaveFileToastType(variant);
+      setSaveFileToast(msg);
+      toastTimerRef.current = setTimeout(() => {
+        setSaveFileToast(null);
+        toastTimerRef.current = null;
+      }, durationMs);
+    },
+    []
+  );
   const [workMode, setWorkMode] = useState<WorkMode>('dev');
   const [isHudOpen, setIsHudOpen] = useState(false);
   const [isActionDrawerOpen, setIsActionDrawerOpen] = useState(false);
@@ -1398,14 +1423,96 @@ export default function WorkbenchPage() {
       if (res.ok) {
         const data = await res.json();
         if (data && data.success) {
-          setSaveFileToast(`代码文件已成功落盘至: ${data.rel_path}`);
-          setTimeout(() => setSaveFileToast(null), 3500);
+          showFloatingToast(`代码文件已成功落盘至: ${data.rel_path}`, 'success', 3500);
         }
       }
     } catch (e: any) {
       alert(e?.message || '文件落盘失败');
     }
   };
+
+  /**
+   * 在系统默认应用中直接打开生成文件（或定位到所在文件夹），高危可执行文件由后端自动降级为目录定位
+   */
+  const handleOpenGeneratedFile = useCallback(
+    async (rawPath: string, mode: 'launch' | 'reveal' = 'launch') => {
+      const cleaned = cleanFilePathCandidate(rawPath);
+      if (!cleaned) return;
+      try {
+        const res = await apiFetch('/api/v1/artifacts/open-by-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            workspace_id: activeWorkspaceId || 'default',
+            file_path: cleaned,
+            mode,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          showFloatingToast(data?.detail || `无法打开文件: ${cleaned}`, 'error', 4500);
+          return;
+        }
+        if (data.downgraded) {
+          showFloatingToast(
+            data.message || data.downgraded_reason || '出于安全防护已自动打开所在文件夹定位',
+            'warning',
+            5200
+          );
+        } else {
+          showFloatingToast(
+            data.message || (mode === 'launch' ? `已在默认应用中打开 ${data.file_name || cleaned}` : `已定位文件 ${data.file_name || cleaned}`),
+            'success',
+            3500
+          );
+        }
+      } catch (e: any) {
+        showFloatingToast(e?.message || `打开文件失败: ${cleaned}`, 'error', 4500);
+      }
+    },
+    [activeWorkspaceId, showFloatingToast]
+  );
+
+  /**
+   * 按工作区文件路径在右侧画布抽屉中预览文件内容（文本/HTML/Excel摘要/大图）
+   */
+  const handlePreviewGeneratedFile = useCallback(
+    async (rawPath: string) => {
+      const cleaned = cleanFilePathCandidate(rawPath);
+      if (!cleaned) return;
+      try {
+        const res = await apiFetch('/api/v1/artifacts/content-by-path', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            workspace_id: activeWorkspaceId || 'default',
+            file_path: cleaned,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          showFloatingToast(data?.detail || `预览文件失败: ${cleaned}`, 'error', 4500);
+          return;
+        }
+        if (data.canvas_type === 'image' && data.raw_url) {
+          const token = await getAccessToken();
+          const finalUrl = token
+            ? `${data.raw_url}${data.raw_url.includes('?') ? '&' : '?'}token=${encodeURIComponent(token)}`
+            : data.raw_url;
+          handleOpenCanvas(finalUrl, 'image', data.file_name || '图片预览');
+          return;
+        }
+        handleOpenCanvas(
+          data.content || '',
+          data.canvas_type || 'code',
+          data.file_name || cleaned
+        );
+      } catch (e: any) {
+        showFloatingToast(e?.message || `读取预览失败: ${cleaned}`, 'error', 4500);
+      }
+    },
+    [activeWorkspaceId, showFloatingToast]
+  );
 
   // 稳定抽屉与模态框的关闭/刷新回调引用，避免 3 秒状态轮询引发子组件不必要的 Effect 重跑
   const handleCloseCanvas = useCallback(() => setCanvasState((prev) => ({ ...prev, isOpen: false })), []);
@@ -1855,84 +1962,206 @@ export default function WorkbenchPage() {
                               );
                             })()
                           ) : (
-                            <div className="prose dark:prose-invert max-w-none text-foreground break-anywhere">
-                              {msg.content ? (
-                                <ReactMarkdown
-                                  remarkPlugins={[remarkGfm]}
-                                  components={{
-                                    code({ node, inline, className, children, ...props }: any) {
-                                      const match = /language-(\w+)/.exec(className || '');
-                                      const language = match ? match[1] : '';
-                                      const codeString = String(children).replace(/\n$/, '');
+                            (() => {
+                              const isCurrentStreamingMsg = isStreaming && msg.id === messages[messages.length - 1]?.id;
+                              const normalizedMarkdown = normalizeEscapedContent(msg.content);
+                              const renderedMarkdown = isCurrentStreamingMsg
+                                ? normalizedMarkdown
+                                : linkifyBareFilePathsInMarkdown(normalizedMarkdown);
 
-                                      if (!inline && language === 'interactive_inquiry') {
-                                        return (
-                                          <InteractiveInquiryCard
-                                            rawContent={codeString}
-                                            onSendFeedback={(feedback, confirmedFacts) =>
-                                              handleSendMessage(feedback, undefined, confirmedFacts)
-                                            }
-                                            onFillTemplate={(tmpl) => handleFillTemplateToInput(tmpl)}
-                                            onApprovePlan={(steps, feedback, confirmedFacts) =>
-                                              handleApproveAndExecutePlan(steps, feedback, confirmedFacts)
-                                            }
-                                            isStreaming={isStreaming && msg.id === messages[messages.length - 1]?.id}
-                                          />
-                                        );
-                                      }
+                              const extractPlainText = (childrenNode: React.ReactNode): string => {
+                                if (typeof childrenNode === 'string' || typeof childrenNode === 'number') {
+                                  return String(childrenNode);
+                                }
+                                if (Array.isArray(childrenNode)) {
+                                  return childrenNode.map(extractPlainText).join('');
+                                }
+                                if (React.isValidElement<{ children?: React.ReactNode }>(childrenNode) && childrenNode.props?.children) {
+                                  return extractPlainText(childrenNode.props.children);
+                                }
+                                return '';
+                              };
 
-                                      if (!inline && language) {
-                                        return (
-                                          <CodeBlock
-                                            code={codeString}
-                                            language={language}
-                                            onSendToCanvas={(c: string, l: string) => handleOpenCanvas(c, l)}
-                                            onSaveToWorkspace={handleSaveCodeToWorkspace}
-                                          />
-                                        );
-                                      }
-                                      return (
-                                        <code
-                                          className="bg-surface-200 border border-border px-1.5 py-0.5 rounded font-mono text-[12px] text-amber-600 dark:text-amber-300 break-anywhere"
-                                          {...props}
-                                        >
-                                          {children}
-                                        </code>
-                                      );
-                                    },
-                                    img({ node, src, alt, ...props }: any) {
-                                      if (!src) return null;
-                                      return (
-                                        <span className="block my-3">
-                                          <img
-                                            src={src}
-                                            alt={alt || 'AI 生成插画'}
-                                            className="rounded-xl border border-border shadow-lg max-w-full h-auto object-cover max-h-[512px] hover:scale-[1.01] transition-transform cursor-pointer"
-                                            onClick={() => handleOpenCanvas(src, 'image', alt ? `画作预览: ${alt}` : '生成的 AI 画作原图预览')}
-                                            {...props}
-                                          />
-                                          {alt && (
-                                            <span className="block text-xs text-muted-foreground mt-1 italic text-center">
-                                              {alt}（点击可在右侧画布全屏查看大图）
+                              return (
+                                <div className="prose dark:prose-invert max-w-none text-foreground break-anywhere">
+                                  {msg.content ? (
+                                    <ReactMarkdown
+                                      remarkPlugins={[remarkGfm]}
+                                      urlTransform={(url) => {
+                                        if (
+                                          url.startsWith(AGENTHUB_FILE_SCHEME) ||
+                                          url.toLowerCase().startsWith('file://') ||
+                                          isNavigableLocalFilePath(url)
+                                        ) {
+                                          return url;
+                                        }
+                                        return defaultUrlTransform(url);
+                                      }}
+                                      components={{
+                                        code({ node, inline, className, children, ...props }: any) {
+                                          const match = /language-(\w+)/.exec(className || '');
+                                          const language = match ? match[1] : '';
+                                          const rawChildrenText = String(children ?? '');
+                                          const codeString = rawChildrenText.replace(/\n$/, '');
+
+                                          if (!inline && language === 'interactive_inquiry') {
+                                            return (
+                                              <InteractiveInquiryCard
+                                                rawContent={codeString}
+                                                onSendFeedback={(feedback, confirmedFacts) =>
+                                                  handleSendMessage(feedback, undefined, confirmedFacts)
+                                                }
+                                                onFillTemplate={(tmpl) => handleFillTemplateToInput(tmpl)}
+                                                onApprovePlan={(steps, feedback, confirmedFacts) =>
+                                                  handleApproveAndExecutePlan(steps, feedback, confirmedFacts)
+                                                }
+                                                isStreaming={isCurrentStreamingMsg}
+                                              />
+                                            );
+                                          }
+
+                                          if (!inline && language) {
+                                            return (
+                                              <CodeBlock
+                                                code={codeString}
+                                                language={language}
+                                                onSendToCanvas={(c: string, l: string) => handleOpenCanvas(c, l)}
+                                                onSaveToWorkspace={handleSaveCodeToWorkspace}
+                                              />
+                                            );
+                                          }
+
+                                          // 仅对单行行内代码做本地文件路径直开识别（严格避开多行代码块）
+                                          if (
+                                            inline !== false &&
+                                            !language &&
+                                            !rawChildrenText.includes('\n') &&
+                                            isNavigableLocalFilePath(codeString)
+                                          ) {
+                                            return (
+                                              <GeneratedFileChip
+                                                filePath={cleanFilePathCandidate(codeString)}
+                                                variant="inline"
+                                                onLaunch={(fp) => handleOpenGeneratedFile(fp, 'launch')}
+                                                onReveal={(fp) => handleOpenGeneratedFile(fp, 'reveal')}
+                                                onPreview={(fp) => handlePreviewGeneratedFile(fp)}
+                                              />
+                                            );
+                                          }
+
+                                          return (
+                                            <code
+                                              className="bg-surface-200 border border-border px-1.5 py-0.5 rounded font-mono text-[12px] text-amber-600 dark:text-amber-300 break-anywhere"
+                                              {...props}
+                                            >
+                                              {children}
+                                            </code>
+                                          );
+                                        },
+                                        a({ node, href, children, ...props }: any) {
+                                          const hrefStr = String(href || '').trim();
+                                          if (hrefStr.startsWith(AGENTHUB_FILE_SCHEME)) {
+                                            const decodedPath = decodeURIComponent(hrefStr.slice(AGENTHUB_FILE_SCHEME.length));
+                                            return (
+                                              <GeneratedFileChip
+                                                filePath={decodedPath}
+                                                variant="inline"
+                                                onLaunch={(fp) => handleOpenGeneratedFile(fp, 'launch')}
+                                                onReveal={(fp) => handleOpenGeneratedFile(fp, 'reveal')}
+                                                onPreview={(fp) => handlePreviewGeneratedFile(fp)}
+                                              />
+                                            );
+                                          }
+                                          if (hrefStr && isNavigableLocalFilePath(hrefStr)) {
+                                            const labelText = extractPlainText(children).trim();
+                                            const customLabel =
+                                              labelText && labelText !== hrefStr ? labelText : undefined;
+                                            return (
+                                              <GeneratedFileChip
+                                                filePath={hrefStr}
+                                                label={customLabel}
+                                                variant="inline"
+                                                onLaunch={(fp) => handleOpenGeneratedFile(fp, 'launch')}
+                                                onReveal={(fp) => handleOpenGeneratedFile(fp, 'reveal')}
+                                                onPreview={(fp) => handlePreviewGeneratedFile(fp)}
+                                              />
+                                            );
+                                          }
+                                          const isAnchorOnly = hrefStr.startsWith('#');
+                                          return (
+                                            <a
+                                              href={hrefStr}
+                                              target={isAnchorOnly ? undefined : '_blank'}
+                                              rel={isAnchorOnly ? undefined : 'noopener noreferrer'}
+                                              className="text-emerald-600 dark:text-emerald-400 underline underline-offset-2 hover:text-emerald-500 transition-colors"
+                                              {...props}
+                                            >
+                                              {children}
+                                            </a>
+                                          );
+                                        },
+                                        img({ node, src, alt, ...props }: any) {
+                                          if (!src) return null;
+                                          return (
+                                            <span className="block my-3">
+                                              <img
+                                                src={src}
+                                                alt={alt || 'AI 生成插画'}
+                                                className="rounded-xl border border-border shadow-lg max-w-full h-auto object-cover max-h-[512px] hover:scale-[1.01] transition-transform cursor-pointer"
+                                                onClick={() => handleOpenCanvas(src, 'image', alt ? `画作预览: ${alt}` : '生成的 AI 画作原图预览')}
+                                                {...props}
+                                              />
+                                              {alt && (
+                                                <span className="block text-xs text-muted-foreground mt-1 italic text-center">
+                                                  {alt}（点击可在右侧画布全屏查看大图）
+                                                </span>
+                                              )}
                                             </span>
-                                          )}
-                                        </span>
-                                      );
-                                    },
-                                  }}
-                                >
-                                  {normalizeEscapedContent(msg.content)}
-                                </ReactMarkdown>
-                              ) : (
-                                <div className="flex items-center space-x-2 text-muted-foreground text-xs py-1">
-                                  <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
-                                  <span>正在调度本地执行与安全分析...</span>
+                                          );
+                                        },
+                                      }}
+                                    >
+                                      {renderedMarkdown}
+                                    </ReactMarkdown>
+                                  ) : (
+                                    <div className="flex items-center space-x-2 text-muted-foreground text-xs py-1">
+                                      <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
+                                      <span>正在调度本地执行与安全分析...</span>
+                                    </div>
+                                  )}
                                 </div>
-                              )}
-                            </div>
+                              );
+                            })()
                           )}
                         </div>
                       )}
+
+                      {/* 生成文件快捷直达栏（点击默认程序直接打开 / 预览 / 所在目录定位） */}
+                      {!isUser &&
+                        msg.content &&
+                        !(isStreaming && msg.id === messages[messages.length - 1]?.id) &&
+                        (() => {
+                          const deliverablePaths = extractGeneratedFilePaths(msg.content);
+                          if (deliverablePaths.length === 0) return null;
+                          return (
+                            <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-xl border border-emerald-500/20 bg-emerald-500/5 max-w-[92%] md:max-w-[85%] animate-fade-in">
+                              <div className="inline-flex items-center space-x-1.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 shrink-0 mr-1">
+                                <PackageOpen className="w-3.5 h-3.5 text-emerald-500" />
+                                <span>生成文件直达</span>
+                              </div>
+                              {deliverablePaths.map((fp) => (
+                                <GeneratedFileChip
+                                  key={fp}
+                                  filePath={fp}
+                                  variant="card"
+                                  onLaunch={(targetPath) => handleOpenGeneratedFile(targetPath, 'launch')}
+                                  onReveal={(targetPath) => handleOpenGeneratedFile(targetPath, 'reveal')}
+                                  onPreview={(targetPath) => handlePreviewGeneratedFile(targetPath)}
+                                />
+                              ))}
+                            </div>
+                          );
+                        })()}
 
                       {/* 内联终端工具调用与安全审批卡片：跟随在思考过程与正文输出之后的最底端，避免被上方长内容顶走 */}
                       {!isUser && msg.tool_events && msg.tool_events.length > 0 && (
@@ -1977,8 +2206,7 @@ export default function WorkbenchPage() {
                           const skillTag = updated?.proposed_skill_name
                             ? `/${updated.proposed_skill_name}`
                             : 'Skill 知识库';
-                          setSaveFileToast(`✨ 经验已确认落盘并热加载至 ${skillTag}`);
-                          setTimeout(() => setSaveFileToast(null), 4000);
+                          showFloatingToast(`✨ 经验已确认落盘并热加载至 ${skillTag}`, 'success', 4000);
                         }
                       }}
                     />
@@ -2358,11 +2586,23 @@ export default function WorkbenchPage() {
         )}
       </main>
 
-      {/* 代码文件落盘浮层通知 */}
+      {/* 操作与文件落盘浮层通知 */}
       {saveFileToast && (
-        <div className="fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-2xl bg-emerald-600 text-white text-xs font-semibold shadow-2xl flex items-center space-x-2 animate-bounce">
-          <CheckCircle2 className="w-4 h-4 shrink-0" />
-          <span>{saveFileToast}</span>
+        <div
+          className={`fixed bottom-6 right-6 z-50 px-4 py-2.5 rounded-2xl text-white text-xs font-semibold shadow-2xl flex items-center space-x-2 max-w-md animate-fade-in ${
+            saveFileToastType === 'error'
+              ? 'bg-rose-600'
+              : saveFileToastType === 'warning'
+              ? 'bg-amber-600'
+              : 'bg-emerald-600'
+          }`}
+        >
+          {saveFileToastType === 'error' || saveFileToastType === 'warning' ? (
+            <AlertTriangle className="w-4 h-4 shrink-0" />
+          ) : (
+            <CheckCircle2 className="w-4 h-4 shrink-0" />
+          )}
+          <span className="leading-snug">{saveFileToast}</span>
         </div>
       )}
 
