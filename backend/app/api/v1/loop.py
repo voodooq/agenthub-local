@@ -4,15 +4,46 @@
 from fastapi import APIRouter, HTTPException
 from ...agent.loop_runner import TaskLoopRunner
 from ...core.logging_config import logger
+from ...memory.ledger import event_ledger
+from ...repository.conversation_repository import ConversationRepository
 from ...repository.loop_run_repository import TaskLoopRepository
+from ...repository.workspace_repository import WorkspaceRepository
 from ...schema.loop_schema import (
     TaskLoopApprovalAction,
     TaskLoopControlAction,
     TaskLoopCreateRequest,
     TaskLoopResponse,
 )
+from ...skills.experience_distiller import ExecutionTrace, experience_distiller
 
 router = APIRouter(prefix="/loop", tags=["Task Loop & HITL Gate"])
+
+
+async def _record_loop_intervention(
+    loop_id: str,
+    action: str,
+    detail: dict,
+) -> None:
+    """在非无痕会话下将用户暂停/纠偏/改参等介入行为追加至 event_ledger"""
+    try:
+        loop_data = await TaskLoopRepository.get_loop(loop_id)
+        if not loop_data:
+            return
+        conv = await ConversationRepository.get_by_id(loop_data.conversation_id)
+        if conv and bool(conv.incognito):
+            return
+        await event_ledger.append_event(
+            workspace_id=loop_data.workspace_id,
+            conversation_id=loop_data.conversation_id,
+            turn_id=max(1, int(loop_data.current_iteration or 1)),
+            loop_id=loop_id,
+            event_type="user_intervention",
+            actor="user",
+            payload={"action": action, **detail},
+            incognito=False,
+        )
+    except Exception as e:
+        logger.debug(f"记录 Loop 人工介入账本跳过: {e}")
 
 
 @router.post("/start", response_model=TaskLoopResponse)
@@ -82,15 +113,26 @@ async def handle_loop_action(
             modified_args=approval_req.modified_arguments,
             guidance=approval_req.user_guidance,
         )
+        if result.get("success") and approval_req.action in ("modify_args", "reject"):
+            await _record_loop_intervention(
+                loop_id,
+                approval_req.action,
+                {
+                    "guidance": approval_req.user_guidance or "",
+                    "modified_arguments": approval_req.modified_arguments or {},
+                },
+            )
         return result
 
     # 2. 控制指令
     ctrl_action = getattr(action_data, "action", "")
     if ctrl_action == "pause":
         await TaskLoopRepository.update_loop_status(loop_id, "paused")
+        await _record_loop_intervention(loop_id, "pause", {"guidance": "用户暂停自主执行进行人工检查"})
         return {"success": True, "action": "pause", "message": "循环已暂停"}
     elif ctrl_action == "resume":
         await TaskLoopRepository.update_loop_status(loop_id, "executing")
+        await _record_loop_intervention(loop_id, "resume", {"guidance": "用户检查后恢复自主执行"})
         return {"success": True, "action": "resume", "message": "循环已恢复执行"}
     elif ctrl_action == "abort":
         await TaskLoopRepository.update_loop_status(loop_id, "failed")
@@ -103,4 +145,69 @@ async def handle_loop_action(
         return {"success": True, "action": "archive", "message": "任务已归档收起"}
 
     raise HTTPException(status_code=400, detail="未知的操作类型")
+
+
+@router.post("/{loop_id}/distill-skill")
+async def distill_loop_to_skill(loop_id: str) -> dict:
+    """
+    从已执行/已交付的任务 Loop 轨迹（账本 + scratchpad.md）手动强触发经验提炼，
+    生成一条 pending 状态的 experience_proposal 供前端预览 Diff 并确认沉淀为可复用 Skill。
+    """
+    loop_data = await TaskLoopRepository.get_loop(loop_id)
+    if not loop_data:
+        raise HTTPException(status_code=404, detail="未找到指定的任务循环")
+
+    conv = await ConversationRepository.get_by_id(loop_data.conversation_id)
+    if conv and bool(conv.incognito):
+        raise HTTPException(status_code=400, detail="无痕模式下禁止沉淀会话执行经验")
+
+    ws_root = await WorkspaceRepository.get_root_path_by_id(loop_data.workspace_id)
+    events = await event_ledger.get_trace_for_distillation(
+        loop_data.conversation_id,
+        loop_id=loop_id,
+        limit=150,
+    )
+    active_skills: list[str] = []
+    recovered_cnt = 0
+    had_intervention = False
+    tool_steps = 0
+    artifacts: list[str] = []
+
+    for evt in events:
+        etype = evt.get("event_type")
+        sid = str(evt.get("skill_id") or "").strip()
+        if sid and sid not in active_skills:
+            active_skills.append(sid)
+        if etype == "tool_executed":
+            tool_steps += 1
+        elif etype == "tool_error_recovered":
+            recovered_cnt += 1
+        elif etype == "user_intervention":
+            had_intervention = True
+        elif etype == "artifact_produced":
+            p = str((evt.get("payload") or {}).get("file_path") or "").strip()
+            if p and p not in artifacts:
+                artifacts.append(p)
+
+    trace = ExecutionTrace(
+        workspace_id=loop_data.workspace_id,
+        conversation_id=loop_data.conversation_id,
+        loop_id=loop_data.id,
+        scene_mode=(conv.scene_mode if conv else "agent") or "agent",
+        incognito=False,
+        user_goal=loop_data.goal_prompt or "",
+        active_skill_ids=active_skills,
+        recovered_error_count=recovered_cnt,
+        had_user_intervention=had_intervention,
+        total_tool_steps=max(tool_steps, int(loop_data.current_iteration or 0)),
+        circuit_breaker_triggered=(loop_data.loop_status == "failed"),
+        final_success=True,
+        final_summary=loop_data.scratchpad_md or "",
+        produced_artifacts=artifacts,
+        workspace_root=ws_root,
+    )
+    proposal = await experience_distiller.distill_and_propose(trace, force=True)
+    if not proposal:
+        raise HTTPException(status_code=400, detail="未能从当前任务轨迹中生成有效经验提议")
+    return {"success": True, "proposal": proposal}
 

@@ -8,8 +8,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 from ..core.logging_config import logger
+from ..memory.ledger import event_ledger
+from ..repository.conversation_repository import ConversationRepository
 from ..repository.loop_run_repository import TaskLoopRepository
 from ..repository.workspace_repository import WorkspaceRepository
+from ..skills.experience_distiller import ExecutionTrace, experience_distiller
 from .policy_interceptor import PolicyInterceptor
 
 
@@ -162,7 +165,7 @@ class TaskLoopRunner:
 
     async def step_verify(self, success_criteria_met: bool, detail: str = "") -> bool:
         """
-        [Verifier 阶段] 客观校验本次迭代是否达成标准 (DoD)
+        [Verifier 阶段] 客观校验本次迭代是否达成标准 (DoD)，并在验收完成时幂等触发 Post-Task 经验提炼。
         """
         await TaskLoopRepository.update_loop_status(self.loop_id, "verifying")
         if success_criteria_met:
@@ -172,6 +175,56 @@ class TaskLoopRunner:
             )
             if completed_loop and completed_loop.scratchpad_md:
                 self._sync_scratchpad_file(completed_loop.scratchpad_md)
+            if completed_loop:
+                try:
+                    conv = await ConversationRepository.get_by_id(completed_loop.conversation_id)
+                    is_incognito = bool(conv.incognito) if conv else False
+                    if not is_incognito:
+                        events = await event_ledger.get_trace_for_distillation(
+                            completed_loop.conversation_id,
+                            loop_id=completed_loop.id,
+                            limit=120,
+                        )
+                        active_skills: list[str] = []
+                        recovered_cnt = 0
+                        had_intervention = False
+                        tool_steps = 0
+                        artifacts: list[str] = []
+                        for evt in events:
+                            et = evt.get("event_type")
+                            sid = str(evt.get("skill_id") or "").strip()
+                            if sid and sid not in active_skills:
+                                active_skills.append(sid)
+                            if et == "tool_executed":
+                                tool_steps += 1
+                            elif et == "tool_error_recovered":
+                                recovered_cnt += 1
+                            elif et == "user_intervention":
+                                had_intervention = True
+                            elif et == "artifact_produced":
+                                p = str((evt.get("payload") or {}).get("file_path") or "").strip()
+                                if p and p not in artifacts:
+                                    artifacts.append(p)
+                        trace = ExecutionTrace(
+                            workspace_id=completed_loop.workspace_id,
+                            conversation_id=completed_loop.conversation_id,
+                            loop_id=completed_loop.id,
+                            scene_mode=(conv.scene_mode if conv else "agent") or "agent",
+                            incognito=False,
+                            user_goal=completed_loop.goal_prompt or "",
+                            active_skill_ids=active_skills,
+                            recovered_error_count=recovered_cnt,
+                            had_user_intervention=had_intervention,
+                            total_tool_steps=tool_steps,
+                            circuit_breaker_triggered=False,
+                            final_success=True,
+                            final_summary=detail or "",
+                            produced_artifacts=artifacts,
+                            workspace_root=str(self.workspace_root),
+                        )
+                        await experience_distiller.on_task_complete(trace)
+                except Exception as e:
+                    logger.debug(f"[TaskLoopRunner] 任务验收触发经验提炼跳过: {e}")
             return True
         else:
             return False

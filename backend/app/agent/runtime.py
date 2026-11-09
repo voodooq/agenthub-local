@@ -15,9 +15,15 @@ from typing import Any, AsyncGenerator
 from ..core.logging_config import logger
 from ..repository.conversation_repository import ConversationRepository
 from ..repository.message_repository import MessageRepository
+from ..repository.search_repository import SearchRepository
 from ..service.engine_pool import engine_pool
 from ..service.audit_service import audit_service
+from ..memory.fact_manager import fact_manager
+from ..memory.ledger import event_ledger
 from ..memory.long_term import long_term_memory
+from ..memory.policy_guard import MemoryPolicyGuard
+from ..memory.session_summary import session_summary_manager
+from ..memory.workspace_fts import WorkspaceFTSEngine
 from ..extensions.skill_loader import skill_loader
 from ..extensions.mcp_manager import mcp_manager
 from .shell_executor import shell_executor
@@ -25,6 +31,7 @@ from .tool_protocol import ToolProtocolAdapter
 from .context_builder import ContextBuilder
 from .ui_operator import ui_operator
 from ..repository.loop_run_repository import TaskLoopRepository
+from ..skills.experience_distiller import ExecutionTrace, experience_distiller
 
 
 class AgentRuntime:
@@ -32,6 +39,213 @@ class AgentRuntime:
 
     DEFAULT_REACT_STEPS = 16
     MAX_REACT_STEPS = 40  # 任务深度自愈与多步推进时的绝对动态扩展上限
+
+    @staticmethod
+    async def _ingest_confirmed_facts(
+        *,
+        confirmed_facts: list[Any] | None,
+        workspace_id: str,
+        conversation_id: str,
+        turn_id: int,
+        incognito: bool,
+        scene_mode: str,
+    ) -> list[dict[str, Any]]:
+        """
+        将前端交互对齐卡提交的结构化确认事实直接写入 event_ledger 与 memory_facts（0 额外 LLM Token）。
+        """
+        if incognito or scene_mode == "oneshot" or not confirmed_facts:
+            return []
+
+        normalized_items: list[dict[str, str]] = []
+        for item in confirmed_facts:
+            d = item if isinstance(item, dict) else item.model_dump()
+            f_key = str(d.get("fact_key") or "").strip()
+            f_val = str(d.get("fact_value") or "").strip()
+            if not f_key or not f_val:
+                continue
+            normalized_items.append({
+                "fact_key": f_key,
+                "fact_value": f_val,
+                "category": str(d.get("category") or "biz_rule").strip(),
+                "workspace_scope": str(d.get("workspace_scope") or "workspace").strip().lower(),
+            })
+
+        if not normalized_items:
+            return []
+
+        evt = await event_ledger.append_event(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            turn_id=turn_id,
+            event_type="inquiry_confirmed",
+            actor="user",
+            payload={"facts": normalized_items},
+            incognito=False,
+        )
+        source_evt_id = evt["id"] if evt else None
+
+        saved_facts: list[dict[str, Any]] = []
+        for item in normalized_items:
+            target_ws = "GLOBAL" if item["workspace_scope"] == "global" else workspace_id
+            try:
+                res = await fact_manager.upsert_fact(
+                    fact_key=item["fact_key"],
+                    fact_value=item["fact_value"],
+                    workspace_id=target_ws,
+                    category=item["category"],
+                    source_type="inquiry",
+                    source_event_id=source_evt_id,
+                    incognito=False,
+                    scene_mode=scene_mode,
+                    verified=True,
+                )
+                if res.get("fact"):
+                    saved_facts.append(res["fact"])
+            except Exception as e:
+                logger.warning(f"[AgentRuntime] 对齐卡确认事实落盘失败 ({item['fact_key']}): {e}")
+
+        return saved_facts
+
+    @staticmethod
+    async def _execute_search_memory_history(
+        *,
+        query: str,
+        scope: str = "all",
+        limit: int = 5,
+        workspace_id: str = "default",
+        target_cwd: str | None = None,
+        incognito: bool = False,
+    ) -> str:
+        """
+        执行按需 FTS5 历史对话、事实变更历史与工作区文档/源码联合召回（全量结果均经隐私脱敏）。
+        """
+        clean_q = (query or "").strip()
+        if not clean_q:
+            return "Error: search_memory_history 参数 query 不能为空。"
+
+        clean_scope = (scope or "all").strip().lower()
+        if clean_scope not in ("messages", "facts_history", "workspace", "all"):
+            clean_scope = "all"
+        safe_limit = max(1, min(int(limit or 5), 20))
+
+        sections: list[str] = []
+
+        # 1. 历史消息 FTS5 BM25（无痕模式跳过）
+        if not incognito and clean_scope in ("messages", "all"):
+            msg_hits = await SearchRepository.search_messages(clean_q, limit=safe_limit)
+            if msg_hits:
+                lines = ["#### 💬 历史会话消息召回 (messages_fts)"]
+                for hit in msg_hits[:safe_limit]:
+                    raw_snip = re.sub(r"<[^>]+>", "", str(hit.get("highlighted_snippet") or hit.get("content") or ""))
+                    safe_snip, _ = MemoryPolicyGuard.sanitize_text(raw_snip[:220])
+                    title = str(hit.get("conversation_title") or hit.get("conversation_id") or "")
+                    lines.append(
+                        f"- **[{hit.get('role', 'user')}]** (会话 `{title}`, {hit.get('created_at', '')}): {safe_snip}"
+                    )
+                sections.append("\n".join(lines))
+
+        # 2. 双时间轴历史事实 + 非结构化长期记忆（无痕模式跳过）
+        if not incognito and clean_scope in ("facts_history", "all"):
+            fact_hits = await fact_manager.search_history(clean_q, workspace_id=workspace_id, limit=safe_limit)
+            lt_hits_all = await long_term_memory.list_all()
+            lt_matched = [
+                m for m in lt_hits_all
+                if clean_q.lower() in str(m.get("content") or "").lower()
+                or clean_q.lower() in str(m.get("category") or "").lower()
+            ][:safe_limit]
+
+            if fact_hits or lt_matched:
+                lines = ["#### 📜 确定性事实历史与长期画像 (memory_facts & long_term_memories)"]
+                for f in fact_hits:
+                    safe_val, _ = MemoryPolicyGuard.sanitize_text(str(f.get("fact_value") or ""))
+                    status_tag = "当前生效" if f.get("is_active") else f"已归档 @{f.get('valid_to')}"
+                    lines.append(
+                        f"- `[{f.get('workspace_id')}:{f.get('fact_key')}]` = `{safe_val}` ({status_tag}, 来源: {f.get('source_type')})"
+                    )
+                for m in lt_matched:
+                    safe_c, _ = MemoryPolicyGuard.sanitize_text(str(m.get("content") or ""))
+                    lines.append(f"- `[LTM:{m.get('category')}]` {safe_c}")
+                sections.append("\n".join(lines))
+
+        # 3. 当前工作区代码与文档 FTS5（需物理目录存在）
+        if target_cwd and clean_scope in ("workspace", "all"):
+            cwd_path = Path(target_cwd)
+            if cwd_path.exists() and cwd_path.is_dir():
+                def _run_ws_search() -> list[dict[str, Any]]:
+                    index_db = cwd_path / ".agenthub" / "index.db"
+                    if not index_db.exists():
+                        return []
+                    engine = WorkspaceFTSEngine(str(cwd_path))
+                    return engine.search(clean_q, limit=safe_limit)
+
+                try:
+                    ws_hits = await asyncio.to_thread(_run_ws_search)
+                except Exception as e:
+                    logger.debug(f"[AgentRuntime] WorkspaceFTSEngine 检索跳过: {e}")
+                    ws_hits = []
+
+                if ws_hits:
+                    lines = ["#### 📁 工作区文档/源码片段召回 (workspace_fts)"]
+                    for wh in ws_hits[:safe_limit]:
+                        raw_s = re.sub(r"</?b>", "", str(wh.get("snippet") or ""))
+                        safe_s, _ = MemoryPolicyGuard.sanitize_text(raw_s[:240])
+                        lines.append(f"- `{wh.get('rel_path')}`: {safe_s}")
+                    sections.append("\n".join(lines))
+
+        if not sections:
+            return f"未在范围 `{clean_scope}` 内检索到与 '{clean_q}' 相关的历史记忆或工作区片段。"
+
+        return f"### 🔍 按需记忆与历史溯源检索结果 (`query=\"{clean_q}\"`)\n\n" + "\n\n".join(sections)
+
+    @staticmethod
+    async def _run_post_task_distillation(
+        *,
+        workspace_id: str,
+        conversation_id: str,
+        loop_id: str | None,
+        scene_mode: str,
+        incognito: bool,
+        user_goal: str,
+        active_skill_ids: list[str],
+        recovered_error_count: int,
+        total_tool_steps: int,
+        circuit_breaker_triggered: bool,
+        final_summary: str,
+        produced_artifacts: list[str],
+        workspace_root: str | None,
+    ) -> dict[str, Any] | None:
+        """汇总本轮执行轨迹并调用 ExperienceDistiller 评估是否产生经验自进化提议"""
+        if incognito or scene_mode != "agent" or circuit_breaker_triggered:
+            return None
+        try:
+            intervention_res = await event_ledger.list_events(
+                conversation_id=conversation_id,
+                loop_id=loop_id,
+                event_type="user_intervention",
+                limit=5,
+            )
+            had_intervention = bool(intervention_res.get("total", 0) > 0)
+            trace = ExecutionTrace(
+                workspace_id=workspace_id,
+                conversation_id=conversation_id,
+                loop_id=loop_id,
+                scene_mode=scene_mode,
+                incognito=incognito,
+                user_goal=user_goal,
+                active_skill_ids=list(dict.fromkeys(active_skill_ids)),
+                recovered_error_count=recovered_error_count,
+                had_user_intervention=had_intervention,
+                total_tool_steps=total_tool_steps,
+                circuit_breaker_triggered=circuit_breaker_triggered,
+                final_success=True,
+                final_summary=final_summary,
+                produced_artifacts=list(dict.fromkeys(produced_artifacts)),
+                workspace_root=workspace_root,
+            )
+            return await experience_distiller.on_task_complete(trace)
+        except Exception as e:
+            logger.debug(f"[AgentRuntime] Post-Task 经验提炼跳过: {e}")
+            return None
 
     async def _persist_approved_plan(
         self,
@@ -80,6 +294,7 @@ class AgentRuntime:
         execution_strategy: str = "direct",
         clarify_mode: bool = False,
         approved_plan_steps: list[dict[str, Any]] | None = None,
+        confirmed_facts: list[Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行双层循环流式推理与工具编排，向外输出标准化 SSE 字典事件流。
@@ -133,6 +348,7 @@ class AgentRuntime:
         conv_obj = await ConversationRepository.get_by_id(conv_id)
         active_scene = (conv_obj.scene_mode if conv_obj else (scene_mode or "agent")) or "agent"
         active_incognito = bool(conv_obj.incognito) if conv_obj else bool(incognito)
+        ws_id = (getattr(conv_obj, "workspace_id", None) if conv_obj else None) or ws_id
 
         # 2. 计算当前大轮次编号 (turn_id) 并率先落盘用户提问
         max_turn = await MessageRepository.get_max_turn_id(conv_id)
@@ -146,6 +362,41 @@ class AgentRuntime:
         )
         await ConversationRepository.touch(conv_id)
 
+        is_planning_phase = (
+            active_scene == "agent"
+            and execution_strategy == "plan_first"
+            and not approved_plan_steps
+        )
+
+        # 2.5 非无痕且非单次模式下：追加 user_input 账本事件并执行对齐卡 confirmed_facts 0-Token 直通入库
+        if not active_incognito and active_scene != "oneshot":
+            try:
+                await event_ledger.append_event(
+                    workspace_id=ws_id,
+                    conversation_id=conv_id,
+                    turn_id=current_turn_id,
+                    event_type="user_input",
+                    actor="user",
+                    payload={
+                        "message": (user_message or "")[:1200],
+                        "scene_mode": active_scene,
+                        "execution_strategy": execution_strategy,
+                    },
+                    incognito=False,
+                )
+            except Exception as evt_err:
+                logger.debug(f"[AgentRuntime] 记录 user_input 账本跳过: {evt_err}")
+
+            if confirmed_facts:
+                await self._ingest_confirmed_facts(
+                    confirmed_facts=confirmed_facts,
+                    workspace_id=ws_id,
+                    conversation_id=conv_id,
+                    turn_id=current_turn_id,
+                    incognito=active_incognito,
+                    scene_mode="plan_first" if is_planning_phase else active_scene,
+                )
+
         # 3. 推送第一条会话初始化握手事件
         yield {
             "type": "conv_init",
@@ -157,14 +408,9 @@ class AgentRuntime:
             "incognito": active_incognito,
         }
 
-        is_planning_phase = (
-            active_scene == "agent"
-            and execution_strategy == "plan_first"
-            and not approved_plan_steps
-        )
-
         PLANNING_SAFE_TOOLS = {
             "read_local_file",
+            "search_memory_history",
             "search_skill_knowledge",
             "load_skill_detail",
             "web_fetch",
@@ -203,9 +449,15 @@ class AgentRuntime:
         consecutive_stalls = 0
         allow_step_extension = not is_planning_phase
         command_history: list[dict[str, Any]] = []
+        active_skill_ids: list[str] = []
+        recovered_error_count = 0
+        total_tool_steps = 0
+        circuit_breaker_triggered = False
+        produced_artifacts: list[str] = []
 
         # 4.5 关联工作区长程自主领航舱 (TaskLoopRunner 闭环驱动)
         active_loop_obj = None
+        tracked_loop_id: str | None = None
         if active_scene == "agent" and ws_id and not is_planning_phase:
             try:
                 active_loop_obj = await TaskLoopRepository.get_active_loop_by_workspace(ws_id, include_completed=False)
@@ -217,6 +469,8 @@ class AgentRuntime:
                         goal_prompt=user_message.strip().split("\n")[0][:120] or "执行自主推演任务",
                         max_iterations=10,
                     )
+                if active_loop_obj:
+                    tracked_loop_id = active_loop_obj.id
             except Exception as e:
                 logger.warning(f"初始化任务自主领航舱实例异常: {e}")
 
@@ -246,8 +500,16 @@ class AgentRuntime:
                 approved_plan_steps=approved_plan_steps,
             )
 
-            # 首步向前端推送命中的长期记忆溯源与当前任务草稿纸
+            # 首步向前端推送命中的长期记忆溯源、活跃确定性事实视图与当前任务草稿纸
             if step_idx == 0:
+                matched_sk_id = str(ctx.get("matched_skill_id") or "").strip()
+                if matched_sk_id and matched_sk_id not in active_skill_ids:
+                    active_skill_ids.append(matched_sk_id)
+                if ctx.get("active_facts"):
+                    yield {
+                        "type": "fact_refs",
+                        "facts": ctx["active_facts"],
+                    }
                 if ctx.get("referenced_memories"):
                     yield {
                         "type": "memory_refs",
@@ -410,7 +672,7 @@ class AgentRuntime:
                         turn_id=current_turn_id,
                     )
                     await ConversationRepository.touch(conv_id)
-                    if conv_id and not incognito:
+                    if conv_id and not active_incognito:
                         long_term_memory.schedule_extraction(conv_id, delay_seconds=180)
                 accumulated_visible_text += ("\n\n" + final_saved_text if accumulated_visible_text else final_saved_text)
 
@@ -441,6 +703,29 @@ class AgentRuntime:
                             active_loop_obj = None
                     except Exception as e:
                         logger.warning(f"自主循环自动验收完成异常: {e}")
+
+                # Post-Task 经验自动提炼钩子（满足规则 A/B/C 时生成 Diff 提议推送前端）
+                if active_scene == "agent" and not active_incognito and not is_planning_phase:
+                    exp_proposal = await self._run_post_task_distillation(
+                        workspace_id=ws_id,
+                        conversation_id=conv_id,
+                        loop_id=tracked_loop_id,
+                        scene_mode=active_scene,
+                        incognito=active_incognito,
+                        user_goal=user_message.strip().split("\n")[0][:140],
+                        active_skill_ids=active_skill_ids,
+                        recovered_error_count=recovered_error_count,
+                        total_tool_steps=total_tool_steps,
+                        circuit_breaker_triggered=circuit_breaker_triggered,
+                        final_summary=final_saved_text[:300] if final_saved_text else "",
+                        produced_artifacts=produced_artifacts,
+                        workspace_root=ctx.get("current_cwd") or target_cwd,
+                    )
+                    if exp_proposal:
+                        yield {
+                            "type": "experience_proposal",
+                            "proposal": exp_proposal,
+                        }
 
                 yield {
                     "type": "done",
@@ -592,6 +877,39 @@ class AgentRuntime:
                             "cwd": new_cwd,
                         }
 
+                # ── 工具 1.5: 按需 FTS5 记忆与工作区历史检索 (search_memory_history) ──
+                elif func_name == "search_memory_history":
+                    mem_query = str(args.get("query", "")).strip()
+                    mem_scope = str(args.get("scope", "all")).strip()
+                    mem_limit = int(args.get("limit", 5) or 5)
+                    yield {
+                        "type": "tool_start",
+                        "call_id": call_id,
+                        "name": func_name,
+                        "command": f"search_memory_history('{mem_query}', scope='{mem_scope}')",
+                        "reason": f"按需 FTS5 检索历史记忆与工作区轨迹: {mem_query}",
+                        "security": "SAFE",
+                    }
+                    tool_output = await self._execute_search_memory_history(
+                        query=mem_query,
+                        scope=mem_scope,
+                        limit=mem_limit,
+                        workspace_id=ws_id,
+                        target_cwd=ctx.get("current_cwd") or target_cwd,
+                        incognito=active_incognito,
+                    )
+                    compressed = f"[已按需检索历史记忆 ({mem_scope}): '{mem_query[:40]}']"
+                    yield {
+                        "type": "tool_end",
+                        "call_id": call_id,
+                        "name": func_name,
+                        "command": f"search_memory_history('{mem_query[:40]}')",
+                        "reason": f"按需检索历史记忆: {mem_query}",
+                        "status": "completed",
+                        "output": tool_output,
+                        "compressed": compressed,
+                    }
+
                 # ── 工具 2: 更新任务工作草稿纸 (update_working_memory) ──
                 elif func_name == "update_working_memory":
                     current_wm = dict(ctx.get("working_memory") or {})
@@ -636,19 +954,23 @@ class AgentRuntime:
                     cat = str(args.get("category", "preference")).strip()
                     mem_content = str(args.get("content", "")).strip()
                     pinned = bool(args.get("is_pinned", True))
-                    if not mem_content:
+                    if active_incognito:
+                        tool_output = "Skipped: 当前处于无痕模式 (incognito=True)，禁止写入长期记忆库。"
+                        compressed = "[无痕模式跳过写入长期记忆]"
+                    elif not mem_content:
                         tool_output = "Error: 长期记忆内容 content 不能为空。"
                         compressed = "[长期记忆写入失败: 内容为空]"
                     else:
+                        safe_mem_content, _ = MemoryPolicyGuard.sanitize_text(mem_content)
                         saved_mem = await long_term_memory.add_memory(
                             category=cat,
-                            content=mem_content,
+                            content=safe_mem_content,
                             confidence=0.98,
                             source="user_explicit",
                             is_pinned=1 if pinned else 0,
                         )
-                        tool_output = f"✅ 已成功写入本地 SQLite 长期记忆库 (ID: `{saved_mem['id']}`, 分类: `{cat}`, 置顶: `{pinned}`): {mem_content}"
-                        compressed = f"[已植入长期记忆 ({cat}): {mem_content[:45]}...]"
+                        tool_output = f"✅ 已成功写入本地 SQLite 长期记忆库 (ID: `{saved_mem['id']}`, 分类: `{cat}`, 置顶: `{pinned}`): {safe_mem_content}"
+                        compressed = f"[已植入长期记忆 ({cat}): {safe_mem_content[:45]}...]"
                     yield {
                         "type": "tool_end",
                         "call_id": call_id,
@@ -663,7 +985,14 @@ class AgentRuntime:
                 # ── 工具 3: 按需加载 Skill 详情 (load_skill_detail) ──
                 elif func_name == "load_skill_detail":
                     skill_name = str(args.get("skill_name", "")).strip()
-                    tool_output = skill_loader.get_full_skill_markdown(skill_name)
+                    eff_ws_root = ctx.get("current_cwd") or target_cwd
+                    tool_output = skill_loader.get_full_skill_markdown(
+                        skill_name,
+                        workspace_root=eff_ws_root,
+                    )
+                    clean_sid = skill_name.lstrip("/")
+                    if clean_sid and clean_sid not in active_skill_ids and not str(tool_output).startswith("Error:"):
+                        active_skill_ids.append(clean_sid)
                     compressed = f"[已加载专业技能 `{skill_name}` 操作规程与四元组清单]"
                     yield {
                         "type": "tool_end",
@@ -680,6 +1009,7 @@ class AgentRuntime:
                 elif func_name == "search_skill_knowledge":
                     sk_name = str(args.get("skill_name", "")).strip()
                     kb_query = str(args.get("query", "")).strip()
+                    eff_ws_root = ctx.get("current_cwd") or target_cwd
                     yield {
                         "type": "tool_start",
                         "call_id": call_id,
@@ -688,7 +1018,14 @@ class AgentRuntime:
                         "reason": f"FTS5 毫秒级检索技能 {sk_name} 的领域知识库",
                         "security": "SAFE",
                     }
-                    tool_output = await skill_loader.search_knowledge(sk_name, kb_query)
+                    tool_output = await skill_loader.search_knowledge(
+                        sk_name,
+                        kb_query,
+                        workspace_root=eff_ws_root,
+                    )
+                    clean_sid = sk_name.lstrip("/")
+                    if clean_sid and clean_sid not in active_skill_ids:
+                        active_skill_ids.append(clean_sid)
                     compressed = f"[已检索 `{sk_name}` 领域知识库: 关键词 '{kb_query}']"
                     yield {
                         "type": "tool_end",
@@ -706,6 +1043,7 @@ class AgentRuntime:
                     sk_name = str(args.get("skill_name", "")).strip()
                     scr_name = str(args.get("script_name", "")).strip()
                     scr_args = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
+                    eff_ws_root = ctx.get("current_cwd") or target_cwd
                     yield {
                         "type": "tool_start",
                         "call_id": call_id,
@@ -714,7 +1052,15 @@ class AgentRuntime:
                         "reason": f"运行技能 {sk_name} 随包专属算子 {scr_name}",
                         "security": "AUTO_CONFIRMED",
                     }
-                    tool_output = await skill_loader.execute_skill_tool(sk_name, scr_name, scr_args)
+                    tool_output = await skill_loader.execute_skill_tool(
+                        sk_name,
+                        scr_name,
+                        scr_args,
+                        workspace_root=eff_ws_root,
+                    )
+                    clean_sid = sk_name.lstrip("/")
+                    if clean_sid and clean_sid not in active_skill_ids:
+                        active_skill_ids.append(clean_sid)
                     compressed = f"[已运行随包算子 `{sk_name}/tools/{scr_name}`]"
                     yield {
                         "type": "tool_end",
@@ -997,6 +1343,7 @@ class AgentRuntime:
                     compressed = f"[未知工具调用 `{func_name}`]"
 
                 # 智能异常探测：判断该步骤是否遇到报错，并为下一步自愈循环激活调度器
+                prev_step_error = last_step_error_info
                 out_lower = (tool_output or "").lower()
                 is_step_abnormal = any(
                     err_kw in out_lower
@@ -1022,6 +1369,7 @@ class AgentRuntime:
 
                         if is_circuit_breaker:
                             allow_step_extension = False
+                            circuit_breaker_triggered = True
                             logger.warning(f"[AgentRuntime] 触发死循环熔断 (LoopBreaker): {norm_entry}")
 
                     last_step_error_info = {
@@ -1035,6 +1383,14 @@ class AgentRuntime:
                         cmd_entry = str(args.get("command", "")).strip()
                         command_history.append({"cmd": re.sub(r"\s+", " ", cmd_entry), "abnormal": False})
                     last_step_error_info = None
+                    if not str(tool_output or "").startswith("Error:"):
+                        total_tool_steps += 1
+                        if func_name == "write_local_file":
+                            fp = str(args.get("file_path") or "").strip()
+                            if fp and fp not in produced_artifacts:
+                                produced_artifacts.append(fp)
+                        if prev_step_error is not None:
+                            recovered_error_count += 1
 
                 # 将工具真实输出与单行折叠摘要同时落盘（当前 Turn 用完整 output，后续 Turn 自动用 compressed）
                 await MessageRepository.save_message(
@@ -1045,6 +1401,68 @@ class AgentRuntime:
                     turn_id=current_turn_id,
                     tool_call_id=call_id,
                 )
+
+                # 追加写入 Event Ledger（tool_executed / artifact_produced / tool_error_recovered）
+                if not active_incognito and active_scene != "oneshot":
+                    step_skill_id = str(args.get("skill_name") or "").strip().lstrip("/") or None
+                    current_loop_id = tracked_loop_id or (active_loop_obj.id if active_loop_obj else None)
+                    try:
+                        await event_ledger.append_event(
+                            workspace_id=ws_id,
+                            conversation_id=conv_id,
+                            turn_id=current_turn_id,
+                            loop_id=current_loop_id,
+                            event_type="tool_executed",
+                            actor="agent",
+                            skill_id=step_skill_id,
+                            payload={
+                                "tool": func_name,
+                                "args": args,
+                                "compressed": compressed,
+                                "is_error": is_step_abnormal,
+                                "output_preview": (tool_output or "")[:400],
+                            },
+                            incognito=False,
+                        )
+                        if (
+                            func_name == "write_local_file"
+                            and not is_step_abnormal
+                            and not str(tool_output).startswith("Error:")
+                        ):
+                            await event_ledger.append_event(
+                                workspace_id=ws_id,
+                                conversation_id=conv_id,
+                                turn_id=current_turn_id,
+                                loop_id=current_loop_id,
+                                event_type="artifact_produced",
+                                actor="agent",
+                                skill_id=step_skill_id,
+                                payload={
+                                    "file_path": str(args.get("file_path") or ""),
+                                    "compressed": compressed,
+                                },
+                                incognito=False,
+                            )
+                        if prev_step_error is not None and not is_step_abnormal:
+                            await event_ledger.append_event(
+                                workspace_id=ws_id,
+                                conversation_id=conv_id,
+                                turn_id=current_turn_id,
+                                loop_id=current_loop_id,
+                                event_type="tool_error_recovered",
+                                actor="agent",
+                                skill_id=step_skill_id,
+                                payload={
+                                    "failed_tool": prev_step_error.get("tool"),
+                                    "failed_summary": prev_step_error.get("summary"),
+                                    "recovery_tool": func_name,
+                                    "recovery_args": args,
+                                    "recovery_compressed": compressed,
+                                },
+                                incognito=False,
+                            )
+                    except Exception as ledger_err:
+                        logger.debug(f"[AgentRuntime] 写入工具账本事件跳过: {ledger_err}")
 
                 # ── 具身状态联动：推进 Loop 轮次并动态记事板 ──
                 if active_loop_obj:
@@ -1099,21 +1517,52 @@ class AgentRuntime:
                             active_loop_obj = None
                     except Exception:
                         pass
+                if active_scene == "agent" and not active_incognito and not is_planning_phase:
+                    exp_proposal = await self._run_post_task_distillation(
+                        workspace_id=ws_id,
+                        conversation_id=conv_id,
+                        loop_id=tracked_loop_id,
+                        scene_mode=active_scene,
+                        incognito=active_incognito,
+                        user_goal=user_message.strip().split("\n")[0][:140],
+                        active_skill_ids=active_skill_ids,
+                        recovered_error_count=recovered_error_count,
+                        total_tool_steps=total_tool_steps,
+                        circuit_breaker_triggered=circuit_breaker_triggered,
+                        final_summary=f"已执行 {step_idx} 步任务",
+                        produced_artifacts=produced_artifacts,
+                        workspace_root=ctx.get("current_cwd") or target_cwd,
+                    )
+                    if exp_proposal:
+                        yield {
+                            "type": "experience_proposal",
+                            "proposal": exp_proposal,
+                        }
                 yield {
                     "type": "done",
                     "full_content": accumulated_visible_text.strip() or f"已完成深度推演与自主闭环执行（共执行 {step_idx} 步）。若需进一步处理请继续告知。",
                     "account": final_account,
                 }
 
-        # 7. 回合后异步记忆提炼与自然衰减维护（非阻塞后台任务）
+        # 7. 回合后异步记忆提炼、增量会话摘要推进与自然衰减维护（非阻塞后台任务）
         if active_scene != "oneshot" and not active_incognito:
             asyncio.create_task(self._post_turn_memory_maintenance(user_message))
+            window_limit = 12 if active_scene == "chat" else 10
+            asyncio.create_task(
+                session_summary_manager.maybe_update_summary(
+                    conv_id,
+                    workspace_id=ws_id,
+                    current_turn_id=current_turn_id,
+                    window_turns=window_limit,
+                    incognito=active_incognito,
+                )
+            )
 
     @staticmethod
     async def _post_turn_memory_maintenance(user_message: str) -> None:
         """
         回合后后台轻量级长期记忆捕获与 30 天指数衰减维护。
-        当用户在对话中明确表达个人技术栈偏好、工作规范或环境特征时自动入库。
+        当用户在对话中明确表达个人技术栈偏好、工作规范或环境特征时自动入库（经过隐私脱敏）。
         """
         try:
             text = (user_message or "").strip()
@@ -1129,7 +1578,10 @@ class AgentRuntime:
             for pat, cat, conf in explicit_patterns:
                 m = re.search(pat, text)
                 if m:
-                    fact = m.group(0).strip()[:160]
+                    raw_fact = m.group(0).strip()[:160]
+                    fact, _ = MemoryPolicyGuard.sanitize_text(raw_fact)
+                    if not fact.strip():
+                        break
                     # 查重避免重复写入完全相同的句子
                     existing = await long_term_memory.list_all()
                     if not any(e["content"] == fact for e in existing):

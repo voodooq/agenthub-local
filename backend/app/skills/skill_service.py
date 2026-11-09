@@ -173,6 +173,8 @@ class SkillService:
     ) -> dict[str, Any]:
         skill_name = parsed["name"]
         prefix = "l2" if scope == "workspace" else "l1"
+        playbook_file = Path(folder_path) / "knowledge" / "experience_playbook.md"
+        has_playbook = playbook_file.is_file()
         record: dict[str, Any] = {
             "id": f"{prefix}_{skill_name}",
             "name": skill_name,
@@ -182,11 +184,25 @@ class SkillService:
             "is_override": is_override,
             "folder_path": folder_path,
             "has_sop": bool(parsed.get("has_sop", True)),
+            "has_playbook": has_playbook,
         }
         if parsed.get("version"):
             record["version"] = parsed["version"]
         if include_content:
-            record["sop_content"] = parsed.get("sop_content", "")
+            sop_text = parsed.get("sop_content", "")
+            if has_playbook:
+                try:
+                    pb_raw = playbook_file.read_text(encoding="utf-8", errors="replace").strip()
+                    if pb_raw:
+                        record["experience_highlights"] = pb_raw[-1800:]
+                        sop_text = (
+                            f"{sop_text}\n\n---\n\n### 💡 演进实战经验 (`knowledge/experience_playbook.md`)\n{pb_raw}"
+                            if sop_text
+                            else pb_raw
+                        )
+                except OSError:
+                    pass
+            record["sop_content"] = sop_text
         return record
 
     def _scan_root_skills(

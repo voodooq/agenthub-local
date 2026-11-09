@@ -139,17 +139,19 @@ class SkillLoader:
                     "## 2. 标准四元组目录结构 (Skill-as-a-Folder)\n"
                     "```text\n"
                     "skills/<skill-id>/\n"
-                    "├── SKILL.md          # [必选] YAML 头信息 (name, command, type, description) + 详细 SOP 规程\n"
-                    "├── tools/            # [可选] 确定性 Python 算子脚本 (如 tools/calculator.py)，接收命令行 JSON 参数并输出标准结果\n"
-                    "├── knowledge/        # [可选] 领域参考文档 (*.md / *.txt / *.csv)，系统自动切块挂载至 SQLite FTS5 引擎\n"
-                    "└── schema.json       # [可选] 结构化输出 JSON Schema 校验契约\n"
+                    "├── SKILL.md                      # [必选] YAML 头信息 (name, command, type, description) + 详细 SOP 规程\n"
+                    "├── tools/                        # [可选] 确定性 Python 算子脚本 (如 tools/calculator.py)，接收命令行 JSON 参数并输出标准结果\n"
+                    "├── knowledge/                    # [可选] 领域参考文档 (*.md / *.txt / *.csv)，系统自动切块挂载至 SQLite FTS5 引擎\n"
+                    "│   └── experience_playbook.md    # [演进] 实战避坑守则与报错恢复三元组经验本\n"
+                    "└── schema.json                   # [可选] 结构化输出 JSON Schema 校验契约\n"
                     "```\n\n"
-                    "## 3. 构建执行步骤\n"
+                    "## 3. 构建与参数化沉淀规范\n"
                     "1. 提炼用户需求或当前会话已跑通的操作流程，确定 `kebab-case` 格式的 `<skill-id>` 与 `/<command>`；\n"
-                    "2. 调用 `write_local_file` 创建 `skills/<skill-id>/SKILL.md`；\n"
+                    "2. 调用 `write_local_file` 创建 `skills/<skill-id>/SKILL.md`；需要动态输入的参数统一采用 `{{参数名:默认值}}` 模板占位符标注；\n"
                     "3. 若任务涉及精确计算、表格核验或外部接口调用，在 `skills/<skill-id>/tools/` 下编写对应的 Python 脚本；\n"
-                    "4. 若任务包含特定规程或模板，写入 `skills/<skill-id>/knowledge/`；\n"
-                    "5. 告知用户技能已热加载就绪，可直接在输入框输入 `/<command>` 查看说明并调用。\n",
+                    "4. 若任务包含特定规程、模板或实战报错自愈经验，写入 `skills/<skill-id>/knowledge/experience_playbook.md`；\n"
+                    "5. 若具备固定交付字段或参数契约，同步生成 `skills/<skill-id>/schema.json`（含 `required` 字段校验）；\n"
+                    "6. 告知用户技能已热加载就绪，可直接在输入框输入 `/<command>` 查看说明并调用。\n",
                     encoding="utf-8",
                 )
         except Exception as e:
@@ -392,6 +394,81 @@ class SkillLoader:
         if created_count > 0:
             self.invalidate_cache()
         return created_count
+
+    def resolve_skill_dir_with_scope(
+        self,
+        skill_id_or_name: str,
+        workspace_root: str | None = None,
+    ) -> tuple[Path | None, str]:
+        """
+        结合可选的工作区路径定位指定 Skill 目录及作用域；
+        L2 工作区私有目录 (<workspace>/skills 或 <workspace>/.agenthub/skills) 严格优先于 L1 全局目录。
+        """
+        raw_norm = (skill_id_or_name or "").strip().lstrip("/")
+        if not raw_norm:
+            return None, ""
+        safe_name = os.path.basename(raw_norm)
+        target_lower = safe_name.lower()
+
+        if workspace_root:
+            ws_path = Path(workspace_root).resolve()
+            for ws_root in (ws_path / "skills", ws_path / ".agenthub" / "skills"):
+                if not ws_root.is_dir():
+                    continue
+                direct = ws_root / safe_name
+                if direct.is_dir() and (direct / "SKILL.md").exists():
+                    return direct, "workspace"
+                try:
+                    for item in ws_root.iterdir():
+                        if not item.is_dir():
+                            continue
+                        md_file = item / "SKILL.md"
+                        if not md_file.exists():
+                            continue
+                        meta = self._parse_frontmatter(
+                            md_file.read_text(encoding="utf-8", errors="replace")[:4096],
+                            item.name,
+                        )
+                        if (
+                            item.name.lower() == target_lower
+                            or meta["name"].lower() == target_lower
+                            or meta["command"].lstrip("/").lower() == target_lower
+                        ):
+                            return item, "workspace"
+                except OSError:
+                    pass
+
+        l1_dir = self._find_skill_dir(raw_norm)
+        if l1_dir:
+            return l1_dir, "global"
+        return None, ""
+
+    @staticmethod
+    def extract_playbook_highlights(skill_dir: Path, max_entries: int = 5) -> str:
+        """
+        从 skill_dir/knowledge/experience_playbook.md 提取最近 max_entries 条实战避坑守则摘要。
+        """
+        pb_file = skill_dir / "knowledge" / "experience_playbook.md"
+        if not pb_file.is_file():
+            return ""
+        try:
+            text = pb_file.read_text(encoding="utf-8", errors="replace").replace("\r\n", "\n").strip()
+        except OSError:
+            return ""
+        if not text:
+            return ""
+
+        sections = re.split(r"(?=^#{2,3}\s+)", text, flags=re.MULTILINE)
+        entries = [sec.strip() for sec in sections if sec.strip().startswith("##")]
+        if entries:
+            recent = entries[-max_entries:]
+            clipped = [e[:420] + ("\n..." if len(e) > 420 else "") for e in recent]
+            return "\n\n".join(clipped)
+
+        # 若暂无标准 ## 条目头，回退截取正文末尾
+        lines = [ln for ln in text.splitlines() if not ln.strip().startswith("# ")]
+        body = "\n".join(lines).strip()
+        return body[-1500:] if body else ""
 
     def _find_skill_dir(self, skill_id_or_name: str) -> Path | None:
         """在 skills/ 和 suites/ 双轨目录中定位指定 Skill 的根目录"""
@@ -736,18 +813,27 @@ class SkillLoader:
                 )
         return None
 
+    @staticmethod
+    def _build_knowledge_project_id(workspace_root: str | None, scope: str, project_id: str = "default") -> str:
+        """为工作区 L2 Skill 构造稳定的 project_id 分片隔离键"""
+        if workspace_root and scope == "workspace":
+            ws_norm = str(Path(workspace_root).resolve()).lower()
+            return f"ws:{hashlib.sha1(ws_norm.encode('utf-8')).hexdigest()[:12]}"
+        return project_id or "default"
+
     async def sync_skill_knowledge(
         self,
         skill_id: str,
         tenant_id: str = "default",
         project_id: str = "default",
+        skill_dir_override: Path | None = None,
     ) -> int:
         """
         [四元组第3组件: knowledge/]
         按文件 SHA256 幂等水位线将 skills/<skill_id>/knowledge/ 下的文档切块同步至 SQLite FTS5 引擎。
         若文件未发生修改，耗时 <1ms 零重复计算。
         """
-        skill_dir = self._find_skill_dir(skill_id)
+        skill_dir = skill_dir_override if (skill_dir_override and skill_dir_override.is_dir()) else self._find_skill_dir(skill_id)
         if not skill_dir:
             return 0
         kb_dir = skill_dir / "knowledge"
@@ -763,17 +849,23 @@ class SkillLoader:
                 f_hash = hashlib.sha256(raw_bytes).hexdigest()[:16]
 
                 async with conn.execute(
-                    "SELECT COUNT(1) as cnt FROM skill_knowledge_chunks WHERE skill_id = ? AND file_name = ? AND file_hash = ?",
-                    (skill_dir.name, kb_file.name, f_hash),
+                    """
+                    SELECT COUNT(1) as cnt FROM skill_knowledge_chunks
+                    WHERE skill_id = ? AND project_id = ? AND file_name = ? AND file_hash = ?
+                    """,
+                    (skill_dir.name, project_id, kb_file.name, f_hash),
                 ) as cur:
                     row = await cur.fetchone()
                     if row and row["cnt"] > 0:
                         continue
 
-                # 文件新增或已变更，先清除该文件的旧分片，再重新切块写入
+                # 文件新增或已变更，先清除该作用域下同文件的旧分片，再重新切块写入
                 await conn.execute(
-                    "DELETE FROM skill_knowledge_chunks WHERE skill_id = ? AND file_name = ?",
-                    (skill_dir.name, kb_file.name),
+                    """
+                    DELETE FROM skill_knowledge_chunks
+                    WHERE skill_id = ? AND project_id = ? AND file_name = ?
+                    """,
+                    (skill_dir.name, project_id, kb_file.name),
                 )
                 text = raw_bytes.decode("utf-8", errors="replace").strip()
                 if not text:
@@ -814,15 +906,23 @@ class SkillLoader:
         limit: int = 5,
         tenant_id: str = "default",
         project_id: str = "default",
+        workspace_root: str | None = None,
     ) -> str:
         """
         基于 SQLite FTS5 BM25 毫秒级检索指定 Skill `knowledge/` 目录下的领域规程与参考资料。
+        支持工作区 L2 同名覆盖技能优先检索。
         """
-        skill_dir = self._find_skill_dir(skill_name)
+        skill_dir, scope = self.resolve_skill_dir_with_scope(skill_name, workspace_root=workspace_root)
         if not skill_dir:
             return f"Error: 未找到名为 '{skill_name}' 的 Skill。"
 
-        await self.sync_skill_knowledge(skill_dir.name, tenant_id=tenant_id, project_id=project_id)
+        eff_project_id = self._build_knowledge_project_id(workspace_root, scope, project_id=project_id)
+        await self.sync_skill_knowledge(
+            skill_dir.name,
+            tenant_id=tenant_id,
+            project_id=eff_project_id,
+            skill_dir_override=skill_dir,
+        )
 
         tokens = [t for t in re.split(r"[\s,.;:!?，。；：！？、/\\]+", (query or "").strip()) if len(t) >= 2]
         rows_found: list[dict[str, Any]] = []
@@ -838,11 +938,11 @@ class SkillLoader:
                             SELECT c.file_name, c.chunk_index, c.content, bm25(skill_knowledge_fts) as score
                             FROM skill_knowledge_fts f
                             JOIN skill_knowledge_chunks c ON c.id = f.chunk_id
-                            WHERE f.skill_id = ? AND skill_knowledge_fts MATCH ?
+                            WHERE f.skill_id = ? AND c.project_id = ? AND skill_knowledge_fts MATCH ?
                             ORDER BY score ASC
                             LIMIT ?
                             """,
-                            (skill_dir.name, fts_expr, limit),
+                            (skill_dir.name, eff_project_id, fts_expr, limit),
                         ) as cur:
                             rows_found = [dict(r) for r in await cur.fetchall()]
                     except Exception:
@@ -855,11 +955,11 @@ class SkillLoader:
                     """
                     SELECT file_name, chunk_index, content
                     FROM skill_knowledge_chunks
-                    WHERE skill_id = ? AND content LIKE ?
+                    WHERE skill_id = ? AND project_id = ? AND content LIKE ?
                     ORDER BY chunk_index ASC
                     LIMIT ?
                     """,
-                    (skill_dir.name, like_kw, limit),
+                    (skill_dir.name, eff_project_id, like_kw, limit),
                 ) as cur:
                     rows_found = [dict(r) for r in await cur.fetchall()]
 
@@ -876,13 +976,14 @@ class SkillLoader:
         skill_name: str,
         script_name: str,
         arguments: dict[str, Any] | None = None,
+        workspace_root: str | None = None,
     ) -> str:
         """
         [四元组第2组件: tools/]
         在受控隔离环境中执行指定 Skill 随包挂载的确定性算子脚本 (`skills/<id>/tools/<script_name>`)。
         支持通过命令行 JSON 参数或环境变量传入参数，彻底杜绝大模型复杂计算幻觉。
         """
-        skill_dir = self._find_skill_dir(skill_name)
+        skill_dir, _ = self.resolve_skill_dir_with_scope(skill_name, workspace_root=workspace_root)
         if not skill_dir:
             return f"Error: 未找到名为 '{skill_name}' 的 Skill。"
 
@@ -940,12 +1041,17 @@ class SkillLoader:
         except Exception as e:
             return f"Error: 执行 Skill 算子 `{target_script.name}` 异常: {e}"
 
-    def validate_output_schema(self, skill_name: str, assistant_text: str) -> tuple[bool, str]:
+    def validate_output_schema(
+        self,
+        skill_name: str,
+        assistant_text: str,
+        workspace_root: str | None = None,
+    ) -> tuple[bool, str]:
         """
         [四元组第4组件: schema.json]
         若激活的 Skill 包含 `schema.json`，对模型最终输出的 JSON 数据块进行必填字段与类型契约校验。
         """
-        skill_dir = self._find_skill_dir(skill_name)
+        skill_dir, _ = self.resolve_skill_dir_with_scope(skill_name, workspace_root=workspace_root)
         if not skill_dir:
             return True, ""
         schema_file = skill_dir / "schema.json"
@@ -976,13 +1082,51 @@ class SkillLoader:
 
         return True, ""
 
-    def resolve_slash_command(self, user_query: str) -> dict[str, Any] | None:
-        """根据用户输入的 `/xxx` 前缀匹配对应的本地 Skill 或 MCP 说明"""
+    def resolve_slash_command(
+        self,
+        user_query: str,
+        workspace_root: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        根据用户输入的 `/xxx` 前缀匹配对应的 Skill（L2 工作区私有技能高优覆盖 L1 全局技能）或 MCP 说明。
+        """
         q = (user_query or "").strip()
         if not q.startswith("/"):
             return None
         first_token = q.split()[0].lower()
         bare_token = first_token.lstrip("/")
+
+        if workspace_root:
+            ws_path = Path(workspace_root).resolve()
+            for ws_root in (ws_path / "skills", ws_path / ".agenthub" / "skills"):
+                if not ws_root.is_dir():
+                    continue
+                try:
+                    for item in sorted(ws_root.iterdir(), key=lambda p: p.name):
+                        if not item.is_dir():
+                            continue
+                        md_file = item / "SKILL.md"
+                        if not md_file.is_file():
+                            continue
+                        raw = md_file.read_text(encoding="utf-8", errors="replace")[:4096]
+                        meta = self._parse_frontmatter(raw, item.name)
+                        if (
+                            meta["command"].lower() == first_token
+                            or item.name.lower() == bare_token
+                            or meta["name"].lower() == bare_token
+                        ):
+                            return {
+                                "id": item.name,
+                                "name": meta["name"],
+                                "command": meta["command"],
+                                "type": meta["type"] or "skill",
+                                "description": meta["description"],
+                                "path": str(md_file.resolve()),
+                                "scope": "workspace",
+                            }
+                except OSError:
+                    continue
+
         for sk in self.list_skills(include_content=False):
             if (
                 sk["command"].lower() == first_token
@@ -1185,12 +1329,17 @@ class SkillLoader:
         )
         return "\n".join(lines)
 
-    def get_full_skill_markdown(self, skill_name: str) -> str:
+    def get_full_skill_markdown(
+        self,
+        skill_name: str,
+        workspace_root: str | None = None,
+    ) -> str:
         """
         当模型调用 load_skill_detail 或用户输入 /command 激活某 Skill 时，
-        返回完整 SKILL.md 规程，并自动附上该 Skill 挂载的 `tools/`、`knowledge/` 与 `schema.json` 调用指引。
+        返回完整 SKILL.md 规程，并自动附上该 Skill 挂载的 `tools/`、`knowledge/`（含实战避坑摘要）、`schema.json` 调用指引。
+        支持 L2 工作区私有技能同名高优覆盖。
         """
-        skill_dir = self._find_skill_dir(skill_name)
+        skill_dir, scope = self.resolve_skill_dir_with_scope(skill_name, workspace_root=workspace_root)
         if not skill_dir:
             # 尝试匹配合成的按需 MCP 说明
             detail_item = self.get_skill_detail_item(skill_name)
@@ -1204,6 +1353,10 @@ class SkillLoader:
             four_tuple = self._inspect_four_tuple(skill_dir)
             addon_sections: list[str] = []
 
+            if scope == "workspace":
+                addon_sections.append(
+                    f"> 🏷️ 当前激活为 **工作区私有 Skill (`{skill_dir.name}`)**，优先覆盖同名的全局底座技能。"
+                )
             if four_tuple["has_tools"]:
                 addon_sections.append(
                     f"### 🔧 已挂载的随包专属确定性算子 (`{skill_dir.name}/tools/`)\n"
@@ -1217,6 +1370,13 @@ class SkillLoader:
                     f"- 包含文档: `{', '.join(four_tuple['knowledge_files'])}`\n"
                     f"- 检索方式: 需要查阅具体条款或模板时，请调用 `<tool_call name=\"search_skill_knowledge\">"
                     f"{{\"skill_name\": \"{skill_dir.name}\", \"query\": \"关键词\"}}</tool_call>` 进行 BM25 毫秒级按需召回。"
+                )
+            playbook_highlights = self.extract_playbook_highlights(skill_dir, max_entries=5)
+            if playbook_highlights:
+                addon_sections.append(
+                    f"### 💡 实战避坑守则与演进经验摘要 (`{skill_dir.name}/knowledge/experience_playbook.md`)\n"
+                    f"以下为从历史真实故障自愈与人工纠偏中沉淀的高优经验，执行前请务必对照遵守：\n\n"
+                    f"{playbook_highlights}"
                 )
             if four_tuple["has_schema"] and four_tuple["schema"]:
                 addon_sections.append(

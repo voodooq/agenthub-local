@@ -512,8 +512,107 @@ class DatabaseManager:
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_sched_ws ON scheduled_tasks(workspace_id);")
 
+            # 15. 追加式原始事件账本表 (event_ledger - Append-Only 黑匣子事件轨迹)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS event_ledger (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL DEFAULT 'default',
+                conversation_id TEXT NOT NULL,
+                turn_id INTEGER NOT NULL DEFAULT 1,
+                loop_id TEXT,
+                event_type TEXT NOT NULL CHECK(event_type IN (
+                    'user_input',
+                    'inquiry_confirmed',
+                    'tool_executed',
+                    'tool_error_recovered',
+                    'user_intervention',
+                    'artifact_produced'
+                )),
+                actor TEXT NOT NULL DEFAULT 'user',
+                skill_id TEXT,
+                payload_json TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ledger_conv_turn ON event_ledger(conversation_id, turn_id);"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_ledger_ws_type ON event_ledger(workspace_id, event_type, created_at);"
+            )
+
+            # 16. 双时间轴结构化事实表 (memory_facts - 工作区沙箱隔离 + Bi-temporal 版本演化)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS memory_facts (
+                fact_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL DEFAULT 'GLOBAL',
+                category TEXT NOT NULL CHECK(category IN ('user_pref', 'biz_rule', 'env_config')),
+                fact_key TEXT NOT NULL,
+                fact_value TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 1.0,
+                source_type TEXT NOT NULL DEFAULT 'inquiry',
+                source_event_id TEXT,
+                valid_from DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                valid_to DATETIME DEFAULT NULL,
+                recorded_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_facts_active_lookup ON memory_facts(workspace_id, fact_key, valid_to);"
+            )
+            # NOTE: 局部唯一索引从引擎层物理防重，同一工作区下同一 fact_key 绝不允许存在多条 valid_to IS NULL 的生效记录
+            await conn.execute("""
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_facts_active_key
+                ON memory_facts(workspace_id, fact_key)
+                WHERE valid_to IS NULL;
+            """)
+
+            # 17. 增量会话摘要表 (session_summaries - 水位线推进压缩长程历史)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS session_summaries (
+                conversation_id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL DEFAULT 'default',
+                watermark_turn_id INTEGER NOT NULL DEFAULT 0,
+                core_goal TEXT DEFAULT '',
+                confirmed_params_json TEXT DEFAULT '{}',
+                produced_artifacts_json TEXT DEFAULT '[]',
+                open_issues_json TEXT DEFAULT '[]',
+                summary_markdown TEXT DEFAULT '',
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            """)
+
+            # 18. Skill 经验提炼与升级提议表 (experience_proposals - HITL Diff 确认防污染)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS experience_proposals (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL DEFAULT 'default',
+                conversation_id TEXT NOT NULL,
+                loop_id TEXT,
+                proposal_type TEXT NOT NULL CHECK(proposal_type IN ('skill_patch', 'new_skill')),
+                target_skill_id TEXT,
+                proposed_skill_name TEXT,
+                target_scope TEXT NOT NULL DEFAULT 'workspace' CHECK(target_scope IN ('global', 'workspace')),
+                trigger_reason TEXT NOT NULL,
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                experience_triple_json TEXT NOT NULL,
+                diff_preview TEXT DEFAULT '',
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending', 'applied', 'dismissed')),
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                resolved_at DATETIME
+            );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_exp_prop_status ON experience_proposals(status, workspace_id, created_at);"
+            )
+
             await conn.commit()
-            logger.info("SQLite 全景架构表 (conversations/messages/long_term_memories/task_loop_runs/workspace_artifacts/scheduled_tasks) 初始化完成")
+            logger.info(
+                "SQLite 全景架构表 (conversations/messages/long_term_memories/memory_facts/event_ledger/session_summaries/experience_proposals/task_loop_runs/workspace_artifacts/scheduled_tasks) 初始化完成"
+            )
 
 
 db_manager = DatabaseManager(settings.db_path)

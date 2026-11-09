@@ -12,6 +12,14 @@ class AttachmentItem(BaseModel):
     size_str: str | None = Field(default=None, description="文件大小展示")
 
 
+class ConfirmedFactItem(BaseModel):
+    """前端交互对齐卡直通落盘的结构化事实项"""
+    fact_key: str = Field(..., min_length=1, max_length=120, description="标准化事实键")
+    fact_value: str = Field(..., min_length=1, max_length=2000, description="已确认的确定性值")
+    category: str = Field(default="biz_rule", description="事实分类: user_pref | biz_rule | env_config")
+    workspace_scope: str = Field(default="workspace", description="作用域: workspace(当前工作区) | global(全局)")
+
+
 class ChatStreamRequest(BaseModel):
     """发起流式对话请求"""
     conversation_id: str | None = Field(default=None, description="会话ID，若为空则由后端自动生成新会话")
@@ -28,6 +36,7 @@ class ChatStreamRequest(BaseModel):
     execution_strategy: str = Field(default="direct", description="执行策略: direct(立即执行) | plan_first(计划优先/谋定而动)")
     clarify_mode: bool = Field(default=False, description="对话模式下是否开启需求前置澄清")
     approved_plan_steps: list[dict] | None = Field(default=None, description="用户在前端确认批准的步骤清单")
+    confirmed_facts: list[ConfirmedFactItem] | None = Field(default=None, description="对齐卡确认的结构化事实参数列表")
 
 
 class ToolApprovalRequest(BaseModel):

@@ -20,8 +20,18 @@ import {
   CheckCircle2,
   AlertTriangle,
   Eye,
+  Clock,
+  RotateCcw,
+  Archive,
+  Lock,
+  History,
+  ChevronLeft,
+  ChevronRight,
+  Globe,
+  FolderGit2,
+  BookOpen,
 } from 'lucide-react';
-import { LongTermMemoryItem } from '@/types';
+import { EventLedgerItem, LongTermMemoryItem, MemoryFactItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 import {
   fetchExtensionSkillDetail,
@@ -32,10 +42,15 @@ import {
 } from '@/utils/skillCache';
 import { PersonaPreset, SkillItem } from './SettingsModal';
 
+export type MemoryHubTab = 'memories' | 'facts' | 'ledger' | 'personality' | 'extensions';
+
 interface MemoryHubModalProps {
   isOpen: boolean;
   onClose: () => void;
   onProvidersChanged?: () => void;
+  workspaceId?: string;
+  initialTab?: MemoryHubTab;
+  onSkillsUpdated?: () => void;
 }
 
 interface SkillInfo {
@@ -46,6 +61,8 @@ interface SkillInfo {
   has_content?: boolean;
   content?: string;
   is_builtin?: boolean;
+  has_knowledge?: boolean;
+  knowledge_files?: string[];
 }
 
 const CATEGORY_MAP: Record<string, { label: string; colorClass: string }> = {
@@ -63,13 +80,78 @@ const CATEGORY_MAP: Record<string, { label: string; colorClass: string }> = {
   },
 };
 
-export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHubModalProps) {
+const FACT_CATEGORY_MAP: Record<string, { label: string; colorClass: string }> = {
+  biz_rule: {
+    label: '业务规则',
+    colorClass: 'bg-teal-500/15 text-teal-600 dark:text-teal-400 border-teal-500/30',
+  },
+  user_pref: {
+    label: '个人偏好',
+    colorClass: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30',
+  },
+  env_config: {
+    label: '环境契约',
+    colorClass: 'bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border-indigo-500/30',
+  },
+};
+
+const FACT_SOURCE_LABELS: Record<string, string> = {
+  manual: '手动录入',
+  inquiry: '对齐卡确认',
+  explicit_cmd: '显式指令',
+  verified_env: '环境验证',
+  rollback: '版本回滚',
+};
+
+const LEDGER_EVENT_TYPE_MAP: Record<string, { label: string; badgeClass: string }> = {
+  inquiry_confirmed: {
+    label: '对齐卡确认',
+    badgeClass: 'bg-teal-500/15 text-teal-600 dark:text-teal-300 border-teal-500/30',
+  },
+  tool_error_recovered: {
+    label: '故障自愈恢复',
+    badgeClass: 'bg-amber-500/15 text-amber-600 dark:text-amber-300 border-amber-500/30',
+  },
+  user_intervention: {
+    label: '人工纠偏干预',
+    badgeClass: 'bg-rose-500/15 text-rose-600 dark:text-rose-300 border-rose-500/30',
+  },
+  artifact_produced: {
+    label: '产出资产落盘',
+    badgeClass: 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border-emerald-500/30',
+  },
+  tool_executed: {
+    label: '工具算子执行',
+    badgeClass: 'bg-indigo-500/15 text-indigo-600 dark:text-indigo-300 border-indigo-500/30',
+  },
+  user_input: {
+    label: '用户输入指令',
+    badgeClass: 'bg-surface-200 text-muted-foreground border-border',
+  },
+};
+
+function formatIsoTime(iso?: string | null): string {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+
+export function MemoryHubModal({
+  isOpen,
+  onClose,
+  onProvidersChanged,
+  workspaceId = 'default',
+  initialTab = 'memories',
+  onSkillsUpdated,
+}: MemoryHubModalProps) {
   const onCloseRef = useRef(onClose);
   useEffect(() => {
     onCloseRef.current = onClose;
   }, [onClose]);
 
-  const [activeTab, setActiveTab] = useState<'memories' | 'personality' | 'extensions'>('memories');
+  const [activeTab, setActiveTab] = useState<MemoryHubTab>(initialTab);
   const [memories, setMemories] = useState<LongTermMemoryItem[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -82,6 +164,35 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
   // 编辑单条记忆状态
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingContent, setEditingContent] = useState('');
+
+  // ──────────── 精确事实视图 (双时间轴 L4) 状态 ────────────
+  const [facts, setFacts] = useState<MemoryFactItem[]>([]);
+  const [factsLoading, setFactsLoading] = useState(false);
+  const [factScopeFilter, setFactScopeFilter] = useState<'merged' | 'workspace' | 'global'>('merged');
+  const [factIncludeHistory, setFactIncludeHistory] = useState(false);
+  const [factCategoryFilter, setFactCategoryFilter] = useState<
+    'all' | 'biz_rule' | 'user_pref' | 'env_config'
+  >('all');
+  const [factFeedback, setFactFeedback] = useState<{ success: boolean; msg: string } | null>(null);
+  const [isAddingFact, setIsAddingFact] = useState(false);
+  const [newFactKey, setNewFactKey] = useState('');
+  const [newFactValue, setNewFactValue] = useState('');
+  const [newFactCategory, setNewFactCategory] = useState<'biz_rule' | 'user_pref' | 'env_config'>(
+    'biz_rule'
+  );
+  const [newFactScope, setNewFactScope] = useState<'workspace' | 'global'>('workspace');
+  const [editingFactId, setEditingFactId] = useState<string | null>(null);
+  const [editingFactValue, setEditingFactValue] = useState('');
+  const [factActionId, setFactActionId] = useState<string | null>(null);
+
+  // ──────────── 追加式事件账本 (Append-Only Ledger) 状态 ────────────
+  const [ledgerEvents, setLedgerEvents] = useState<EventLedgerItem[]>([]);
+  const [ledgerTotal, setLedgerTotal] = useState(0);
+  const [ledgerLoading, setLedgerLoading] = useState(false);
+  const [ledgerWorkspaceOnly, setLedgerWorkspaceOnly] = useState(true);
+  const [ledgerEventType, setLedgerEventType] = useState('');
+  const [ledgerOffset, setLedgerOffset] = useState(0);
+  const ledgerPageSize = 30;
 
   // ──────────── 回复性格与 SKILL 定制状态 ────────────
   const [presets, setPresets] = useState<PersonaPreset[]>([]);
@@ -149,6 +260,62 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
     }
   };
 
+  const fetchFacts = async (silent = false) => {
+    if (!silent) setFactsLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (factScopeFilter === 'global') {
+        params.set('workspace_id', 'GLOBAL');
+        params.set('include_global', 'false');
+      } else if (factScopeFilter === 'workspace') {
+        params.set('workspace_id', workspaceId || 'default');
+        params.set('include_global', 'false');
+      } else {
+        params.set('workspace_id', workspaceId || 'default');
+        params.set('include_global', 'true');
+      }
+      params.set('include_history', String(factIncludeHistory));
+      if (factCategoryFilter !== 'all') {
+        params.set('category', factCategoryFilter);
+      }
+      const res = await apiFetch(`/api/v1/memories/facts?${params.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        setFacts(data.items || []);
+      }
+    } catch (e) {
+      console.warn('获取精确事实视图失败:', e);
+    } finally {
+      if (!silent) setFactsLoading(false);
+    }
+  };
+
+  const fetchLedgerEvents = async (silent = false) => {
+    if (!silent) setLedgerLoading(true);
+    try {
+      const params = new URLSearchParams({
+        limit: String(ledgerPageSize),
+        offset: String(ledgerOffset),
+      });
+      if (ledgerWorkspaceOnly && workspaceId) {
+        params.set('workspace_id', workspaceId);
+      }
+      if (ledgerEventType) {
+        params.set('event_type', ledgerEventType);
+      }
+      const res = await apiFetch(`/api/v1/memories/ledger?${params.toString()}`);
+      if (res.ok) {
+        const data = await res.json();
+        setLedgerEvents(data.items || []);
+        setLedgerTotal(typeof data.total === 'number' ? data.total : 0);
+      }
+    } catch (e) {
+      console.warn('获取事件账本失败:', e);
+    } finally {
+      if (!silent) setLedgerLoading(false);
+    }
+  };
+
   const fetchPersonalitySettings = async () => {
     try {
       const res = await apiFetch('/api/v1/settings/personality');
@@ -201,17 +368,168 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
     };
   }, [isOpen]);
 
-  // 仅在弹窗打开时拉取初始配置，防止未保存的性格/技能选项在 3 秒轮询后蹦回后端初始值
+  // 弹窗打开时按调用方传入的 initialTab 自动切换目标视图，并拉取初始化数据
   useEffect(() => {
     if (!isOpen) return;
+    setActiveTab(initialTab);
     fetchMemories();
     fetchPersonalitySettings();
     fetchExtensions();
     setPersonalityFeedback(null);
     setExtFeedback(null);
-  }, [isOpen]);
+    setFactFeedback(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, initialTab]);
+
+  // 当事实视图筛选条件或当前工作区变化时刷新结构化事实列表
+  useEffect(() => {
+    if (!isOpen) return;
+    fetchFacts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, workspaceId, factScopeFilter, factIncludeHistory, factCategoryFilter]);
+
+  // 当切换至事件账本或过滤/分页变化时按需拉取审计流水
+  useEffect(() => {
+    if (!isOpen || activeTab !== 'ledger') return;
+    fetchLedgerEvents();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, activeTab, workspaceId, ledgerWorkspaceOnly, ledgerEventType, ledgerOffset]);
 
   if (!isOpen) return null;
+
+  // ──────────── 精确事实 (Bi-Temporal Facts) 操作 ────────────
+  const handleAddFact = async () => {
+    if (!newFactKey.trim() || !newFactValue.trim()) {
+      setFactFeedback({ success: false, msg: '事实键 (fact_key) 与事实值均不能为空' });
+      return;
+    }
+    setFactActionId('add');
+    setFactFeedback(null);
+    try {
+      const targetWs = newFactScope === 'global' ? 'GLOBAL' : workspaceId || 'default';
+      const res = await apiFetch('/api/v1/memories/facts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fact_key: newFactKey.trim(),
+          fact_value: newFactValue.trim(),
+          workspace_id: targetWs,
+          category: newFactCategory,
+          source_type: 'manual',
+          confidence: 1.0,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setFactFeedback({ success: false, msg: data.detail || '写入结构化事实失败' });
+        return;
+      }
+      const hasRedacted = Array.isArray(data.redactions) && data.redactions.length > 0;
+      setNewFactKey('');
+      setNewFactValue('');
+      setIsAddingFact(false);
+      setFactFeedback({
+        success: true,
+        msg: hasRedacted
+          ? '✅ 事实已写入并触发双时间轴更新，其中的敏感凭据已自动脱敏'
+          : data.action === 'updated'
+          ? '✅ 已触发双时间轴覆盖更新，旧版本已自动归档留痕'
+          : '✅ 已新增工作区/全局确定性事实',
+      });
+      await fetchFacts(true);
+    } catch (e: any) {
+      setFactFeedback({ success: false, msg: e?.message || '网络异常' });
+    } finally {
+      setFactActionId(null);
+    }
+  };
+
+  const handleSaveEditFact = async (item: MemoryFactItem) => {
+    if (!editingFactValue.trim()) return;
+    setFactActionId(item.fact_id);
+    setFactFeedback(null);
+    try {
+      const res = await apiFetch('/api/v1/memories/facts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fact_key: item.fact_key,
+          fact_value: editingFactValue.trim(),
+          workspace_id: item.workspace_id,
+          category: item.category,
+          source_type: 'manual',
+          confidence: 1.0,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setFactFeedback({ success: false, msg: data.detail || '更新事实失败' });
+        return;
+      }
+      setEditingFactId(null);
+      setFactFeedback({
+        success: true,
+        msg:
+          data.action === 'unchanged'
+            ? '事实值未发生实质变化，已保持原版本'
+            : '✅ 已激活新版本并自动关闭旧版本有效时间线',
+      });
+      await fetchFacts(true);
+    } catch (e: any) {
+      setFactFeedback({ success: false, msg: e?.message || '网络异常' });
+    } finally {
+      setFactActionId(null);
+    }
+  };
+
+  const handleRollbackFact = async (factId: string) => {
+    setFactActionId(factId);
+    setFactFeedback(null);
+    try {
+      const res = await apiFetch(`/api/v1/memories/facts/${encodeURIComponent(factId)}/rollback`, {
+        method: 'POST',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setFactFeedback({ success: false, msg: data.detail || '版本回滚失败' });
+        return;
+      }
+      setFactFeedback({
+        success: true,
+        msg: '✅ 已将该历史版本重新激活为当前有效契约（完整演进链已保留）',
+      });
+      await fetchFacts(true);
+    } catch (e: any) {
+      setFactFeedback({ success: false, msg: e?.message || '网络异常' });
+    } finally {
+      setFactActionId(null);
+    }
+  };
+
+  const handleDeactivateFact = async (factId: string) => {
+    setFactActionId(factId);
+    setFactFeedback(null);
+    try {
+      const res = await apiFetch(
+        `/api/v1/memories/facts/${encodeURIComponent(factId)}/deactivate`,
+        { method: 'POST' }
+      );
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setFactFeedback({ success: false, msg: data.detail || '停用归档失败' });
+        return;
+      }
+      setFactFeedback({
+        success: true,
+        msg: '已将该条事实软停用归档，保留于双时间轴历史记录中',
+      });
+      await fetchFacts(true);
+    } catch (e: any) {
+      setFactFeedback({ success: false, msg: e?.message || '网络异常' });
+    } finally {
+      setFactActionId(null);
+    }
+  };
 
   // ──────────── 长期记忆操作 ────────────
   const handleAddMemory = async () => {
@@ -376,7 +694,8 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
         const freshSkills = data.skills || [];
         setSkills(freshSkills);
         setExtensionSkillsCache(freshSkills);
-        invalidateWorkspaceSkills();
+        invalidateWorkspaceSkills(workspaceId);
+        onSkillsUpdated?.();
         setNewSkillName('');
         setNewSkillDesc('');
         setNewSkillContent('');
@@ -409,7 +728,8 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
         const freshSkills = data.skills || [];
         setSkills(freshSkills);
         setExtensionSkillsCache(freshSkills);
-        invalidateWorkspaceSkills();
+        invalidateWorkspaceSkills(workspaceId);
+        onSkillsUpdated?.();
         setImportSkillText('');
         setSkillFormMode('none');
         setExtFeedback({ success: true, msg: `✅ 成功导入并挂载技能包：${data.skill?.name}` });
@@ -443,7 +763,8 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
         const freshSkills = data.skills || [];
         setSkills(freshSkills);
         setExtensionSkillsCache(freshSkills);
-        invalidateWorkspaceSkills();
+        invalidateWorkspaceSkills(workspaceId);
+        onSkillsUpdated?.();
         setExtFeedback({ success: true, msg: `已卸载技能包 [${skillId}]` });
       }
     } catch (e) {}
@@ -592,13 +913,15 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
 
   const customSkillIdSet = new Set(customPromptSkills.map((s) => s.id));
 
+  const activeFactsCount = facts.filter((f) => f.is_active).length;
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fade-in"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-3xl max-h-[88vh] flex flex-col rounded-2xl bg-surface-card border border-border shadow-2xl overflow-hidden text-foreground"
+        className="w-full max-w-4xl max-h-[88vh] flex flex-col rounded-2xl bg-surface-card border border-border shadow-2xl overflow-hidden text-foreground"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 顶部标题栏 */}
@@ -609,10 +932,10 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
             </div>
             <div>
               <h2 className="text-[15px] font-bold text-foreground">
-                记忆中枢 · 回复性格 · Skill 与 MCP 扩展总线
+                记忆中枢 · 精确事实双时间轴 · 账本追溯 · Skill 与 MCP
               </h2>
               <p className="text-xs text-muted-foreground">
-                SQLite FTS5 长期记忆画像 · 回复性格与 SKILL 定制 · 支持自定义 Skill 与 MCP 服务添加及导入
+                L4 确定性 KV 契约 · Append-Only 审计账本 · 长期记忆画像 · 回复性格与自演化 Skill 扩展总线
               </p>
             </div>
           </div>
@@ -626,8 +949,8 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
         </div>
 
         {/* 顶部 Tab 切换 */}
-        <div className="px-6 pt-3 border-b border-border flex items-center justify-between bg-surface-100/30">
-          <div className="flex space-x-5">
+        <div className="px-6 pt-3 border-b border-border flex items-center justify-between gap-3 bg-surface-100/30 overflow-x-auto">
+          <div className="flex items-center space-x-4 whitespace-nowrap shrink-0">
             <button
               onClick={() => setActiveTab('memories')}
               className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
@@ -641,6 +964,30 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
             </button>
 
             <button
+              onClick={() => setActiveTab('facts')}
+              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
+                activeTab === 'facts'
+                  ? 'border-teal-500 text-teal-600 dark:text-teal-400'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <Clock className="w-3.5 h-3.5 text-teal-500" />
+              <span>精确事实视图 ({activeFactsCount})</span>
+            </button>
+
+            <button
+              onClick={() => setActiveTab('ledger')}
+              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
+                activeTab === 'ledger'
+                  ? 'border-amber-500 text-amber-600 dark:text-amber-400'
+                  : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <History className="w-3.5 h-3.5 text-amber-500" />
+              <span>事件账本追溯</span>
+            </button>
+
+            <button
               onClick={() => setActiveTab('personality')}
               className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
                 activeTab === 'personality'
@@ -649,7 +996,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
               }`}
             >
               <Brain className="w-3.5 h-3.5 text-purple-500" />
-              <span>回复性格与 SKILL 定制</span>
+              <span>回复性格与 SKILL</span>
             </button>
 
             <button
@@ -661,12 +1008,12 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
               }`}
             >
               <Puzzle className="w-3.5 h-3.5 text-teal-500" />
-              <span>Skill 技能包与 MCP ({skills.length + Object.keys(mcpServers).length})</span>
+              <span>Skill 与 MCP ({skills.length + Object.keys(mcpServers).length})</span>
             </button>
           </div>
 
           {activeTab === 'memories' && (
-            <div className="flex items-center space-x-2 pb-2">
+            <div className="flex items-center space-x-2 pb-2 shrink-0">
               <button
                 onClick={() => setIsAdding(!isAdding)}
                 className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors"
@@ -683,6 +1030,18 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                   <span>清空全部</span>
                 </button>
               )}
+            </div>
+          )}
+
+          {activeTab === 'facts' && (
+            <div className="flex items-center space-x-2 pb-2 shrink-0">
+              <button
+                onClick={() => setIsAddingFact((prev) => !prev)}
+                className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs font-medium transition-colors whitespace-nowrap"
+              >
+                <Plus className="w-3.5 h-3.5" />
+                <span>新增契约事实</span>
+              </button>
             </div>
           )}
         </div>
@@ -844,6 +1203,497 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                 </div>
               )}
             </>
+          )}
+
+          {/* ────────── TAB 1B: 精确事实视图 (双时间轴 L4) ────────── */}
+          {activeTab === 'facts' && (
+            <div className="space-y-4">
+              {factFeedback && (
+                <div
+                  className={`p-3 rounded-xl text-xs flex items-center justify-between animate-fadeIn ${
+                    factFeedback.success
+                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border border-emerald-500/20'
+                      : 'bg-rose-500/10 text-rose-600 dark:text-rose-300 border border-rose-500/20'
+                  }`}
+                >
+                  <span>{factFeedback.msg}</span>
+                  <button
+                    type="button"
+                    onClick={() => setFactFeedback(null)}
+                    className="text-muted-foreground hover:text-foreground ml-2"
+                  >
+                    <X className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              )}
+
+              {/* 筛选工具栏 */}
+              <div className="flex flex-wrap items-center justify-between gap-2.5 p-3 rounded-xl bg-surface-100/70 border border-border">
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {(
+                    [
+                      { id: 'merged', label: '当前合并视图 (Workspace 覆盖 GLOBAL)' },
+                      { id: 'workspace', label: '仅当前工作区' },
+                      { id: 'global', label: '仅全局 GLOBAL' },
+                    ] as const
+                  ).map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => setFactScopeFilter(opt.id)}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors ${
+                        factScopeFilter === opt.id
+                          ? 'bg-teal-600 text-white border-teal-600'
+                          : 'bg-surface-card border-border text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <select
+                    value={factCategoryFilter}
+                    onChange={(e) =>
+                      setFactCategoryFilter(
+                        e.target.value as 'all' | 'biz_rule' | 'user_pref' | 'env_config'
+                      )
+                    }
+                    className="px-2.5 py-1 rounded-lg bg-surface-card border border-border text-[11px] text-foreground outline-none"
+                  >
+                    <option value="all">全部分类</option>
+                    <option value="biz_rule">业务规则</option>
+                    <option value="user_pref">个人偏好</option>
+                    <option value="env_config">环境契约</option>
+                  </select>
+
+                  <label className="flex items-center space-x-1.5 text-[11px] text-foreground cursor-pointer px-2 py-1 rounded-lg bg-surface-card border border-border">
+                    <input
+                      type="checkbox"
+                      checked={factIncludeHistory}
+                      onChange={(e) => setFactIncludeHistory(e.target.checked)}
+                    />
+                    <span>显示已归档历史版本</span>
+                  </label>
+                </div>
+              </div>
+
+              {/* 新增/覆盖契约事实表单 */}
+              {isAddingFact && (
+                <div className="p-4 rounded-xl bg-surface-100 border border-teal-500/35 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center space-x-2">
+                      <span className="text-xs font-medium text-muted-foreground">事实分类:</span>
+                      {(['biz_rule', 'user_pref', 'env_config'] as const).map((cat) => (
+                        <button
+                          key={cat}
+                          type="button"
+                          onClick={() => setNewFactCategory(cat)}
+                          className={`px-2.5 py-1 rounded-lg text-xs border transition-all ${
+                            newFactCategory === cat
+                              ? FACT_CATEGORY_MAP[cat].colorClass + ' font-semibold'
+                              : 'border-border text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          {FACT_CATEGORY_MAP[cat].label}
+                        </button>
+                      ))}
+                    </div>
+
+                    <div className="flex items-center rounded-lg bg-surface-card border border-border p-0.5 text-[11px]">
+                      <button
+                        type="button"
+                        onClick={() => setNewFactScope('workspace')}
+                        className={`px-2 py-0.5 rounded-md flex items-center space-x-1 transition-colors ${
+                          newFactScope === 'workspace'
+                            ? 'bg-teal-600 text-white font-medium'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        <FolderGit2 className="w-3 h-3" />
+                        <span>当前工作区</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setNewFactScope('global')}
+                        className={`px-2 py-0.5 rounded-md flex items-center space-x-1 transition-colors ${
+                          newFactScope === 'global'
+                            ? 'bg-teal-600 text-white font-medium'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        <Globe className="w-3 h-3" />
+                        <span>全局 GLOBAL</span>
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <input
+                      type="text"
+                      value={newFactKey}
+                      onChange={(e) => setNewFactKey(e.target.value)}
+                      placeholder="事实键 (如 export_format)"
+                      className="px-3 py-2 rounded-xl bg-surface-card border border-border text-xs font-mono text-foreground outline-none focus:border-teal-500"
+                    />
+                    <input
+                      type="text"
+                      value={newFactValue}
+                      onChange={(e) => setNewFactValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleAddFact();
+                      }}
+                      placeholder="确定性事实值 (如 带高亮差异的 .xlsx)"
+                      className="sm:col-span-2 px-3 py-2 rounded-xl bg-surface-card border border-border text-xs text-foreground outline-none focus:border-teal-500"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+                    <span>若同作用域下该事实键已存在，将自动关闭旧版本有效时间线并激活新值（凭据将自动脱敏）</span>
+                    <div className="flex items-center space-x-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsAddingFact(false)}
+                        className="px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:bg-surface-200"
+                      >
+                        取消
+                      </button>
+                      <button
+                        type="button"
+                        disabled={factActionId === 'add'}
+                        onClick={handleAddFact}
+                        className="px-4 py-1.5 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs font-semibold disabled:opacity-50"
+                      >
+                        {factActionId === 'add' ? '保存中...' : '保存并生效'}
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {factsLoading ? (
+                <div className="text-center py-12 text-xs text-muted-foreground">
+                  正在加载双时间轴结构化事实视图...
+                </div>
+              ) : facts.length === 0 ? (
+                <div className="text-center py-12 space-y-2">
+                  <p className="text-sm font-medium text-foreground">暂无匹配的结构化契约事实</p>
+                  <p className="text-xs text-muted-foreground max-w-md mx-auto">
+                    在交互对齐卡中勾选参数、下达显式规则指令或点击右上角「新增契约事实」后，确定性键值将沉淀于此并优先注入推理上下文。
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2.5">
+                  {facts.map((item) => {
+                    const catMeta = FACT_CATEGORY_MAP[item.category] || FACT_CATEGORY_MAP.biz_rule;
+                    const isEditing = editingFactId === item.fact_id;
+                    const isBusy = factActionId === item.fact_id;
+                    const isGlobal = item.workspace_id === 'GLOBAL' || item.scope === 'global';
+
+                    return (
+                      <div
+                        key={item.fact_id}
+                        className={`p-3.5 rounded-xl border flex items-start justify-between gap-3 transition-colors ${
+                          item.is_active
+                            ? 'bg-surface-100/75 border-border hover:bg-surface-100'
+                            : 'bg-surface-100/35 border-border/50 opacity-75'
+                        }`}
+                      >
+                        <div className="flex-1 min-w-0 space-y-1.5">
+                          <div className="flex items-center flex-wrap gap-1.5">
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[10px] border font-semibold ${
+                                item.is_active
+                                  ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
+                                  : 'bg-surface-200 text-muted-foreground border-border'
+                              }`}
+                            >
+                              {item.is_active ? '生效中' : '历史已归档'}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[10px] border font-medium ${
+                                isGlobal
+                                  ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/25'
+                                  : 'bg-teal-500/15 text-teal-600 dark:text-teal-300 border-teal-500/30'
+                              }`}
+                            >
+                              {isGlobal ? '🌐 GLOBAL 全局' : `📁 工作区 (${item.workspace_id})`}
+                            </span>
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[10px] border font-medium ${catMeta.colorClass}`}
+                            >
+                              {catMeta.label}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded text-[10px] bg-surface-200 text-muted-foreground">
+                              来源: {FACT_SOURCE_LABELS[item.source_type] || item.source_type}
+                            </span>
+                            {item.overridden_global && (
+                              <span
+                                className="px-2 py-0.5 rounded-md text-[10px] bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 font-medium"
+                                title={`全局原值为: ${item.global_fallback_value}`}
+                              >
+                                ⚡ 已覆盖全局默认值: {item.global_fallback_value}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex items-baseline flex-wrap gap-2">
+                            <code className="px-2 py-0.5 rounded bg-surface-card border border-border text-xs font-mono font-bold text-foreground">
+                              {item.fact_key}
+                            </code>
+                            <span className="text-muted-foreground text-xs">=</span>
+                            {isEditing ? (
+                              <div className="flex-1 flex items-center space-x-2 min-w-[200px]">
+                                <input
+                                  type="text"
+                                  value={editingFactValue}
+                                  onChange={(e) => setEditingFactValue(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleSaveEditFact(item);
+                                  }}
+                                  className="flex-1 px-2.5 py-1 rounded-lg bg-surface-card border border-teal-500 text-xs text-foreground outline-none"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={isBusy}
+                                  onClick={() => handleSaveEditFact(item)}
+                                  className="p-1.5 rounded-lg bg-teal-600 text-white hover:bg-teal-500 disabled:opacity-50"
+                                  title="确认更新并生成新版本"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingFactId(null)}
+                                  className="p-1.5 rounded-lg bg-surface-200 text-muted-foreground hover:text-foreground"
+                                  title="取消编辑"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            ) : (
+                              <span className="text-[13px] font-medium text-foreground break-anywhere">
+                                {item.fact_value}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="text-[10px] font-mono text-muted-foreground flex flex-wrap gap-x-4 gap-y-1">
+                            <span>有效起点: {formatIsoTime(item.valid_from)}</span>
+                            <span>
+                              失效时间: {item.valid_to ? formatIsoTime(item.valid_to) : '至今持续生效'}
+                            </span>
+                            {item.source_event_id && <span>溯源事件: {item.source_event_id}</span>}
+                          </div>
+                        </div>
+
+                        <div className="flex items-center space-x-1 shrink-0">
+                          {item.is_active ? (
+                            <>
+                              <button
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() => {
+                                  setEditingFactId(item.fact_id);
+                                  setEditingFactValue(item.fact_value);
+                                }}
+                                className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
+                                title="更新覆盖此契约（保留历史演进线）"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" />
+                              </button>
+                              <button
+                                type="button"
+                                disabled={isBusy}
+                                onClick={() => handleDeactivateFact(item.fact_id)}
+                                className="p-1.5 rounded-lg text-muted-foreground hover:text-amber-600 hover:bg-amber-500/10 transition-colors"
+                                title="软停用归档（保留在历史时间轴）"
+                              >
+                                <Archive className="w-3.5 h-3.5" />
+                              </button>
+                            </>
+                          ) : (
+                            <button
+                              type="button"
+                              disabled={isBusy}
+                              onClick={() => handleRollbackFact(item.fact_id)}
+                              className="px-2.5 py-1 rounded-lg bg-teal-600/15 hover:bg-teal-600/25 text-teal-600 dark:text-teal-300 border border-teal-500/30 text-[11px] font-medium flex items-center space-x-1 transition-colors disabled:opacity-50"
+                              title="重新激活该历史版本为当前有效契约"
+                            >
+                              <RotateCcw className="w-3 h-3" />
+                              <span>回滚激活</span>
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* ────────── TAB 1C: 追加式事件账本审计视图 ────────── */}
+          {activeTab === 'ledger' && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-2.5 p-3 rounded-xl bg-surface-100/70 border border-border">
+                <div className="flex items-center space-x-2 text-[11px] text-muted-foreground">
+                  <Lock className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                  <span>
+                    Append-Only 只增不改事件流水（共 {ledgerTotal} 条记录 · 敏感信息在落盘前自动脱敏）
+                  </span>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setLedgerWorkspaceOnly((prev) => !prev);
+                      setLedgerOffset(0);
+                    }}
+                    className={`px-2.5 py-1 rounded-lg text-[11px] border font-medium transition-colors ${
+                      ledgerWorkspaceOnly
+                        ? 'bg-amber-500/15 border-amber-500/35 text-amber-700 dark:text-amber-300'
+                        : 'bg-surface-card border-border text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {ledgerWorkspaceOnly ? `仅当前工作区 (${workspaceId})` : '全部工作区'}
+                  </button>
+
+                  <select
+                    value={ledgerEventType}
+                    onChange={(e) => {
+                      setLedgerEventType(e.target.value);
+                      setLedgerOffset(0);
+                    }}
+                    className="px-2.5 py-1 rounded-lg bg-surface-card border border-border text-[11px] text-foreground outline-none"
+                  >
+                    <option value="">全部事件类型</option>
+                    <option value="inquiry_confirmed">对齐卡确认</option>
+                    <option value="tool_error_recovered">故障自愈恢复</option>
+                    <option value="user_intervention">人工纠偏干预</option>
+                    <option value="artifact_produced">产出资产落盘</option>
+                    <option value="tool_executed">工具算子执行</option>
+                    <option value="user_input">用户输入指令</option>
+                  </select>
+
+                  <button
+                    type="button"
+                    onClick={() => fetchLedgerEvents()}
+                    className="p-1.5 rounded-lg bg-surface-card border border-border text-muted-foreground hover:text-foreground transition-colors"
+                    title="刷新账本"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${ledgerLoading ? 'animate-spin' : ''}`} />
+                  </button>
+                </div>
+              </div>
+
+              {ledgerLoading ? (
+                <div className="text-center py-12 text-xs text-muted-foreground">
+                  正在读取本地 event_ledger 审计账本...
+                </div>
+              ) : ledgerEvents.length === 0 ? (
+                <div className="text-center py-12 space-y-2">
+                  <p className="text-sm font-medium text-foreground">暂无事件账本记录</p>
+                  <p className="text-xs text-muted-foreground max-w-md mx-auto">
+                    在工作区正常发起对话、通过对齐卡确认参数或执行自主任务工具调用后，审计流水将自动按时间序列追加至此（无痕模式不记录）。
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {ledgerEvents.map((evt) => {
+                    const typeMeta = LEDGER_EVENT_TYPE_MAP[evt.event_type] || {
+                      label: evt.event_type,
+                      badgeClass: 'bg-surface-200 text-muted-foreground border-border',
+                    };
+                    const cleanPayload = { ...(evt.payload || {}) };
+                    delete cleanPayload._redacted_types;
+                    const serialized = JSON.stringify(cleanPayload, null, 2);
+
+                    return (
+                      <div
+                        key={evt.id}
+                        className="p-3 rounded-xl bg-surface-100/70 border border-border/80 space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between flex-wrap gap-2">
+                          <div className="flex items-center flex-wrap gap-1.5">
+                            <span
+                              className={`px-2 py-0.5 rounded-md text-[10px] border font-semibold ${typeMeta.badgeClass}`}
+                            >
+                              {typeMeta.label}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded bg-surface-200 text-[10px] font-mono text-muted-foreground">
+                              {evt.actor}
+                            </span>
+                            <span className="text-[11px] font-mono text-muted-foreground">
+                              Turn #{evt.turn_id}
+                            </span>
+                            {evt.skill_id && (
+                              <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 text-[10px] font-mono">
+                                /{evt.skill_id}
+                              </span>
+                            )}
+                            {evt.is_redacted && (
+                              <span
+                                className="px-2 py-0.5 rounded-md bg-rose-500/15 text-rose-600 dark:text-rose-300 border border-rose-500/30 text-[10px] font-semibold flex items-center space-x-1"
+                                title={
+                                  evt.redactions?.length
+                                    ? `已脱敏凭据类型: ${evt.redactions.join(', ')}`
+                                    : '包含敏感凭据，落盘前已脱敏'
+                                }
+                              >
+                                <Lock className="w-2.5 h-2.5" />
+                                <span>
+                                  🔒 已脱敏
+                                  {evt.redactions && evt.redactions.length > 0
+                                    ? ` (${evt.redactions.join(', ')})`
+                                    : ''}
+                                </span>
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[10px] font-mono text-muted-foreground">
+                            {formatIsoTime(evt.created_at)}
+                          </span>
+                        </div>
+
+                        <pre className="p-2 rounded-lg bg-surface-card border border-border/70 text-[11px] font-mono text-foreground/85 whitespace-pre-wrap break-all max-h-36 overflow-y-auto">
+                          {serialized}
+                        </pre>
+                      </div>
+                    );
+                  })}
+
+                  {/* 分页栏 */}
+                  <div className="flex items-center justify-between pt-2 text-xs text-muted-foreground">
+                    <span>
+                      第 {Math.floor(ledgerOffset / ledgerPageSize) + 1} /{' '}
+                      {Math.max(1, Math.ceil(ledgerTotal / ledgerPageSize))} 页 · 共 {ledgerTotal} 条
+                    </span>
+                    <div className="flex items-center space-x-2">
+                      <button
+                        type="button"
+                        disabled={ledgerOffset <= 0}
+                        onClick={() => setLedgerOffset((prev) => Math.max(0, prev - ledgerPageSize))}
+                        className="px-2.5 py-1 rounded-lg border border-border bg-surface-card hover:bg-surface-200 disabled:opacity-40 flex items-center space-x-1"
+                      >
+                        <ChevronLeft className="w-3.5 h-3.5" />
+                        <span>上一页</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={ledgerOffset + ledgerPageSize >= ledgerTotal}
+                        onClick={() => setLedgerOffset((prev) => prev + ledgerPageSize)}
+                        className="px-2.5 py-1 rounded-lg border border-border bg-surface-card hover:bg-surface-200 disabled:opacity-40 flex items-center space-x-1"
+                      >
+                        <span>下一页</span>
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
           )}
 
           {/* ────────── TAB 2: 回复性格与 SKILL 定制 ────────── */}
@@ -1251,6 +2101,15 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                               {sk.is_builtin && (
                                 <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
                                   内置示例
+                                </span>
+                              )}
+                              {sk.knowledge_files?.includes('experience_playbook.md') && (
+                                <span
+                                  className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/25 flex items-center space-x-1"
+                                  title="已挂载自演化经验守则 (knowledge/experience_playbook.md)"
+                                >
+                                  <BookOpen className="w-2.5 h-2.5" />
+                                  <span>含经验守则</span>
                                 </span>
                               )}
                             </div>

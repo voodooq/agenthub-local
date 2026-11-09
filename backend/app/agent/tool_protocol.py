@@ -25,7 +25,7 @@ class ToolProtocolAdapter:
 
     @staticmethod
     def get_builtin_tools() -> list[dict[str, Any]]:
-        """获取微内核内置的 3 个核心原子工具声明"""
+        """获取微内核内置的核心原子工具声明"""
         return [
             {
                 "name": "execute_local_command",
@@ -43,6 +43,29 @@ class ToolProtocolAdapter:
                         },
                     },
                     "required": ["command"],
+                },
+            },
+            {
+                "name": "search_memory_history",
+                "description": "按需基于本地 SQLite FTS5 BM25 毫秒级追溯历史对话、双时间轴结构化事实变更记录（含已覆盖旧版本）以及当前工作区源码/文档片段。仅在需要回溯窗口之外的历史报错、决策原因或跨文件线索时按需调用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "检索关键词或关键短语（支持中英文子串与代码符号）",
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["messages", "facts_history", "workspace", "all"],
+                            "description": "检索范围：messages(历史消息)、facts_history(含历史版本的精确事实与长期画像)、workspace(工作区代码文档 FTS5)、all(全部联合召回，默认)",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "每类来源最多返回的匹配条目数（默认 5）",
+                        },
+                    },
+                    "required": ["query"],
                 },
             },
             {
@@ -324,6 +347,7 @@ class ToolProtocolAdapter:
 
     _CORE_TOOL_NAMES = (
         "execute_local_command",
+        "search_memory_history",
         "write_local_file",
         "read_local_file",
         "web_fetch",

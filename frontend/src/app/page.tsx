@@ -41,7 +41,7 @@ import { RightActionDrawer } from '@/components/RightActionDrawer';
 import { CommandAutocomplete } from '@/components/CommandAutocomplete';
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { LanguageToggle } from '@/components/LanguageToggle';
-import { MemoryHubModal } from '@/components/MemoryHubModal';
+import { MemoryHubModal, MemoryHubTab } from '@/components/MemoryHubModal';
 import { InlineToolCard } from '@/components/InlineToolCard';
 import { ImportWizardModal } from '@/components/ImportWizardModal';
 import { LoopHUD } from '@/components/LoopHUD';
@@ -49,6 +49,7 @@ import { ApprovalCard } from '@/components/ApprovalCard';
 import { SkillPickerModal } from '@/components/SkillPickerModal';
 import { SopDrawer } from '@/components/SopDrawer';
 import { InteractiveInquiryCard } from '@/components/InteractiveInquiryCard';
+import { ExperienceProposalCard } from '@/components/ExperienceProposalCard';
 
 import { buildActiveSystemOverride } from '@/utils/personalityHelper';
 import { generateScenarioThinking } from '@/utils/scenarioThinking';
@@ -63,6 +64,9 @@ import {
   SkillItem,
   ExecutionStrategy,
   PlanStepItem,
+  ConfirmedFactItem,
+  MemoryFactItem,
+  ExperienceProposalItem,
 } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 import { prefetchExtensionSkills, prefetchWorkspaceSkills } from '@/utils/skillCache';
@@ -124,6 +128,7 @@ export default function WorkbenchPage() {
   const [isAccountOpen, setIsAccountOpen] = useState(false);
   const [isSyncOpen, setIsSyncOpen] = useState(false);
   const [isMemoryHubOpen, setIsMemoryHubOpen] = useState(false);
+  const [memoryHubInitialTab, setMemoryHubInitialTab] = useState<MemoryHubTab>('memories');
 
   // 三层记忆与微内核 Agent 状态
   const [sceneMode, setSceneMode] = useState<SceneMode>('agent');
@@ -181,9 +186,47 @@ export default function WorkbenchPage() {
   };
 
   // 用户在方案卡片中确认批准步骤清单并启动自主执行
-  const handleApproveAndExecutePlan = async (steps: PlanStepItem[], feedbackText: string) => {
-    await handleSendMessage(feedbackText, steps);
+  const handleApproveAndExecutePlan = async (
+    steps: PlanStepItem[],
+    feedbackText: string,
+    confirmedFacts?: ConfirmedFactItem[]
+  ) => {
+    await handleSendMessage(feedbackText, steps, confirmedFacts);
   };
+
+  // 流式结束重载数据库消息时，保留最新一轮收到的 fact_refs 溯源状态
+  const lastStreamFactRefsRef = useRef<{ convId: string; facts: MemoryFactItem[] } | null>(null);
+  const [pendingProposals, setPendingProposals] = useState<ExperienceProposalItem[]>([]);
+
+  const upsertPendingProposal = useCallback((proposal: ExperienceProposalItem) => {
+    if (!proposal || proposal.status !== 'pending') return;
+    setPendingProposals((prev) => {
+      const idx = prev.findIndex((p) => p.id === proposal.id);
+      if (idx >= 0) {
+        const next = [...prev];
+        next[idx] = proposal;
+        return next;
+      }
+      return [proposal, ...prev];
+    });
+  }, []);
+
+  const fetchPendingProposals = useCallback(async (targetConvId?: string) => {
+    const cid = targetConvId || activeConvId;
+    if (!cid) {
+      setPendingProposals([]);
+      return;
+    }
+    try {
+      const res = await apiFetch(
+        `/api/v1/experiences/proposals?conversation_id=${encodeURIComponent(cid)}&status=pending`
+      );
+      if (res.ok) {
+        const data = await res.json();
+        setPendingProposals(Array.isArray(data.proposals) ? data.proposals : []);
+      }
+    } catch (e) {}
+  }, [activeConvId]);
 
   const [canvasState, setCanvasState] = useState<{
     isOpen: boolean;
@@ -447,6 +490,16 @@ export default function WorkbenchPage() {
             merged.push({ ...m, content: cleanContent });
           }
         }
+        // 保活当前会话最新一轮已激活的确定性事实视图引用，防止流结束重载消息时微提示闪灭
+        const preservedFacts = lastStreamFactRefsRef.current;
+        if (preservedFacts && preservedFacts.convId === cid && preservedFacts.facts.length > 0) {
+          for (let i = merged.length - 1; i >= 0; i--) {
+            if (merged[i].role === 'model') {
+              merged[i].fact_refs = preservedFacts.facts;
+              break;
+            }
+          }
+        }
         setMessages(merged);
       }
     } catch (e) {
@@ -458,6 +511,7 @@ export default function WorkbenchPage() {
     if (!activeConvId) {
       setMessages([]);
       setWorkingMemory({});
+      setPendingProposals([]);
       return;
     }
 
@@ -467,7 +521,8 @@ export default function WorkbenchPage() {
     }
 
     fetchMessagesAndState();
-  }, [activeConvId, fetchMessagesAndState]);
+    fetchPendingProposals(activeConvId);
+  }, [activeConvId, fetchMessagesAndState, fetchPendingProposals]);
 
   const handleSwitchSceneMode = async (nextMode: SceneMode) => {
     setSceneMode(nextMode);
@@ -571,13 +626,21 @@ export default function WorkbenchPage() {
     } catch (e) {}
   };
 
-  const handleSendMessage = async (customPrompt?: string, approvedStepsForRequest?: PlanStepItem[]) => {
+  const handleSendMessage = async (
+    customPrompt?: string,
+    approvedStepsForRequest?: PlanStepItem[],
+    confirmedFactsForRequest?: ConfirmedFactItem[]
+  ) => {
     const rawPrompt = customPrompt || inputPrompt;
     if (!rawPrompt.trim() || isStreaming) return;
 
     let promptToSend = rawPrompt;
     let effectiveConvId = activeConvId;
     setInputPrompt('');
+    // 新一轮提问开始前重置本轮临时 fact_refs 缓存
+    if (lastStreamFactRefsRef.current && lastStreamFactRefsRef.current.convId !== activeConvId) {
+      lastStreamFactRefsRef.current = null;
+    }
 
     const currentAttachments = [...attachments];
     setAttachments([]);
@@ -704,6 +767,7 @@ export default function WorkbenchPage() {
           execution_strategy: sceneMode === 'agent' ? executionStrategy : 'direct',
           clarify_mode: sceneMode === 'chat' ? clarifyMode : false,
           approved_plan_steps: approvedStepsForRequest || null,
+          confirmed_facts: confirmedFactsForRequest && confirmedFactsForRequest.length > 0 ? confirmedFactsForRequest : null,
           attachments: currentAttachments.map((a) => ({
             name: a.name,
             file_path: a.filePath,
@@ -752,6 +816,19 @@ export default function WorkbenchPage() {
               setActiveConvId(parsed.conversation_id);
               fetchConversations();
             }
+          } else if (parsed.type === 'fact_refs') {
+            const incomingFacts = (parsed.facts || []) as MemoryFactItem[];
+            if (effectiveConvId) {
+              lastStreamFactRefsRef.current = { convId: effectiveConvId, facts: incomingFacts };
+            }
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                last.fact_refs = incomingFacts;
+              }
+              return updated;
+            });
           } else if (parsed.type === 'memory_refs') {
             setMessages((prev) => {
               const updated = [...prev];
@@ -806,6 +883,8 @@ export default function WorkbenchPage() {
                 loop_status: 'failed',
               };
             });
+          } else if (parsed.type === 'experience_proposal' && parsed.proposal) {
+            upsertPendingProposal(parsed.proposal as ExperienceProposalItem);
           } else if (
             parsed.type === 'require_approval' ||
             parsed.type === 'tool_start' ||
@@ -983,6 +1062,7 @@ export default function WorkbenchPage() {
       // 彻底根治新会话首轮问答因 activeConvId 转换未触发拉取而需要手动切换会话的体验问题
       if (effectiveConvId) {
         await fetchMessagesAndState(effectiveConvId);
+        await fetchPendingProposals(effectiveConvId);
       }
       setTimeout(scrollToBottom, 60);
     }
@@ -1193,6 +1273,8 @@ export default function WorkbenchPage() {
         activeNavHub={activeNavHub}
         onSelectNavHub={(hub) => setActiveNavHub(hub)}
         onSelectWorkspace={(wsId) => {
+          lastStreamFactRefsRef.current = null;
+          setPendingProposals([]);
           setActiveWorkspaceId(wsId);
           setActiveConvId(null);
           setMessages([]);
@@ -1208,6 +1290,8 @@ export default function WorkbenchPage() {
         }}
         onSelectConv={(id) => setActiveConvId(id)}
         onNewChat={() => {
+          lastStreamFactRefsRef.current = null;
+          setPendingProposals([]);
           setActiveConvId(null);
           setMessages([]);
         }}
@@ -1259,7 +1343,10 @@ export default function WorkbenchPage() {
           <div className="flex items-center space-x-1.5">
             {/* 记忆中枢与扩展插件入口 */}
             <button
-              onClick={() => setIsMemoryHubOpen(true)}
+              onClick={() => {
+                setMemoryHubInitialTab('memories');
+                setIsMemoryHubOpen(true);
+              }}
               className="flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs text-muted-foreground hover:text-foreground hover:bg-surface-200/70 transition-all"
               title="打开长期记忆画像与 Skill/MCP 扩展中枢"
             >
@@ -1325,7 +1412,11 @@ export default function WorkbenchPage() {
           <>
             {/* 顶部长程任务领航舱 (Loop HUD) 与敏感操作审批拦截卡片 */}
             <div className="px-4 md:px-12 lg:px-24 pt-3">
-              <LoopHUD loop={activeLoop} onRefresh={fetchActiveLoop} />
+              <LoopHUD
+                loop={activeLoop}
+                onRefresh={fetchActiveLoop}
+                onProposalCreated={upsertPendingProposal}
+              />
               {activeLoop &&
                 activeLoop.loop_status === 'waiting_approval' &&
                 activeLoop.pending_approval_call && (
@@ -1431,17 +1522,37 @@ export default function WorkbenchPage() {
                     <ThinkingBlock content={msg.thinking} isStreaming={isStreaming && index === messages.length - 1} />
                   )}
 
-                  {/* 长期记忆引用溯源微提示 */}
-                  {!isUser && msg.memory_refs && msg.memory_refs.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => setIsMemoryHubOpen(true)}
-                      className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/15 border border-emerald-500/20 text-[11px] text-emerald-600 dark:text-emerald-400 transition-colors"
-                      title={msg.memory_refs.map((m) => `• ${m.content}`).join('\n')}
-                    >
-                      <Brain className="w-3 h-3 text-emerald-500" />
-                      <span>已引用 {msg.memory_refs.length} 条长期个人偏好（点击查看或管理）</span>
-                    </button>
+                  {/* 确定性事实视图与长期记忆引用溯源微提示 */}
+                  {!isUser && ((msg.fact_refs && msg.fact_refs.length > 0) || (msg.memory_refs && msg.memory_refs.length > 0)) && (
+                    <div className="flex flex-wrap items-center gap-2">
+                      {msg.fact_refs && msg.fact_refs.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMemoryHubInitialTab('facts');
+                            setIsMemoryHubOpen(true);
+                          }}
+                          className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-teal-500/10 hover:bg-teal-500/15 border border-teal-500/25 text-[11px] text-teal-700 dark:text-teal-300 transition-colors"
+                          title={msg.fact_refs.map((f) => `• [${f.scope === 'global' ? '全局' : '工作区'}] ${f.fact_key} = ${f.fact_value}`).join('\n')}
+                        >
+                          <span>📌 已激活 {msg.fact_refs.length} 项工作区确定性事实（点击查看双时间轴）</span>
+                        </button>
+                      )}
+                      {msg.memory_refs && msg.memory_refs.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMemoryHubInitialTab('memories');
+                            setIsMemoryHubOpen(true);
+                          }}
+                          className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/15 border border-emerald-500/20 text-[11px] text-emerald-600 dark:text-emerald-400 transition-colors"
+                          title={msg.memory_refs.map((m) => `• ${m.content}`).join('\n')}
+                        >
+                          <Brain className="w-3 h-3 text-emerald-500" />
+                          <span>已引用 {msg.memory_refs.length} 条长期个人偏好（点击查看或管理）</span>
+                        </button>
+                      )}
+                    </div>
                   )}
 
                   {/* 消息正文主体：大字体、高清晰度、长 Token 强制自然折行（过滤纯工具执行时的无内容空白卡片） */}
@@ -1497,9 +1608,13 @@ export default function WorkbenchPage() {
                                     return (
                                       <InteractiveInquiryCard
                                         rawContent={codeString}
-                                        onSendFeedback={(feedback) => handleSendMessage(feedback)}
+                                        onSendFeedback={(feedback, confirmedFacts) =>
+                                          handleSendMessage(feedback, undefined, confirmedFacts)
+                                        }
                                         onFillTemplate={(tmpl) => handleFillTemplateToInput(tmpl)}
-                                        onApprovePlan={(steps, feedback) => handleApproveAndExecutePlan(steps, feedback)}
+                                        onApprovePlan={(steps, feedback, confirmedFacts) =>
+                                          handleApproveAndExecutePlan(steps, feedback, confirmedFacts)
+                                        }
                                         isStreaming={isStreaming && msg.id === messages[messages.length - 1]?.id}
                                       />
                                     );
@@ -1580,6 +1695,26 @@ export default function WorkbenchPage() {
                 </div>
               );
             })
+          )}
+          {pendingProposals.length > 0 && (
+            <div className="space-y-3 pt-2">
+              {pendingProposals.map((prop) => (
+                <ExperienceProposalCard
+                  key={prop.id}
+                  proposal={prop}
+                  onResolved={(proposalId, action, updated) => {
+                    setPendingProposals((prev) => prev.filter((item) => item.id !== proposalId));
+                    if (action === 'applied') {
+                      const skillTag = updated?.proposed_skill_name
+                        ? `/${updated.proposed_skill_name}`
+                        : 'Skill 知识库';
+                      setSaveFileToast(`✨ 经验已确认落盘并热加载至 ${skillTag}`);
+                      setTimeout(() => setSaveFileToast(null), 4000);
+                    }
+                  }}
+                />
+              ))}
+            </div>
           )}
           <div ref={messagesEndRef} />
         </div>
@@ -1950,6 +2085,9 @@ export default function WorkbenchPage() {
         isOpen={isMemoryHubOpen}
         onClose={handleCloseMemoryHub}
         onProvidersChanged={() => fetchActiveModels()}
+        workspaceId={activeWorkspaceId}
+        initialTab={memoryHubInitialTab}
+        onSkillsUpdated={() => prefetchWorkspaceSkills(activeWorkspaceId)}
       />
 
       {/* 快捷技能呼出面板与 SOP 明文规程抽屉 */}

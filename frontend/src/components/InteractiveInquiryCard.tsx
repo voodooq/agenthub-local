@@ -18,14 +18,42 @@ import {
   InteractiveInquiryPayload,
   InquiryQuestion,
   PlanStepItem,
+  ConfirmedFactItem,
 } from '@/types';
 import { useLanguage } from '@/context/LanguageContext';
 
+const PLACEHOLDER_VALUE_RE = /^(默认值|请输入|请填写|待填写|待补充|请补充|填写.*|placeholder|example|todo|tbd|xxx|\.\.\.)$/i;
+
+function extractFactsFromTemplate(templateText?: string): ConfirmedFactItem[] {
+  if (!templateText) return [];
+  const results: ConfirmedFactItem[] = [];
+  const seenKeys = new Set<string>();
+  const regex = /\{\{([^{}:]+):([^{}]+)\}\}/g;
+  let match: RegExpExecArray | null;
+  while ((match = regex.exec(templateText)) !== null) {
+    const rawKey = match[1].trim();
+    const rawVal = match[2].trim();
+    if (!rawKey || !rawVal || PLACEHOLDER_VALUE_RE.test(rawVal)) {
+      continue;
+    }
+    const normalizedKey = rawKey.toLowerCase().replace(/[\s-]+/g, '_');
+    if (seenKeys.has(normalizedKey)) continue;
+    seenKeys.add(normalizedKey);
+    results.push({
+      fact_key: rawKey,
+      fact_value: rawVal,
+      category: 'biz_rule',
+      workspace_scope: 'workspace',
+    });
+  }
+  return results;
+}
+
 interface InteractiveInquiryCardProps {
   rawContent: string;
-  onSendFeedback?: (feedbackText: string) => void;
+  onSendFeedback?: (feedbackText: string, confirmedFacts?: ConfirmedFactItem[]) => void;
   onFillTemplate?: (templateText: string) => void;
-  onApprovePlan?: (steps: PlanStepItem[], feedbackText: string) => void;
+  onApprovePlan?: (steps: PlanStepItem[], feedbackText: string, confirmedFacts?: ConfirmedFactItem[]) => void;
   isStreaming?: boolean;
 }
 
@@ -100,6 +128,7 @@ export function InteractiveInquiryCard({
     buildInitialSteps(parsed?.plan_steps)
   );
   const [hasSubmitted, setHasSubmitted] = useState(false);
+  const [rememberFacts, setRememberFacts] = useState(true);
 
   useEffect(() => {
     if (!parsed || hasInitializedRef.current) return;
@@ -162,12 +191,79 @@ export function InteractiveInquiryCard({
     setStepSelections((prev) => ({ ...prev, [stepNo]: !prev[stepNo] }));
   };
 
+  // 计算明确携带持久化标识的模板填空事实与问题列表
+  const templateFacts = extractFactsFromTemplate(fillTemplate?.template_text);
+  const hasFactCandidates =
+    questions.some((q) => Boolean(q.fact_key && q.fact_key.trim())) || templateFacts.length > 0;
+
+  const formatOptionFactValue = (val: string, opt?: { value: string; label: string }) => {
+    if (!opt) return val;
+    if (opt.label && opt.label !== opt.value) {
+      return `${opt.label} (${opt.value})`;
+    }
+    return opt.value;
+  };
+
+  // 提取显式标记 fact_key 的选项及明确的 {{KEY:VAL}} 参数
+  const buildConfirmedFacts = (
+    onlyQuestion?: InquiryQuestion,
+    forcedOption?: { value: string; label: string }
+  ): ConfirmedFactItem[] | undefined => {
+    if (!rememberFacts) return undefined;
+
+    if (onlyQuestion && forcedOption) {
+      const fk = onlyQuestion.fact_key?.trim();
+      if (!fk) return undefined;
+      return [
+        {
+          fact_key: fk,
+          fact_value: formatOptionFactValue(forcedOption.value, forcedOption),
+          category: onlyQuestion.fact_category || 'biz_rule',
+          workspace_scope: onlyQuestion.fact_scope || 'workspace',
+        },
+      ];
+    }
+
+    const factMap = new Map<string, ConfirmedFactItem>();
+    for (const tf of templateFacts) {
+      factMap.set(tf.fact_key.toLowerCase().replace(/[\s-]+/g, '_'), tf);
+    }
+
+    for (const q of questions) {
+      const fk = q.fact_key?.trim();
+      if (!fk) continue;
+      const ans = selectedAnswers[q.id];
+      let valStr = '';
+      if (Array.isArray(ans)) {
+        const parts = q.options
+          .filter((o) => ans.includes(o.value))
+          .map((o) => formatOptionFactValue(o.value, o));
+        valStr = parts.join('、');
+      } else if (ans) {
+        const opt = q.options.find((o) => o.value === ans);
+        valStr = formatOptionFactValue(String(ans), opt);
+      }
+      if (valStr.trim()) {
+        factMap.set(fk.toLowerCase().replace(/[\s-]+/g, '_'), {
+          fact_key: fk,
+          fact_value: valStr.trim(),
+          category: q.fact_category || 'biz_rule',
+          workspace_scope: q.fact_scope || 'workspace',
+        });
+      }
+    }
+
+    const list = Array.from(factMap.values());
+    return list.length > 0 ? list : undefined;
+  };
+
   // 单题一键直发
   const handleDirectSendOption = (q: InquiryQuestion, opt: { value: string; label: string }) => {
     if (hasSubmitted || !onSendFeedback) return;
     const text = `已确认决策: 【${q.label}】选用方案为「${opt.label}」(${opt.value})。请继续。`;
+    const facts = buildConfirmedFacts(q, opt);
     setHasSubmitted(true);
-    onSendFeedback(text);
+    onSendFeedback(text, facts);
   };
 
   // 组合表单统一提交
@@ -185,8 +281,9 @@ export function InteractiveInquiryCard({
       }
     }
     lines.push('请根据以上确认结果继续执行。');
+    const facts = buildConfirmedFacts();
     setHasSubmitted(true);
-    onSendFeedback(lines.join('\n'));
+    onSendFeedback(lines.join('\n'), facts);
   };
 
   // 方案批准并执行
@@ -198,11 +295,12 @@ export function InteractiveInquiryCard({
       ...activeSteps.map((s) => `${s.step}. ${s.title} [${s.tool_level || 'L1'}]`),
       '请解锁执行权限并立即进入 TaskLoop 自主推演循环！',
     ];
+    const facts = buildConfirmedFacts();
     setHasSubmitted(true);
     if (onApprovePlan) {
-      onApprovePlan(activeSteps, feedbackLines.join('\n'));
+      onApprovePlan(activeSteps, feedbackLines.join('\n'), facts);
     } else if (onSendFeedback) {
-      onSendFeedback(feedbackLines.join('\n'));
+      onSendFeedback(feedbackLines.join('\n'), facts);
     }
   };
 
@@ -397,14 +495,28 @@ export function InteractiveInquiryCard({
         )}
 
         {/* 底部操作区域 */}
-        <div className="pt-2 flex flex-col sm:flex-row items-center justify-between gap-3 border-t border-border">
-          <span className="text-[11px] text-muted-foreground">
-            {hasSubmitted
-              ? t('✓ 已提交确认结果，等待 Agent 响应中...')
-              : isPlanApproval
-              ? t('请确认实施步骤无误后批准启动执行')
-              : t('可点击单个选项直发，或在调整后统一提交')}
-          </span>
+        <div className="pt-2 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 border-t border-border">
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] text-muted-foreground">
+              {hasSubmitted
+                ? t('✓ 已提交确认结果，等待 Agent 响应中...')
+                : isPlanApproval
+                ? t('请确认实施步骤无误后批准启动执行')
+                : t('可点击单个选项直发，或在调整后统一提交')}
+            </span>
+            {hasFactCandidates && (
+              <label className={`flex items-center space-x-1.5 text-[11px] select-none ${hasSubmitted ? 'opacity-60 cursor-not-allowed' : 'cursor-pointer text-emerald-700 dark:text-emerald-300'}`}>
+                <input
+                  type="checkbox"
+                  disabled={hasSubmitted}
+                  checked={rememberFacts}
+                  onChange={(e) => setRememberFacts(e.target.checked)}
+                  className="rounded border-emerald-500/40 text-emerald-600 focus:ring-emerald-500"
+                />
+                <span>{t('记住本次配置偏好到当前工作区')}</span>
+              </label>
+            )}
+          </div>
 
           <div className="flex items-center space-x-2 w-full sm:w-auto justify-end">
             {/* 多题组合提交按钮 */}

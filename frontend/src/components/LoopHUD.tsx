@@ -1,19 +1,21 @@
 'use strict';
 
 import React, { useState } from 'react';
-import { TaskLoopResponse, LoopStatus } from '@/types';
+import { TaskLoopResponse, LoopStatus, ExperienceProposalItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 import { useLanguage } from '@/context/LanguageContext';
 
 interface LoopHUDProps {
   loop: TaskLoopResponse | null;
   onRefresh?: () => void;
+  onProposalCreated?: (proposal: ExperienceProposalItem) => void;
 }
 
-export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
+export function LoopHUD({ loop, onRefresh, onProposalCreated }: LoopHUDProps) {
   const { t } = useLanguage();
   const [isExpanded, setIsExpanded] = useState(false);
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
+  const [distillFeedback, setDistillFeedback] = useState<string | null>(null);
 
   if (!loop || loop.loop_status === 'idle') {
     return null;
@@ -30,6 +32,30 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
       if (onRefresh) onRefresh();
     } catch (e) {
       console.error('控制任务循环失败:', e);
+    } finally {
+      setLoadingAction(null);
+    }
+  };
+
+  const handleDistillSkill = async () => {
+    setLoadingAction('distill');
+    setDistillFeedback(null);
+    try {
+      const res = await apiFetch(`/api/v1/loop/${loop.id}/distill-skill`, {
+        method: 'POST',
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setDistillFeedback(data.detail || t('暂无可提炼的执行轨迹'));
+        return;
+      }
+      if (data.proposal && onProposalCreated) {
+        onProposalCreated(data.proposal as ExperienceProposalItem);
+        setDistillFeedback(t('已生成 Diff 预览，请在下方卡片确认落盘'));
+      }
+    } catch (e) {
+      console.error('手动沉淀 Skill 失败:', e);
+      setDistillFeedback(t('沉淀请求失败'));
     } finally {
       setLoadingAction(null);
     }
@@ -138,6 +164,17 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
             </button>
           )}
 
+          {loop.loop_status === 'completed' && (
+            <button
+              onClick={handleDistillSkill}
+              disabled={loadingAction !== null}
+              className="text-[11px] px-2.5 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-medium transition flex items-center space-x-1"
+              title={t('将该闭环任务提炼为标准化可复用 Skill（先预览 Diff，确认后落盘）')}
+            >
+              <span>{loadingAction === 'distill' ? '...' : `🧩 ${t('沉淀为可复用 Skill')}`}</span>
+            </button>
+          )}
+
           {['completed', 'failed'].includes(loop.loop_status) && (
             <button
               onClick={() => handleControl('archive')}
@@ -157,6 +194,12 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
           </button>
         </div>
       </div>
+
+      {distillFeedback && (
+        <div className="px-4 py-1.5 border-t border-border bg-emerald-500/5 text-[11px] text-emerald-600 dark:text-emerald-300">
+          {distillFeedback}
+        </div>
+      )}
 
       {isExpanded && loop.scratchpad_md && (
         <div className="px-4 py-3 border-t border-border bg-surface-200/50 text-xs font-mono text-foreground max-h-48 overflow-y-auto whitespace-pre-wrap leading-relaxed select-text">

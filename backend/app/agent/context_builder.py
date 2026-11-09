@@ -13,8 +13,12 @@ from typing import Any
 from ..core.logging_config import logger
 from ..repository.conversation_repository import ConversationRepository
 from ..repository.message_repository import MessageRepository
+from ..memory.fact_manager import fact_manager
 from ..memory.long_term import long_term_memory
+from ..memory.policy_guard import MemoryPolicyGuard
+from ..memory.session_summary import session_summary_manager
 from ..extensions.skill_loader import skill_loader
+from ..skills.skill_service import SkillService
 from .tool_protocol import ToolProtocolAdapter
 
 
@@ -104,6 +108,7 @@ class ContextBuilder:
         conv = await ConversationRepository.get_by_id(conversation_id)
         scene_mode = (conv.scene_mode if conv else "agent") or "agent"
         incognito = bool(conv.incognito) if conv else False
+        workspace_id = (getattr(conv, "workspace_id", None) if conv else None) or "default"
         working_memory_raw = (conv.working_memory_json if conv else "{}") or "{}"
         rolling_summary = (conv.rolling_summary if conv else "") or ""
         current_cwd = (conv.current_cwd if conv else None)
@@ -116,10 +121,12 @@ class ContextBuilder:
         # ── 模式 A: ⚡ 极速单次模式 (oneshot) ──
         if scene_mode == "oneshot":
             sys_prompt = base_system_prompt or "你是 AgentHub Local 极速研发助手，请直接、精炼地输出结果。"
+            safe_sys, _ = MemoryPolicyGuard.sanitize_text(sys_prompt)
             return {
-                "system_instruction": sys_prompt,
+                "system_instruction": safe_sys,
                 "history_messages": [],
                 "referenced_memories": [],
+                "active_facts": [],
                 "scene_mode": "oneshot",
                 "working_memory": {},
                 "current_cwd": current_cwd,
@@ -194,7 +201,7 @@ class ContextBuilder:
                     "  ]\n"
                     "}\n"
                     "```\n"
-                    "   - 提示：留空填空模板中，使用 `{{参数名:默认值或提示}}` 作为标准占位符，前端支持光标高亮和 Tab 键快速跳转填空。\n"
+                    "   - 提示：留空填空模板中，使用 `{{参数名:默认值或提示}}` 作为标准占位符，前端支持光标高亮和 Tab 键快速跳转填空；仅针对需要跨轮长期复用的规则/偏好，在 `questions` 项中附带可选字段 `\"fact_key\"`、`\"fact_category\"` (`user_pref|biz_rule|env_config`) 与 `\"fact_scope\"` (`workspace|global`)。\n"
                     "4. 【严禁跳过方案强行写盘】：方案未获得用户在前端确认审批通过前，绝对禁止声明已落地修改！"
                 )
             elif approved_plan_steps:
@@ -209,33 +216,85 @@ class ContextBuilder:
             system_parts.append(
                 "### 🧭【需求前置主动澄清模式 (Clarify Mode)】：\n"
                 "用户开启了需求澄清模式。当用户的提问涉及多方案分歧、前提假设不明确或缺少场景约束时，切勿盲目输出长篇泛泛而谈的理论；\n"
-                "应先在正文中提炼核心考量，并在末尾输出 ```interactive_inquiry 结构化卡片（包含 phase: 'clarification' 与 questions 选择题或 fill_template 模板），供用户一键对齐上下文后再展开深度解答。"
+                "应先在正文中提炼核心考量，并在末尾输出 ```interactive_inquiry 结构化卡片（包含 phase: 'clarification' 与 questions 选择题或 fill_template 模板；可长期复用的配置问题可附加 fact_key / fact_category / fact_scope），供用户一键对齐上下文后再展开深度解答。"
             )
 
-        # 2. 检索并挂载长期记忆 Top 5（无痕模式下跳过）
+        # 2. [L4 确定性事实视图] 挂载 Active Fact View（工作区契约严格覆盖 GLOBAL，无痕模式跳过）
+        active_facts: list[dict[str, Any]] = []
         referenced_memories: list[dict[str, Any]] = []
         if not incognito:
+            raw_facts = await fact_manager.get_active_facts(workspace_id)
+            if raw_facts:
+                fact_lines: list[str] = []
+                for f in raw_facts:
+                    safe_val, _ = MemoryPolicyGuard.sanitize_text(str(f.get("fact_value") or ""))
+                    fact_copy = dict(f)
+                    fact_copy["fact_value"] = safe_val
+                    active_facts.append(fact_copy)
+                    scope_tag = "工作区契约" if f.get("scope") == "workspace" else "全局偏好"
+                    fact_lines.append(
+                        f"- `[{f.get('category', 'biz_rule')} | {scope_tag}]` `{f['fact_key']}` = `{safe_val}`"
+                    )
+                system_parts.append(
+                    "### 📌 确定性活跃事实视图 (L4 Active Fact View，工作区契约高优生效)：\n"
+                    + "\n".join(fact_lines)
+                )
+
+            # 3. [L4 非结构化画像补充] 检索并挂载长期记忆 Top 5
             referenced_memories = await long_term_memory.retrieve_relevant(user_query, limit=5, min_confidence=0.5)
             if referenced_memories:
-                mem_lines = [
-                    f"- [{m['category']}] (置信度:{float(m['confidence']):.2f}) {m['content']}"
-                    for m in referenced_memories
-                ]
+                mem_lines: list[str] = []
+                for m in referenced_memories:
+                    safe_content, _ = MemoryPolicyGuard.sanitize_text(str(m.get("content") or ""))
+                    mem_lines.append(
+                        f"- [{m['category']}] (置信度:{float(m['confidence']):.2f}) {safe_content}"
+                    )
                 system_parts.append("### 💡 用户长期偏好与本机环境记忆 (Long-Term Memory)：\n" + "\n".join(mem_lines))
 
-        # 3. 挂载早期对话溢出浓缩摘要 (Rolling Summary)
-        if rolling_summary.strip():
-            system_parts.append(f"### 📜 更早期的历史对话浓缩背景 (Rolling Summary)：\n{rolling_summary.strip()}")
+            # 4. [L3 增量会话摘要] 优先挂载 session_summaries，无记录时兼容回退 rolling_summary
+            summary_record = await session_summary_manager.get_summary(conversation_id)
+            effective_summary = (
+                (summary_record.get("summary_markdown") or "").strip()
+                if summary_record
+                else rolling_summary.strip()
+            )
+            if effective_summary:
+                safe_summary, _ = MemoryPolicyGuard.sanitize_text(effective_summary)
+                system_parts.append(
+                    f"### 📜 更早期的历史对话增量浓缩摘要 (L3 Session Summary)：\n{safe_summary}"
+                )
 
         # 4. 挂载按需专业技能摘要 (Skills Summary) 与斜杠指令直通激活（放到线程池防止大目录扫描卡顿）
         skills_summary = await asyncio.to_thread(skill_loader.get_skills_summary_prompt)
         if skills_summary:
             system_parts.append(skills_summary)
 
-        # 若用户输入了 /command 或 /skill-name，自动预加载对应 Skill 的完整四元组规程（含 tools/、knowledge/、schema.json 指引）
-        matched_skill = await asyncio.to_thread(skill_loader.resolve_slash_command, user_query)
+        if current_cwd:
+            def _list_ws_skills() -> list[dict[str, Any]]:
+                svc = SkillService(workspace_root=current_cwd)
+                return [s for s in svc.list_all_skills(include_content=False) if s.get("scope") == "workspace"]
+
+            try:
+                ws_skills = await asyncio.to_thread(_list_ws_skills)
+                if ws_skills:
+                    ws_lines = ["### 🗂️ 当前工作区专属技能 (Workspace L2 Skills，高优生效)："]
+                    for ws_sk in ws_skills:
+                        ovr = " (覆盖全局)" if ws_sk.get("is_override") else ""
+                        ws_lines.append(
+                            f"- [工作区{ovr}] `{ws_sk['name']}` (快捷命令 `{ws_sk['command']}`): {ws_sk.get('description', '')}"
+                        )
+                    system_parts.append("\n".join(ws_lines))
+            except Exception as e:
+                logger.debug(f"[ContextBuilder] 扫描工作区专属技能跳过: {e}")
+
+        # 若用户输入了 /command 或 /skill-name，自动预加载对应 Skill 的完整四元组规程（含 tools/、knowledge/、schema.json 与避坑经验摘要）
+        matched_skill = await asyncio.to_thread(skill_loader.resolve_slash_command, user_query, current_cwd)
         if matched_skill:
-            full_skill_md = await asyncio.to_thread(skill_loader.get_full_skill_markdown, matched_skill["id"])
+            full_skill_md = await asyncio.to_thread(
+                skill_loader.get_full_skill_markdown,
+                matched_skill["id"],
+                current_cwd,
+            )
             system_parts.append(
                 f"### 🎯 已由斜杠指令 `{matched_skill['command']}` 直接激活的四元组技能规程 (`{matched_skill['id']}`)：\n"
                 f"请严格遵循以下技能规程处理用户请求：\n{full_skill_md}"
@@ -321,6 +380,8 @@ class ContextBuilder:
             "system_instruction": "\n\n".join(system_parts),
             "history_messages": history_list,
             "referenced_memories": referenced_memories,
+            "active_facts": active_facts,
+            "matched_skill_id": matched_skill["id"] if matched_skill else None,
             "scene_mode": scene_mode,
             "working_memory": working_memory,
             "current_cwd": current_cwd,

@@ -78,7 +78,7 @@ fencing_*.json
 # 8. 文档归档与本地知识库（公开仓库保留根目录 README.md 与底座技能库，忽略本地知识库、临时套件）
 docs/
 suites/
-memory/
+/memory/
 knowledge_base/
 *.md
 !README.md

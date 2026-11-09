@@ -7,6 +7,9 @@ from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel, Field
 
 from ...memory.long_term import long_term_memory
+from ...memory.fact_manager import fact_manager
+from ...memory.ledger import event_ledger
+from ...memory.policy_guard import MemoryAdmissionError
 from ...extensions.skill_loader import skill_loader
 from ...extensions.mcp_manager import mcp_manager
 from ...core.provider_adapter import provider_adapter
@@ -91,6 +94,114 @@ async def clear_all_long_term_memories():
     """一键清空所有长期记忆画像"""
     deleted = await long_term_memory.clear_all()
     return {"status": "ok", "deleted_count": deleted}
+
+
+# ──────────────────── 1B. 双时间轴结构化事实视图与事件账本 (v1.1.6) ────────────────────
+
+class MemoryFactUpsertRequest(BaseModel):
+    """新增或更新确定性事实（触发双时间轴冲突消解）"""
+    fact_key: str = Field(..., description="标准化事实键，如 refund_fee_rate / export_format")
+    fact_value: str = Field(..., description="确定性事实值")
+    workspace_id: str = Field(default="GLOBAL", description="作用域：GLOBAL 或具体工作区 ID")
+    category: str = Field(default="biz_rule", description="分类: user_pref | biz_rule | env_config")
+    source_type: str = Field(default="manual", description="准入来源: manual | explicit_cmd | inquiry | verified_env")
+    source_event_id: str | None = Field(default=None, description="可选关联的 event_ledger.id 溯源")
+    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+
+
+@router.get("/memories/facts")
+async def list_memory_facts(
+    workspace_id: str | None = Query(default=None, description="指定工作区 ID（不传默认仅返回 GLOBAL）"),
+    include_history: bool = Query(default=False, description="是否包含已退位的历史版本时间线"),
+    include_global: bool = Query(default=True, description="工作区查询时是否同时合并 GLOBAL 全局偏好"),
+    category: str | None = Query(default=None, description="过滤分类: user_pref | biz_rule | env_config"),
+    fact_key: str | None = Query(default=None, description="按特定 fact_key 精确查看演进时间轴"),
+):
+    """获取双时间轴结构化事实视图与演进历史"""
+    try:
+        items = await fact_manager.list_facts(
+            workspace_id=workspace_id,
+            include_history=include_history,
+            include_global=include_global,
+            category=category,
+            fact_key=fact_key,
+        )
+        active_view = await fact_manager.get_active_facts(
+            workspace_id=workspace_id,
+            include_global=include_global,
+            category=category,
+        )
+        return {
+            "items": items,
+            "active_view": active_view,
+            "total": len(items),
+        }
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+
+@router.post("/memories/facts")
+async def upsert_memory_fact(req: MemoryFactUpsertRequest):
+    """新增或覆盖一条确定性结构化事实（自动关闭旧版本并执行隐私脱敏）"""
+    if not req.fact_key.strip() or not req.fact_value.strip():
+        raise HTTPException(status_code=400, detail="fact_key 与 fact_value 均不能为空")
+    try:
+        result = await fact_manager.upsert_fact(
+            fact_key=req.fact_key,
+            fact_value=req.fact_value,
+            workspace_id=req.workspace_id,
+            category=req.category,
+            source_type=req.source_type,
+            source_event_id=req.source_event_id,
+            confidence=req.confidence,
+        )
+        return result
+    except MemoryAdmissionError as mae:
+        raise HTTPException(status_code=403, detail=str(mae))
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+
+@router.post("/memories/facts/{fact_id}/rollback")
+async def rollback_memory_fact(fact_id: str):
+    """将指定历史版本事实重新激活为当前有效版本"""
+    try:
+        return await fact_manager.rollback_fact(fact_id)
+    except LookupError as le:
+        raise HTTPException(status_code=404, detail=str(le))
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+
+@router.post("/memories/facts/{fact_id}/deactivate")
+async def deactivate_memory_fact(fact_id: str):
+    """软停用一条当前生效中的结构化事实（保留历史版本记录）"""
+    ok = await fact_manager.deactivate_fact(fact_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="未找到当前生效的事实记录或已归档")
+    return {"status": "ok", "fact_id": fact_id}
+
+
+@router.get("/memories/ledger")
+async def list_event_ledger(
+    workspace_id: str | None = Query(default=None),
+    conversation_id: str | None = Query(default=None),
+    loop_id: str | None = Query(default=None),
+    event_type: str | None = Query(default=None),
+    ascending: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    """按会话或工作区分页审计只增不改的 event_ledger 原始交互轨迹"""
+    return await event_ledger.list_events(
+        workspace_id=workspace_id,
+        conversation_id=conversation_id,
+        loop_id=loop_id,
+        event_type=event_type,
+        ascending=ascending,
+        limit=limit,
+        offset=offset,
+    )
 
 
 # ──────────────────── 2. Skill & MCP 扩展总线 ────────────────────

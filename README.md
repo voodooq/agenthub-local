@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.1.5-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.1.6-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -14,6 +14,27 @@
 > **数据与算力彻底解耦，告别单一模型绑定**：
 > AgentHub Local 是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、Llama.cpp、Nvidia 实例），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、SiliconFlow、Google AI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
+
+---
+
+## 🧠 v1.1.6 重大架构升级：四层记忆分层治理与 Skill 经验自演化体系
+
+在不引入任何笨重外部向量库容器（100% 基于本地 `SQLite + WAL + FTS5` 与物理工作区沙箱）的前提下，落地完整工程化记忆治理与技能自演化闭环：
+
+1. **四层确定性记忆架构 (L1 ~ L4) 与固定槽位装配**：
+   - **L1 会话与环路元数据**：状态机与 `<workspace>/.agenthub/scratchpad.md`；
+   - **L2 滑动原始窗口 + L3 增量摘要 (`SessionSummaryManager`)**：当对话超过窗口水位线后自动提炼/合并增量目标、关键参数与产出路径，释放早期原始轮次，将长程对话 Token 压缩为精炼上下文（轻量模型不可用时提供确定性启发式兜底，永不阻塞主流程）；
+   - **L4 双时间轴精确结构化事实 (`memory_facts` & `FactManager`)**：配合原生 `Partial Unique Index` 保障同一工作区下同一 `fact_key` 仅一条当前生效记录；支持 **`Workspace` 严格覆盖 `GLOBAL`**、完整时间轴版本归档与一键安全追加回滚（`V1 -> V2 -> V1`）；并与原有 `long_term_memories` 双轨兼容共存、零回归。
+2. **三大记忆治理机制 (Ledger - Views - Policy)**：
+   - **Append-Only 事件账本 (`event_ledger`)**：只增不改审计流水，忠实溯源用户输入、对齐卡选择、自愈恢复、人工干预与资产落盘；
+   - **隐私与准入网关 (`MemoryPolicyGuard`)**：落盘前自动对 `API Key / Bearer Token / 私钥 / 手机号 / 邮箱 / 身份证号` 等凭据脱敏并打标 `🔒 已脱敏`；严格隔离 `incognito` 无痕会话、`oneshot` 单次模式及 `plan_first` 规划阶段，杜绝记忆污染；
+   - **对齐卡 0-Token 参数直通 (`InteractiveInquiryCard`)**：支持显式 `fact_key` 选项及非占位符 `{{KEY:VAL}}` 填空值，勾选「记住本次配置偏好到当前工作区」即 0 额外模型开销直接沉淀为工作区确定性契约；
+   - **三路联合按需召回 (`search_memory_history`)**：整合对话全文 FTS5、工作区源码/文档 trigram FTS5（含 `< 3` 字符短词平滑 `LIKE` 回退）与事实历史检索。
+3. **Post-Task Skill 经验自演化与 HITL Diff 确认 (`ExperienceDistiller`)**：
+   - 仅当任务满足**「报错自愈恢复 >= 1 次」「人类中途干预纠偏」或「无 Skill 指导下成功执行 >= 4 步有效工具调用」**时，以 `loop_id` 幂等防重自动凝练三元组避坑经验或新四元组 Skill 草案，亦支持在 `LoopHUD` 一键手动归档；
+   - 先写入待确认池并生成 Unified Diff，在前端 `ExperienceProposalCard` 经**人工确认后**方才合入 `<workspace>/skills/<skill-id>/knowledge/experience_playbook.md`（L2 Override，不污染全局底座），并即时刷新 SQLite FTS5 与前后端缓存实现 `0ms` 热生效。
+4. **记忆中枢双时间轴与账本审计 UI (`MemoryHubModal`)**：
+   - 全新推出 **`精确事实视图`**（工作区/GLOBAL 覆盖标记、时间轴演变与一键回滚）与 **`事件账本追溯`**（类型过滤、分页与脱敏审计徽标），全面适配中/繁/英/日四语种国际化。
 
 ---
 
@@ -179,8 +200,8 @@ flowchart TD
 
 | 客户端版本 | 适用系统 | 包名称 | 运行方式 |
 | :--- | :--- | :--- | :--- |
-| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.5-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
-| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.5-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
+| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.6-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
+| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.6-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
 | **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
 
 ---
@@ -198,23 +219,23 @@ sequenceDiagram
     participant Actions as GitHub Actions Runner (windows-latest)
     participant Releases as GitHub Releases 页面
 
-    Dev->>Git: git tag v1.1.5
-    Dev->>GH: git push origin v1.1.5
+    Dev->>Git: git tag v1.1.6
+    Dev->>GH: git push origin v1.1.6
     GH->>Actions: 触发 release.yml 流水线
     Actions->>Actions: 安装 Node 20 & Python 3.12
     Actions->>Actions: 编译并导出 Next.js 静态前端 (out/)
     Actions->>Actions: 打包 Windows 便携包 (*-windows-x64.zip)
     Actions->>Actions: 打包跨平台源码包 (*-portable.tar.gz)
-    Actions->>Releases: 自动创建 Release v1.1.5 并上传分发产物
+    Actions->>Releases: 自动创建 Release v1.1.6 并上传分发产物
     Releases-->>Dev: 用户可在页面直接下载执行文件
 ```
 
 ### 如何发布新版本：
 只需在本地执行以下三条命令：
 ```bash
-git tag v1.1.5
+git tag v1.1.6
 git push origin master
-git push origin v1.1.5
+git push origin v1.1.6
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 release 附件，几分钟内即可在 Releases 页面看到生成的下载文件！
 

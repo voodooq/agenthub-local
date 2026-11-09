@@ -173,3 +173,35 @@ class PolicyInterceptor:
             logger.warning(f"创建快照失败: {e}")
             return None
 
+    @staticmethod
+    def evaluate_memory_write(
+        source_type: str,
+        content: str,
+        *,
+        incognito: bool = False,
+        scene_mode: str = "agent",
+        verified: bool = True,
+    ):
+        """
+        联动记忆策略守卫 (MemoryPolicyGuard) 评估事实写入准入并执行隐私脱敏。
+        """
+        from ..memory.policy_guard import MemoryPolicyGuard
+
+        return MemoryPolicyGuard.evaluate_write(
+            source_type=source_type,
+            content=content,
+            incognito=incognito,
+            scene_mode=scene_mode,
+            verified=verified,
+        )
+
+    @staticmethod
+    def sanitize_sensitive_text(text: str) -> tuple[str, list[str]]:
+        """
+        对外暴露统一的敏感凭据与个人隐私扫描脱敏网关。
+        """
+        from ..memory.policy_guard import MemoryPolicyGuard
+
+        return MemoryPolicyGuard.sanitize_text(text)
+
+

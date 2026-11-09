@@ -1,10 +1,10 @@
 """
-AgentHub Local v1.1.5 独立可执行程序与离线发布包一键构建脚本 (Release EXE Builder)
+AgentHub Local v1.1.6 独立可执行程序与离线发布包一键构建脚本 (Release EXE Builder)
 核心目标：
 1. 使用 PyInstaller 将完整 Python 运行环境、WebView2 宿主外壳与后端 FastAPI 编译为独立的原生绿色免安装目录 (dist/AgentHub/)
 2. 内嵌最新编译的前端静态页面 (static/)、全局默认技能 (skills/) 与 MCP 初始配置 (mcp_servers.json)
-3. 确保 0 私有数据污染（绝对不包含任何测试账号、旧数据库或历史路径，初次启动自动建全新库）
-4. 一键压缩打包为 AgentHub-Local-v1.1.5-windows-x64.zip，可直接上传发布至 GitHub Releases
+3. 严格过滤源码切片与隐私隔离，确保 0 私有数据/测试代码污染（绝对不包含 uploads、测试账号、旧数据库或历史路径，初次启动自动建全新库）
+4. 一键压缩打包为 AgentHub-Local-v1.1.6-windows-x64.zip，可直接上传发布至 GitHub Releases
 """
 import os
 import sys
@@ -18,11 +18,41 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 FRONTEND_OUT = FRONTEND_DIR / "out"
 DIST_DIR = BASE_DIR / "dist"
 BUILD_DIR = BASE_DIR / "build"
-RELEASE_VERSION = "v1.1.5"
+RELEASE_VERSION = "v1.1.6"
 APP_NAME = "AgentHub"
 OUTPUT_DIR = DIST_DIR / APP_NAME
 ZIP_NAME = f"AgentHub-Local-{RELEASE_VERSION}-windows-x64.zip"
 FINAL_ZIP_PATH = DIST_DIR / ZIP_NAME
+
+
+def prepare_clean_backend_stage() -> Path:
+    """准备纯净的 backend 源码切片，严格剔除个人 data/uploads、tests 与缓存文件"""
+    clean_backend_dir = BUILD_DIR / "_clean_backend"
+    if clean_backend_dir.exists():
+        shutil.rmtree(clean_backend_dir, ignore_errors=True)
+    clean_backend_dir.mkdir(parents=True, exist_ok=True)
+
+    src_backend = BASE_DIR / "backend"
+    ignore_fn = shutil.ignore_patterns(
+        "__pycache__",
+        "*.pyc",
+        "*.pyo",
+        "*.db",
+        "*.db-wal",
+        "*.db-shm",
+        "*.sqlite*",
+        "*.log",
+        ".access_token",
+    )
+
+    # 仅拷贝运行期必需的代码目录与入口文件，物理阻断 data/、tests/ 等进入发行包
+    shutil.copytree(src_backend / "app", clean_backend_dir / "app", ignore=ignore_fn)
+    for fname in ("__init__.py", "main.py", "requirements.txt"):
+        src_file = src_backend / fname
+        if src_file.is_file():
+            shutil.copy2(src_file, clean_backend_dir / fname)
+
+    return clean_backend_dir
 
 
 def ensure_frontend_built():
@@ -37,13 +67,14 @@ def ensure_frontend_built():
 def build_pyinstaller_exe():
     """调用 PyInstaller 将所有 Python 运行环境与微内核编译为独立绿色目录"""
     ensure_frontend_built()
+    clean_backend_dir = prepare_clean_backend_stage()
 
-    print(f"\n>>> 正在使用 PyInstaller 编译独立桌面程序 {APP_NAME}.exe ...")
-    
+    print(f"\n>>> 正在使用 PyInstaller 编译独立桌面程序 {APP_NAME}.exe ({RELEASE_VERSION})...")
+
     # 动态构建 PyInstaller 编译参数
     sep = ";" if sys.platform == "win32" else ":"
     static_arg = f"{FRONTEND_OUT}{sep}static"
-    backend_data_arg = f"{BASE_DIR / 'backend'}{sep}backend"
+    backend_data_arg = f"{clean_backend_dir}{sep}backend"
 
     pyinstaller_cmd = [
         sys.executable,
@@ -90,6 +121,14 @@ def build_pyinstaller_exe():
         "--hidden-import",
         "backend.app.api.router",
         "--hidden-import",
+        "backend.app.api.v1.experiences",
+        "--hidden-import",
+        "backend.app.api.v1.memories",
+        "--hidden-import",
+        "backend.app.api.v1.skills",
+        "--hidden-import",
+        "backend.app.api.v1.loop",
+        "--hidden-import",
         "backend.app.agent.runtime",
         "--hidden-import",
         "backend.app.agent.context_builder",
@@ -118,13 +157,33 @@ def build_pyinstaller_exe():
         "--hidden-import",
         "backend.app.service.audit_service",
         "--hidden-import",
+        "backend.app.memory",
+        "--hidden-import",
         "backend.app.memory.long_term",
+        "--hidden-import",
+        "backend.app.memory.policy_guard",
+        "--hidden-import",
+        "backend.app.memory.ledger",
+        "--hidden-import",
+        "backend.app.memory.fact_manager",
+        "--hidden-import",
+        "backend.app.memory.session_summary",
+        "--hidden-import",
+        "backend.app.memory.workspace_fts",
+        "--hidden-import",
+        "backend.app.skills",
+        "--hidden-import",
+        "backend.app.skills.skill_service",
+        "--hidden-import",
+        "backend.app.skills.experience_distiller",
         "--hidden-import",
         "backend.app.extensions.skill_loader",
         "--hidden-import",
         "backend.app.extensions.mcp_manager",
         "--hidden-import",
         "backend.app.schema.chat_schema",
+        "--hidden-import",
+        "backend.app.schema.loop_schema",
         str(BASE_DIR / "desktop_app.py"),
     ]
 
@@ -192,7 +251,7 @@ def assemble_standalone_package():
         'title AgentHub Local 调试控制台\r\n'
         'cd /d "%~dp0"\r\n'
         'echo ========================================================\r\n'
-        'echo   AgentHub Local v1.1.5 调试运行模式 (按 Ctrl+C 可停止)\r\n'
+        f'echo   AgentHub Local {RELEASE_VERSION} 调试运行模式 (按 Ctrl+C 可停止)\r\n'
         'echo ========================================================\r\n'
         'echo.\r\n'
         '"%~dp0AgentHub.exe" --debug\r\n'
@@ -201,13 +260,32 @@ def assemble_standalone_package():
     )
     print("  -> 已生成一键启动脚本 启动AgentHub.bat 与 调试启动脚本 ...")
 
-    # 6. 安全红线校验：确保绝对不包含现有的 data/ 历史数据库文件
-    target_data = OUTPUT_DIR / "data"
-    if target_data.exists():
-        for item in target_data.glob("*.db*"):
-            item.unlink(missing_ok=True)
-            print(f"  [安全清除] 已剔除本地旧数据库: {item.name}")
-    print("  ✓ 已保证数据目录为 100% 纯净初始状态（无任何历史会话/私有密钥）")
+    # 6. 安全红线校验：彻底清除并校验运行包内 0 个人数据 / 数据库 / 测试代码残留
+    for dirty_rel in ("data", "_internal/backend/data", "_internal/backend/tests"):
+        dirty_path = OUTPUT_DIR / dirty_rel
+        if dirty_path.exists():
+            shutil.rmtree(dirty_path, ignore_errors=True)
+            print(f"  [安全清除] 已移除敏感/非发行目录: {dirty_rel}")
+
+    forbidden_patterns = ("*.db", "*.db-wal", "*.db-shm", "*.sqlite*", "*.log", ".access_token", ".env")
+    leaked_items: list[Path] = []
+    for pat in forbidden_patterns:
+        for matched in OUTPUT_DIR.rglob(pat):
+            # 忽略 PyInstaller 内嵌 Python 标准库或三方包自带非业务文件外的根及 backend 路径
+            rel_str = str(matched.relative_to(OUTPUT_DIR)).replace("\\", "/")
+            if rel_str.startswith("_internal/") and not rel_str.startswith("_internal/backend/"):
+                continue
+            matched.unlink(missing_ok=True)
+            leaked_items.append(matched)
+    if leaked_items:
+        print(f"  [安全清除] 已清理 {len(leaked_items)} 个敏感文件残留。")
+
+    # 断言终态无上传/个人配置/数据库残留
+    for forbidden_dir in (OUTPUT_DIR / "data", OUTPUT_DIR / "_internal" / "backend" / "data", OUTPUT_DIR / "_internal" / "backend" / "tests"):
+        if forbidden_dir.exists():
+            raise RuntimeError(f"安全红线阻断：发现非法目录残留 {forbidden_dir}")
+
+    print("  ✓ 已保证运行包 100% 纯净初始状态（无任何历史会话、个人上传或私有密钥）")
 
 
 def create_release_zip():

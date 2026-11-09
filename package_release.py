@@ -1,5 +1,5 @@
 """
-AgentHub Local v1.1.5 本地离线发布打包脚本
+AgentHub Local v1.1.6 本地离线发布打包脚本
 生成独立 Windows 便携包与跨平台便携运行包至 dist/ 目录
 """
 import os
@@ -11,7 +11,7 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
 DIST_DIR = BASE_DIR / "dist"
-VERSION = "v1.1.5"
+VERSION = "v1.1.6"
 PKG_NAME = f"AgentHub-Local-{VERSION}"
 STAGE_DIR = DIST_DIR / PKG_NAME
 
@@ -24,12 +24,14 @@ def package():
         shutil.rmtree(STAGE_DIR, ignore_errors=True)
     STAGE_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. 复制后端目录 (排除 __pycache__ 等)
+    # 1. 复制后端目录 (严格排除 __pycache__、个人 data/uploads、tests 等)
     print("  -> 拷贝后端核心模块 backend/ ...")
     shutil.copytree(
         BASE_DIR / "backend",
         STAGE_DIR / "backend",
-        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.db", "logs"),
+        ignore=shutil.ignore_patterns(
+            "__pycache__", "*.pyc", "*.db*", "data", "tests", "logs", "*.log", "diagnose.py"
+        ),
     )
 
     # 2. 复制已导出的静态前端 frontend/out

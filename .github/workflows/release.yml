@@ -46,7 +46,7 @@ jobs:
 
       - name: Package Windows & Cross-Platform Release Archives
         run: |
-          $TAG_NAME = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v1.1.5" }
+          $TAG_NAME = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v1.1.6" }
           New-Item -ItemType Directory -Force -Path dist | Out-Null
           
           # 1. 准备发布目录结构
@@ -55,7 +55,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path $PKG_DIR | Out-Null
 
           # 拷贝核心程序与静态产物 (全量安全校验)
-          if (Test-Path backend) { Copy-Item -Recurse -Force backend $PKG_DIR\backend }
+          if (Test-Path backend) {
+              Copy-Item -Recurse -Force backend $PKG_DIR\backend
+              foreach ($dirty in @("data", "tests", "__pycache__")) {
+                  $dirtyPath = Join-Path "$PKG_DIR\backend" $dirty
+                  if (Test-Path $dirtyPath) { Remove-Item -Recurse -Force $dirtyPath }
+              }
+          }
           if (Test-Path frontend\out) { Copy-Item -Recurse -Force frontend\out $PKG_DIR\frontend\out }
           if (Test-Path skills) {
               Copy-Item -Recurse -Force skills $PKG_DIR\skills

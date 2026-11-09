@@ -51,6 +51,85 @@ export interface MemoryRefItem {
   confidence: number;
 }
 
+export interface ConfirmedFactItem {
+  fact_key: string;
+  fact_value: string;
+  category?: 'user_pref' | 'biz_rule' | 'env_config' | string;
+  workspace_scope?: 'workspace' | 'global';
+}
+
+export interface MemoryFactItem {
+  fact_id: string;
+  workspace_id: string;
+  category: string;
+  fact_key: string;
+  fact_value: string;
+  confidence: number;
+  source_type: string;
+  source_event_id?: string | null;
+  valid_from: string;
+  valid_to?: string | null;
+  recorded_at: string;
+  is_active: boolean;
+  scope: 'workspace' | 'global';
+  overridden_global?: boolean;
+  global_fallback_value?: string | null;
+}
+
+export interface EventLedgerItem {
+  id: string;
+  workspace_id: string;
+  conversation_id: string;
+  turn_id: number;
+  loop_id?: string | null;
+  event_type: string;
+  actor: string;
+  skill_id?: string | null;
+  payload?: Record<string, any>;
+  redactions?: string[];
+  is_redacted: boolean;
+  created_at: string;
+}
+
+export interface ExperienceProposalTriple {
+  problem: string;
+  root_cause: string;
+  solution: string;
+}
+
+export interface ExperienceProposalPayload {
+  target_file?: string;
+  markdown_entry?: string;
+  skill_id?: string;
+  command?: string;
+  description?: string;
+  skill_md?: string;
+  schema_json?: Record<string, any> | null;
+  playbook_md?: string;
+}
+
+export interface ExperienceProposalItem {
+  id: string;
+  workspace_id: string;
+  conversation_id: string;
+  loop_id?: string | null;
+  proposal_type: 'skill_patch' | 'new_skill';
+  target_skill_id?: string | null;
+  proposed_skill_name?: string | null;
+  target_scope: 'workspace' | 'global';
+  trigger_reason: string;
+  title: string;
+  summary: string;
+  experience_triple: ExperienceProposalTriple;
+  diff_preview?: string;
+  payload: ExperienceProposalPayload;
+  status: 'pending' | 'applied' | 'dismissed';
+  created_at: string;
+  resolved_at?: string | null;
+  written_path?: string;
+  skill_dir?: string;
+}
+
 export interface LongTermMemoryItem {
   id: string;
   category: 'env_info' | 'preference' | 'rule';
@@ -111,6 +190,8 @@ export interface Message {
   tool_call_id?: string | null;
   tool_events?: ToolExecutionCardItem[];
   memory_refs?: MemoryRefItem[];
+  fact_refs?: MemoryFactItem[];
+  experience_proposal?: ExperienceProposalItem;
   downgrade_info?: {
     original_model: string;
     current_model: string;
@@ -221,7 +302,9 @@ export interface SkillItem {
   description?: string;
   version?: string;
   has_sop?: boolean;
+  has_playbook?: boolean;
   sop_content?: string;
+  experience_highlights?: string;
 }
 
 export interface ExtensionSkillItem {
@@ -259,6 +342,9 @@ export interface InquiryQuestion {
   label: string;
   options: InquiryOption[];
   default?: string | string[];
+  fact_key?: string;
+  fact_category?: 'user_pref' | 'biz_rule' | 'env_config';
+  fact_scope?: 'workspace' | 'global';
 }
 
 export interface FillTemplateInfo {
