@@ -18,8 +18,10 @@ from ..core.proxy_helper import get_system_proxy_env, get_system_proxy_url
 from ..repository.account_repository import AccountRepository
 from .agent_runner import _find_cli_binary
 
-# 账号目录根路径（本机用户目录下，所有账号子目录的父目录）
-ACCOUNTS_ROOT = Path.home() / ".gemini" / "geminihub-accounts"
+# 账号目录根路径（优先使用 .agenthub/accounts，兼容回退旧路径）
+_new_root = Path.home() / ".agenthub" / "accounts"
+_legacy_root = Path.home() / ".gemini" / "geminihub-accounts"
+ACCOUNTS_ROOT = _legacy_root if not _new_root.exists() and _legacy_root.exists() else _new_root
 
 # 内存中暂存各账号拉起登录时捕获的 OAuth 授权链接或终端命令
 _AUTH_URL_STORE: dict[str, str] = {}
@@ -117,10 +119,10 @@ def open_interactive_terminal(alias: str) -> bool:
             f'$env:GEMINI_CLI_HOME = "{account_dir}"',
             '$env:GEMINI_CLI_TRUST_WORKSPACE = "true"',
             'Write-Host "============================================================" -ForegroundColor Cyan',
-            f'Write-Host " [GeminiHub] 正在为账号 [{alias}] 启动 Google 官方客户端授权" -ForegroundColor Yellow',
+            f'Write-Host " [AgentHub] 正在为账号 [{alias}] 启动 Google 官方客户端授权" -ForegroundColor Yellow',
             'Write-Host "============================================================" -ForegroundColor Cyan',
             f'& "{cli_bin}" -p "hi"',
-            'Write-Host "`n[GeminiHub] 授权已完成或退出，请关闭本窗口返回网页查看状态。" -ForegroundColor Green',
+            'Write-Host "`n[AgentHub] 授权已完成或退出，请关闭本窗口返回网页查看状态。" -ForegroundColor Green',
             'Write-Host "本窗口将在 10 秒后自动关闭..." -ForegroundColor Gray',
             'Start-Sleep -Seconds 10',
         ])
@@ -145,7 +147,8 @@ def open_interactive_terminal(alias: str) -> bool:
 def get_windows_account_cmd(alias: str) -> str:
     """生成适用于 Windows PowerShell 的账号专属交互式登录命令"""
     cli_bin, _ = _find_cli_binary()
-    return f'$env:GEMINI_CLI_HOME="$HOME\\.gemini\\geminihub-accounts\\{alias}"; & "{cli_bin}" -p "hi"'
+    acc_dir = ACCOUNTS_ROOT / alias
+    return f'$env:GEMINI_CLI_HOME="{acc_dir}"; & "{cli_bin}" -p "hi"'
 
 
 def get_account_auth_info(alias: str) -> dict:

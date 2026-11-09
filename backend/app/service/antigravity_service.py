@@ -82,7 +82,7 @@ class AntigravityService:
 
     async def sync_local_accounts(self, import_active: bool = True, import_old: bool = True) -> dict[str, Any]:
         """
-        扫描本地 google_accounts.json 并一键同步导入到 GeminiHub 数据库中
+        扫描本地 google_accounts.json 并一键同步导入到 AgentHub 数据库中
         """
         accounts_json_path = self._resolve_accounts_json_path()
         if not os.path.exists(accounts_json_path):
@@ -134,7 +134,7 @@ class AntigravityService:
     async def switch_active_account(self, target_email: str, sync_priority: bool = True) -> dict[str, Any]:
         """
         一键切换 Antigravity 当前使用的活跃账号（热更新 google_accounts.json）
-        并同步将 GeminiHub 内部对应账号的调度优先级设为 1
+        并同步将 AgentHub 内部对应账号的调度优先级设为 1
         """
         accounts_json_path = self._resolve_accounts_json_path()
         if not os.path.exists(accounts_json_path):
@@ -172,12 +172,12 @@ class AntigravityService:
 
             logger.info(f"Antigravity IDE 活跃账号已切换: [{prev_active}] -> [{target_email}]")
 
-        # 4. 同步提升 GeminiHub 内部该账号的优先级为 1 (Top Priority)
+        # 4. 同步提升 AgentHub 内部该账号的优先级为 1 (Top Priority)
         if sync_priority:
             account = await AccountRepository.get_by_email(target_email)
             if account and account.id:
                 await AccountRepository.update(account.id, {"priority": 1})
-                logger.info(f"已将 GeminiHub 账号 [{account.name}] 设为主力优先级 1")
+                logger.info(f"已将 AgentHub 账号 [{account.name}] 设为主力优先级 1")
 
         return {
             "success": True,

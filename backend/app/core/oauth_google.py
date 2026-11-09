@@ -614,7 +614,7 @@ class GoogleOAuthManager:
                             "<!DOCTYPE html><html><head><meta charset='utf-8'><title>授权成功</title></head>"
                             "<body style='font-family:sans-serif;text-align:center;padding-top:80px;background:#0f172a;color:#f8fafc;'>"
                             f"<h2 style='color:#34d399;'>✅ 账号 {saved['email']} 授权成功！</h2>"
-                            "<p style='color:#94a3b8;'>已自动加入 GeminiHub Local 多账号算力池，您可以关闭此页面返回工作台。</p>"
+                            "<p style='color:#94a3b8;'>已自动加入 AgentHub Local 多账号算力池，您可以关闭此页面返回工作台。</p>"
                             "<script>setTimeout(()=>window.close(), 1200);</script></body></html>"
                         )
                         body = html.encode("utf-8")

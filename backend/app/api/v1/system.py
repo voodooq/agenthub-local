@@ -90,9 +90,16 @@ async def scan_caches() -> list[dict[str, Any]]:
 @router.get("/logs")
 async def get_recent_logs(lines: int = Query(100, ge=10, le=1000)) -> dict[str, Any]:
     """读取本地最新写入的系统运行与错误日志切片"""
-    log_file = Path(settings.db_path).parent / "logs" / "geminihub.log"
+    logs_dir = Path(settings.db_path).parent / "logs"
+    log_file = logs_dir / "agenthub.log"
     if not log_file.exists():
-        log_file = Path("geminihub.log")
+        legacy_log = logs_dir / "geminihub.log"
+        if legacy_log.exists():
+            log_file = legacy_log
+        elif Path("agenthub.log").exists():
+            log_file = Path("agenthub.log")
+        elif Path("geminihub.log").exists():
+            log_file = Path("geminihub.log")
 
     if not log_file.exists():
         return {"file": str(log_file), "lines": []}

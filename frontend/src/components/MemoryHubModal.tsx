@@ -316,7 +316,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
 
       const resData = await res.json();
       if (res.ok) {
-        localStorage.setItem('geminihub_personality_config', JSON.stringify(payload));
+        localStorage.setItem('agenthub_personality_config', JSON.stringify(payload));
         setPersonalityFeedback({
           success: true,
           msg: '回复性格与叠加 SKILL 设置已成功保存并立即生效！',

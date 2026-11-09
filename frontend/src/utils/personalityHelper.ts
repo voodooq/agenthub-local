@@ -7,7 +7,7 @@ import { apiFetch } from './apiClient';
 export async function buildActiveSystemOverride(): Promise<string | undefined> {
   try {
     let savedConfig: any = null;
-    const local = localStorage.getItem('geminihub_personality_config');
+    const local = localStorage.getItem('agenthub_personality_config') || localStorage.getItem('geminihub_personality_config');
     if (local) {
       try {
         savedConfig = JSON.parse(local);

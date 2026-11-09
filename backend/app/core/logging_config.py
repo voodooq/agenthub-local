@@ -21,9 +21,9 @@ def setup_logging() -> None:
     log_dir = Path(settings.db_path).parent / "logs"
     try:
         log_dir.mkdir(parents=True, exist_ok=True)
-        log_file = log_dir / "geminihub.log"
+        log_file = log_dir / "agenthub.log"
     except Exception:
-        log_file = Path("geminihub.log")
+        log_file = Path("agenthub.log")
 
     handlers: list[logging.Handler] = [
         logging.StreamHandler(sys.stdout),
@@ -54,4 +54,4 @@ def setup_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
 
 
-logger = logging.getLogger("geminihub")
+logger = logging.getLogger("agenthub")

@@ -89,7 +89,7 @@ class _StdioMCPConnection:
                 {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "GeminiHub-Local", "version": "2.0.0"},
+                    "clientInfo": {"name": "AgentHub-Local", "version": "1.1.2"},
                 },
                 timeout=10.0,
             )

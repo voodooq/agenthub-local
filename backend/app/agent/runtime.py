@@ -427,7 +427,7 @@ class AgentRuntime:
                                 try:
                                     ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
                                     ws_sp.parent.mkdir(parents=True, exist_ok=True)
-                                    ws_sp.write_text(completed_loop.scratchpad_md, encoding="utf-8")
+                                    ws_sp.write_text(completed_loop.scratchpad_md or "", encoding="utf-8")
                                 except Exception:
                                     pass
                             yield {
@@ -1063,7 +1063,7 @@ class AgentRuntime:
                                 try:
                                     ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
                                     ws_sp.parent.mkdir(parents=True, exist_ok=True)
-                                    ws_sp.write_text(updated_loop.scratchpad_md, encoding="utf-8")
+                                    ws_sp.write_text(updated_loop.scratchpad_md or "", encoding="utf-8")
                                 except Exception:
                                     pass
                             yield {

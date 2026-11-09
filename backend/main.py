@@ -34,7 +34,7 @@ async def watch_parent_process(parent_pid: int) -> None:
     """父进程存活心跳守护器：防止主窗口崩溃后 Python 沦为孤儿僵尸进程"""
     while True:
         if not psutil.pid_exists(parent_pid):
-            logger.info(f"父进程 [PID: {parent_pid}] 已退出，GeminiHub 后端守护服务自毁清理。")
+            logger.info(f"父进程 [PID: {parent_pid}] 已退出，AgentHub 后端守护服务自毁清理。")
             os._exit(0)
         await asyncio.sleep(2)
 
@@ -219,6 +219,7 @@ if static_path:
 def run_server(port: int = 8686):
     import uvicorn
     # 打印约定格式的端口信息，供桌面外壳主进程捕获
+    print(f"AGENT_HUB_PORT={port}", flush=True)
     print(f"GEMINI_HUB_PORT={port}", flush=True)
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="warning")
 
@@ -227,6 +228,6 @@ if __name__ == "__main__":
     target_port = settings.port
     if len(sys.argv) > 1 and sys.argv[1].isdigit():
         target_port = int(sys.argv[1])
-    elif os.environ.get("GEMINI_HUB_DYNAMIC_PORT") == "1":
+    elif os.environ.get("AGENT_HUB_DYNAMIC_PORT") == "1" or os.environ.get("GEMINI_HUB_DYNAMIC_PORT") == "1":
         target_port = find_free_port()
     run_server(target_port)

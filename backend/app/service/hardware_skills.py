@@ -1,5 +1,5 @@
 """
-GeminiHub 本地硬件协同技能与待审批提案管理器 (Hardware Skills & Proposal Queue)
+AgentHub 本地硬件协同技能与待审批提案管理器 (Hardware Skills & Proposal Queue)
 遵循人类确认锁原则 (Human-in-the-Loop)：高危动作必须生成待审批提案，由用户在界面点击确认后执行
 """
 import os

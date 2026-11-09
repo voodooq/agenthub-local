@@ -60,7 +60,13 @@ class Settings(BaseSettings):
                 data_dir = Path(__file__).resolve().parent.parent.parent.parent / "data"
 
             data_dir.mkdir(parents=True, exist_ok=True)
-            self.db_path = str(data_dir / "gemini_hub_local.db")
+            # 默认使用 agenthub_local.db，兼容回退 gemini_hub_local.db
+            new_db = data_dir / "agenthub_local.db"
+            legacy_db = data_dir / "gemini_hub_local.db"
+            if not new_db.exists() and legacy_db.exists():
+                self.db_path = str(legacy_db)
+            else:
+                self.db_path = str(new_db)
 
         if not self.profile_path:
             profile_dir = Path(self.db_path).parent

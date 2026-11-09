@@ -8,7 +8,7 @@ description: 【系统母技能】通过自然语言对话或总结刚才的操�
 # 智能 Skill 构建母技能 (Built-in Skill Creator)
 
 ## 1. 功能定位
-当用户输入 `/new-skill <需求描述>` 或要求“把刚才我们执行的步骤保存为一个新 Skill”时，自动在 `skills/<skill-id>/` 下创建符合 GeminiHub 四元组标准的技能容器。
+当用户输入 `/new-skill <需求描述>` 或要求“把刚才我们执行的步骤保存为一个新 Skill”时，自动在 `skills/<skill-id>/` 下创建符合 AgentHub 四元组标准的技能容器。
 
 ## 2. 标准四元组目录结构 (Skill-as-a-Folder)
 ```text

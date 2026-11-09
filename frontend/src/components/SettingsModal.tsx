@@ -91,7 +91,7 @@ export function SettingsModal({
   }, [isOpen, onClose]);
 
   useEffect(() => {
-    const savedRounds = localStorage.getItem('geminihub_context_rounds');
+    const savedRounds = localStorage.getItem('agenthub_context_rounds') || localStorage.getItem('geminihub_context_rounds');
     if (savedRounds !== null) {
       setContextRounds(parseInt(savedRounds, 10));
     }
@@ -99,7 +99,7 @@ export function SettingsModal({
 
   const handleUpdateContextRounds = (rounds: number) => {
     setContextRounds(rounds);
-    localStorage.setItem('geminihub_context_rounds', rounds.toString());
+    localStorage.setItem('agenthub_context_rounds', rounds.toString());
   };
 
   const handleCleanupDuplicates = async () => {
@@ -340,7 +340,7 @@ export function SettingsModal({
 
       const resData = await res.json();
       if (res.ok) {
-        localStorage.setItem('geminihub_personality_config', JSON.stringify(payload));
+        localStorage.setItem('agenthub_personality_config', JSON.stringify(payload));
         setFeedback({ success: true, msg: '设置与个性化性格已成功保存并立即生效！' });
         if (onSettingsSaved) onSettingsSaved();
       } else {

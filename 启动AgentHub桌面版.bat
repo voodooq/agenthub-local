@@ -11,8 +11,8 @@ echo.
 
 if exist "dist\AgentHub\AgentHub.exe" (
     start "" "dist\AgentHub\AgentHub.exe"
-) else if exist "dist\GeminiHub\GeminiHub.exe" (
-    start "" "dist\GeminiHub\GeminiHub.exe"
+) else if exist "AgentHub.exe" (
+    start "" "AgentHub.exe"
 ) else (
     echo [提示] 正在通过 Python 运行时拉起原生桌面窗体...
     start "" ".\.venv\Scripts\pythonw.exe" "desktop_app.py"

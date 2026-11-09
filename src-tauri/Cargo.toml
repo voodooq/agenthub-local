@@ -1,7 +1,7 @@
 [package]
-name = "geminihub-desktop"
-version = "2.0.0"
-description = "GeminiHub Local Cross-Platform Desktop"
+name = "agenthub-desktop"
+version = "1.1.2"
+description = "AgentHub Local Cross-Platform Desktop"
 edition = "2021"
 
 [build-dependencies]

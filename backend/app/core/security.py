@@ -19,8 +19,8 @@ PROTECTED_PROCESS_NAMES = {
     # Linux 核心进程
     "systemd", "init", "kthreadd", "xorg", "wayland", "gnome-shell",
     "dbus-daemon", "pulseaudio", "pipewire",
-    # GeminiHub 自身核心与 Python 运行时
-    "geminihub", "geminihub.exe", "python", "python.exe", "uvicorn", "uvicorn.exe"
+    # AgentHub 自身核心与 Python 运行时
+    "agenthub", "agenthub.exe", "geminihub", "geminihub.exe", "python", "python.exe", "uvicorn", "uvicorn.exe"
 }
 
 
@@ -39,7 +39,7 @@ def is_process_safe_to_modify(pid: int, current_backend_pid: int = 0) -> Tuple[b
         return False, f"PID {pid} 为系统级内核或根进程，严禁操作"
 
     if current_backend_pid > 0 and pid == current_backend_pid:
-        return False, "禁止终止或修改 GeminiHub 服务自身进程"
+        return False, "禁止终止或修改 AgentHub 服务自身进程"
 
     try:
         proc = psutil.Process(pid)
@@ -51,7 +51,7 @@ def is_process_safe_to_modify(pid: int, current_backend_pid: int = 0) -> Tuple[b
         # 检查是否为当前进程的父进程或自身
         my_pid = os.getpid()
         if pid == my_pid:
-            return False, "禁止干预 GeminiHub 后端进程"
+            return False, "禁止干预 AgentHub 后端进程"
 
         try:
             parent = proc.parent()

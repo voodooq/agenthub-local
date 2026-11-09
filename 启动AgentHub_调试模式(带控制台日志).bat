@@ -14,8 +14,11 @@ echo 正在拉起桌面服务...
 echo.
 
 set "AGENT_HUB_DEBUG=1"
-set "GEMINI_HUB_DEBUG=1"
-.\.venv\Scripts\python.exe desktop_app.py --debug
+if exist "dist\AgentHub\AgentHub.exe" (
+    "dist\AgentHub\AgentHub.exe" --debug
+) else (
+    .\.venv\Scripts\python.exe desktop_app.py --debug
+)
 
 pause
 

@@ -1,5 +1,5 @@
 """
-GeminiHub WorkBuddy 桌面可执行程序一键构建脚本 (Desktop EXE Builder)
+AgentHub WorkBuddy 桌面可执行程序一键构建脚本 (Desktop EXE Builder)
 """
 import sys
 import os
@@ -27,7 +27,7 @@ def build_exe():
     """调用 PyInstaller 打包生成独立桌面程序"""
     build_frontend_if_needed()
 
-    print(">>> 正在启动 PyInstaller 编译桌面原生程序 GeminiHub.exe ...")
+    print(">>> 正在启动 PyInstaller 编译桌面原生程序 AgentHub.exe ...")
     sep = ";" if sys.platform == "win32" else ":"
     static_arg = f"{FRONTEND_OUT}{sep}static"
 
@@ -38,9 +38,11 @@ def build_exe():
         "--noconfirm",
         "--clean",
         "--name",
-        "GeminiHub",
+        "AgentHub",
         "--windowed",  # 无黑色命令行控制台窗口
         "--onedir",    # 目录模式启动速度最快，秒级打开，免重复解压
+        "--paths",
+        str(BASE_DIR / "backend"),
         "--add-data",
         static_arg,
         "--collect-all",
@@ -51,6 +53,8 @@ def build_exe():
         "pythonnet",
         "--collect-all",
         "uvicorn",
+        "--collect-all",
+        "fastapi",
         "--collect-all",
         "psutil",
         "--collect-all",
@@ -65,15 +69,15 @@ def build_exe():
     print(">>> 执行编译命令:", " ".join(cmd))
     subprocess.run(cmd, cwd=str(BASE_DIR), check=True)
 
-    exe_path = BASE_DIR / "dist" / "GeminiHub" / "GeminiHub.exe"
+    exe_path = BASE_DIR / "dist" / "AgentHub" / "AgentHub.exe"
     if exe_path.exists():
         print("\n=======================================================")
         print("[SUCCESS] 桌面原生程序构建成功！")
         print(f"运行路径: {exe_path}")
-        print("双击 GeminiHub.exe 即可直接打开原生窗口应用！")
+        print("双击 AgentHub.exe 即可直接打开原生窗口应用！")
         print("=======================================================\n")
     else:
-        print(">>> 构建完成，但未在预期路径找到 GeminiHub.exe，请检查 dist/ 目录。")
+        print(">>> 构建完成，但未在预期路径找到 AgentHub.exe，请检查 dist/ 目录。")
 
 
 if __name__ == "__main__":

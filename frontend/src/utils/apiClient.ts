@@ -3,7 +3,8 @@
  * 负责自动携带 X-Access-Token 请求头，支持自动向本地后端握手获取令牌与异常拦截
  */
 
-const TOKEN_STORAGE_KEY = 'geminihub_access_token';
+const TOKEN_STORAGE_KEY = 'agenthub_access_token';
+const LEGACY_TOKEN_STORAGE_KEY = 'geminihub_access_token';
 
 let cachedToken: string | null = null;
 
@@ -20,8 +21,8 @@ export async function getAccessToken(): Promise<string> {
     return cachedToken;
   }
 
-  // 2. 从本地 localStorage 中读取
-  const stored = localStorage.getItem(TOKEN_STORAGE_KEY);
+  // 2. 从本地 localStorage 中读取 (兼容旧 key)
+  const stored = localStorage.getItem(TOKEN_STORAGE_KEY) || localStorage.getItem(LEGACY_TOKEN_STORAGE_KEY);
   if (stored) {
     cachedToken = stored;
     return stored;

@@ -112,7 +112,7 @@ class SkillLoader:
                     "---\n\n"
                     "# 智能 Skill 构建母技能 (Built-in Skill Creator)\n\n"
                     "## 1. 功能定位\n"
-                    "当用户输入 `/new-skill <需求描述>` 或要求“把刚才我们执行的步骤保存为一个新 Skill”时，自动在 `skills/<skill-id>/` 下创建符合 GeminiHub 四元组标准的技能容器。\n\n"
+                    "当用户输入 `/new-skill <需求描述>` 或要求“把刚才我们执行的步骤保存为一个新 Skill”时，自动在 `skills/<skill-id>/` 下创建符合 AgentHub 四元组标准的技能容器。\n\n"
                     "## 2. 标准四元组目录结构 (Skill-as-a-Folder)\n"
                     "```text\n"
                     "skills/<skill-id>/\n"

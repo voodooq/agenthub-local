@@ -33,7 +33,7 @@ fn main() {
             // 传入当前 Tauri 宿主进程 PID，供 Python Sidecar 做孤儿进程自毁监听
             let current_pid = std::process::id().to_string();
             let sidecar_cmd = app.shell()
-                .sidecar("geminihub-backend")
+                .sidecar("agenthub-backend")
                 .unwrap()
                 .env("TAURI_PARENT_PID", current_pid);
 
@@ -45,7 +45,8 @@ fn main() {
                 while let Some(event) = rx.recv().await {
                     if let CommandEvent::Stdout(line_bytes) = event {
                         let line = String::from_utf8_lossy(&line_bytes);
-                        if let Some(port_str) = line.strip_prefix("GEMINI_HUB_PORT=") {
+                        let port_opt = line.strip_prefix("AGENT_HUB_PORT=").or_else(|| line.strip_prefix("GEMINI_HUB_PORT="));
+                        if let Some(port_str) = port_opt {
                             if let Ok(port) = port_str.trim().parse::<u16>() {
                                 *port_arc.lock().unwrap() = port;
                                 let _ = app_handle.emit("backend-ready", port);

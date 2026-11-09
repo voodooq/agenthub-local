@@ -19,7 +19,7 @@ import re
 import subprocess
 from typing import Any
 
-logger = logging.getLogger("geminihub.ui_operator")
+logger = logging.getLogger("agenthub.ui_operator")
 
 user32 = ctypes.windll.user32
 WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)

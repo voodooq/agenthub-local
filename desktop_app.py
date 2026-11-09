@@ -93,7 +93,8 @@ def main():
         # 窗口彻底销毁时退出整个进程树
         os._exit(0)
 
-    window.events.closed += on_closed
+    if window:
+        window.events.closed += on_closed
 
     # 启动 GUI 事件循环（private_mode=True 彻底禁用 WebView2 磁盘与 HTTP 强缓存，保证修改代码立即生效）
     webview.start(debug=is_debug, private_mode=True)

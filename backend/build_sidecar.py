@@ -45,15 +45,15 @@ def build_sidecar():
         "--clean",
         "--onefile",
         "--name",
-        "geminihub-backend",
+        "agenthub-backend",
         str(base_dir / "main.py"),
     ]
     subprocess.run(cmd, cwd=str(base_dir), check=True)
 
-    src = base_dir / "dist" / f"geminihub-backend{ext}"
+    src = base_dir / "dist" / f"agenthub-backend{ext}"
     dst_dir = base_dir.parent / "src-tauri" / "binaries"
     dst_dir.mkdir(parents=True, exist_ok=True)
-    dst = dst_dir / f"geminihub-backend-{triple}{ext}"
+    dst = dst_dir / f"agenthub-backend-{triple}{ext}"
 
     if src.exists():
         shutil.move(str(src), str(dst))

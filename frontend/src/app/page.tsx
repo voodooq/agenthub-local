@@ -134,11 +134,11 @@ export default function WorkbenchPage() {
 
   useEffect(() => {
     try {
-      const savedStrategy = localStorage.getItem('geminihub_exec_strategy') as ExecutionStrategy;
+      const savedStrategy = (localStorage.getItem('agenthub_exec_strategy') || localStorage.getItem('geminihub_exec_strategy')) as ExecutionStrategy;
       if (savedStrategy === 'direct' || savedStrategy === 'plan_first') {
         setExecutionStrategy(savedStrategy);
       }
-      const savedClarify = localStorage.getItem('geminihub_clarify_mode');
+      const savedClarify = localStorage.getItem('agenthub_clarify_mode') ?? localStorage.getItem('geminihub_clarify_mode');
       if (savedClarify !== null) {
         setClarifyMode(savedClarify === 'true');
       }
@@ -148,7 +148,7 @@ export default function WorkbenchPage() {
   const handleSwitchExecStrategy = (strategy: ExecutionStrategy) => {
     setExecutionStrategy(strategy);
     try {
-      localStorage.setItem('geminihub_exec_strategy', strategy);
+      localStorage.setItem('agenthub_exec_strategy', strategy);
     } catch {}
   };
 
@@ -156,7 +156,7 @@ export default function WorkbenchPage() {
     setClarifyMode((prev) => {
       const next = !prev;
       try {
-        localStorage.setItem('geminihub_clarify_mode', String(next));
+        localStorage.setItem('agenthub_clarify_mode', String(next));
       } catch {}
       return next;
     });
@@ -674,7 +674,7 @@ export default function WorkbenchPage() {
       // 读取用户配置的多轮对话记忆上下文轮数
       let memoryRounds = 10;
       try {
-        const savedRounds = localStorage.getItem('geminihub_context_rounds');
+        const savedRounds = localStorage.getItem('agenthub_context_rounds') || localStorage.getItem('geminihub_context_rounds');
         if (savedRounds !== null) memoryRounds = parseInt(savedRounds, 10);
       } catch (e) {}
 

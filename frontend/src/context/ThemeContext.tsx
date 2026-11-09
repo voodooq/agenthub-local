@@ -24,7 +24,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   // 初始化加载本地持久化偏好
   useEffect(() => {
     try {
-      const saved = localStorage.getItem('geminihub_theme_mode') as ThemeMode;
+      const saved = (localStorage.getItem('agenthub_theme_mode') || localStorage.getItem('geminihub_theme_mode')) as ThemeMode;
       if (saved && ['light', 'dark', 'system'].includes(saved)) {
         setThemeState(saved);
       } else {
@@ -87,7 +87,7 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
   const setTheme = (newTheme: ThemeMode) => {
     setThemeState(newTheme);
     try {
-      localStorage.setItem('geminihub_theme_mode', newTheme);
+      localStorage.setItem('agenthub_theme_mode', newTheme);
     } catch {}
   };
 

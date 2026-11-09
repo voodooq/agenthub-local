@@ -274,7 +274,7 @@ class EnginePoolService:
                 logger.error("算力池告警：所有账号均处于 Cooldown 或已用尽配额！")
                 yield {
                     "type": "error",
-                    "content": "【GeminiHub】当前所有账号均处于冷却或配额用尽状态，请稍候再试或添加新账号。"
+                    "content": "【AgentHub】当前所有账号均处于冷却或配额用尽状态，请稍候再试或添加新账号。"
                 }
                 return
 

@@ -14,7 +14,7 @@ export function generateScenarioThinking(prompt: string): string {
   let personaId = 'architect';
   let activeSkills: string[] = [];
   try {
-    const raw = localStorage.getItem('geminihub_personality_config');
+    const raw = localStorage.getItem('agenthub_personality_config') || localStorage.getItem('geminihub_personality_config');
     if (raw) {
       const cfg = JSON.parse(raw);
       personaId = cfg.selected_persona_id || 'architect';
