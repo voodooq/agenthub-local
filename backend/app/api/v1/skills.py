@@ -1,6 +1,7 @@
 """
 技能 (Skills) 检索与工作区沙盒管理路由
 """
+import asyncio
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 from ...core.logging_config import logger
@@ -19,34 +20,39 @@ class WorkspaceSkillCreateRequest(BaseModel):
 
 
 @router.get("")
-async def list_skills(workspace_id: str | None = Query(None)):
+async def list_skills(
+    workspace_id: str | None = Query(None),
+    include_content: bool = Query(False, description="是否一并返回完整 SOP 正文，列表页默认 False 仅返摘要"),
+    refresh: bool = Query(False, description="是否强制绕过列表短窗口快照缓存即时重扫磁盘"),
+):
     """
-    获取可用技能列表（若提供 workspace_id 则合并该工作区的 L2 专属技能与 L1 底座技能）
+    获取可用技能列表（若提供 workspace_id 则合并该工作区的 L2 专属技能与 L1 底座技能）。
+    在线程池执行磁盘扫描，避免大量技能文件 I/O 阻塞异步事件循环。
     """
     ws_root = None
     if workspace_id:
-        ws = await WorkspaceRepository.get_by_id(workspace_id)
-        if ws:
-            ws_root = ws["root_path"]
+        ws_root = await WorkspaceRepository.get_root_path_by_id(workspace_id)
 
     service = SkillService(workspace_root=ws_root)
-    skills = service.list_all_skills()
+    skills = await asyncio.to_thread(
+        service.list_all_skills,
+        include_content=include_content,
+        force_refresh=refresh,
+    )
     return {"skills": skills, "total": len(skills)}
 
 
 @router.get("/{name}")
 async def get_skill_detail(name: str, workspace_id: str | None = Query(None)):
     """
-    获取指定技能的 SOP 明文规程
+    按需获取单个指定技能的 SOP 明文规程
     """
     ws_root = None
     if workspace_id:
-        ws = await WorkspaceRepository.get_by_id(workspace_id)
-        if ws:
-            ws_root = ws["root_path"]
+        ws_root = await WorkspaceRepository.get_root_path_by_id(workspace_id)
 
     service = SkillService(workspace_root=ws_root)
-    detail = service.get_skill_detail(name)
+    detail = await asyncio.to_thread(service.get_skill_detail, name)
     if not detail:
         raise HTTPException(status_code=404, detail=f"未找到技能: {name}")
     return detail
@@ -55,15 +61,16 @@ async def get_skill_detail(name: str, workspace_id: str | None = Query(None)):
 @router.post("")
 async def create_workspace_skill(req: WorkspaceSkillCreateRequest):
     """
-    在工作区物理路径下创建或覆盖 L2 专属技能 (<workspace>/.agenthub/skills/<name>/SKILL.md)
+    在工作区物理路径下创建或覆盖 L2 专属技能 (<workspace>/skills/<name>/SKILL.md)
     """
-    ws = await WorkspaceRepository.get_by_id(req.workspace_id)
-    if not ws:
+    ws_root = await WorkspaceRepository.get_root_path_by_id(req.workspace_id)
+    if not ws_root:
         raise HTTPException(status_code=404, detail="工作区不存在")
 
-    service = SkillService(workspace_root=ws["root_path"])
+    service = SkillService(workspace_root=ws_root)
     try:
-        saved = service.save_workspace_skill(
+        saved = await asyncio.to_thread(
+            service.save_workspace_skill,
             skill_name=req.name,
             command=req.command,
             description=req.description,
@@ -80,13 +87,12 @@ async def delete_workspace_skill(name: str, workspace_id: str = Query(..., descr
     """
     删除指定工作区私有专属技能
     """
-    ws = await WorkspaceRepository.get_by_id(workspace_id)
-    if not ws:
+    ws_root = await WorkspaceRepository.get_root_path_by_id(workspace_id)
+    if not ws_root:
         raise HTTPException(status_code=404, detail="工作区不存在")
 
-    service = SkillService(workspace_root=ws["root_path"])
-    deleted = service.delete_workspace_skill(name)
+    service = SkillService(workspace_root=ws_root)
+    deleted = await asyncio.to_thread(service.delete_workspace_skill, name)
     if not deleted:
         raise HTTPException(status_code=404, detail=f"未找到可删除的工作区专属技能: {name}")
     return {"success": True, "deleted": name}
-

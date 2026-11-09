@@ -15,6 +15,11 @@ import {
 import { Workspace, SkillItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 import { useLanguage } from '@/context/LanguageContext';
+import {
+  fetchWorkspaceSkills,
+  getCachedWorkspaceSkills,
+  invalidateWorkspaceSkills,
+} from '@/utils/skillCache';
 import { SopDrawer } from './SopDrawer';
 
 interface SkillsViewProps {
@@ -36,15 +41,27 @@ export function SkillsView({ workspace }: SkillsViewProps) {
   const [newSkillDesc, setNewSkillDesc] = useState('');
   const [newSkillSop, setNewSkillSop] = useState('');
 
-  const fetchSkills = async () => {
-    setLoading(true);
-    try {
-      const qs = workspace ? `?workspace_id=${workspace.id}` : '';
-      const res = await apiFetch(`/api/v1/skills${qs}`);
-      if (res.ok) {
-        const data = await res.json();
-        setSkills(data.skills || []);
+  const fetchSkills = async (forceRefresh = false) => {
+    const wsId = workspace?.id;
+    if (forceRefresh) {
+      invalidateWorkspaceSkills(wsId);
+      setLoading(true);
+    } else {
+      const cached = getCachedWorkspaceSkills(wsId);
+      if (cached) {
+        setSkills(cached);
+        setLoading(false);
+      } else {
+        setLoading(true);
       }
+    }
+
+    try {
+      const list = await fetchWorkspaceSkills(wsId, {
+        force: true,
+        refreshBackend: forceRefresh,
+      });
+      setSkills(list);
     } catch (e) {
       console.error('拉取技能失败:', e);
     } finally {
@@ -53,7 +70,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
   };
 
   useEffect(() => {
-    fetchSkills();
+    fetchSkills(false);
   }, [workspace?.id]);
 
   const handleCreateSkill = async () => {
@@ -76,7 +93,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
         setNewSkillCommand('');
         setNewSkillDesc('');
         setNewSkillSop('');
-        await fetchSkills();
+        await fetchSkills(true);
       }
     } catch (e) {
       console.error('创建技能失败:', e);
@@ -97,7 +114,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
         if (selectedSkill?.name === skill.name) {
           setSelectedSkill(null);
         }
-        await fetchSkills();
+        await fetchSkills(true);
       } else {
         const data = await res.json().catch(() => ({}));
         alert(data.detail || t('删除技能失败'));
@@ -155,7 +172,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
           <div className="flex items-center space-x-3">
             {activeTab === 'skills' && (
               <button
-                onClick={fetchSkills}
+                onClick={() => fetchSkills(true)}
                 disabled={loading}
                 title={t('重新扫描工作区与全局底座技能')}
                 className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-foreground text-xs transition disabled:opacity-50"
@@ -399,7 +416,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
         skill={selectedSkill}
         workspaceId={workspace?.id}
         onClose={() => setSelectedSkill(null)}
-        onSkillDeleted={() => fetchSkills()}
+        onSkillDeleted={() => fetchSkills(true)}
       />
     </div>
   );

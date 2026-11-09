@@ -127,7 +127,7 @@ export function Sidebar({
             <span className="text-xs font-bold tracking-wider text-muted-foreground font-mono flex items-center space-x-1.5 pl-1">
               <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
               <span>AGENT-HUB</span>
-              <span className="text-[10px] text-muted-foreground/70 font-normal">v1.1.3</span>
+              <span className="text-[10px] text-muted-foreground/70 font-normal">v1.1.4</span>
             </span>
           )}
           <button

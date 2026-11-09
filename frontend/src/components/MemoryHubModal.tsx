@@ -23,6 +23,13 @@ import {
 } from 'lucide-react';
 import { LongTermMemoryItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
+import {
+  fetchExtensionSkillDetail,
+  fetchExtensionSkills,
+  getCachedExtensionSkills,
+  invalidateWorkspaceSkills,
+  setExtensionSkillsCache,
+} from '@/utils/skillCache';
 import { PersonaPreset, SkillItem } from './SettingsModal';
 
 interface MemoryHubModalProps {
@@ -35,7 +42,8 @@ interface SkillInfo {
   id: string;
   name: string;
   description: string;
-  path: string;
+  path?: string;
+  has_content?: boolean;
   content?: string;
   is_builtin?: boolean;
 }
@@ -100,6 +108,7 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
   const [mcpServers, setMcpServers] = useState<Record<string, any>>({});
   const [extFeedback, setExtFeedback] = useState<{ success: boolean; msg: string } | null>(null);
   const [previewSkillId, setPreviewSkillId] = useState<string | null>(null);
+  const [loadingPreviewId, setLoadingPreviewId] = useState<string | null>(null);
 
   // 新建/导入 Workspace Skill 状态
   const [skillFormMode, setSkillFormMode] = useState<'none' | 'create' | 'import'>('none');
@@ -160,15 +169,16 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
   };
 
   const fetchExtensions = async () => {
+    const cachedSkills = getCachedExtensionSkills();
+    if (cachedSkills) {
+      setSkills(cachedSkills);
+    }
     try {
-      const [sRes, mRes] = await Promise.all([
-        apiFetch('/api/v1/extensions/skills'),
+      const [extSkills, mRes] = await Promise.all([
+        fetchExtensionSkills({ force: true }),
         apiFetch('/api/v1/extensions/mcp'),
       ]);
-      if (sRes.ok) {
-        const sData = await sRes.json();
-        setSkills(sData.skills || []);
-      }
+      setSkills(extSkills);
       if (mRes.ok) {
         const mData = await mRes.json();
         setMcpServers(mData.mcpServers || {});
@@ -363,7 +373,10 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
       });
       const data = await res.json();
       if (res.ok) {
-        setSkills(data.skills || []);
+        const freshSkills = data.skills || [];
+        setSkills(freshSkills);
+        setExtensionSkillsCache(freshSkills);
+        invalidateWorkspaceSkills();
         setNewSkillName('');
         setNewSkillDesc('');
         setNewSkillContent('');
@@ -393,7 +406,10 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
       });
       const data = await res.json();
       if (res.ok) {
-        setSkills(data.skills || []);
+        const freshSkills = data.skills || [];
+        setSkills(freshSkills);
+        setExtensionSkillsCache(freshSkills);
+        invalidateWorkspaceSkills();
         setImportSkillText('');
         setSkillFormMode('none');
         setExtFeedback({ success: true, msg: `✅ 成功导入并挂载技能包：${data.skill?.name}` });
@@ -424,10 +440,36 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
       });
       const data = await res.json();
       if (res.ok) {
-        setSkills(data.skills || []);
+        const freshSkills = data.skills || [];
+        setSkills(freshSkills);
+        setExtensionSkillsCache(freshSkills);
+        invalidateWorkspaceSkills();
         setExtFeedback({ success: true, msg: `已卸载技能包 [${skillId}]` });
       }
     } catch (e) {}
+  };
+
+  const handleToggleSkillPreview = async (sk: SkillInfo) => {
+    if (previewSkillId === sk.id) {
+      setPreviewSkillId(null);
+      return;
+    }
+    setPreviewSkillId(sk.id);
+    if (sk.content) return;
+
+    setLoadingPreviewId(sk.id);
+    try {
+      const detail = await fetchExtensionSkillDetail(sk.id);
+      if (detail?.content) {
+        setSkills((prev) =>
+          prev.map((item) => (item.id === sk.id ? { ...item, content: detail.content } : item))
+        );
+      }
+    } catch {
+      // 忽略瞬时异常
+    } finally {
+      setLoadingPreviewId((curr) => (curr === sk.id ? null : curr));
+    }
   };
 
   const handleAddMcpServer = async () => {
@@ -1218,12 +1260,10 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                           </div>
 
                           <div className="flex items-center space-x-1 shrink-0">
-                            {sk.content && (
+                            {(sk.content || sk.has_content) && (
                               <button
                                 type="button"
-                                onClick={() =>
-                                  setPreviewSkillId(isPreviewing ? null : sk.id)
-                                }
+                                onClick={() => handleToggleSkillPreview(sk)}
                                 className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
                                 title="查看 SKILL.md 内容"
                               >
@@ -1241,9 +1281,11 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
                           </div>
                         </div>
 
-                        {isPreviewing && sk.content && (
+                        {isPreviewing && (
                           <pre className="p-3 rounded-lg bg-surface-card border border-border text-[11px] font-mono text-muted-foreground overflow-x-auto whitespace-pre-wrap max-h-48">
-                            {sk.content}
+                            {loadingPreviewId === sk.id
+                              ? '正在按需读取 SKILL.md 原文...'
+                              : sk.content || '暂无内容'}
                           </pre>
                         )}
                       </div>

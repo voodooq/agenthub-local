@@ -1,10 +1,10 @@
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { Folder, Globe, FileText, Search, X } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Folder, Globe, FileText, X, ChevronDown } from 'lucide-react';
 import { SkillItem } from '@/types';
-import { apiFetch } from '@/utils/apiClient';
 import { useLanguage } from '@/context/LanguageContext';
+import { fetchWorkspaceSkills, getCachedWorkspaceSkills } from '@/utils/skillCache';
 
 interface SkillPickerModalProps {
   workspaceId: string;
@@ -13,6 +13,8 @@ interface SkillPickerModalProps {
   onSelectSkill: (command: string) => void;
   onViewSop: (skill: SkillItem) => void;
 }
+
+const DEFAULT_VISIBLE_LIMIT = 80;
 
 export function SkillPickerModal({
   workspaceId,
@@ -25,28 +27,43 @@ export function SkillPickerModal({
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showAll, setShowAll] = useState(false);
 
   useEffect(() => {
     if (!isOpen) return;
-    const fetchSkills = async () => {
-      setLoading(true);
-      try {
-        const res = await apiFetch(`/api/v1/skills?workspace_id=${workspaceId}`);
-        if (res.ok) {
-          const data = await res.json();
-          setSkills(data.skills || []);
-        }
-      } catch (e) {
-        console.error('获取技能列表失败:', e);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetchSkills();
-    setSearch('');
-  }, [isOpen, workspaceId]);
+    let cancelled = false;
 
-  if (!isOpen) return null;
+    setSearch('');
+    setShowAll(false);
+
+    // 优先使用缓存立即 0ms 渲染，随后后台静默校验更新
+    const cached = getCachedWorkspaceSkills(workspaceId);
+    if (cached) {
+      setSkills(cached);
+      setLoading(false);
+    } else {
+      setLoading(true);
+    }
+
+    fetchWorkspaceSkills(workspaceId, { force: true })
+      .then((freshList) => {
+        if (!cancelled) {
+          setSkills(freshList);
+        }
+      })
+      .catch((e) => {
+        console.error('获取技能列表失败:', e);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isOpen, workspaceId]);
 
   const getDisplayCommand = (sk: SkillItem): string => {
     if (sk.command?.trim()) {
@@ -55,18 +72,43 @@ export function SkillPickerModal({
     return `/${sk.name}`;
   };
 
-  const filtered = skills.filter((s) => {
-    const term = search.toLowerCase();
-    const cmd = getDisplayCommand(s).toLowerCase();
-    return (
-      s.name.toLowerCase().includes(term) ||
-      cmd.includes(term) ||
-      (s.description && s.description.toLowerCase().includes(term))
-    );
-  });
+  const filtered = useMemo(() => {
+    const term = search.trim().toLowerCase();
+    if (!term) return skills;
+    return skills.filter((s) => {
+      const cmd = (
+        s.command?.trim()
+          ? (s.command.trim().startsWith('/') ? s.command.trim() : `/${s.command.trim()}`)
+          : `/${s.name}`
+      ).toLowerCase();
+      return (
+        s.name.toLowerCase().includes(term) ||
+        cmd.includes(term) ||
+        (s.description && s.description.toLowerCase().includes(term))
+      );
+    });
+  }, [skills, search]);
 
-  const workspaceSkills = filtered.filter((s) => s.scope === 'workspace');
-  const globalSkills = filtered.filter((s) => s.scope === 'global');
+  // 技能数量极多时限制首屏 DOM 挂载上限，防止浏览器弹窗重排卡顿
+  const visibleItems = useMemo(() => {
+    if (showAll || filtered.length <= DEFAULT_VISIBLE_LIMIT) {
+      return filtered;
+    }
+    return filtered.slice(0, DEFAULT_VISIBLE_LIMIT);
+  }, [filtered, showAll]);
+
+  const workspaceSkills = useMemo(
+    () => visibleItems.filter((s) => s.scope === 'workspace'),
+    [visibleItems]
+  );
+  const globalSkills = useMemo(
+    () => visibleItems.filter((s) => s.scope === 'global'),
+    [visibleItems]
+  );
+
+  if (!isOpen) return null;
+
+  const hasMoreItems = filtered.length > visibleItems.length;
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Escape') {
@@ -100,6 +142,11 @@ export function SkillPickerModal({
             className="flex-1 bg-transparent text-sm text-foreground placeholder-muted-foreground focus:outline-none"
             autoFocus
           />
+          {skills.length > 0 && (
+            <span className="text-[11px] font-mono text-muted-foreground/80 shrink-0">
+              {filtered.length}/{skills.length}
+            </span>
+          )}
           <button
             onClick={onClose}
             className="p-1 rounded hover:bg-surface-200 text-muted-foreground hover:text-foreground transition"
@@ -201,6 +248,19 @@ export function SkillPickerModal({
                     })}
                   </div>
                 </div>
+              )}
+
+              {hasMoreItems && (
+                <button
+                  type="button"
+                  onClick={() => setShowAll(true)}
+                  className="w-full py-2 rounded-xl border border-border/80 bg-surface-50 hover:bg-surface-100 text-xs text-muted-foreground hover:text-foreground transition flex items-center justify-center space-x-1.5"
+                >
+                  <ChevronDown className="w-3.5 h-3.5" />
+                  <span>
+                    {t('展开全部')} ({visibleItems.length} / {filtered.length})
+                  </span>
+                </button>
               )}
             </>
           )}

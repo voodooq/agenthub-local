@@ -1,8 +1,9 @@
 """
 长期记忆画像管理 (Memory Hub)、多协议算力池 (LLM Providers)、四步跨平台导入向导 (Unified Importer) 与 Skill/MCP 扩展 API
 """
+import asyncio
 from typing import Any
-from fastapi import APIRouter, HTTPException, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel, Field
 
 from ...memory.long_term import long_term_memory
@@ -129,10 +130,26 @@ class MCPImportRequest(BaseModel):
 
 
 @router.get("/extensions/skills")
-async def list_installed_skills():
+async def list_installed_skills(
+    include_content: bool = Query(False, description="是否一并返回完整 Markdown 正文，默认 False 仅返摘要"),
+    refresh: bool = Query(False, description="是否强制绕过列表短窗口快照缓存即时重扫磁盘"),
+):
     """获取本地 skills/ 目录下已挂载的所有按需专业技能包（含绑定的 /command 斜杠指令）"""
-    skills = skill_loader.list_skills()
+    skills = await asyncio.to_thread(
+        skill_loader.list_skills,
+        include_content=include_content,
+        force_refresh=refresh,
+    )
     return {"skills": skills, "total": len(skills)}
+
+
+@router.get("/extensions/skills/{skill_id}")
+async def get_installed_skill_detail(skill_id: str):
+    """按需获取单个扩展技能包或 MCP 说明的完整 SKILL.md 与解析正文"""
+    detail = await asyncio.to_thread(skill_loader.get_skill_detail_item, skill_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail=f"未找到技能包: {skill_id}")
+    return detail
 
 
 @router.post("/extensions/skills")
@@ -140,13 +157,15 @@ async def create_or_update_skill(req: SkillSaveRequest):
     """手动新建或更新一个本地按需专业技能包 (skills/<id>/SKILL.md)"""
     if not req.name.strip() or not req.content.strip():
         raise HTTPException(status_code=400, detail="技能名称与正文规程不能为空")
-    saved = skill_loader.save_skill(
+    saved = await asyncio.to_thread(
+        skill_loader.save_skill,
         name=req.name,
         description=req.description,
         content=req.content,
         skill_id=req.id,
     )
-    return {"status": "ok", "skill": saved, "skills": skill_loader.list_skills()}
+    skills = await asyncio.to_thread(skill_loader.list_skills, include_content=False)
+    return {"status": "ok", "skill": saved, "skills": skills}
 
 
 @router.post("/extensions/skills/import")
@@ -154,8 +173,13 @@ async def import_skill_from_markdown(req: SkillImportRequest):
     """导入外部 SKILL.md 文件或粘贴的 Markdown 技能包"""
     if not req.content.strip():
         raise HTTPException(status_code=400, detail="导入的 SKILL.md 内容不能为空")
-    saved = skill_loader.import_skill_markdown(raw_md=req.content, filename_hint=req.filename)
-    return {"status": "ok", "skill": saved, "skills": skill_loader.list_skills()}
+    saved = await asyncio.to_thread(
+        skill_loader.import_skill_markdown,
+        raw_md=req.content,
+        filename_hint=req.filename,
+    )
+    skills = await asyncio.to_thread(skill_loader.list_skills, include_content=False)
+    return {"status": "ok", "skill": saved, "skills": skills}
 
 
 @router.post("/extensions/skills/install-repo")
@@ -163,7 +187,8 @@ async def install_skill_from_repo(req: SkillRepoInstallRequest):
     """一键从 GitHub 仓库或远程 URL 安装标准四元组 Skill 技能包"""
     try:
         saved = await skill_loader.install_from_repo_or_url(req.source)
-        return {"status": "ok", "skill": saved, "skills": skill_loader.list_skills()}
+        skills = await asyncio.to_thread(skill_loader.list_skills, include_content=False)
+        return {"status": "ok", "skill": saved, "skills": skills}
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"一键安装 Skill 失败: {str(e)}")
 
@@ -171,10 +196,11 @@ async def install_skill_from_repo(req: SkillRepoInstallRequest):
 @router.delete("/extensions/skills/{skill_id}")
 async def delete_installed_skill(skill_id: str):
     """删除指定的本地 Skill 技能包"""
-    ok = skill_loader.delete_skill(skill_id)
+    ok = await asyncio.to_thread(skill_loader.delete_skill, skill_id)
     if not ok:
         raise HTTPException(status_code=404, detail="未找到该技能包或已删除")
-    return {"status": "ok", "id": skill_id, "skills": skill_loader.list_skills()}
+    skills = await asyncio.to_thread(skill_loader.list_skills, include_content=False)
+    return {"status": "ok", "id": skill_id, "skills": skills}
 
 
 @router.get("/extensions/mcp")
@@ -187,6 +213,7 @@ async def get_mcp_servers_config():
 async def update_mcp_servers_config(req: MCPConfigUpdateRequest):
     """保存并更新 mcp_servers.json 配置"""
     mcp_manager.save_config({"mcpServers": req.mcpServers})
+    skill_loader.invalidate_cache()
     return {"status": "ok", "mcpServers": req.mcpServers}
 
 
@@ -206,6 +233,7 @@ async def add_or_update_mcp_server(req: MCPServerSaveRequest):
         "enabled": req.enabled,
     }
     mcp_manager.save_config({"mcpServers": servers})
+    skill_loader.invalidate_cache()
     return {"status": "ok", "mcpServers": servers}
 
 
@@ -244,6 +272,7 @@ async def import_mcp_servers_json(req: MCPImportRequest):
         )
 
     mcp_manager.save_config({"mcpServers": servers})
+    skill_loader.invalidate_cache()
     return {"status": "ok", "imported_count": imported_count, "mcpServers": servers}
 
 
@@ -255,6 +284,7 @@ async def delete_mcp_server(server_name: str):
     if server_name in servers:
         del servers[server_name]
         mcp_manager.save_config({"mcpServers": servers})
+        skill_loader.invalidate_cache()
     return {"status": "ok", "mcpServers": servers}
 
 

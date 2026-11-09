@@ -92,6 +92,18 @@ class WorkspaceRepository:
             return item
 
     @staticmethod
+    async def get_root_path_by_id(ws_id: str) -> str | None:
+        """
+        轻量查询工作区物理根目录路径。
+        NOTE: 仅供技能扫描、资产检索等高频路径依赖场景调用，跳过聚合统计与 WORKSPACE.md 读取以降低延迟。
+        """
+        query = "SELECT root_path FROM workspaces WHERE id = ? LIMIT 1;"
+        async with db_manager.get_connection() as conn:
+            cursor = await conn.execute(query, (ws_id,))
+            row = await cursor.fetchone()
+            return row["root_path"] if row else None
+
+    @staticmethod
     async def create(data: dict[str, Any]) -> dict[str, Any]:
         """创建或挂载工作区"""
         ws_id = data.get("id") or str(uuid.uuid4())

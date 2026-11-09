@@ -1,10 +1,10 @@
 """
-AgentHub Local v1.1.3 独立可执行程序与离线发布包一键构建脚本 (Release EXE Builder)
+AgentHub Local v1.1.4 独立可执行程序与离线发布包一键构建脚本 (Release EXE Builder)
 核心目标：
 1. 使用 PyInstaller 将完整 Python 运行环境、WebView2 宿主外壳与后端 FastAPI 编译为独立的原生绿色免安装目录 (dist/AgentHub/)
 2. 内嵌最新编译的前端静态页面 (static/)、全局默认技能 (skills/) 与 MCP 初始配置 (mcp_servers.json)
 3. 确保 0 私有数据污染（绝对不包含任何测试账号、旧数据库或历史路径，初次启动自动建全新库）
-4. 一键压缩打包为 AgentHub-Local-v1.1.3-windows-x64.zip，可直接上传发布至 GitHub Releases
+4. 一键压缩打包为 AgentHub-Local-v1.1.4-windows-x64.zip，可直接上传发布至 GitHub Releases
 """
 import os
 import sys
@@ -18,7 +18,7 @@ FRONTEND_DIR = BASE_DIR / "frontend"
 FRONTEND_OUT = FRONTEND_DIR / "out"
 DIST_DIR = BASE_DIR / "dist"
 BUILD_DIR = BASE_DIR / "build"
-RELEASE_VERSION = "v1.1.3"
+RELEASE_VERSION = "v1.1.4"
 APP_NAME = "AgentHub"
 OUTPUT_DIR = DIST_DIR / APP_NAME
 ZIP_NAME = f"AgentHub-Local-{RELEASE_VERSION}-windows-x64.zip"
@@ -192,7 +192,7 @@ def assemble_standalone_package():
         'title AgentHub Local 调试控制台\r\n'
         'cd /d "%~dp0"\r\n'
         'echo ========================================================\r\n'
-        'echo   AgentHub Local v1.1.3 调试运行模式 (按 Ctrl+C 可停止)\r\n'
+        'echo   AgentHub Local v1.1.4 调试运行模式 (按 Ctrl+C 可停止)\r\n'
         'echo ========================================================\r\n'
         'echo.\r\n'
         '"%~dp0AgentHub.exe" --debug\r\n'

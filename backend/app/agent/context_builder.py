@@ -5,6 +5,7 @@
 2. Observation Masking: 历史轮次 (turn_id < current_turn_id) 的超长工具输出自动替换为单行 compressed_content 摘要
 3. 按场景 (oneshot / chat / agent) 差异化装配：长期记忆 Top 5 + 工作记忆草稿纸 + 短期 Turn 滑动窗口 + 工具协议
 """
+import asyncio
 import json
 import re
 from typing import Any
@@ -226,15 +227,15 @@ class ContextBuilder:
         if rolling_summary.strip():
             system_parts.append(f"### 📜 更早期的历史对话浓缩背景 (Rolling Summary)：\n{rolling_summary.strip()}")
 
-        # 4. 挂载按需专业技能摘要 (Skills Summary) 与斜杠指令直通激活
-        skills_summary = skill_loader.get_skills_summary_prompt()
+        # 4. 挂载按需专业技能摘要 (Skills Summary) 与斜杠指令直通激活（放到线程池防止大目录扫描卡顿）
+        skills_summary = await asyncio.to_thread(skill_loader.get_skills_summary_prompt)
         if skills_summary:
             system_parts.append(skills_summary)
 
         # 若用户输入了 /command 或 /skill-name，自动预加载对应 Skill 的完整四元组规程（含 tools/、knowledge/、schema.json 指引）
-        matched_skill = skill_loader.resolve_slash_command(user_query)
+        matched_skill = await asyncio.to_thread(skill_loader.resolve_slash_command, user_query)
         if matched_skill:
-            full_skill_md = skill_loader.get_full_skill_markdown(matched_skill["id"])
+            full_skill_md = await asyncio.to_thread(skill_loader.get_full_skill_markdown, matched_skill["id"])
             system_parts.append(
                 f"### 🎯 已由斜杠指令 `{matched_skill['command']}` 直接激活的四元组技能规程 (`{matched_skill['id']}`)：\n"
                 f"请严格遵循以下技能规程处理用户请求：\n{full_skill_md}"

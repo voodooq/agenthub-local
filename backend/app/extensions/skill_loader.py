@@ -18,6 +18,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -50,7 +52,28 @@ class SkillLoader:
             self.base_dir = Path(__file__).resolve().parent.parent.parent.parent
         self.skills_dir = Path(workspace_skills_dir) if workspace_skills_dir else (self.base_dir / "skills")
         self.suites_dir = Path(commercial_suites_dir) if commercial_suites_dir else (self.base_dir / "suites")
+        self._cache_lock = threading.RLock()
+        self._snapshot_epoch = 0
+        self._snapshot_ttl_seconds = 10.0
+        # (skill_dir_str, include_content) -> (signature_tuple, skill_item_dict)
+        self._skill_cache: dict[tuple[str, bool], tuple[Any, dict[str, Any]]] = {}
+        self._mcp_cfg_cache: tuple[int, int, dict[str, Any]] | None = None
+        # include_content -> (epoch, monotonic_ts, roots_sig, skills_list)
+        self._list_snapshot_cache: dict[bool, tuple[int, float, tuple[Any, ...], list[dict[str, Any]]]] = {}
         self._ensure_default_skills()
+
+    def invalidate_cache(self) -> None:
+        """清空 SkillLoader 内存摘要与详情缓存，保证技能安装/编辑/删除后立即可见"""
+        with self._cache_lock:
+            self._snapshot_epoch += 1
+            self._skill_cache.clear()
+            self._mcp_cfg_cache = None
+            self._list_snapshot_cache.clear()
+        try:
+            from ..skills.skill_service import invalidate_skill_file_cache
+            invalidate_skill_file_cache()
+        except Exception:
+            pass
 
     def _ensure_default_skills(self) -> None:
         """确保本地 skills 目录存在，并初始化内置标准 Skill 与 `/new-skill` 母技能"""
@@ -194,43 +217,70 @@ class SkillLoader:
         }
 
     @staticmethod
-    def _inspect_four_tuple(skill_dir: Path) -> dict[str, Any]:
+    def _inspect_four_tuple(skill_dir: Path, load_schema_content: bool = True) -> dict[str, Any]:
         """检查技能目录的四元组组件挂载情况 (tools/, knowledge/, schema.json)"""
         tools_dir = skill_dir / "tools"
         knowledge_dir = skill_dir / "knowledge"
         schema_file = skill_dir / "schema.json"
 
         tool_files: list[str] = []
-        if tools_dir.exists() and tools_dir.is_dir():
-            tool_files = sorted(
-                f.name for f in tools_dir.iterdir()
-                if f.is_file() and f.suffix.lower() in (".py", ".js", ".ps1", ".sh", ".pyd")
-            )
+        if tools_dir.is_dir():
+            try:
+                with os.scandir(tools_dir) as it:
+                    tool_files = sorted(
+                        entry.name
+                        for entry in it
+                        if entry.is_file() and Path(entry.name).suffix.lower() in (".py", ".js", ".ps1", ".sh", ".pyd")
+                    )
+            except OSError:
+                pass
 
         knowledge_files: list[str] = []
-        if knowledge_dir.exists() and knowledge_dir.is_dir():
-            knowledge_files = sorted(
-                f.name for f in knowledge_dir.iterdir()
-                if f.is_file() and f.suffix.lower() in (".md", ".txt", ".csv", ".json")
-            )
-
-        schema_obj: dict[str, Any] | None = None
-        if schema_file.exists() and schema_file.is_file():
+        if knowledge_dir.is_dir():
             try:
-                parsed = json.loads(schema_file.read_text(encoding="utf-8", errors="replace"))
-                if isinstance(parsed, dict):
-                    schema_obj = parsed
-            except Exception:
+                with os.scandir(knowledge_dir) as it:
+                    knowledge_files = sorted(
+                        entry.name
+                        for entry in it
+                        if entry.is_file() and Path(entry.name).suffix.lower() in (".md", ".txt", ".csv", ".json")
+                    )
+            except OSError:
                 pass
+
+        has_schema = False
+        schema_obj: dict[str, Any] | None = None
+        if schema_file.is_file():
+            if not load_schema_content:
+                has_schema = True
+            else:
+                try:
+                    parsed = json.loads(schema_file.read_text(encoding="utf-8", errors="replace"))
+                    if isinstance(parsed, dict):
+                        schema_obj = parsed
+                        has_schema = True
+                except Exception:
+                    pass
 
         return {
             "has_tools": len(tool_files) > 0,
             "tools": tool_files,
             "has_knowledge": len(knowledge_files) > 0,
             "knowledge_files": knowledge_files,
-            "has_schema": schema_obj is not None,
+            "has_schema": has_schema,
             "schema": schema_obj,
         }
+
+    @staticmethod
+    def _get_skill_cache_signature(skill_dir: Path, skill_md_stat: os.stat_result) -> tuple[Any, ...]:
+        """采集 SKILL.md 与四元组子目录/契约文件的时间戳签名用于增量缓存"""
+        sig_parts: list[Any] = [skill_md_stat.st_mtime_ns, skill_md_stat.st_size]
+        for sub in ("tools", "knowledge", "schema.json"):
+            try:
+                st = os.stat(skill_dir / sub)
+                sig_parts.append((st.st_mtime_ns, st.st_size))
+            except OSError:
+                sig_parts.append(None)
+        return tuple(sig_parts)
 
     def normalize_skill_file(self, file_path: Path) -> Path:
         """
@@ -272,6 +322,7 @@ class SkillLoader:
             )
             target_file.parent.mkdir(parents=True, exist_ok=True)
             target_file.write_text(normalized_md, encoding="utf-8")
+            self.invalidate_cache()
             return target_file
         except Exception as e:
             logger.warning(f"规范化 SKILL.md 失败: {e}")
@@ -338,6 +389,8 @@ class SkillLoader:
                     created_count += 1
         except Exception as e:
             logger.warning(f"同步 MCP 伴生 SKILL 说明异常: {e}")
+        if created_count > 0:
+            self.invalidate_cache()
         return created_count
 
     def _find_skill_dir(self, skill_id_or_name: str) -> Path | None:
@@ -351,7 +404,7 @@ class SkillLoader:
             cand = root / safe_name
             if cand.exists() and cand.is_dir() and (cand / "SKILL.md").exists():
                 return cand
-        for s in self.list_skills():
+        for s in self.list_skills(include_content=False):
             if (
                 s["id"].lower() == safe_name.lower()
                 or s["name"].lower() == safe_name.lower()
@@ -362,95 +415,169 @@ class SkillLoader:
                     return p.parent
         return None
 
-    def list_skills(self) -> list[dict[str, Any]]:
-        """扫描并返回所有可用的本地 Skill、四元组容器与 MCP 封装说明列表（实时读取磁盘）"""
-        results: list[dict[str, Any]] = []
+    def _load_mcp_servers_config(self) -> tuple[dict[str, Any], Path]:
+        """带 (mtime_ns, size) 缓存地读取 mcp_servers.json 配置"""
+        mcp_cfg_path = self.base_dir / "mcp_servers.json"
+        try:
+            st = os.stat(mcp_cfg_path)
+        except OSError:
+            return {}, mcp_cfg_path
+
+        with self._cache_lock:
+            if (
+                self._mcp_cfg_cache
+                and self._mcp_cfg_cache[0] == st.st_mtime_ns
+                and self._mcp_cfg_cache[1] == st.st_size
+            ):
+                return self._mcp_cfg_cache[2], mcp_cfg_path
 
         mcp_servers: dict[str, Any] = {}
-        mcp_cfg_path = self.base_dir / "mcp_servers.json"
-        if mcp_cfg_path.exists():
-            try:
-                raw_mcp = json.loads(mcp_cfg_path.read_text(encoding="utf-8"))
-                if isinstance(raw_mcp, dict) and isinstance(raw_mcp.get("mcpServers"), dict):
-                    mcp_servers = raw_mcp["mcpServers"]
-            except Exception:
-                pass
+        try:
+            raw_mcp = json.loads(mcp_cfg_path.read_text(encoding="utf-8"))
+            if isinstance(raw_mcp, dict) and isinstance(raw_mcp.get("mcpServers"), dict):
+                mcp_servers = raw_mcp["mcpServers"]
+        except Exception:
+            pass
 
-        bound_mcp_names: set[str] = set()
+        with self._cache_lock:
+            self._mcp_cfg_cache = (st.st_mtime_ns, st.st_size, mcp_servers)
+        return mcp_servers, mcp_cfg_path
 
-        # 同时扫描开源轨 (skills/) 与商业套件轨 (suites/)
-        scan_roots: list[tuple[Path, str]] = [(self.skills_dir, "community")]
-        if self.suites_dir.exists():
-            scan_roots.append((self.suites_dir, "commercial"))
+    def _build_dir_skill_item(
+        self,
+        item: Path,
+        skill_md: Path,
+        skill_md_stat: os.stat_result,
+        default_tier: str,
+        mcp_servers: dict[str, Any],
+        include_content: bool,
+    ) -> dict[str, Any]:
+        """解析并缓存单个目录形式的四元组 Skill 条目"""
+        sig = self._get_skill_cache_signature(item, skill_md_stat)
+        cache_key = (str(item.resolve()), include_content)
 
-        for root_dir, default_tier in scan_roots:
-            if not root_dir.exists():
-                continue
-            for item in sorted(root_dir.iterdir()):
-                if item.is_dir():
-                    skill_md = item / "SKILL.md"
-                    if skill_md.exists():
-                        try:
-                            raw = skill_md.read_text(encoding="utf-8", errors="replace")
-                            meta = self._parse_frontmatter(raw, item.name)
-                            four_tuple = self._inspect_four_tuple(item)
+        cached_base: dict[str, Any] | None = None
+        with self._cache_lock:
+            entry = self._skill_cache.get(cache_key)
+            if entry and entry[0] == sig:
+                cached_base = entry[1]
 
-                            mcp_srv = meta["mcp_server"] or (item.name if item.name in mcp_servers else "")
-                            if mcp_srv:
-                                bound_mcp_names.add(mcp_srv)
+        if cached_base is None:
+            if include_content:
+                raw = skill_md.read_text(encoding="utf-8", errors="replace")
+            else:
+                # 列表摘要仅读取文件前 4KB 解析 YAML Frontmatter 与首个标题
+                with skill_md.open("r", encoding="utf-8", errors="replace") as fh:
+                    raw = fh.read(4096)
 
-                            skill_type = "mcp" if mcp_srv or meta["type"] == "mcp" else (
-                                "suite" if default_tier == "commercial" or meta["type"] == "suite" else "skill"
-                            )
+            meta = self._parse_frontmatter(raw, item.name)
+            four_tuple = self._inspect_four_tuple(item, load_schema_content=False)
 
-                            # 为包含四元组扩展组件的技能追加可视化组件清单说明
-                            enriched_body = meta["body"]
-                            manifest_lines: list[str] = []
-                            if four_tuple["has_tools"]:
-                                manifest_lines.append(f"- 🔧 **随包专属算子 (`tools/`)**: `{', '.join(four_tuple['tools'])}`")
-                            if four_tuple["has_knowledge"]:
-                                manifest_lines.append(f"- 📚 **FTS5 领域知识库 (`knowledge/`)**: `{', '.join(four_tuple['knowledge_files'])}`")
-                            if four_tuple["has_schema"]:
-                                manifest_lines.append("- 📋 **结构化交付契约 (`schema.json`)**: 已启用强格式校验")
-                            if manifest_lines:
-                                enriched_body = (
-                                    "### 📦 四元组容器挂载组件\n"
-                                    + "\n".join(manifest_lines)
-                                    + "\n\n---\n\n"
-                                    + enriched_body
-                                )
+            cached_base = {
+                "id": item.name,
+                "name": meta["name"],
+                "command": meta["command"],
+                "meta_type": meta["type"],
+                "meta_tier": meta["tier"],
+                "meta_mcp_server": meta["mcp_server"],
+                "default_tier": default_tier,
+                "has_tools": four_tuple["has_tools"],
+                "tools": four_tuple["tools"],
+                "has_knowledge": four_tuple["has_knowledge"],
+                "knowledge_files": four_tuple["knowledge_files"],
+                "has_schema": four_tuple["has_schema"],
+                "description": meta["description"],
+                "path": str(skill_md.resolve()),
+                "is_builtin": item.name in self.BUILTIN_IDS,
+                "has_content": True,
+            }
 
-                            results.append({
-                                "id": item.name,
-                                "name": meta["name"],
-                                "command": meta["command"],
-                                "type": skill_type,
-                                "tier": "commercial" if default_tier == "commercial" else meta["tier"],
-                                "mcp_server": mcp_srv,
-                                "mcp_enabled": bool(mcp_servers.get(mcp_srv, {}).get("enabled", False)) if mcp_srv else None,
-                                "has_tools": four_tuple["has_tools"],
-                                "tools": four_tuple["tools"],
-                                "has_knowledge": four_tuple["has_knowledge"],
-                                "knowledge_files": four_tuple["knowledge_files"],
-                                "has_schema": four_tuple["has_schema"],
-                                "description": meta["description"],
-                                "path": str(skill_md.resolve()),
-                                "content": raw,
-                                "body": enriched_body,
-                                "is_builtin": item.name in self.BUILTIN_IDS,
-                            })
-                        except Exception as e:
-                            logger.warning(f"读取 Skill {item.name} 失败: {e}")
+            if include_content:
+                enriched_body = meta["body"]
+                manifest_lines: list[str] = []
+                if four_tuple["has_tools"]:
+                    manifest_lines.append(f"- 🔧 **随包专属算子 (`tools/`)**: `{', '.join(four_tuple['tools'])}`")
+                if four_tuple["has_knowledge"]:
+                    manifest_lines.append(f"- 📚 **FTS5 领域知识库 (`knowledge/`)**: `{', '.join(four_tuple['knowledge_files'])}`")
+                if four_tuple["has_schema"]:
+                    manifest_lines.append("- 📋 **结构化交付契约 (`schema.json`)**: 已启用强格式校验")
+                if manifest_lines:
+                    enriched_body = (
+                        "### 📦 四元组容器挂载组件\n"
+                        + "\n".join(manifest_lines)
+                        + "\n\n---\n\n"
+                        + enriched_body
+                    )
+                cached_base["content"] = raw
+                cached_base["body"] = enriched_body
 
-        # 合成 mcp_servers.json 中未创建独立 SKILL.md 的按需 MCP 服务
-        for srv_name, srv_info in mcp_servers.items():
-            if srv_name in bound_mcp_names or not isinstance(srv_info, dict):
-                continue
-            safe_id = self._sanitize_skill_id(srv_name)
-            enabled = bool(srv_info.get("enabled", False))
+            with self._cache_lock:
+                if len(self._skill_cache) >= 4096:
+                    self._skill_cache.clear()
+                self._skill_cache[cache_key] = (sig, cached_base)
+
+        mcp_srv = cached_base["meta_mcp_server"] or (item.name if item.name in mcp_servers else "")
+        skill_type = (
+            "mcp"
+            if mcp_srv or cached_base["meta_type"] == "mcp"
+            else ("suite" if cached_base["default_tier"] == "commercial" or cached_base["meta_type"] == "suite" else "skill")
+        )
+
+        record: dict[str, Any] = {
+            "id": cached_base["id"],
+            "name": cached_base["name"],
+            "command": cached_base["command"],
+            "type": skill_type,
+            "tier": "commercial" if cached_base["default_tier"] == "commercial" else cached_base["meta_tier"],
+            "mcp_server": mcp_srv,
+            "mcp_enabled": bool(mcp_servers.get(mcp_srv, {}).get("enabled", False)) if mcp_srv else None,
+            "has_tools": cached_base["has_tools"],
+            "tools": cached_base["tools"],
+            "has_knowledge": cached_base["has_knowledge"],
+            "knowledge_files": cached_base["knowledge_files"],
+            "has_schema": cached_base["has_schema"],
+            "description": cached_base["description"],
+            "path": cached_base["path"],
+            "is_builtin": cached_base["is_builtin"],
+            "has_content": True,
+        }
+        if include_content:
+            record["content"] = cached_base.get("content", "")
+            record["body"] = cached_base.get("body", "")
+        return record
+
+    def _build_synth_mcp_item(
+        self,
+        srv_name: str,
+        srv_info: dict[str, Any],
+        mcp_cfg_path: Path,
+        include_content: bool,
+    ) -> dict[str, Any]:
+        """构建未绑定独立 SKILL.md 的按需 MCP 服务封装条目"""
+        safe_id = self._sanitize_skill_id(srv_name)
+        enabled = bool(srv_info.get("enabled", False))
+        desc = srv_info.get("description") or f"MCP 外部扩展服务 ({srv_name})"
+        item: dict[str, Any] = {
+            "id": safe_id,
+            "name": safe_id,
+            "command": f"/{safe_id}",
+            "type": "mcp",
+            "tier": "community",
+            "mcp_server": srv_name,
+            "mcp_enabled": enabled,
+            "has_tools": False,
+            "tools": [],
+            "has_knowledge": False,
+            "knowledge_files": [],
+            "has_schema": False,
+            "description": desc,
+            "path": str(mcp_cfg_path.resolve()),
+            "is_builtin": False,
+            "has_content": True,
+        }
+        if include_content:
             cmd_exec = srv_info.get("command", "")
             cmd_args = " ".join(str(a) for a in (srv_info.get("args") or []))
-            desc = srv_info.get("description") or f"MCP 外部扩展服务 ({srv_name})"
             synth_body = (
                 f"# MCP 服务封装说明：{srv_name}\n\n"
                 f"- **服务状态**：{'🟢 已启用' if enabled else '⚪ 按需启用（可在设置或通过 Agent 设为 enabled: true）'}\n"
@@ -459,27 +586,155 @@ class SkillLoader:
                 f"## 使用方法\n"
                 f"直接输入 `/{safe_id} <你的需求>`，若服务已启用则自动调用 `mcp__{srv_name}__*` 系列工具执行。"
             )
-            results.append({
-                "id": safe_id,
-                "name": safe_id,
-                "command": f"/{safe_id}",
-                "type": "mcp",
-                "tier": "community",
-                "mcp_server": srv_name,
-                "mcp_enabled": enabled,
-                "has_tools": False,
-                "tools": [],
-                "has_knowledge": False,
-                "knowledge_files": [],
-                "has_schema": False,
-                "description": desc,
-                "path": str(mcp_cfg_path.resolve()),
-                "content": synth_body,
-                "body": synth_body,
-                "is_builtin": False,
-            })
+            item["content"] = synth_body
+            item["body"] = synth_body
+        return item
+
+    def _get_list_snapshot_signature(self) -> tuple[Any, ...]:
+        """采集 skills/、suites/ 目录与 mcp_servers.json 的轻量状态签名，用于短窗口列表快照校验"""
+        sig: list[Any] = []
+        for root_dir in (self.skills_dir, self.suites_dir):
+            try:
+                sig.append(os.stat(root_dir).st_mtime_ns)
+            except OSError:
+                sig.append(0)
+        mcp_cfg_path = self.base_dir / "mcp_servers.json"
+        try:
+            st = os.stat(mcp_cfg_path)
+            sig.append((st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append(None)
+        return tuple(sig)
+
+    def list_skills(
+        self,
+        include_content: bool = True,
+        force_refresh: bool = False,
+    ) -> list[dict[str, Any]]:
+        """
+        扫描并返回所有可用的本地 Skill、四元组容器与 MCP 封装说明列表。
+        结合根目录签名 + 短窗口列表快照及 os.scandir + mtime 缓存；列表页传 include_content=False 实现 <1ms 响应。
+        """
+        roots_sig = self._get_list_snapshot_signature()
+        now_ts = time.monotonic()
+
+        with self._cache_lock:
+            scan_epoch = self._snapshot_epoch
+            if not force_refresh:
+                snap = self._list_snapshot_cache.get(include_content)
+                if (
+                    snap
+                    and snap[0] == scan_epoch
+                    and (now_ts - snap[1]) < self._snapshot_ttl_seconds
+                    and snap[2] == roots_sig
+                ):
+                    return [dict(item) for item in snap[3]]
+
+        results: list[dict[str, Any]] = []
+        mcp_servers, mcp_cfg_path = self._load_mcp_servers_config()
+        bound_mcp_names: set[str] = set()
+
+        # 同时扫描开源轨 (skills/) 与商业套件轨 (suites/)
+        scan_roots: list[tuple[Path, str]] = [(self.skills_dir, "community")]
+        if self.suites_dir.is_dir():
+            scan_roots.append((self.suites_dir, "commercial"))
+
+        for root_dir, default_tier in scan_roots:
+            if not root_dir.is_dir():
+                continue
+            try:
+                with os.scandir(root_dir) as it:
+                    dir_entries = sorted(
+                        (e for e in it if e.is_dir()),
+                        key=lambda e: e.name,
+                    )
+            except OSError as e:
+                logger.warning(f"扫描技能目录失败 {root_dir}: {e}")
+                continue
+
+            for entry in dir_entries:
+                item = Path(entry.path)
+                skill_md = item / "SKILL.md"
+                try:
+                    st = os.stat(skill_md)
+                except OSError:
+                    continue
+                try:
+                    record = self._build_dir_skill_item(
+                        item=item,
+                        skill_md=skill_md,
+                        skill_md_stat=st,
+                        default_tier=default_tier,
+                        mcp_servers=mcp_servers,
+                        include_content=include_content,
+                    )
+                    if record.get("mcp_server"):
+                        bound_mcp_names.add(record["mcp_server"])
+                    results.append(record)
+                except Exception as e:
+                    logger.warning(f"读取 Skill {item.name} 失败: {e}")
+
+        # 合成 mcp_servers.json 中未创建独立 SKILL.md 的按需 MCP 服务
+        for srv_name, srv_info in mcp_servers.items():
+            if srv_name in bound_mcp_names or not isinstance(srv_info, dict):
+                continue
+            results.append(
+                self._build_synth_mcp_item(
+                    srv_name=srv_name,
+                    srv_info=srv_info,
+                    mcp_cfg_path=mcp_cfg_path,
+                    include_content=include_content,
+                )
+            )
+
+        with self._cache_lock:
+            if scan_epoch == self._snapshot_epoch:
+                self._list_snapshot_cache[include_content] = (
+                    scan_epoch,
+                    time.monotonic(),
+                    roots_sig,
+                    [dict(item) for item in results],
+                )
 
         return results
+
+    def get_skill_detail_item(self, skill_id_or_name: str) -> dict[str, Any] | None:
+        """按需获取单个扩展 Skill 或合成 MCP 服务说明的完整内容（含 content 与 body）"""
+        raw_norm = (skill_id_or_name or "").strip().lstrip("/")
+        if not raw_norm:
+            return None
+
+        mcp_servers, mcp_cfg_path = self._load_mcp_servers_config()
+        skill_dir = self._find_skill_dir(raw_norm)
+        if skill_dir:
+            skill_md = skill_dir / "SKILL.md"
+            try:
+                st = os.stat(skill_md)
+            except OSError:
+                return None
+            default_tier = "commercial" if skill_dir.parent.resolve() == self.suites_dir.resolve() else "community"
+            return self._build_dir_skill_item(
+                item=skill_dir,
+                skill_md=skill_md,
+                skill_md_stat=st,
+                default_tier=default_tier,
+                mcp_servers=mcp_servers,
+                include_content=True,
+            )
+
+        target_lower = raw_norm.lower()
+        for srv_name, srv_info in mcp_servers.items():
+            if not isinstance(srv_info, dict):
+                continue
+            safe_id = self._sanitize_skill_id(srv_name)
+            if safe_id.lower() == target_lower or srv_name.lower() == target_lower:
+                return self._build_synth_mcp_item(
+                    srv_name=srv_name,
+                    srv_info=srv_info,
+                    mcp_cfg_path=mcp_cfg_path,
+                    include_content=True,
+                )
+        return None
 
     async def sync_skill_knowledge(
         self,
@@ -728,7 +983,7 @@ class SkillLoader:
             return None
         first_token = q.split()[0].lower()
         bare_token = first_token.lstrip("/")
-        for sk in self.list_skills():
+        for sk in self.list_skills(include_content=False):
             if (
                 sk["command"].lower() == first_token
                 or sk["id"].lower() == bare_token
@@ -888,11 +1143,12 @@ class SkillLoader:
         if not target_dir.exists() or not target_dir.is_dir():
             return False
         shutil.rmtree(target_dir, ignore_errors=True)
+        self.invalidate_cache()
         return True
 
     def get_skills_summary_prompt(self) -> str:
         """生成极简的可用 Skill/MCP 列表摘要与四元组开发标准规范，供注入 System Prompt"""
-        skills = self.list_skills()
+        skills = self.list_skills(include_content=False)
         lines = ["### 🧩 已挂载的本地专业技能包与 MCP 封装规程 (Skills & MCP Summary)："]
         if skills:
             lines.append(
@@ -937,9 +1193,9 @@ class SkillLoader:
         skill_dir = self._find_skill_dir(skill_name)
         if not skill_dir:
             # 尝试匹配合成的按需 MCP 说明
-            for s in self.list_skills():
-                if s["id"].lower() == (skill_name or "").strip().lstrip("/").lower():
-                    return s.get("content", "")
+            detail_item = self.get_skill_detail_item(skill_name)
+            if detail_item:
+                return detail_item.get("content", "")
             return f"Error: 未找到名为 '{skill_name}' 的 Skill。"
 
         target_md = skill_dir / "SKILL.md"

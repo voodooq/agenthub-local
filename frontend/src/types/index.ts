@@ -220,7 +220,29 @@ export interface SkillItem {
   is_override?: boolean;
   description?: string;
   version?: string;
+  has_sop?: boolean;
   sop_content?: string;
+}
+
+export interface ExtensionSkillItem {
+  id: string;
+  name: string;
+  command: string;
+  type?: 'skill' | 'mcp' | 'suite' | string;
+  tier?: string;
+  mcp_server?: string;
+  mcp_enabled?: boolean | null;
+  has_tools?: boolean;
+  tools?: string[];
+  has_knowledge?: boolean;
+  knowledge_files?: string[];
+  has_schema?: boolean;
+  description: string;
+  path?: string;
+  is_builtin?: boolean;
+  has_content?: boolean;
+  content?: string;
+  body?: string;
 }
 
 export type ExecutionStrategy = 'direct' | 'plan_first';

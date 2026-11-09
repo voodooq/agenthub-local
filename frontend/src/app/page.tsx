@@ -65,6 +65,7 @@ import {
   PlanStepItem,
 } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
+import { prefetchExtensionSkills, prefetchWorkspaceSkills } from '@/utils/skillCache';
 
 export default function WorkbenchPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -374,9 +375,14 @@ export default function WorkbenchPage() {
     fetchWorkspaces();
     fetchStatusPill();
     fetchActiveModels();
+    prefetchExtensionSkills();
     const pillTimer = setInterval(fetchStatusPill, 3000);
     return () => clearInterval(pillTimer);
   }, []);
+
+  useEffect(() => {
+    prefetchWorkspaceSkills(activeWorkspaceId);
+  }, [activeWorkspaceId]);
 
   useEffect(() => {
     fetchConversations(activeWorkspaceId);

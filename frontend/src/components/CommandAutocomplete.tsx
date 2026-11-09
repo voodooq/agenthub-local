@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import {
   Cpu,
   Terminal,
@@ -14,8 +14,14 @@ import {
   FileText,
   X,
   ArrowRight,
+  Loader2,
 } from 'lucide-react';
-import { apiFetch } from '@/utils/apiClient';
+import { ExtensionSkillItem } from '@/types';
+import {
+  fetchExtensionSkillDetail,
+  fetchExtensionSkills,
+  getCachedExtensionSkills,
+} from '@/utils/skillCache';
 
 interface CommandItem {
   id: string;
@@ -26,10 +32,13 @@ interface CommandItem {
   icon: React.ComponentType<{ className?: string }>;
   badge?: string;
   docBody?: string;
+  hasDoc?: boolean;
   skillId?: string;
   mcpServer?: string;
   mcpEnabled?: boolean | null;
 }
+
+const MAX_AUTOCOMPLETE_ITEMS = 60;
 
 const STATIC_COMMAND_LIST: CommandItem[] = [
   // @ 上下文引用
@@ -41,6 +50,7 @@ const STATIC_COMMAND_LIST: CommandItem[] = [
     insertText: '@hardware 请分析当前硬件状态并评估项目承载力。',
     icon: Cpu,
     badge: '上下文',
+    hasDoc: true,
     docBody:
       '# @hardware 宿主机硬件快照引用\n\n自动采集当前机器的 CPU 负载、物理内存余量、NVIDIA GPU 显存 (VRAM) 与磁盘空间指标，并注入当前对话上下文中供智能体诊断分析。',
   },
@@ -52,6 +62,7 @@ const STATIC_COMMAND_LIST: CommandItem[] = [
     insertText: '@process 帮我排查当前是否有僵尸或异常耗能进程。',
     icon: Terminal,
     badge: '上下文',
+    hasDoc: true,
     docBody:
       '# @process 高占用进程列表引用\n\n实时枚举宿主机内存与 CPU 占用 Top 进程列表（含 PID 与进程名称），辅助排查脱离终端的孤儿进程或资源泄漏。',
   },
@@ -63,6 +74,7 @@ const STATIC_COMMAND_LIST: CommandItem[] = [
     insertText: '@workspace 请阅读当前项目架构并给出重构建议。',
     icon: FolderGit2,
     badge: '上下文',
+    hasDoc: true,
     docBody:
       '# @workspace 本地工作区目录引用\n\n将智能体的持久工作目录 (CWD) 与目录结构摘要挂载到当前提问中，适合代码审查与项目级重构。',
   },
@@ -75,6 +87,7 @@ const STATIC_COMMAND_LIST: CommandItem[] = [
     insertText: '/optimize-dev 请全面体检本地研发环境，排查端口冲突与编译缓存。',
     icon: Wrench,
     badge: '系统指令',
+    hasDoc: true,
     docBody:
       '# /optimize-dev 研发环境专项体检\n\n## 功能说明\n1. 自动扫描本机残留的孤儿 `node`、`python` 构建进程；\n2. 排查常用开发端口（3000/8000/8080 等）占用情况；\n3. 给出安全释放建议并在审批后清理。',
   },
@@ -86,6 +99,7 @@ const STATIC_COMMAND_LIST: CommandItem[] = [
     insertText: '/optimize-design 请进行显存护航，清理占用显存的后台程序。',
     icon: Sparkles,
     badge: '系统指令',
+    hasDoc: true,
     docBody:
       '# /optimize-design 显存与创作环境护航\n\n## 功能说明\n1. 检查 GPU 显存 (VRAM) 实时占用分布；\n2. 排查占用大量显存或暂存盘空间的后台进程，保障本地大模型推理与图形渲染流畅。',
   },
@@ -97,6 +111,7 @@ const STATIC_COMMAND_LIST: CommandItem[] = [
     insertText: '/free-port 3000 排查 3000 端口被谁占用并释放。',
     icon: Zap,
     badge: '系统指令',
+    hasDoc: true,
     docBody:
       '# /free-port 端口死锁排查与释放\n\n## 用法示例\n- `/free-port 8080`\n- `/free-port 3000`\n\n## 执行流程\n自动通过 `netstat -ano` 与 `Get-Process` 定位占用指定端口的进程 PID 与路径，并协助释放端口。',
   },
@@ -108,10 +123,61 @@ const STATIC_COMMAND_LIST: CommandItem[] = [
     insertText: '/clean-cache 扫描本地开发包缓存与临时文件。',
     icon: Terminal,
     badge: '系统指令',
+    hasDoc: true,
     docBody:
       '# /clean-cache 开发缓存与临时目录体检\n\n扫描本机 `npm-cache`、`pip/cache` 及系统 `Temp` 目录体积，生成可审计的空間释放清单。',
   },
 ];
+
+function mapExtensionSkillsToCommands(skills: ExtensionSkillItem[]): CommandItem[] {
+  const items: CommandItem[] = [];
+  const seenLabels = new Set<string>();
+
+  for (const sk of skills) {
+    const skillId = String(sk.id || sk.name || '').trim();
+    if (!skillId) continue;
+    const rawCmd = String(sk.command || `/${skillId}`).trim();
+    const label = rawCmd.startsWith('/') ? rawCmd : `/${rawCmd}`;
+    if (seenLabels.has(label.toLowerCase())) continue;
+    seenLabels.add(label.toLowerCase());
+
+    const isMcp = sk.type === 'mcp' || Boolean(sk.mcp_server);
+    const isSuite = sk.type === 'suite' || sk.tier === 'commercial';
+    const aliasSuffix = label.toLowerCase() !== `/${skillId.toLowerCase()}` ? ` [${skillId}]` : '';
+    const tupleFlags: string[] = [];
+    if (sk.has_tools) tupleFlags.push('🔧算子');
+    if (sk.has_knowledge) tupleFlags.push('📚知识库');
+    if (sk.has_schema) tupleFlags.push('📋Schema');
+    const tupleSuffix = tupleFlags.length > 0 ? ` · ${tupleFlags.join('/')}` : '';
+
+    let badgeText = sk.is_builtin ? '内置 SKILL' : '自定义 SKILL';
+    if (isSuite) {
+      badgeText = `Pro 套件${tupleSuffix}`;
+    } else if (isMcp) {
+      badgeText = sk.mcp_enabled ? 'MCP 封装 (已启用)' : 'MCP 封装 (按需)';
+    } else if (tupleSuffix) {
+      badgeText = `${badgeText}${tupleSuffix}`;
+    }
+
+    const docText = sk.body || sk.content;
+    items.push({
+      id: `skill_${skillId}`,
+      trigger: '/',
+      label,
+      description: `${sk.description || `激活本地专业技能包 ${skillId}`}${aliasSuffix}`,
+      insertText: `${label} `,
+      icon: isMcp ? Server : sk.is_builtin ? Puzzle : BookOpen,
+      badge: badgeText,
+      docBody: docText ? String(docText) : undefined,
+      hasDoc: Boolean(docText || sk.has_content || skillId),
+      skillId,
+      mcpServer: sk.mcp_server || undefined,
+      mcpEnabled: sk.mcp_enabled ?? null,
+    });
+  }
+
+  return items;
+}
 
 interface CommandAutocompleteProps {
   input: string;
@@ -122,6 +188,8 @@ interface CommandAutocompleteProps {
 export function CommandAutocomplete({ input, onSelect, onClose }: CommandAutocompleteProps) {
   const [dynamicItems, setDynamicItems] = useState<CommandItem[]>([]);
   const [previewItemId, setPreviewItemId] = useState<string | null>(null);
+  const [detailCache, setDetailCache] = useState<Record<string, string>>({});
+  const [loadingDocId, setLoadingDocId] = useState<string | null>(null);
 
   // 检查最后一个词是否以 @ 或 / 开头
   const words = input.split(/\s+/);
@@ -129,75 +197,57 @@ export function CommandAutocomplete({ input, onSelect, onClose }: CommandAutocom
   const isTriggered = lastWord.startsWith('@') || lastWord.startsWith('/');
   const isSlashTriggered = lastWord.startsWith('/');
 
-  // 当用户输入 '/' 触发菜单时，实时拉取本地 skills/ 目录与 MCP 封装说明
+  // 仅在首次触发 '/' 时同步读取缓存秒显并后台刷新一次，不再随敲字重复请求全量扫描接口
   useEffect(() => {
     if (!isSlashTriggered) return;
     let cancelled = false;
 
-    const loadDynamicSkills = async () => {
-      try {
-        const res = await apiFetch('/api/v1/extensions/skills');
-        if (!res.ok || cancelled) return;
-        const data = await res.json();
-        const items: CommandItem[] = [];
-        const seenLabels = new Set<string>();
+    const cached = getCachedExtensionSkills();
+    if (cached) {
+      setDynamicItems(mapExtensionSkillsToCommands(cached));
+    }
 
-        if (Array.isArray(data.skills)) {
-          for (const sk of data.skills) {
-            const skillId = String(sk.id || sk.name || '').trim();
-            if (!skillId) continue;
-            const rawCmd = String(sk.command || `/${skillId}`).trim();
-            const label = rawCmd.startsWith('/') ? rawCmd : `/${rawCmd}`;
-            if (seenLabels.has(label.toLowerCase())) continue;
-            seenLabels.add(label.toLowerCase());
-
-            const isMcp = sk.type === 'mcp' || Boolean(sk.mcp_server);
-            const isSuite = sk.type === 'suite' || sk.tier === 'commercial';
-            const aliasSuffix = label.toLowerCase() !== `/${skillId.toLowerCase()}` ? ` [${skillId}]` : '';
-            const tupleFlags: string[] = [];
-            if (sk.has_tools) tupleFlags.push('🔧算子');
-            if (sk.has_knowledge) tupleFlags.push('📚知识库');
-            if (sk.has_schema) tupleFlags.push('📋Schema');
-            const tupleSuffix = tupleFlags.length > 0 ? ` · ${tupleFlags.join('/')}` : '';
-
-            let badgeText = sk.is_builtin ? '内置 SKILL' : '自定义 SKILL';
-            if (isSuite) {
-              badgeText = `Pro 套件${tupleSuffix}`;
-            } else if (isMcp) {
-              badgeText = sk.mcp_enabled ? 'MCP 封装 (已启用)' : 'MCP 封装 (按需)';
-            } else if (tupleSuffix) {
-              badgeText = `${badgeText}${tupleSuffix}`;
-            }
-
-            items.push({
-              id: `skill_${skillId}`,
-              trigger: '/',
-              label,
-              description: `${sk.description || `激活本地专业技能包 ${skillId}`}${aliasSuffix}`,
-              insertText: `${label} `,
-              icon: isMcp ? Server : sk.is_builtin ? Puzzle : BookOpen,
-              badge: badgeText,
-              docBody: String(sk.body || sk.content || sk.description || ''),
-              skillId,
-              mcpServer: sk.mcp_server || undefined,
-              mcpEnabled: sk.mcp_enabled ?? null,
-            });
-          }
-        }
-
+    fetchExtensionSkills({ force: true })
+      .then((skills) => {
         if (!cancelled) {
-          setDynamicItems(items);
+          setDynamicItems(mapExtensionSkillsToCommands(skills));
         }
-      } catch (e) {
-        // 静默忽略网络抖动，回退静态列表
-      }
-    };
+      })
+      .catch(() => {
+        // 静默忽略网络抖动，回退静态列表或缓存
+      });
 
-    loadDynamicSkills();
     return () => {
       cancelled = true;
     };
-  }, [isSlashTriggered, lastWord]);
+  }, [isSlashTriggered]);
+
+  const handleTogglePreview = useCallback(
+    async (item: CommandItem) => {
+      if (previewItemId === item.id) {
+        setPreviewItemId(null);
+        return;
+      }
+
+      setPreviewItemId(item.id);
+      if (item.docBody || !item.skillId || detailCache[item.skillId]) {
+        return;
+      }
+
+      const sid = item.skillId;
+      setLoadingDocId(item.id);
+      try {
+        const detail = await fetchExtensionSkillDetail(sid);
+        const text = detail?.body || detail?.content || detail?.description || item.description;
+        setDetailCache((prev) => ({ ...prev, [sid]: String(text) }));
+      } catch {
+        setDetailCache((prev) => ({ ...prev, [sid]: item.description }));
+      } finally {
+        setLoadingDocId((curr) => (curr === item.id ? null : curr));
+      }
+    },
+    [previewItemId, detailCache]
+  );
 
   const allCommands = useMemo(() => {
     const merged: CommandItem[] = [...dynamicItems];
@@ -210,24 +260,31 @@ export function CommandAutocomplete({ input, onSelect, onClose }: CommandAutocom
     return merged;
   }, [dynamicItems]);
 
-  if (!isTriggered) {
+  const filtered = useMemo(() => {
+    if (!isTriggered) return [];
+    const trigger = lastWord[0];
+    const filterKey = lastWord.slice(1).toLowerCase();
+    return allCommands
+      .filter(
+        (item) =>
+          item.trigger === trigger &&
+          (item.label.toLowerCase().includes(filterKey) ||
+            item.description.toLowerCase().includes(filterKey) ||
+            (item.skillId && item.skillId.toLowerCase().includes(filterKey)))
+      )
+      .slice(0, MAX_AUTOCOMPLETE_ITEMS);
+  }, [isTriggered, lastWord, allCommands]);
+
+  if (!isTriggered || filtered.length === 0) {
     return null;
   }
 
-  const trigger = lastWord[0];
-  const filterKey = lastWord.slice(1).toLowerCase();
-
-  const filtered = allCommands.filter(
-    (item) =>
-      item.trigger === trigger &&
-      (item.label.toLowerCase().includes(filterKey) ||
-        item.description.toLowerCase().includes(filterKey) ||
-        (item.skillId && item.skillId.toLowerCase().includes(filterKey)))
-  );
-
-  if (filtered.length === 0) return null;
-
   const activePreviewItem = filtered.find((item) => item.id === previewItemId) || null;
+  const activePreviewBody = activePreviewItem
+    ? activePreviewItem.docBody ||
+      (activePreviewItem.skillId ? detailCache[activePreviewItem.skillId] : undefined) ||
+      ''
+    : '';
 
   return (
     <div
@@ -297,12 +354,12 @@ export function CommandAutocomplete({ input, onSelect, onClose }: CommandAutocom
                 </div>
 
                 {/* 右侧：查看说明按钮 */}
-                {item.docBody && (
+                {(item.hasDoc || item.docBody) && (
                   <button
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      setPreviewItemId((prev) => (prev === item.id ? null : item.id));
+                      handleTogglePreview(item);
                     }}
                     title="查看该 SKILL / MCP 的详细使用说明与参数规程"
                     className={`ml-2 px-2 py-1 rounded-lg text-[10px] font-medium flex items-center space-x-1 shrink-0 transition-all ${
@@ -360,7 +417,14 @@ export function CommandAutocomplete({ input, onSelect, onClose }: CommandAutocom
             )}
 
             <div className="flex-1 overflow-y-auto pr-1 text-[11px] leading-relaxed text-foreground/90 whitespace-pre-wrap font-sans">
-              {activePreviewItem.docBody}
+              {loadingDocId === activePreviewItem.id ? (
+                <div className="flex items-center space-x-1.5 text-muted-foreground py-4">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-500" />
+                  <span>正在按需加载完整规程...</span>
+                </div>
+              ) : (
+                activePreviewBody || activePreviewItem.description
+              )}
             </div>
           </div>
         )}

@@ -75,6 +75,8 @@ export const PHRASE_DICTIONARY: Record<string, { 'zh-TW': string; en: string; ja
   '用户拒绝了该项高危操作': { 'zh-TW': '使用者拒絕了該項高危操作', en: 'User rejected this critical operation', ja: 'ユーザーがこの危険操作を拒否しました' },
   '搜索技能或输入指令...': { 'zh-TW': '搜尋技能或輸入指令...', en: 'Search skills or enter command...', ja: 'スキルまたはコマンドを検索...' },
   '正在加载技能...': { 'zh-TW': '正在載入技能...', en: 'Loading skills...', ja: 'スキル読み込み中...' },
+  '展开全部': { 'zh-TW': '展開全部', en: 'Show All', ja: 'すべて表示' },
+  '正在按需读取 SOP 规程...': { 'zh-TW': '正在按需讀取 SOP 規程...', en: 'Loading SOP guidelines on demand...', ja: 'SOP規程をオンデマンド読み込み中...' },
   '未找到匹配技能': { 'zh-TW': '未找到符合技能', en: 'No matching skills found', ja: '一致するスキルがありません' },
   '当前工作区专属技能': { 'zh-TW': '目前工作區專屬技能', en: 'Workspace Private Skills', ja: 'ワークスペース専用スキル' },
   '覆盖全局': { 'zh-TW': '覆蓋全域', en: 'Override Global', ja: 'グローバル上書き' },

@@ -1,10 +1,11 @@
 'use client';
 
-import React, { useState } from 'react';
-import { BookOpen, Copy, Check, Trash2, X } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { BookOpen, Copy, Check, Trash2, X, Loader2 } from 'lucide-react';
 import { SkillItem } from '@/types';
 import { useLanguage } from '@/context/LanguageContext';
 import { apiFetch } from '@/utils/apiClient';
+import { fetchWorkspaceSkillDetail, invalidateWorkspaceSkills } from '@/utils/skillCache';
 
 interface SopDrawerProps {
   skill: SkillItem | null;
@@ -17,6 +18,46 @@ export function SopDrawer({ skill, workspaceId, onClose, onSkillDeleted }: SopDr
   const { t } = useLanguage();
   const [copied, setCopied] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [loadedSop, setLoadedSop] = useState<string>('');
+  const [loadingSop, setLoadingSop] = useState(false);
+
+  // 列表只拉取轻量摘要；打开 SOP 抽屉时再按需懒加载完整执行规程
+  useEffect(() => {
+    if (!skill) {
+      setLoadedSop('');
+      setLoadingSop(false);
+      return;
+    }
+
+    if (skill.sop_content !== undefined) {
+      setLoadedSop(skill.sop_content);
+      setLoadingSop(false);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadedSop('');
+    setLoadingSop(true);
+
+    fetchWorkspaceSkillDetail(skill.name, workspaceId)
+      .then((detail) => {
+        if (!cancelled) {
+          setLoadedSop(detail?.sop_content || '');
+        }
+      })
+      .catch((e) => {
+        console.error('加载 SOP 详情失败:', e);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingSop(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [skill, workspaceId]);
 
   if (!skill) return null;
 
@@ -43,6 +84,7 @@ export function SopDrawer({ skill, workspaceId, onClose, onSkillDeleted }: SopDr
         method: 'DELETE',
       });
       if (res.ok) {
+        invalidateWorkspaceSkills(workspaceId);
         if (onSkillDeleted) {
           onSkillDeleted(skill.name);
         }
@@ -103,7 +145,14 @@ export function SopDrawer({ skill, workspaceId, onClose, onSkillDeleted }: SopDr
       </div>
 
       <div className="flex-1 overflow-y-auto p-5 text-xs font-mono text-foreground whitespace-pre-wrap leading-relaxed select-text bg-surface-card">
-        {skill.sop_content || t('该技能未定义详细 SOP 执行规程。')}
+        {loadingSop ? (
+          <div className="flex items-center space-x-2 text-muted-foreground py-6 font-sans">
+            <Loader2 className="w-4 h-4 animate-spin text-emerald-500" />
+            <span>{t('正在按需读取 SOP 规程...')}</span>
+          </div>
+        ) : (
+          loadedSop || t('该技能未定义详细 SOP 执行规程。')
+        )}
       </div>
 
       <div className="p-4 border-t border-border bg-surface-50 flex items-center justify-between">

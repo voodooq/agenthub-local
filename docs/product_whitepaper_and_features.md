@@ -1,5 +1,5 @@
 # AgentHub Local 产品白皮书与全量技术特性全景指南
-> **Document Version**: `v1.1.3`  
+> **Document Version**: `v1.1.4`  
 > **Target Audience**: 视频制作 AI 分析、产品发布会物料、技术评审报告、商业推广与用户文档。  
 > **Product Slogan**: 本地优先 · 谋定而动 · 具身自主 —— 属于极客的桌面级 AI 智能体工作台
 
@@ -241,9 +241,9 @@ flowchart TD
     ├── knowledge/        # [可选] 领域专业参考文档 (*.md / *.txt / *.csv)
     └── schema.json       # [可选] 结构化输入输出 JSON Schema 校验契约
     ```
-* **L1 底座与 L2 工作区分层加载机制**：
-  * L1 全局底座技能跨项目常驻；
-  * L2 物理工作区专属技能，支持对 L1 技能同名高优覆盖，实现“项目级个性化定制”。
+* **L1 底座与 L2 工作区分层加载与毫秒级缓存引擎**：
+  * L1 全局底座技能跨项目常驻，L2 物理工作区专属技能支持同名高优覆盖，实现“项目级个性化定制”；
+  * 列表请求默认采用 4KB Frontmatter 轻量摘要 + 文件 `mtime_ns` / 10 秒列表快照三级缓存及 `asyncio.to_thread` 线程卸载，结合前端 SWR 静默预热与分批 DOM 裁剪，即便挂载数百个长篇技能亦可 0ms 秒开，SOP 完整正文按需懒加载。
 * **内置母技能：`skill-creator`**：
   * 用户完成一段复杂、精妙的对话推演后，若该流程具有长期复用价值，只需输入 `/new-skill` 或交代“把刚才跑通的操作做成一个技能”；
   * 系统在 3 分钟内自动提取步骤 SOP、生成工具脚本目录骨架并完成热加载，实现“以技能制造技能”。
@@ -271,7 +271,7 @@ flowchart TD
   * **冷曜石墨黑 (Obsidian Emerald)**：深沉内敛的石墨底色搭配荧光翡翠绿微光，专为深夜极客打造，沉浸专注；
   * **温润鼠尾草白 (Sage Minimal)**：专为白天办公调优的高透气鼠尾草白（`#f4f6f5`），消除纯白刺眼眩光，彻底根除死黑残留；
   * 遵循严格的语义化 Token 规范，支持跟随操作系统或一键秒切。
-* **独立免安装绿色便携运行包 (Release v1.1.3)**：
+* **独立免安装绿色便携运行包 (Release v1.1.4)**：
   * **解压即用**：打包体积约 32MB，解压后双击 `AgentHub.exe` 瞬间启动；
   * **零依赖要求**：彻底告别“配 Python 虚拟环境配到崩溃”、“Node.js npm install 依赖报错”的噩梦；
   * **100% 数据本地自主掌控**：
@@ -282,7 +282,7 @@ flowchart TD
 
 ## 四、 核心竞争优势对比 (Competitive Matrix)
 
-| 核心对比维度 | AgentHub Local (v1.1.3) | 传统 Web 聊天 (ChatGPT / Claude) | IDE 插件 (Cursor / Copilot) | 命令行 Agent (Aider / Claude Code) |
+| 核心对比维度 | AgentHub Local (v1.1.4) | 传统 Web 聊天 (ChatGPT / Claude) | IDE 插件 (Cursor / Copilot) | 命令行 Agent (Aider / Claude Code) |
 | :--- | :---: | :---: | :---: | :---: |
 | **交付物形态** | **多态全覆盖 (报告/文档/数据表/图表/代码/技能)** | 纯聊天气泡文本 | 仅限代码修改与补全 | 仅限代码与终端命令修改 |
 | **算力连续性** | **多账号池 + <50ms 429 秒切** | 容易触发 429，一旦限流完全中断 | 依赖官方 Token / 订阅额度 | 依赖单 Key 额度，用完即停 |
@@ -322,6 +322,6 @@ flowchart TD
 
 ## 六、 总结与结语 (Conclusion)
 
-**AgentHub Local v1.1.3** 彻底打破了“大模型只能在云端网页里做文字问答，或只能机械地输出代码/技能”的狭隘认知，走出了一条**“本地优先 (Local-First)”、“谋定而动 (Plan-First)”、“多态交付 (Polymorphic Deliverables)”**的全新技术范式。
+**AgentHub Local v1.1.4** 彻底打破了“大模型只能在云端网页里做文字问答，或只能机械地输出代码/技能”的狭隘认知，走出了一条**“本地优先 (Local-First)”、“谋定而动 (Plan-First)”、“多态交付 (Polymorphic Deliverables)”**的全新技术范式。
 
 无论用户需要的是一份深度的技术分析报告、一张高亮对账数据表、一套完整的工程脚本，还是一个可长期沉淀复用的技能包，AgentHub Local 都能在本地桌面上，为用户提供最安全、最连续、最可靠的生产力闭环交付。
