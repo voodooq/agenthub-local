@@ -89,7 +89,7 @@ class _StdioMCPConnection:
                 {
                     "protocolVersion": "2024-11-05",
                     "capabilities": {},
-                    "clientInfo": {"name": "AgentHub-Local", "version": "1.1.8"},
+                    "clientInfo": {"name": "AgentHub-Local", "version": "1.1.9"},
                 },
                 timeout=10.0,
             )

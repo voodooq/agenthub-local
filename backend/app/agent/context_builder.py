@@ -176,8 +176,9 @@ class ContextBuilder:
                     "   - 先输出结构清晰的 Markdown【实施方案（Implementation Plan）】与【分步执行步骤清单（Step-by-Step Task List）】；\n"
                     "   - 步骤必须按序号标注（如 步骤 1、步骤 2...），并标注对应的工具安全级别（L0 只读 / L1 本地受控文件操作 / L2 终端执行与测试）；\n"
                     "3. 【交互式对齐协议规范 (```interactive_inquiry)】：\n"
-                    "   - 若需求存在技术路线分歧、多方案选择或缺少关键参数，必须在回复末尾附带如下标准 JSON 协议块（包含单选/多选/留空模板）：\n"
-                    "   - 若方案完整无歧义，直接在末尾输出带 `phase: \"plan_approval\"` 的标准 JSON 协议块，供用户一键审批启动执行：\n"
+                    "   - **【按需全量列出、不人为限缩数量】**：当任务存在多个技术路线分歧、参数约束、边界策略或较多实施步骤时，**务必按问题实际需要，在 `questions` 与 `plan_steps` 中完整逐条列出全部待确认问题和全量步骤（数量不限，切勿刻意压缩为 1~2 个确认项）**，方便用户一次性核对并选择确认；\n"
+                    "   - 若需求尚存不确定点或缺少关键参数，必须在回复末尾附带如下标准 JSON 协议块（可按需同时包含多道单选/多选 `questions` 与留空模板 `fill_template`）；\n"
+                    "   - 若方案可进入审批启动阶段，请在末尾输出带 `phase: \"plan_approval\"` 的标准 JSON 协议块与完整 `plan_steps`；若批准步骤的同时仍有若干配置项/细节待用户一并拍板，允许在同一卡片内同时附带 `questions` 与 `fill_template`，前端会统一收集全部答案与勾选步骤后再启动执行：\n"
                     "```interactive_inquiry\n"
                     "{\n"
                     '  "inquiry_id": "inq_unique_id",\n'
@@ -188,12 +189,21 @@ class ContextBuilder:
                     '    {\n'
                     '      "id": "q1",\n'
                     '      "type": "single_choice 或 multi_choice",\n'
-                    '      "label": "选择题标题说明",\n'
+                    '      "label": "确认项 1 标题说明",\n'
                     '      "options": [\n'
                     '        {"value": "opt_a", "label": "选项A名称", "desc": "推荐理由或说明"},\n'
                     '        {"value": "opt_b", "label": "选项B名称", "desc": "备选说明"}\n'
                     "      ],\n"
                     '      "default": "opt_a"\n'
+                    "    },\n"
+                    '    {\n'
+                    '      "id": "q2",\n'
+                    '      "type": "multi_choice",\n'
+                    '      "label": "确认项 2 标题说明（可根据需要继续扩展 q3, q4... 无数量上限）",\n'
+                    '      "options": [\n'
+                    '        {"value": "opt_c", "label": "选项C名称", "desc": "说明"},\n'
+                    '        {"value": "opt_d", "label": "选项D名称", "desc": "说明"}\n'
+                    "      ]\n"
                     "    }\n"
                     "  ],\n"
                     '  "fill_template": {\n'
@@ -201,8 +211,9 @@ class ContextBuilder:
                     '    "template_text": "配置参数示例：端口号为 {{PORT:8080}}，目标路径为 {{TARGET_DIR:./output}}。"\n'
                     "  },\n"
                     '  "plan_steps": [\n'
-                    '    {"step": 1, "title": "步骤简述", "tool_level": "L0"},\n'
-                    '    {"step": 2, "title": "步骤简述", "tool_level": "L1"}\n'
+                    '    {"step": 1, "title": "步骤 1 简述", "tool_level": "L0"},\n'
+                    '    {"step": 2, "title": "步骤 2 简述", "tool_level": "L1"},\n'
+                    '    {"step": 3, "title": "步骤 3 简述（按实际任务步骤完整列出）", "tool_level": "L2"}\n'
                     "  ]\n"
                     "}\n"
                     "```\n"
@@ -221,7 +232,8 @@ class ContextBuilder:
             system_parts.append(
                 "### 🧭【需求前置主动澄清模式 (Clarify Mode)】：\n"
                 "用户开启了需求澄清模式。当用户的提问涉及多方案分歧、前提假设不明确或缺少场景约束时，切勿盲目输出长篇泛泛而谈的理论；\n"
-                "应先在正文中提炼核心考量，并在末尾输出 ```interactive_inquiry 结构化卡片（包含 phase: 'clarification' 与 questions 选择题或 fill_template 模板；可长期复用的配置问题可附加 fact_key / fact_category / fact_scope），供用户一键对齐上下文后再展开深度解答。"
+                "应先在正文中提炼核心考量，并在末尾输出 ```interactive_inquiry 结构化卡片（包含 phase: 'clarification' 与 questions 选择题或 fill_template 模板；"
+                "当需要确认或明确的维度较多时，务必按问题实际需要完整逐条列出全部待确认问题，数量不限，切勿强行缩减为一两个导致反复追问；可长期复用的配置问题可附加 fact_key / fact_category / fact_scope），供用户一次性对齐全部上下文后再展开深度解答。"
             )
 
         # 2. [L4 确定性事实视图] 挂载 Active Fact View（工作区契约严格覆盖 GLOBAL，无痕模式跳过）

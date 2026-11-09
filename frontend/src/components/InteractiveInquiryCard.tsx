@@ -9,10 +9,8 @@ import {
   Rocket,
   CheckSquare,
   Square,
-  Sparkles,
-  HelpCircle,
-  FileText,
-  ShieldAlert,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import {
   InteractiveInquiryPayload,
@@ -129,6 +127,8 @@ export function InteractiveInquiryCard({
   );
   const [hasSubmitted, setHasSubmitted] = useState(false);
   const [rememberFacts, setRememberFacts] = useState(true);
+  const [collapsedQuestions, setCollapsedQuestions] = useState<Record<string, boolean>>({});
+  const [stepsCollapsed, setStepsCollapsed] = useState(false);
 
   useEffect(() => {
     if (!parsed || hasInitializedRef.current) return;
@@ -257,7 +257,34 @@ export function InteractiveInquiryCard({
     return list.length > 0 ? list : undefined;
   };
 
-  // 单题一键直发
+  // 格式化单项或所有题目的用户选中摘要文本
+  const getQuestionSummary = (q: InquiryQuestion): string => {
+    const ans = selectedAnswers[q.id];
+    if (Array.isArray(ans)) {
+      return q.options
+        .filter((o) => ans.includes(o.value))
+        .map((o) => o.label)
+        .join('、');
+    }
+    if (ans) {
+      const opt = q.options.find((o) => o.value === ans);
+      return opt ? opt.label : String(ans);
+    }
+    return '';
+  };
+
+  const formatSelectedAnswersLines = (): string[] => {
+    const lines: string[] = [];
+    questions.forEach((q, idx) => {
+      const summaryText = getQuestionSummary(q);
+      if (!summaryText) return;
+      const prefix = questions.length > 1 ? `[${idx + 1}/${questions.length}] ` : '';
+      lines.push(`- ${prefix}${q.label}: ${summaryText}`);
+    });
+    return lines;
+  };
+
+  // 单题一键直发（仅在纯单题无步骤审批时启用，避免多题或混合卡片误锁）
   const handleDirectSendOption = (q: InquiryQuestion, opt: { value: string; label: string }) => {
     if (hasSubmitted || !onSendFeedback) return;
     const text = `已确认决策: 【${q.label}】选用方案为「${opt.label}」(${opt.value})。请继续。`;
@@ -269,32 +296,34 @@ export function InteractiveInquiryCard({
   // 组合表单统一提交
   const handleSubmitForm = () => {
     if (hasSubmitted || !onSendFeedback) return;
-    const lines: string[] = ['已确认以下配置与决策：'];
-    for (const q of questions) {
-      const ans = selectedAnswers[q.id];
-      if (Array.isArray(ans)) {
-        const labels = q.options.filter((o) => ans.includes(o.value)).map((o) => o.label);
-        lines.push(`- ${q.label}: ${labels.join('、')}`);
-      } else if (ans) {
-        const opt = q.options.find((o) => o.value === ans);
-        lines.push(`- ${q.label}: ${opt ? opt.label : ans}`);
-      }
-    }
-    lines.push('请根据以上确认结果继续执行。');
+    const answerLines = formatSelectedAnswersLines();
+    const lines: string[] = [
+      '已确认以下配置与决策：',
+      ...answerLines,
+      '请根据以上确认结果继续执行。',
+    ];
     const facts = buildConfirmedFacts();
     setHasSubmitted(true);
     onSendFeedback(lines.join('\n'), facts);
   };
 
-  // 方案批准并执行
+  // 方案批准并执行（混合卡片同时附带全部已选问题结论与批准步骤）
   const handleApprovePlanClick = () => {
     if (hasSubmitted) return;
-    const activeSteps = (parsed.plan_steps || []).filter((s) => stepSelections[s.step] !== false);
-    const feedbackLines = [
+    const planSteps = parsed.plan_steps || [];
+    const activeSteps = planSteps.filter((s) => stepSelections[s.step] !== false);
+    if (planSteps.length > 0 && activeSteps.length === 0) return;
+
+    const answerLines = formatSelectedAnswersLines();
+    const feedbackLines: string[] = [];
+    if (answerLines.length > 0) {
+      feedbackLines.push('已确认以下前置配置与选型决策：', ...answerLines, '');
+    }
+    feedbackLines.push(
       '✅ 实施方案已通过用户审批，批准执行以下步骤清单：',
       ...activeSteps.map((s) => `${s.step}. ${s.title} [${s.tool_level || 'L1'}]`),
-      '请解锁执行权限并立即进入 TaskLoop 自主推演循环！',
-    ];
+      '请解锁执行权限并立即进入 TaskLoop 自主推演循环！'
+    );
     const facts = buildConfirmedFacts();
     setHasSubmitted(true);
     if (onApprovePlan) {
@@ -304,7 +333,43 @@ export function InteractiveInquiryCard({
     }
   };
 
-  const isPlanApproval = parsed.phase === 'plan_approval' || (parsed.plan_steps && parsed.plan_steps.length > 0);
+  // 批量折叠/展开题目与全选/反选步骤
+  const toggleQuestionCollapsed = (qId: string) => {
+    setCollapsedQuestions((prev) => ({ ...prev, [qId]: !prev[qId] }));
+  };
+
+  const toggleAllQuestions = (collapse: boolean) => {
+    const next: Record<string, boolean> = {};
+    for (const q of questions) {
+      next[q.id] = collapse;
+    }
+    setCollapsedQuestions(next);
+  };
+
+  const handleSelectAllSteps = () => {
+    if (hasSubmitted || !parsed.plan_steps) return;
+    const next: Record<number, boolean> = {};
+    for (const s of parsed.plan_steps) {
+      next[s.step] = true;
+    }
+    setStepSelections(next);
+  };
+
+  const handleInvertSteps = () => {
+    if (hasSubmitted || !parsed.plan_steps) return;
+    const next: Record<number, boolean> = {};
+    for (const s of parsed.plan_steps) {
+      next[s.step] = stepSelections[s.step] === false;
+    }
+    setStepSelections(next);
+  };
+
+  const planSteps = parsed.plan_steps || [];
+  const isPlanApproval = parsed.phase === 'plan_approval' || planSteps.length > 0;
+  const allowDirectSingleSend = questions.length === 1 && !isPlanApproval;
+  const activeStepCount = planSteps.filter((s) => stepSelections[s.step] !== false).length;
+  const areAllQuestionsCollapsed =
+    questions.length > 1 && questions.every((q) => Boolean(collapsedQuestions[q.id]));
 
   return (
     <div className="my-4 rounded-xl border border-emerald-500/40 bg-surface-card shadow-sm overflow-hidden select-text transition">
@@ -318,9 +383,21 @@ export function InteractiveInquiryCard({
             {title}
           </h4>
         </div>
-        <span className="text-[11px] px-2 py-0.5 rounded-full font-medium shrink-0 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
-          {isPlanApproval ? t('方案审批') : t('需求澄清')}
-        </span>
+        <div className="flex items-center space-x-1.5 shrink-0">
+          {questions.length > 1 && (
+            <span className="text-[10px] px-2 py-0.5 rounded-full font-mono bg-surface-200 text-muted-foreground border border-border">
+              {questions.length} {t('项确认')}
+            </span>
+          )}
+          {planSteps.length > 0 && (
+            <span className="text-[10px] px-2 py-0.5 rounded-full font-mono bg-surface-200 text-muted-foreground border border-border">
+              {planSteps.length} {t('个步骤')}
+            </span>
+          )}
+          <span className="text-[11px] px-2 py-0.5 rounded-full font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+            {isPlanApproval ? t('方案审批') : t('需求澄清')}
+          </span>
+        </div>
       </div>
 
       <div className="p-4 space-y-4 text-xs">
@@ -331,75 +408,134 @@ export function InteractiveInquiryCard({
 
         {/* 问询问题列表 (Questions) */}
         {questions.length > 0 && (
-          <div className="space-y-4">
-            {questions.map((q) => {
+          <div className="space-y-3">
+            {questions.length > 1 && (
+              <div className="flex items-center justify-between px-1">
+                <span className="text-[11px] font-semibold text-muted-foreground">
+                  {t('待确认事项')} ({questions.length})
+                </span>
+                <button
+                  type="button"
+                  onClick={() => toggleAllQuestions(!areAllQuestionsCollapsed)}
+                  className="text-[11px] text-emerald-600 dark:text-emerald-400 hover:underline flex items-center space-x-1"
+                >
+                  {areAllQuestionsCollapsed ? (
+                    <>
+                      <ChevronDown className="w-3 h-3" />
+                      <span>{t('全部展开')}</span>
+                    </>
+                  ) : (
+                    <>
+                      <ChevronUp className="w-3 h-3" />
+                      <span>{t('全部收起')}</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
+
+            {questions.map((q, qIdx) => {
               const currentVal = selectedAnswers[q.id];
+              const isCollapsed = Boolean(collapsedQuestions[q.id]);
+              const selectedSummary = getQuestionSummary(q);
               return (
-                <div key={q.id} className="space-y-2 p-3 rounded-lg bg-surface-100 border border-border">
-                  <div className="font-medium text-foreground flex items-center justify-between">
-                    <span>{q.label}</span>
-                    <span className="text-[10px] text-muted-foreground">
-                      {q.type === 'multi_choice' ? t('多选') : t('单选')}
-                    </span>
+                <div key={q.id || `q_${qIdx}`} className="space-y-2 p-3 rounded-lg bg-surface-100 border border-border">
+                  <div className="font-medium text-foreground flex items-center justify-between gap-2">
+                    <div className="flex items-center space-x-2 min-w-0">
+                      {questions.length > 1 && (
+                        <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shrink-0">
+                          {qIdx + 1}/{questions.length}
+                        </span>
+                      )}
+                      <span className="break-words">{q.label}</span>
+                    </div>
+                    <div className="flex items-center space-x-2 shrink-0">
+                      <span className="text-[10px] text-muted-foreground">
+                        {q.type === 'multi_choice' ? t('多选') : t('单选')}
+                      </span>
+                      {questions.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => toggleQuestionCollapsed(q.id)}
+                          className="p-0.5 rounded hover:bg-surface-200 text-muted-foreground hover:text-foreground transition"
+                          title={isCollapsed ? t('全部展开') : t('全部收起')}
+                        >
+                          {isCollapsed ? (
+                            <ChevronDown className="w-3.5 h-3.5" />
+                          ) : (
+                            <ChevronUp className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      )}
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
-                    {q.options.map((opt) => {
-                      const isSelected =
-                        q.type === 'single_choice'
-                          ? currentVal === opt.value
-                          : Array.isArray(currentVal) && currentVal.includes(opt.value);
+                  {isCollapsed ? (
+                    <div
+                      onClick={() => toggleQuestionCollapsed(q.id)}
+                      className="text-[11px] text-muted-foreground bg-surface-card border border-border/70 rounded-md px-2.5 py-1.5 cursor-pointer hover:border-emerald-500/40 transition truncate"
+                    >
+                      {t('已收起，当前选择:')} <span className="text-foreground font-medium">{selectedSummary || '-'}</span>
+                    </div>
+                  ) : (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-2">
+                      {q.options.map((opt) => {
+                        const isSelected =
+                          q.type === 'single_choice'
+                            ? currentVal === opt.value
+                            : Array.isArray(currentVal) && currentVal.includes(opt.value);
 
-                      return (
-                        <div
-                          key={opt.value}
-                          onClick={() => {
-                            if (q.type === 'single_choice') {
-                              handleSingleSelect(q.id, opt.value);
-                            } else {
-                              handleMultiToggle(q.id, opt.value);
-                            }
-                          }}
-                          className={`p-2.5 rounded-lg border text-left cursor-pointer transition flex flex-col justify-between ${
-                            isSelected
-                              ? 'border-emerald-500 bg-emerald-500/10 text-foreground'
-                              : 'border-border bg-surface-card hover:bg-surface-50 text-muted-foreground hover:text-foreground'
-                          } ${hasSubmitted ? 'opacity-60 cursor-not-allowed' : ''}`}
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <span className="font-semibold text-foreground text-xs leading-snug">
-                              {opt.label}
-                            </span>
-                            {isSelected ? (
-                              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
-                            ) : (
-                              <div className="w-3.5 h-3.5 rounded-full border border-border shrink-0 mt-0.5" />
+                        return (
+                          <div
+                            key={opt.value}
+                            onClick={() => {
+                              if (q.type === 'single_choice') {
+                                handleSingleSelect(q.id, opt.value);
+                              } else {
+                                handleMultiToggle(q.id, opt.value);
+                              }
+                            }}
+                            className={`p-2.5 rounded-lg border text-left cursor-pointer transition flex flex-col justify-between ${
+                              isSelected
+                                ? 'border-emerald-500 bg-emerald-500/10 text-foreground'
+                                : 'border-border bg-surface-card hover:bg-surface-50 text-muted-foreground hover:text-foreground'
+                            } ${hasSubmitted ? 'opacity-60 cursor-not-allowed' : ''}`}
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <span className="font-semibold text-foreground text-xs leading-snug">
+                                {opt.label}
+                              </span>
+                              {isSelected ? (
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0 mt-0.5" />
+                              ) : (
+                                <div className="w-3.5 h-3.5 rounded-full border border-border shrink-0 mt-0.5" />
+                              )}
+                            </div>
+                            {opt.desc && (
+                              <p className="text-[11px] text-muted-foreground mt-1 leading-normal">
+                                {opt.desc}
+                              </p>
+                            )}
+                            {/* 仅纯单题无步骤时展示单题直发快捷键，防止多题或混合审批误锁整卡 */}
+                            {q.type === 'single_choice' && allowDirectSingleSend && !hasSubmitted && (
+                              <div className="mt-2 pt-1 border-t border-border/40 flex justify-end">
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleDirectSendOption(q, opt);
+                                  }}
+                                  className="text-[10px] px-1.5 py-0.5 rounded bg-surface-200 hover:bg-emerald-500 hover:text-white text-muted-foreground transition flex items-center space-x-1"
+                                >
+                                  <span>{t('⚡ 选此项直发')}</span>
+                                </button>
+                              </div>
                             )}
                           </div>
-                          {opt.desc && (
-                            <p className="text-[11px] text-muted-foreground mt-1 leading-normal">
-                              {opt.desc}
-                            </p>
-                          )}
-                          {/* 单选且未提交时，支持卡片内单题直发快捷键 */}
-                          {q.type === 'single_choice' && !hasSubmitted && (
-                            <div className="mt-2 pt-1 border-t border-border/40 flex justify-end">
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleDirectSendOption(q, opt);
-                                }}
-                                className="text-[10px] px-1.5 py-0.5 rounded bg-surface-200 hover:bg-emerald-500 hover:text-white text-muted-foreground transition flex items-center space-x-1"
-                              >
-                                <span>{t('⚡ 选此项直发')}</span>
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               );
             })}
@@ -434,63 +570,99 @@ export function InteractiveInquiryCard({
         )}
 
         {/* 分步步骤清单 (Step-by-Step Task List) */}
-        {parsed.plan_steps && parsed.plan_steps.length > 0 && (
+        {planSteps.length > 0 && (
           <div className="space-y-2 p-3 rounded-lg bg-surface-100 border border-border">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <span className="font-semibold text-foreground">{t('执行步骤清单 (可按需勾选微调)')}</span>
-              <span className="text-[10px] text-muted-foreground font-mono">
-                {Object.values(stepSelections).filter(Boolean).length}/{parsed.plan_steps.length} {t('已勾选')}
-              </span>
-            </div>
-
-            <div className="space-y-1.5 mt-2">
-              {parsed.plan_steps.map((st) => {
-                const isChecked = stepSelections[st.step] !== false;
-                const toolLvl = (st.tool_level || 'L1').toUpperCase();
-                const lvlColor =
-                  toolLvl === 'L0'
-                    ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20'
-                    : toolLvl === 'L2'
-                    ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20'
-                    : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20';
-
-                return (
-                  <div
-                    key={st.step}
-                    onClick={() => handleStepToggle(st.step)}
-                    className={`flex items-start space-x-2.5 p-2 rounded-lg border text-left cursor-pointer transition ${
-                      isChecked
-                        ? 'border-border bg-surface-card text-foreground'
-                        : 'border-border/60 bg-surface-200/50 text-muted-foreground opacity-60'
-                    }`}
-                  >
-                    <div className="mt-0.5">
-                      {isChecked ? (
-                        <CheckSquare className="w-4 h-4 text-emerald-500" />
-                      ) : (
-                        <Square className="w-4 h-4 text-muted-foreground" />
-                      )}
-                    </div>
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center space-x-2">
-                        <span className="font-mono text-xs font-semibold text-foreground">
-                          {t('步骤')} {st.step}:
-                        </span>
-                        <span className="text-xs text-foreground font-medium truncate">
-                          {st.title}
-                        </span>
-                        <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded border ${lvlColor}`}>
-                          {toolLvl}
-                        </span>
-                      </div>
-                      {st.description && (
-                        <p className="text-[11px] text-muted-foreground mt-0.5">{st.description}</p>
-                      )}
-                    </div>
+              <div className="flex items-center space-x-2">
+                {planSteps.length >= 2 && !hasSubmitted && (
+                  <div className="flex items-center space-x-1">
+                    <button
+                      type="button"
+                      onClick={handleSelectAllSteps}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-surface-card hover:bg-emerald-500/15 text-muted-foreground hover:text-emerald-600 dark:hover:text-emerald-400 border border-border transition"
+                    >
+                      {t('全选')}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleInvertSteps}
+                      className="text-[10px] px-1.5 py-0.5 rounded bg-surface-card hover:bg-emerald-500/15 text-muted-foreground hover:text-emerald-600 dark:hover:text-emerald-400 border border-border transition"
+                    >
+                      {t('反选')}
+                    </button>
                   </div>
-                );
-              })}
+                )}
+                <span className="text-[10px] text-muted-foreground font-mono">
+                  {activeStepCount}/{planSteps.length} {t('已勾选')}
+                </span>
+                {planSteps.length >= 4 && (
+                  <button
+                    type="button"
+                    onClick={() => setStepsCollapsed((prev) => !prev)}
+                    className="text-[10px] text-emerald-600 dark:text-emerald-400 hover:underline flex items-center space-x-0.5"
+                  >
+                    <span>{stepsCollapsed ? t('查看清单') : t('收起清单')}</span>
+                    {stepsCollapsed ? (
+                      <ChevronDown className="w-3 h-3" />
+                    ) : (
+                      <ChevronUp className="w-3 h-3" />
+                    )}
+                  </button>
+                )}
+              </div>
             </div>
+
+            {!stepsCollapsed && (
+              <div className="space-y-1.5 mt-2">
+                {planSteps.map((st) => {
+                  const isChecked = stepSelections[st.step] !== false;
+                  const toolLvl = (st.tool_level || 'L1').toUpperCase();
+                  const lvlColor =
+                    toolLvl === 'L0'
+                      ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20'
+                      : toolLvl === 'L2'
+                      ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20'
+                      : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20';
+
+                  return (
+                    <div
+                      key={st.step}
+                      onClick={() => handleStepToggle(st.step)}
+                      className={`flex items-start space-x-2.5 p-2 rounded-lg border text-left cursor-pointer transition ${
+                        isChecked
+                          ? 'border-border bg-surface-card text-foreground'
+                          : 'border-border/60 bg-surface-200/50 text-muted-foreground opacity-60'
+                      }`}
+                    >
+                      <div className="mt-0.5">
+                        {isChecked ? (
+                          <CheckSquare className="w-4 h-4 text-emerald-500" />
+                        ) : (
+                          <Square className="w-4 h-4 text-muted-foreground" />
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center space-x-2">
+                          <span className="font-mono text-xs font-semibold text-foreground shrink-0">
+                            {t('步骤')} {st.step}:
+                          </span>
+                          <span className="text-xs text-foreground font-medium break-words">
+                            {st.title}
+                          </span>
+                          <span className={`text-[10px] font-mono px-1.5 py-0.2 rounded border shrink-0 ${lvlColor}`}>
+                            {toolLvl}
+                          </span>
+                        </div>
+                        {st.description && (
+                          <p className="text-[11px] text-muted-foreground mt-0.5">{st.description}</p>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
 
@@ -500,8 +672,14 @@ export function InteractiveInquiryCard({
             <span className="text-[11px] text-muted-foreground">
               {hasSubmitted
                 ? t('✓ 已提交确认结果，等待 Agent 响应中...')
+                : isPlanApproval && activeStepCount === 0 && planSteps.length > 0
+                ? t('请至少保留勾选 1 个执行步骤')
+                : isPlanApproval && questions.length > 0
+                ? t('请逐项确认上述问题并勾选实施步骤后批准执行')
                 : isPlanApproval
                 ? t('请确认实施步骤无误后批准启动执行')
+                : questions.length > 1
+                ? t('请逐项选择以上全部待确认项后统一提交')
                 : t('可点击单个选项直发，或在调整后统一提交')}
             </span>
             {hasFactCandidates && (
@@ -528,7 +706,7 @@ export function InteractiveInquiryCard({
                 className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs shadow-sm transition disabled:opacity-50"
               >
                 <Send className="w-3.5 h-3.5" />
-                <span>{t('提交所选决策')}</span>
+                <span>{questions.length > 1 ? t('提交全部所选决策') : t('提交所选决策')}</span>
               </button>
             )}
 
@@ -536,7 +714,7 @@ export function InteractiveInquiryCard({
             {isPlanApproval && (
               <button
                 type="button"
-                disabled={hasSubmitted}
+                disabled={hasSubmitted || (planSteps.length > 0 && activeStepCount === 0)}
                 onClick={handleApprovePlanClick}
                 className="flex items-center space-x-2 px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-semibold text-xs shadow-md transition disabled:opacity-50 group"
               >

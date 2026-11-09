@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # NOTE: 优先读取环境变量，未配置时自适应检测 data 目录
     """
     app_name: str = "AgentHub Local"
-    app_version: str = "1.1.8"
+    app_version: str = "1.1.9"
     # NOTE: 默认仅绑定本机回环地址，防止意外对外暴露
     host: str = "127.0.0.1"
     port: int = 8686
