@@ -9,6 +9,8 @@ import secrets
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from .runtime_paths import get_bundle_root, get_writable_app_root
+
 
 def load_version_metadata(candidates: list[Path] | None = None) -> tuple[str, str]:
     """按优先级从统一版本配置文件读取版本号与版本后缀。
@@ -23,13 +25,12 @@ def load_version_metadata(candidates: list[Path] | None = None) -> tuple[str, st
     if candidates is not None:
         search_paths = list(candidates)
     else:
-        search_paths = []
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            search_paths.append(Path(meipass) / "version.json")
-        # 源码运行或独立便携包：定位仓库根目录 version.json 与包内兜底 version.json
-        search_paths.append(Path(__file__).resolve().parent.parent.parent.parent / "version.json")
-        search_paths.append(Path(__file__).resolve().parent / "version.json")
+        bundle_root = get_bundle_root()
+        search_paths = [
+            bundle_root / "version.json",
+            Path(__file__).resolve().parent.parent.parent.parent / "version.json",
+            Path(__file__).resolve().parent / "version.json",
+        ]
 
     for path in search_paths:
         if not path.is_file():
@@ -92,13 +93,7 @@ class Settings(BaseSettings):
             self.secret_key = secrets.token_hex(32)
 
         if not self.db_path:
-            if Path("/app/data").exists() or Path("/app").exists():
-                data_dir = Path("/app/data")
-            elif getattr(sys, "frozen", False):
-                # 独立便携运行环境：数据存放在可执行文件所在目录下的 data/
-                data_dir = Path(sys.executable).resolve().parent / "data"
-            else:
-                data_dir = Path(__file__).resolve().parent.parent.parent.parent / "data"
+            data_dir = get_writable_app_root() / "data"
 
             data_dir.mkdir(parents=True, exist_ok=True)
             # 默认使用 agenthub_local.db，兼容回退 gemini_hub_local.db

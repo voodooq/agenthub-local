@@ -1,19 +1,43 @@
 """
 网络代理自适应检测模块
-自动探测 Windows 注册表 Internet Settings 与系统环境变量，
-实现 Go CLI 子进程与后端 HTTP 客户端在国内科学网络环境下的秒级连通。
+自动探测 Windows 注册表、macOS scutil 与系统环境变量，
+实现 Go CLI 子进程与后端 HTTP 客户端在代理网络环境下的秒级连通。
 """
 import os
+import re
+import subprocess
 import sys
-import winreg
 from typing import Optional
 from .logging_config import logger
+
+
+def _detect_macos_scutil_proxy() -> Optional[str]:
+    """通过 macOS 原生 scutil --proxy 检测系统 HTTPS / HTTP 代理设置。"""
+    try:
+        proc = subprocess.run(
+            ["scutil", "--proxy"],
+            capture_output=True,
+            text=True,
+            timeout=1.5,
+        )
+        if proc.returncode != 0 or not proc.stdout:
+            return None
+        out = proc.stdout
+        for prefix in ("HTTPS", "HTTP"):
+            en_match = re.search(rf"{prefix}Enable\s*:\s*1\b", out)
+            host_match = re.search(rf"{prefix}Proxy\s*:\s*(\S+)", out)
+            port_match = re.search(rf"{prefix}Port\s*:\s*(\d+)", out)
+            if en_match and host_match and port_match:
+                return f"http://{host_match.group(1)}:{port_match.group(1)}"
+    except Exception as e:
+        logger.debug(f"读取 macOS scutil 系统代理跳过: {e}")
+    return None
 
 
 def get_system_proxy_url() -> Optional[str]:
     """
     自适应获取当前系统的 HTTP/S 代理地址。
-    优先读取环境变量，未配置时读取 Windows 注册表。
+    优先读取环境变量，未配置时按宿主平台读取 Windows 注册表或 macOS scutil。
     """
     for var in ["HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy"]:
         val = os.environ.get(var)
@@ -22,6 +46,8 @@ def get_system_proxy_url() -> Optional[str]:
 
     if sys.platform == "win32":
         try:
+            import winreg
+
             reg_key = winreg.OpenKey(
                 winreg.HKEY_CURRENT_USER,
                 r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
@@ -44,6 +70,8 @@ def get_system_proxy_url() -> Optional[str]:
                 winreg.CloseKey(reg_key)
         except Exception as e:
             logger.debug(f"读取 Windows 注册表代理失败: {e}")
+    elif sys.platform == "darwin":
+        return _detect_macos_scutil_proxy()
 
     return None
 

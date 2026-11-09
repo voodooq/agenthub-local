@@ -227,7 +227,16 @@ class LocalShellExecutor:
                 "timed_out": 是否超时
             }
         """
-        effective_cwd = cwd if (cwd and os.path.isdir(cwd)) else os.getcwd()
+        if cwd and os.path.isdir(cwd):
+            effective_cwd = cwd
+        else:
+            raw_cwd = os.getcwd()
+            # NOTE: macOS 从 Finder 双击 .app 启动时 cwd 常为只读根目录 /，回退至可写应用根
+            if sys.platform != "win32" and (raw_cwd == "/" or not os.access(raw_cwd, os.W_OK)):
+                from ..core.runtime_paths import get_writable_app_root
+                effective_cwd = str(get_writable_app_root())
+            else:
+                effective_cwd = raw_cwd
 
         # 构造带 UTF-8 编码声明与尾部 CWD 探测标记的包装命令
         if sys.platform == "win32":
@@ -267,10 +276,11 @@ class LocalShellExecutor:
             wrapped_cmd = f"{command}; __real_exit=$?; echo \"\n{self._CWD_MARKER}$(pwd)\"; exit $__real_exit"
             exec_args = ["/bin/bash", "-c", wrapped_cmd]
 
-        # 强制将当前 Python 虚拟环境的 Scripts 目录与 bin 目录优先注入子进程 PATH，杜绝 WindowsApps 假 Python 劫持
+        # 非冻结研发模式下将当前虚拟环境 Scripts/bin 优先注入子进程 PATH，杜绝 WindowsApps 假 Python 劫持
         child_env = os.environ.copy()
-        venv_scripts = os.path.dirname(sys.executable)
-        child_env["PATH"] = venv_scripts + os.pathsep + child_env.get("PATH", "")
+        if not getattr(sys, "frozen", False):
+            venv_scripts = os.path.dirname(sys.executable)
+            child_env["PATH"] = venv_scripts + os.pathsep + child_env.get("PATH", "")
         child_env["PYTHONIOENCODING"] = "utf-8"
         child_env["PYTHONUNBUFFERED"] = "1"
 

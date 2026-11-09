@@ -12,10 +12,17 @@ import uvicorn
 import webview
 from pathlib import Path
 
-# 将项目路径与 backend 路径加入 sys.path
-BASE_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(BASE_DIR))
-sys.path.insert(0, str(BASE_DIR / "backend"))
+# 将源码根目录与 backend 路径加入 sys.path（兼容源码开发及 PyInstaller 冻结包）
+_MEIPASS = getattr(sys, "_MEIPASS", None)
+if _MEIPASS:
+    BASE_DIR = Path(_MEIPASS).resolve()
+else:
+    BASE_DIR = Path(__file__).resolve().parent
+if str(BASE_DIR) not in sys.path:
+    sys.path.insert(0, str(BASE_DIR))
+_BACKEND_DIR = BASE_DIR / "backend"
+if _BACKEND_DIR.is_dir() and str(_BACKEND_DIR) not in sys.path:
+    sys.path.insert(0, str(_BACKEND_DIR))
 
 from backend.main import app, find_free_port
 from backend.app.core.config import settings
@@ -45,8 +52,8 @@ def main():
     is_debug = "--debug" in sys.argv or os.environ.get("AGENT_HUB_DEBUG") == "1" or os.environ.get("GEMINI_HUB_DEBUG") == "1"
     is_force_reload = is_debug or "--reload" in sys.argv or "--force" in sys.argv or os.environ.get("AGENT_HUB_FORCE") == "1" or os.environ.get("GEMINI_HUB_FORCE") == "1"
 
-    # 如果带有 --debug 或 --force，自动在启动前彻底清空 WebView2 本地强缓存目录，确保代码 100% 强制最新
-    if is_force_reload:
+    # 如果在 Windows 带有 --debug 或 --force，自动在启动前清空 WebView2 本地强缓存目录，确保代码 100% 强制最新
+    if is_force_reload and sys.platform == "win32":
         cache_root = Path(os.environ.get("APPDATA", "")) / "pywebview" / "EBWebView"
         if cache_root.exists():
             for folder_name in ("Cache", "Code Cache", "DawnCache", "GPUCache", "GrShaderCache", "ShaderCache"):

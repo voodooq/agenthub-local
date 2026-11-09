@@ -12,27 +12,35 @@ Windows UI Automation (UIA) 原生无界面控件交互引擎（工业级高鲁�
 
 import base64
 import ctypes
-from ctypes import wintypes
 import json
 import logging
 import re
 import subprocess
+import sys
 from typing import Any
 
 logger = logging.getLogger("agenthub.ui_operator")
 
-user32 = ctypes.windll.user32
-WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+if sys.platform == "win32":
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    WNDENUMPROC = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+else:
+    user32 = None
+    WNDENUMPROC = None
 
 
 class UIOperator:
-    """Windows 原生 UI 自动化控制器。"""
+    """Windows 原生 UI 自动化控制器（非 Windows 平台安全降级返回未支持提示）。"""
 
     @classmethod
     def _get_default_desktop_windows(cls) -> list[dict[str, Any]]:
         """
         穿透至 default 用户桌面，安全枚举所有可见顶级窗口。
         """
+        if sys.platform != "win32" or user32 is None or WNDENUMPROC is None:
+            return []
         windows: list[dict[str, Any]] = []
         hdesk = user32.OpenDesktopW("default", 0, False, 0x01FF)
         if not hdesk:
@@ -122,6 +130,9 @@ class UIOperator:
         2. FindAll 优先，若元素 <= 3 则自动切换 RawViewWalker 兜底
         3. 输出屏幕物理坐标 [x,y,w,h]，方便无 Pattern 自绘控件回退物理点击
         """
+        if sys.platform != "win32" or user32 is None:
+            return "当前宿主系统非 Windows，原生 Win32 UIA 窗口控件扫描暂不可用。"
+
         hwnd, title = cls._resolve_target_hwnd(target)
         if not hwnd:
             all_wins = cls.list_windows()
@@ -282,6 +293,12 @@ try {{
         :param value: 当 action='input' 时要填充的文本（自动通过剪贴板安全粘贴，杜绝中文乱码）
         :param press_enter: 输入完成后是否自动发送 Enter 回车键
         """
+        if sys.platform != "win32" or user32 is None:
+            return {
+                "success": False,
+                "error": "当前宿主系统非 Windows，不支持 Win32 UIA 控件操作。",
+            }
+
         hwnd, title = cls._resolve_target_hwnd(target)
         if not hwnd:
             return {

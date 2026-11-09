@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.1.12-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.1.13-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -14,6 +14,21 @@
 > **数据与算力彻底解耦，告别单一模型绑定**：
 > AgentHub Local 是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、Llama.cpp、Nvidia 实例），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、SiliconFlow、Google AI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
+
+---
+
+## 📦 v1.1.13 跨平台瘦身拆包、Windows 单文件 EXE 与 macOS 桌面发行流水线升级
+
+彻底实现「**轻量跨平台源码包 (<1 MB)**」与「**Windows 单文件 EXE / macOS ARM64 DMG 独立桌面程序**」分离构建与大幅瘦身：
+1. **统一冻结路径解析与跨平台防崩溃 ([`runtime_paths.py`](backend/app/core/runtime_paths.py), [`proxy_helper.py`](backend/app/core/proxy_helper.py), [`ui_operator.py`](backend/app/agent/ui_operator.py))**：
+   - 将只读 Bundle 内嵌资源根目录 (`sys._MEIPASS`) 与可写用户持久化目录（`data/`、`skills/`、`mcp_servers.json`）彻底解耦：Windows 单文件 EXE 默认采用同级便携模式（无写权限时自动回退 `%LOCALAPPDATA%\AgentHubLocal`）；macOS `.app` 统一保存至 `~/Library/Application Support/AgentHubLocal`，彻底规避 Gatekeeper AppTranslocation 只读沙盒与升级覆盖数据丢失；
+   - 首次运行自动将内置默认 Skill 与初始 MCP 配置增量拷贝到可写目录（不覆盖用户自定义内容），冻结期通过 [`resolve_python_interpreter`](backend/app/core/runtime_paths.py) 查找外部 Python 解释器运行 `.py` 工具脚本；
+   - 修复非 Windows 平台顶层导入 `winreg` 与 `ctypes.windll` 导致启动闪退的问题，新增 macOS `scutil --proxy` 系统代理自动识别；限定 `pythonnet`/`clr-loader` 仅在 Windows 安装。
+2. **依赖精准裁剪与打包分拆 ([`build_release_exe.py`](build_release_exe.py), [`package_release.py`](package_release.py))**：
+   - 剔除 `--collect-all openpyxl` 误带出的未用重型依赖 `pandas` / `numpy` / `scipy` 与重复静态目录副本，将单文件 EXE 体积大幅裁剪 ~19 MB；
+   - [`package_release.py`](package_release.py) 专职产出极速轻量的 `portable.zip` 与 `portable.tar.gz`（含 [`启动AgentHub桌面版.sh`](启动AgentHub桌面版.sh)）。
+3. **GitHub Actions 全平台自动化构建矩阵 ([`release.yml`](.github/workflows/release.yml))**：
+   - 推送 Tag 后云端并行编排编译：一次导出静态前端 -> 并行构建 **轻量便携 Zip / Tar.gz**、**Windows x64 单文件 EXE**、**macOS Apple Silicon DMG** -> 自动挂载 4 类独立资产至 GitHub Release。
 
 ---
 
@@ -291,42 +306,45 @@ flowchart TD
 
 | 客户端版本 | 适用系统 | 包名称 | 运行方式 |
 | :--- | :--- | :--- | :--- |
-| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.12-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
-| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.12-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
+| **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.13-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
+| **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-v1.1.13-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
+| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.1.13-portable.zip` | 不含二进制运行库（约 `<1 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
+| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.1.13-portable.tar.gz` | 不含二进制运行库（约 `<1 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
 | **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
 
 ---
 
 ## 🛠️ GitHub Releases 自动打包机制 (CI/CD)
 
-本项目配置了完整的 GitHub Actions 自动化打包流水线（`.github/workflows/release.yml`）：
+本项目配置了跨平台并行 GitHub Actions 自动化打包流水线（`.github/workflows/release.yml`）：
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Dev as 开发者
-    participant Git as 本地 Git 仓库
     participant GH as GitHub Remote
-    participant Actions as GitHub Actions Runner (windows-latest)
-    participant Releases as GitHub Releases 页面
+    participant FE as build-frontend (ubuntu)
+    participant Win as build-windows-exe (windows-latest)
+    participant Mac as build-macos-dmg (macos-latest)
+    participant Port as package-portable (ubuntu)
+    participant Rel as GitHub Releases 页面
 
-    Dev->>Git: git tag v1.1.12
-    Dev->>GH: git push origin v1.1.12
-    GH->>Actions: 触发 release.yml 流水线
-    Actions->>Actions: 安装 Node 20 & Python 3.12
-    Actions->>Actions: 编译并导出 Next.js 静态前端 (out/)
-    Actions->>Actions: 打包 Windows 便携包 (*-windows-x64.zip)
-    Actions->>Actions: 打包跨平台源码包 (*-portable.tar.gz)
-    Actions->>Releases: 自动创建 Release v1.1.12 并上传分发产物
-    Releases-->>Dev: 用户可在页面直接下载执行文件
+    Dev->>GH: git tag v1.1.13 && git push origin v1.1.13
+    GH->>FE: 安装 Node 20 并导出静态前端 out/
+    FE->>Port: 分发 out/ -> 生成 portable.zip & portable.tar.gz
+    FE->>Win: 分发 out/ -> PyInstaller --onefile 生成 *-windows-x64.exe
+    FE->>Mac: 分发 out/ -> PyInstaller + hdiutil 生成 *-macos-arm64.dmg
+    Port->>Rel: 汇聚 4 类独立资产自动创建 Release v1.1.13
+    Win->>Rel: 挂载独立单文件 EXE
+    Mac->>Rel: 挂载 macOS ARM64 DMG
 ```
 
 ### 如何发布新版本：
 只需在 `version.json` 更新版本号（或运行 `python sync_version.py <version>`），随后在本地执行以下命令：
 ```bash
-git tag v1.1.12
+git tag v1.1.13
 git push origin master
-git push origin v1.1.12
+git push origin v1.1.13
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 release 附件，几分钟内即可在 Releases 页面看到生成的下载文件！
 

@@ -18,6 +18,7 @@ import psutil
 
 from app.core.config import settings
 from app.core.logging_config import setup_logging, logger
+from app.core.runtime_paths import get_bundle_root, get_writable_app_root
 from app.repository.db import db_manager
 from app.core.proxy_helper import apply_system_proxy_to_process
 from app.api.router import api_router
@@ -195,16 +196,16 @@ app.include_router(api_router)
 
 # 挂载 Next.js 静态导出资源目录 (实现免 Node.js 运行)
 base_dir = Path(__file__).resolve().parent
+bundle_root = get_bundle_root()
+writable_root = get_writable_app_root()
 candidates = [
+    bundle_root / "static",
+    bundle_root / "frontend" / "out",
+    writable_root / "static",
+    writable_root / "frontend" / "out",
     base_dir.parent / "frontend" / "out",
     base_dir / "static",
-    Path(sys.executable).parent / "static",
-    Path(sys.executable).parent / "frontend" / "out",
 ]
-meipass = getattr(sys, "_MEIPASS", None)
-if meipass:
-    candidates.insert(0, Path(meipass) / "static")
-    candidates.insert(1, Path(meipass) / "frontend" / "out")
 static_path = None
 for c in candidates:
     if c.exists() and (c / "index.html").exists():

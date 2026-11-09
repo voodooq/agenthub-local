@@ -10,9 +10,9 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build Multi-Client Release Assets
-    runs-on: windows-latest
+  build-frontend:
+    name: Build Frontend Static Export
+    runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -24,81 +24,142 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
+      - name: Install Dependencies & Export Static Bundle
+        run: |
+          cd frontend
+          npm ci
+          NEXT_EXPORT=true npm run build
+
+      - name: Upload Frontend Out Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-out
+          path: frontend/out
+          if-no-files-found: error
+
+  package-portable:
+    name: Package Lightweight Portable Archives
+    runs-on: ubuntu-latest
+    needs: build-frontend
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Download Frontend Out Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-out
+          path: frontend/out
+
+      - name: Build Portable Zip & Tar.gz
+        run: python package_release.py
+
+      - name: Upload Portable Archives
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-portable
+          path: |
+            dist/AgentHub-Local-*-portable.zip
+            dist/AgentHub-Local-*-portable.tar.gz
+          if-no-files-found: error
+
+  build-windows-exe:
+    name: Build Windows Standalone EXE (x64)
+    runs-on: windows-latest
+    needs: build-frontend
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
       - name: Setup Python 3.12
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: Install Frontend Dependencies & Export Static Assets
-        run: |
-          cd frontend
-          npm install
-          $env:NEXT_EXPORT="true"
-          npm run build
-        shell: powershell
+      - name: Download Frontend Out Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-out
+          path: frontend/out
 
-      - name: Install Python Backend Dependencies
+      - name: Install Runtime & PyInstaller Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r requirements.txt pyinstaller
         shell: powershell
 
-      - name: Package Windows & Cross-Platform Release Archives
+      - name: Build Windows Onefile Executable
+        run: python build_release_exe.py --mode onefile
+        shell: powershell
+
+      - name: Upload Windows EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-exe
+          path: dist/AgentHub-Local-*-windows-*.exe
+          if-no-files-found: error
+
+  build-macos-dmg:
+    name: Build macOS Standalone DMG (Apple Silicon)
+    runs-on: macos-latest
+    needs: build-frontend
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: Download Frontend Out Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-out
+          path: frontend/out
+
+      - name: Install Runtime & PyInstaller Dependencies
         run: |
-          $VERSION_CFG = Get-Content -Raw -Path "version.json" | ConvertFrom-Json
-          $TAG_NAME = if ($env:GITHUB_REF_NAME) { $env:GITHUB_REF_NAME } else { "v$($VERSION_CFG.version)" }
-          New-Item -ItemType Directory -Force -Path dist | Out-Null
-          
-          # 1. 准备发布目录结构
-          $PKG_DIR = "dist\AgentHub-Local-$TAG_NAME"
-          if (Test-Path $PKG_DIR) { Remove-Item -Recurse -Force $PKG_DIR }
-          New-Item -ItemType Directory -Force -Path $PKG_DIR | Out-Null
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
 
-          # 拷贝核心程序与静态产物 (全量安全校验)
-          if (Test-Path backend) {
-              Copy-Item -Recurse -Force backend $PKG_DIR\backend
-              foreach ($dirty in @("data", "tests", "__pycache__")) {
-                  $dirtyPath = Join-Path "$PKG_DIR\backend" $dirty
-                  if (Test-Path $dirtyPath) { Remove-Item -Recurse -Force $dirtyPath }
-              }
-          }
-          if (Test-Path frontend\out) { Copy-Item -Recurse -Force frontend\out $PKG_DIR\frontend\out }
-          if (Test-Path skills) {
-              Copy-Item -Recurse -Force skills $PKG_DIR\skills
-          } else {
-              New-Item -ItemType Directory -Force -Path "$PKG_DIR\skills" | Out-Null
-          }
-          if (Test-Path version.json) { Copy-Item -Force version.json $PKG_DIR\ }
-          if (Test-Path desktop_app.py) { Copy-Item -Force desktop_app.py $PKG_DIR\ }
-          if (Test-Path requirements.txt) { Copy-Item -Force requirements.txt $PKG_DIR\ }
-          if (Test-Path mcp_servers.json) { Copy-Item -Force mcp_servers.json $PKG_DIR\ }
-          if (Test-Path README.md) { Copy-Item -Force README.md $PKG_DIR\ }
-          if (Test-Path LICENSE) { Copy-Item -Force LICENSE $PKG_DIR\ }
-          if (Test-Path .env.example) { Copy-Item -Force .env.example $PKG_DIR\ }
-          if (Test-Path "启动AgentHub桌面版.bat") { Copy-Item -Force "启动AgentHub桌面版.bat" $PKG_DIR\ }
-          if (Test-Path "启动AgentHub_调试模式(带控制台日志).bat") { Copy-Item -Force "启动AgentHub_调试模式(带控制台日志).bat" $PKG_DIR\ }
+      - name: Build macOS App & DMG Image
+        run: python build_release_exe.py --mode macos-dmg
 
-          # 2. 生成 Windows x64 压缩包
-          $ZIP_NAME = "dist\AgentHub-Local-$TAG_NAME-windows-x64.zip"
-          Compress-Archive -Path "$PKG_DIR\*" -DestinationPath $ZIP_NAME -Force
-          Write-Host "已生成 Windows 客户端包: $ZIP_NAME"
+      - name: Upload macOS DMG
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-dmg
+          path: dist/AgentHub-Local-*-macos-*.dmg
+          if-no-files-found: error
 
-          # 3. 生成通用便携包 (.tar.gz)
-          $TAR_NAME = "dist/AgentHub-Local-$TAG_NAME-portable.tar.gz"
-          tar -czf $TAR_NAME -C dist "AgentHub-Local-$TAG_NAME"
-          Write-Host "已生成跨平台便携包: $TAR_NAME"
-        shell: powershell
+  publish-release:
+    name: Create GitHub Release & Upload All Assets
+    runs-on: ubuntu-latest
+    needs: [package-portable, build-windows-exe, build-macos-dmg]
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download All Built Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release_staging
+          merge-multiple: true
+
+      - name: Verify All 4 Distribution Packages
+        run: ls -lh release_staging
 
       - name: Create GitHub Release & Upload Assets
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           name: "AgentHub Local ${{ github.ref_name }}"
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: |
-            dist/AgentHub-Local-*-windows-x64.zip
-            dist/AgentHub-Local-*-portable.tar.gz
-
+          files: release_staging/*

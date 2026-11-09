@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from typing import Any
 from ..core.logging_config import logger
+from ..core.runtime_paths import get_bundle_root, get_writable_app_root
 
 # 仅解析摘要元数据时的最大读取字符数，避免长篇 SOP 全文读盘与正则开销
 _HEADER_READ_CHARS = 4096
@@ -56,18 +57,20 @@ def invalidate_skill_file_cache(file_path: Path | str | None = None) -> None:
 
 
 def _resolve_project_root() -> Path:
-    """定位全局 L1 底座技能所属的项目根目录（优先当前 CWD，不存在 skills/ 时回退源码根目录）"""
+    """定位全局 L1 底座技能所属的项目根目录（优先持久化可写根与 CWD，不存在时回退只读 Bundle 与源码根）"""
     cwd = Path.cwd().resolve()
+    writable_root = get_writable_app_root()
+    if (writable_root / "skills").is_dir():
+        return writable_root
     if (cwd / "skills").is_dir():
         return cwd
-    if getattr(sys, "frozen", False):
-        frozen_root = Path(sys.executable).resolve().parent
-        if (frozen_root / "skills").is_dir():
-            return frozen_root
+    bundle_root = get_bundle_root()
+    if (bundle_root / "skills").is_dir():
+        return bundle_root
     repo_root = Path(__file__).resolve().parent.parent.parent.parent
     if (repo_root / "skills").is_dir():
         return repo_root
-    return cwd
+    return writable_root
 
 
 def _extract_frontmatter_fields(fm_text: str, default_name: str) -> dict[str, str]:

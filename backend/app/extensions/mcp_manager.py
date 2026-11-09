@@ -17,6 +17,12 @@ from typing import Any
 
 from ..core.config import settings
 from ..core.logging_config import logger
+from ..core.runtime_paths import (
+    get_bundle_root,
+    get_writable_app_root,
+    resolve_python_interpreter,
+    seed_mcp_config,
+)
 from ..agent.shell_executor import LocalShellExecutor
 
 
@@ -45,16 +51,17 @@ class _StdioMCPConnection:
         return self.proc is not None and self.proc.poll() is None
 
     def _resolve_executable(self) -> str | None:
-        """解析启动命令的真实可执行文件路径，优先将 python 映射至当前虚拟环境解释器"""
+        """解析启动命令的真实可执行文件路径，优先将 python 映射至可用外部/虚拟环境解释器"""
         cmd_lower = self.command.strip().lower()
         if cmd_lower in ("python", "python3", "python.exe"):
-            return sys.executable
+            return resolve_python_interpreter()
 
-        scripts_dir = Path(sys.executable).parent
-        for ext in (".exe", ".cmd", ".bat", ""):
-            candidate = scripts_dir / f"{self.command}{ext}"
-            if candidate.exists():
-                return str(candidate)
+        if not getattr(sys, "frozen", False):
+            scripts_dir = Path(sys.executable).parent
+            for ext in (".exe", ".cmd", ".bat", ""):
+                candidate = scripts_dir / f"{self.command}{ext}"
+                if candidate.exists():
+                    return str(candidate)
 
         resolved = shutil.which(self.command)
         return resolved
@@ -166,16 +173,16 @@ class MCPManager:
     """全局 MCP 客户端常驻连接池（支持热插拔重载与失败熔断）"""
 
     def __init__(self, config_path: str | Path | None = None) -> None:
-        if getattr(sys, "frozen", False):
-            self.base_dir = Path(sys.executable).resolve().parent
-        else:
-            self.base_dir = Path(__file__).resolve().parent.parent.parent.parent
+        self.base_dir = get_writable_app_root()
         root_cfg = self.base_dir / "mcp_servers.json"
         data_cfg = self.base_dir / "data" / "mcp_servers.json"
 
         if config_path:
             self.config_path = Path(config_path)
         elif root_cfg.exists():
+            self.config_path = root_cfg
+        elif getattr(sys, "frozen", False):
+            # 冻结桌面版默认释放配置文件于可写根目录，便于用户编辑与升级保留
             self.config_path = root_cfg
         else:
             self.config_path = data_cfg
@@ -189,6 +196,8 @@ class MCPManager:
         try:
             self.config_path.parent.mkdir(parents=True, exist_ok=True)
             if not self.config_path.exists():
+                if seed_mcp_config(get_bundle_root(), self.config_path):
+                    return
                 default_cfg = {
                     "mcpServers": {
                         "playwright-cdp": {

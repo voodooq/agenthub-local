@@ -27,6 +27,12 @@ from typing import Any
 import httpx
 
 from ..core.logging_config import logger
+from ..core.runtime_paths import (
+    get_bundle_root,
+    get_writable_app_root,
+    resolve_python_interpreter,
+    seed_builtin_skills,
+)
 from ..repository.db import db_manager
 
 
@@ -46,10 +52,7 @@ class SkillLoader:
         workspace_skills_dir: str | Path | None = None,
         commercial_suites_dir: str | Path | None = None,
     ) -> None:
-        if getattr(sys, "frozen", False):
-            self.base_dir = Path(sys.executable).resolve().parent
-        else:
-            self.base_dir = Path(__file__).resolve().parent.parent.parent.parent
+        self.base_dir = get_writable_app_root()
         self.skills_dir = Path(workspace_skills_dir) if workspace_skills_dir else (self.base_dir / "skills")
         self.suites_dir = Path(commercial_suites_dir) if commercial_suites_dir else (self.base_dir / "suites")
         self._cache_lock = threading.RLock()
@@ -76,9 +79,10 @@ class SkillLoader:
             pass
 
     def _ensure_default_skills(self) -> None:
-        """确保本地 skills 目录存在，并初始化内置标准 Skill 与 `/new-skill` 母技能"""
+        """确保本地 skills 目录存在，先增量释放只读 Bundle 内嵌技能，再兜底补全标准 Skill"""
         try:
             self.skills_dir.mkdir(parents=True, exist_ok=True)
+            seed_builtin_skills(get_bundle_root(), self.skills_dir)
 
             # 1. Git 提交助手
             git_skill_dir = self.skills_dir / "git-commit-helper"
@@ -1007,7 +1011,10 @@ class SkillLoader:
 
         ext = target_script.suffix.lower()
         if ext == ".py":
-            cmd_list = [sys.executable, str(target_script), args_json]
+            py_interp = resolve_python_interpreter()
+            if not py_interp:
+                return "Error: 当前为独立打包运行环境且本机未安装 Python 解释器，无法执行 `.py` 算子脚本；请先安装 Python 3 并加入 PATH。"
+            cmd_list = [py_interp, str(target_script), args_json]
         elif ext == ".js":
             cmd_list = ["node", str(target_script), args_json]
         elif ext == ".ps1":
