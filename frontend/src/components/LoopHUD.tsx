@@ -1,21 +1,34 @@
-'use strict';
+'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { TaskLoopResponse, LoopStatus, ExperienceProposalItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 import { useLanguage } from '@/context/LanguageContext';
+import { ExperienceProposalCard } from '@/components/ExperienceProposalCard';
 
 interface LoopHUDProps {
   loop: TaskLoopResponse | null;
   onRefresh?: () => void;
-  onProposalCreated?: (proposal: ExperienceProposalItem) => void;
 }
 
-export function LoopHUD({ loop, onRefresh, onProposalCreated }: LoopHUDProps) {
+export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
   const { t } = useLanguage();
   const [isExpanded, setIsExpanded] = useState(false);
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [distillFeedback, setDistillFeedback] = useState<string | null>(null);
+  const [distillProposal, setDistillProposal] = useState<ExperienceProposalItem | null>(null);
+
+  useEffect(() => {
+    setDistillProposal(null);
+    setDistillFeedback(null);
+    setIsExpanded(false);
+  }, [loop?.id]);
+
+  useEffect(() => {
+    if (loop && loop.loop_status !== 'completed') {
+      setDistillProposal(null);
+    }
+  }, [loop?.loop_status, loop]);
 
   if (!loop || loop.loop_status === 'idle') {
     return null;
@@ -29,6 +42,10 @@ export function LoopHUD({ loop, onRefresh, onProposalCreated }: LoopHUDProps) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ action }),
       });
+      if (action === 'archive' || action === 'abort') {
+        setDistillProposal(null);
+        setDistillFeedback(null);
+      }
       if (onRefresh) onRefresh();
     } catch (e) {
       console.error('控制任务循环失败:', e);
@@ -38,6 +55,13 @@ export function LoopHUD({ loop, onRefresh, onProposalCreated }: LoopHUDProps) {
   };
 
   const handleDistillSkill = async () => {
+    // 若面板已在顶部引擎栏下方原地展开，点击按钮可快速切换收起
+    if (distillProposal && distillProposal.loop_id === loop.id) {
+      setDistillProposal(null);
+      setDistillFeedback(null);
+      return;
+    }
+
     setLoadingAction('distill');
     setDistillFeedback(null);
     try {
@@ -49,9 +73,10 @@ export function LoopHUD({ loop, onRefresh, onProposalCreated }: LoopHUDProps) {
         setDistillFeedback(data.detail || t('暂无可提炼的执行轨迹'));
         return;
       }
-      if (data.proposal && onProposalCreated) {
-        onProposalCreated(data.proposal as ExperienceProposalItem);
-        setDistillFeedback(t('已生成 Diff 预览，请在下方卡片确认落盘'));
+      if (data.proposal) {
+        setIsExpanded(false);
+        setDistillProposal(data.proposal as ExperienceProposalItem);
+        setDistillFeedback(null);
       }
     } catch (e) {
       console.error('手动沉淀 Skill 失败:', e);
@@ -176,10 +201,20 @@ export function LoopHUD({ loop, onRefresh, onProposalCreated }: LoopHUDProps) {
             <button
               onClick={handleDistillSkill}
               disabled={loadingAction !== null}
-              className="text-[11px] px-2.5 py-1 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-medium transition flex items-center space-x-1"
+              className={`text-[11px] px-2.5 py-1 rounded border font-medium transition flex items-center space-x-1 ${
+                distillProposal && distillProposal.loop_id === loop.id
+                  ? 'bg-emerald-600 text-white border-emerald-500 shadow-sm'
+                  : 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-700 dark:text-emerald-300 border-emerald-500/30'
+              }`}
               title={t('将该闭环任务提炼为标准化可复用 Skill（先预览 Diff，确认后落盘）')}
             >
-              <span>{loadingAction === 'distill' ? '...' : `🧩 ${t('沉淀为可复用 Skill')}`}</span>
+              <span>
+                {loadingAction === 'distill'
+                  ? '...'
+                  : distillProposal && distillProposal.loop_id === loop.id
+                    ? `🔼 ${t('收起 Skill 预览')}`
+                    : `🧩 ${t('沉淀为可复用 Skill')}`}
+              </span>
             </button>
           )}
 
@@ -204,14 +239,46 @@ export function LoopHUD({ loop, onRefresh, onProposalCreated }: LoopHUDProps) {
       </div>
 
       {distillFeedback && (
-        <div className="px-4 py-1.5 border-t border-border bg-emerald-500/5 text-[11px] text-emerald-600 dark:text-emerald-300">
-          {distillFeedback}
+        <div className="px-4 py-1.5 border-t border-border bg-emerald-500/5 text-[11px] text-emerald-600 dark:text-emerald-300 flex items-center justify-between">
+          <span>{distillFeedback}</span>
+          <button
+            type="button"
+            onClick={() => setDistillFeedback(null)}
+            className="text-[11px] text-muted-foreground hover:text-foreground ml-3"
+          >
+            ✕
+          </button>
         </div>
       )}
 
       {isExpanded && loop.scratchpad_md && (
         <div className="px-4 py-3 border-t border-border bg-surface-200/50 text-xs font-mono text-foreground max-h-48 overflow-y-auto whitespace-pre-wrap leading-relaxed select-text">
           {loop.scratchpad_md}
+        </div>
+      )}
+
+      {distillProposal && loop.loop_status === 'completed' && (
+        <div className="max-h-[65vh] overflow-y-auto">
+          <ExperienceProposalCard
+            key={distillProposal.id}
+            proposal={distillProposal}
+            embeddedInLoop
+            onClose={() => {
+              setDistillProposal(null);
+              setDistillFeedback(null);
+            }}
+            onResolved={(_proposalId, action, updated) => {
+              setDistillProposal(null);
+              if (action === 'applied') {
+                const skillTag = updated?.proposed_skill_name
+                  ? `/${updated.proposed_skill_name}`
+                  : 'Skill 知识库';
+                setDistillFeedback(`✨ 经验已确认落盘并热加载至 ${skillTag}`);
+              } else {
+                setDistillFeedback(null);
+              }
+            }}
+          />
         </div>
       )}
     </div>

@@ -23,6 +23,10 @@ import {
 
 interface ExperienceProposalCardProps {
   proposal: ExperienceProposalItem;
+  /** 是否嵌入顶部 Loop 引擎下方原地展开区域 */
+  embeddedInLoop?: boolean;
+  /** 仅收起本地预览面板（不忽略或删除提案） */
+  onClose?: () => void;
   onResolved: (
     proposalId: string,
     action: 'applied' | 'dismissed',
@@ -39,6 +43,8 @@ const TRIGGER_REASON_LABELS: Record<string, string> = {
 
 export function ExperienceProposalCard({
   proposal,
+  embeddedInLoop = false,
+  onClose,
   onResolved,
 }: ExperienceProposalCardProps) {
   const isPatch = proposal.proposal_type === 'skill_patch';
@@ -117,7 +123,13 @@ export function ExperienceProposalCard({
   const diffLines = (proposal.diff_preview || '').replace(/\r\n/g, '\n').split('\n');
 
   return (
-    <div className="w-full max-w-[92%] md:max-w-[85%] rounded-2xl border border-emerald-500/35 bg-surface-card shadow-md overflow-hidden animate-fade-in">
+    <div
+      className={
+        embeddedInLoop
+          ? 'w-full border-t border-border bg-surface-card overflow-hidden animate-fade-in'
+          : 'w-full max-w-[92%] md:max-w-[85%] rounded-2xl border border-emerald-500/35 bg-surface-card shadow-md overflow-hidden animate-fade-in'
+      }
+    >
       {/* 头部标题与触发原因 */}
       <div className="px-4 py-3 border-b border-border/70 bg-emerald-500/5 flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center space-x-2.5 min-w-0">
@@ -185,6 +197,19 @@ export function ExperienceProposalCard({
             {isEditing ? <Eye className="w-3 h-3" /> : <Edit3 className="w-3 h-3" />}
             <span>{isEditing ? '预览 Diff' : '编辑正文'}</span>
           </button>
+
+          {onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={isSubmitting}
+              className="px-2 py-1 rounded-lg text-[11px] border border-border bg-surface-100 hover:bg-surface-200 text-muted-foreground hover:text-foreground transition-colors flex items-center space-x-1 disabled:opacity-50"
+              title="收起 Skill 预览面板"
+            >
+              <X className="w-3 h-3" />
+              <span>收起</span>
+            </button>
+          )}
         </div>
       </div>
 

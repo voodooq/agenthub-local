@@ -118,6 +118,8 @@ export const PHRASE_DICTIONARY: Record<string, { 'zh-TW': string; en: string; ja
   '暂无可提炼的执行轨迹': { 'zh-TW': '暫無可提煉的執行軌跡', en: 'No distillable execution trace available', ja: '抽出可能な実行トレースがありません' },
   '显示已归档历史版本': { 'zh-TW': '顯示已歸檔歷史版本', en: 'Show archived history versions', ja: 'アーカイブ済み履歴バージョンを表示' },
   '沉淀为可复用 Skill': { 'zh-TW': '沉澱為可複用 Skill', en: 'Distill into Reusable Skill', ja: '再利用可能なSkillに抽出' },
+  '收起 Skill 预览': { 'zh-TW': '收起 Skill 預覽', en: 'Hide Skill Preview', ja: 'Skillプレビューを閉じる' },
+  '沉淀请求失败': { 'zh-TW': '沉澱請求失敗', en: 'Failed to distill Skill', ja: 'Skillの抽出に失敗しました' },
   '触发问题 / 难点': { 'zh-TW': '觸發問題 / 難點', en: 'Problem / Bottleneck', ja: '発生した課題・難所' },
   '点击查看双时间轴': { 'zh-TW': '點擊檢視雙時間軸', en: 'Click for Bi-Temporal Timeline', ja: 'クリックして二軸タイムラインを表示' },
   '精确事实视图': { 'zh-TW': '精確事實檢視', en: 'Deterministic Facts', ja: '確定的事実ビュー' },

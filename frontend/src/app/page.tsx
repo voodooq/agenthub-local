@@ -53,7 +53,6 @@ import { ApprovalCard } from '@/components/ApprovalCard';
 import { SkillPickerModal } from '@/components/SkillPickerModal';
 import { SopDrawer } from '@/components/SopDrawer';
 import { AssistantMarkdownMessage } from '@/components/AssistantMarkdownMessage';
-import { ExperienceProposalCard } from '@/components/ExperienceProposalCard';
 
 import { GeneratedFileChip } from '@/components/GeneratedFileChip';
 import { buildActiveSystemOverride } from '@/utils/personalityHelper';
@@ -73,7 +72,6 @@ import {
   PlanStepItem,
   ConfirmedFactItem,
   MemoryFactItem,
-  ExperienceProposalItem,
 } from '@/types';
 import { apiFetch, getAccessToken } from '@/utils/apiClient';
 import {
@@ -296,37 +294,6 @@ export default function WorkbenchPage() {
 
   // 流式结束重载数据库消息时，保留最新一轮收到的 fact_refs 溯源状态
   const lastStreamFactRefsRef = useRef<{ convId: string; facts: MemoryFactItem[] } | null>(null);
-  const [pendingProposals, setPendingProposals] = useState<ExperienceProposalItem[]>([]);
-
-  const upsertPendingProposal = useCallback((proposal: ExperienceProposalItem) => {
-    if (!proposal || proposal.status !== 'pending') return;
-    setPendingProposals((prev) => {
-      const idx = prev.findIndex((p) => p.id === proposal.id);
-      if (idx >= 0) {
-        const next = [...prev];
-        next[idx] = proposal;
-        return next;
-      }
-      return [proposal, ...prev];
-    });
-  }, []);
-
-  const fetchPendingProposals = useCallback(async (targetConvId?: string) => {
-    const cid = targetConvId || activeConvId;
-    if (!cid) {
-      setPendingProposals([]);
-      return;
-    }
-    try {
-      const res = await apiFetch(
-        `/api/v1/experiences/proposals?conversation_id=${encodeURIComponent(cid)}&status=pending`
-      );
-      if (res.ok) {
-        const data = await res.json();
-        setPendingProposals(Array.isArray(data.proposals) ? data.proposals : []);
-      }
-    } catch (e) { }
-  }, [activeConvId]);
 
   const [canvasState, setCanvasState] = useState<{
     isOpen: boolean;
@@ -655,7 +622,6 @@ export default function WorkbenchPage() {
     if (!activeConvId) {
       setMessages([]);
       setWorkingMemory({});
-      setPendingProposals([]);
       return;
     }
 
@@ -665,8 +631,7 @@ export default function WorkbenchPage() {
     }
 
     fetchMessagesAndState();
-    fetchPendingProposals(activeConvId);
-  }, [activeConvId, fetchMessagesAndState, fetchPendingProposals]);
+  }, [activeConvId, fetchMessagesAndState]);
 
   const handleSelectSearchResult = useCallback(
     async (result: SearchResult) => {
@@ -1124,12 +1089,31 @@ export default function WorkbenchPage() {
             });
           } else if (parsed.type === 'loop_completed') {
             setActiveLoop((prev) => {
-              if (!prev) return null;
+              if (!prev) {
+                if (!parsed.loop_id) return null;
+                return {
+                  id: parsed.loop_id,
+                  workspace_id: activeWorkspaceId || 'default',
+                  conversation_id: effectiveConvId || activeConvId || 'default',
+                  goal_prompt: rawPrompt.split('\n')[0].slice(0, 120),
+                  scratchpad_md: parsed.scratchpad_md,
+                  loop_status: 'completed',
+                  current_iteration: parsed.iteration ?? 0,
+                  max_iterations: parsed.max_iterations ?? 10,
+                  pending_approval_call: null,
+                  error_fingerprints: [],
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                };
+              }
               return {
                 ...prev,
+                id: parsed.loop_id ?? prev.id,
                 loop_status: 'completed',
                 current_iteration: parsed.iteration ?? prev.current_iteration,
+                max_iterations: parsed.max_iterations ?? prev.max_iterations,
                 scratchpad_md: parsed.scratchpad_md ?? prev.scratchpad_md,
+                pending_approval_call: null,
               };
             });
           } else if (parsed.type === 'loop_failed') {
@@ -1140,8 +1124,6 @@ export default function WorkbenchPage() {
                 loop_status: 'failed',
               };
             });
-          } else if (parsed.type === 'experience_proposal' && parsed.proposal) {
-            upsertPendingProposal(parsed.proposal as ExperienceProposalItem);
           } else if (
             parsed.type === 'require_approval' ||
             parsed.type === 'tool_start' ||
@@ -1325,8 +1307,8 @@ export default function WorkbenchPage() {
       // 彻底根治新会话首轮问答因 activeConvId 转换未触发拉取而需要手动切换会话的体验问题
       if (effectiveConvId) {
         await fetchMessagesAndState(effectiveConvId);
-        await fetchPendingProposals(effectiveConvId);
       }
+      await fetchActiveLoop();
       setTimeout(scrollToBottom, 60);
     }
   };
@@ -1810,7 +1792,6 @@ export default function WorkbenchPage() {
         onSelectNavHub={(hub) => setActiveNavHub(hub)}
         onSelectWorkspace={(wsId) => {
           lastStreamFactRefsRef.current = null;
-          setPendingProposals([]);
           setActiveWorkspaceId(wsId);
           setActiveConvId(null);
           setMessages([]);
@@ -1827,7 +1808,6 @@ export default function WorkbenchPage() {
         onSelectConv={(id) => setActiveConvId(id)}
         onNewChat={() => {
           lastStreamFactRefsRef.current = null;
-          setPendingProposals([]);
           setActiveConvId(null);
           setMessages([]);
         }}
@@ -1983,7 +1963,6 @@ export default function WorkbenchPage() {
               <LoopHUD
                 loop={activeLoop}
                 onRefresh={fetchActiveLoop}
-                onProposalCreated={upsertPendingProposal}
               />
               {activeLoop &&
                 activeLoop.loop_status === 'waiting_approval' &&
@@ -2338,25 +2317,6 @@ export default function WorkbenchPage() {
                     </div>
                   );
                 })
-              )}
-              {pendingProposals.length > 0 && (
-                <div className="space-y-3 pt-2">
-                  {pendingProposals.map((prop) => (
-                    <ExperienceProposalCard
-                      key={prop.id}
-                      proposal={prop}
-                      onResolved={(proposalId, action, updated) => {
-                        setPendingProposals((prev) => prev.filter((item) => item.id !== proposalId));
-                        if (action === 'applied') {
-                          const skillTag = updated?.proposed_skill_name
-                            ? `/${updated.proposed_skill_name}`
-                            : 'Skill 知识库';
-                          showFloatingToast(`✨ 经验已确认落盘并热加载至 ${skillTag}`, 'success', 4000);
-                        }
-                      }}
-                    />
-                  ))}
-                </div>
               )}
               <div ref={messagesEndRef} />
             </div>

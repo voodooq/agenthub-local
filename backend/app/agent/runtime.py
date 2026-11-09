@@ -32,7 +32,6 @@ from .tool_protocol import ToolProtocolAdapter
 from .context_builder import ContextBuilder
 from .ui_operator import ui_operator
 from ..repository.loop_run_repository import TaskLoopRepository
-from ..skills.experience_distiller import ExecutionTrace, experience_distiller
 
 
 class AgentRuntime:
@@ -300,56 +299,6 @@ class AgentRuntime:
             return f"未在范围 `{clean_scope}` 内检索到与 '{clean_q}' 相关的历史记忆或工作区片段。"
 
         return f"### 🔍 按需记忆与历史溯源检索结果 (`query=\"{clean_q}\"`)\n\n" + "\n\n".join(sections)
-
-    @staticmethod
-    async def _run_post_task_distillation(
-        *,
-        workspace_id: str,
-        conversation_id: str,
-        loop_id: str | None,
-        scene_mode: str,
-        incognito: bool,
-        user_goal: str,
-        active_skill_ids: list[str],
-        recovered_error_count: int,
-        total_tool_steps: int,
-        circuit_breaker_triggered: bool,
-        final_summary: str,
-        produced_artifacts: list[str],
-        workspace_root: str | None,
-    ) -> dict[str, Any] | None:
-        """汇总本轮执行轨迹并调用 ExperienceDistiller 评估是否产生经验自进化提议"""
-        if incognito or scene_mode != "agent" or circuit_breaker_triggered:
-            return None
-        try:
-            intervention_res = await event_ledger.list_events(
-                conversation_id=conversation_id,
-                loop_id=loop_id,
-                event_type="user_intervention",
-                limit=5,
-            )
-            had_intervention = bool(intervention_res.get("total", 0) > 0)
-            trace = ExecutionTrace(
-                workspace_id=workspace_id,
-                conversation_id=conversation_id,
-                loop_id=loop_id,
-                scene_mode=scene_mode,
-                incognito=incognito,
-                user_goal=user_goal,
-                active_skill_ids=list(dict.fromkeys(active_skill_ids)),
-                recovered_error_count=recovered_error_count,
-                had_user_intervention=had_intervention,
-                total_tool_steps=total_tool_steps,
-                circuit_breaker_triggered=circuit_breaker_triggered,
-                final_success=True,
-                final_summary=final_summary,
-                produced_artifacts=list(dict.fromkeys(produced_artifacts)),
-                workspace_root=workspace_root,
-            )
-            return await experience_distiller.on_task_complete(trace)
-        except Exception as e:
-            logger.debug(f"[AgentRuntime] Post-Task 经验提炼跳过: {e}")
-            return None
 
     async def _persist_approved_plan(
         self,
@@ -943,29 +892,6 @@ class AgentRuntime:
                                 active_loop_obj = None
                     except Exception as e:
                         logger.warning(f"自主循环状态收敛更新异常: {e}")
-
-                # Post-Task 经验自动提炼钩子（等待用户决策阶段严禁提前提炼，真正交付后触发）
-                if active_scene == "agent" and not active_incognito and not is_waiting_user_decision:
-                    exp_proposal = await self._run_post_task_distillation(
-                        workspace_id=ws_id,
-                        conversation_id=conv_id,
-                        loop_id=tracked_loop_id,
-                        scene_mode=active_scene,
-                        incognito=active_incognito,
-                        user_goal=user_message.strip().split("\n")[0][:140],
-                        active_skill_ids=active_skill_ids,
-                        recovered_error_count=recovered_error_count,
-                        total_tool_steps=total_tool_steps,
-                        circuit_breaker_triggered=circuit_breaker_triggered,
-                        final_summary=final_saved_text[:300] if final_saved_text else "",
-                        produced_artifacts=produced_artifacts,
-                        workspace_root=ctx.get("current_cwd") or target_cwd,
-                    )
-                    if exp_proposal:
-                        yield {
-                            "type": "experience_proposal",
-                            "proposal": exp_proposal,
-                        }
 
                 # 若本轮执行过终端命令/脚本或写盘操作，收尾增量同步一次工作区物理资产
                 if has_workspace_mutations and ws_id:
@@ -1879,27 +1805,6 @@ class AgentRuntime:
                             active_loop_obj = None
                     except Exception:
                         pass
-                if active_scene == "agent" and not active_incognito and not is_planning_phase:
-                    exp_proposal = await self._run_post_task_distillation(
-                        workspace_id=ws_id,
-                        conversation_id=conv_id,
-                        loop_id=tracked_loop_id,
-                        scene_mode=active_scene,
-                        incognito=active_incognito,
-                        user_goal=user_message.strip().split("\n")[0][:140],
-                        active_skill_ids=active_skill_ids,
-                        recovered_error_count=recovered_error_count,
-                        total_tool_steps=total_tool_steps,
-                        circuit_breaker_triggered=circuit_breaker_triggered,
-                        final_summary=f"已执行 {step_idx} 步任务",
-                        produced_artifacts=produced_artifacts,
-                        workspace_root=ctx.get("current_cwd") or target_cwd,
-                    )
-                    if exp_proposal:
-                        yield {
-                            "type": "experience_proposal",
-                            "proposal": exp_proposal,
-                        }
                 if has_workspace_mutations and ws_id:
                     try:
                         from ..repository.artifact_repository import ArtifactRepository
