@@ -16,23 +16,34 @@ export function SearchModal({ isOpen, onClose, onSelectResult }: SearchModalProp
   const [results, setResults] = useState<SearchResult[]>([]);
   const [loading, setLoading] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const onCloseRef = useRef(onClose);
 
   useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  // 独立监听 ESC 关闭事件，避免父组件高频轮询引起 onClose 引用变化时重新聚焦顶部输入框
+  useEffect(() => {
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCloseRef.current();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [isOpen]);
+
+  // 仅在弹窗打开/关闭切换时自动聚焦或清空检索状态
+  useEffect(() => {
     if (isOpen) {
-      setTimeout(() => inputRef.current?.focus(), 50);
-      const handleKeyDown = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          onClose();
-        }
-      };
-      window.addEventListener('keydown', handleKeyDown);
-      return () => window.removeEventListener('keydown', handleKeyDown);
-    } else {
-      setQuery('');
-      setResults([]);
+      const focusTimer = setTimeout(() => inputRef.current?.focus(), 50);
+      return () => clearTimeout(focusTimer);
     }
-  }, [isOpen, onClose]);
+    setQuery('');
+    setResults([]);
+  }, [isOpen]);
 
   useEffect(() => {
     if (!query.trim()) {

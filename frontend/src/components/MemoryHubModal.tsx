@@ -56,6 +56,11 @@ const CATEGORY_MAP: Record<string, { label: string; colorClass: string }> = {
 };
 
 export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHubModalProps) {
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   const [activeTab, setActiveTab] = useState<'memories' | 'personality' | 'extensions'>('memories');
   const [memories, setMemories] = useState<LongTermMemoryItem[]>([]);
   const [loading, setLoading] = useState(false);
@@ -115,8 +120,11 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
   const [importMcpJson, setImportMcpJson] = useState('');
   const mcpFileInputRef = useRef<HTMLInputElement>(null);
 
-  const fetchMemories = async () => {
-    setLoading(true);
+  const fetchMemories = async (isSilent = false) => {
+    // 仅在首次无数据时展示加载占位，避免列表刷新卸载 DOM 导致滚动位置回跳
+    if (!isSilent && memories.length === 0) {
+      setLoading(true);
+    }
     try {
       const res = await apiFetch('/api/v1/memories');
       if (res.ok) {
@@ -126,7 +134,9 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
     } catch (e) {
       console.warn('获取长期记忆失败:', e);
     } finally {
-      setLoading(false);
+      if (!isSilent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -166,27 +176,30 @@ export function MemoryHubModal({ isOpen, onClose, onProvidersChanged }: MemoryHu
     } catch (e) {}
   };
 
+  // 独立监听 ESC 关闭事件，避免父组件轮询引起 onClose 引用变化时连带重置用户输入
   useEffect(() => {
-    if (isOpen) {
-      const handleKeyDown = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          onClose();
-        }
-      };
-      window.addEventListener('keydown', handleKeyDown);
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCloseRef.current();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen]);
 
-      fetchMemories();
-      fetchPersonalitySettings();
-      fetchExtensions();
-      setPersonalityFeedback(null);
-      setExtFeedback(null);
-
-      return () => {
-        window.removeEventListener('keydown', handleKeyDown);
-      };
-    }
-  }, [isOpen, onClose]);
+  // 仅在弹窗打开时拉取初始配置，防止未保存的性格/技能选项在 3 秒轮询后蹦回后端初始值
+  useEffect(() => {
+    if (!isOpen) return;
+    fetchMemories();
+    fetchPersonalitySettings();
+    fetchExtensions();
+    setPersonalityFeedback(null);
+    setExtFeedback(null);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { X, Upload, Link2, Bookmark, Check, Copy } from 'lucide-react';
 import { apiFetch } from '@/utils/apiClient';
 
@@ -14,18 +14,23 @@ export function SyncModal({ isOpen, onClose, onSuccess }: SyncModalProps) {
   const [shareUrl, setShareUrl] = useState('');
   const [cloning, setCloning] = useState(false);
   const [copiedBookmarklet, setCopiedBookmarklet] = useState(false);
+  const onCloseRef = useRef(onClose);
 
-  React.useEffect(() => {
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
+  useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 

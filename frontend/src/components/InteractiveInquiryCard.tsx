@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   Compass,
   CheckCircle2,
@@ -49,6 +49,65 @@ export function InteractiveInquiryCard({
     }
   }, [rawContent]);
 
+  const strategyFallbackLabel = t('请选择策略：');
+  const questions: InquiryQuestion[] = useMemo(() => {
+    if (!parsed) return [];
+    if (parsed.questions) return parsed.questions;
+    if (parsed.type === 'choices' && parsed.options) {
+      return [
+        {
+          id: 'q_default',
+          type: 'single_choice',
+          label: parsed.question || strategyFallbackLabel,
+          options: parsed.options,
+          default: parsed.options[0]?.value,
+        },
+      ];
+    }
+    return [];
+  }, [parsed, strategyFallbackLabel]);
+
+  const buildInitialAnswers = (qs: InquiryQuestion[]) => {
+    const initial: Record<string, string | string[]> = {};
+    for (const q of qs) {
+      if (q.default !== undefined) {
+        initial[q.id] = q.default;
+      } else if (q.type === 'single_choice' && q.options.length > 0) {
+        initial[q.id] = q.options[0].value;
+      } else if (q.type === 'multi_choice') {
+        initial[q.id] = q.options.map((o) => o.value);
+      }
+    }
+    return initial;
+  };
+
+  const buildInitialSteps = (steps?: PlanStepItem[]) => {
+    const initial: Record<number, boolean> = {};
+    if (steps) {
+      for (const step of steps) {
+        initial[step.step] = step.selected !== false;
+      }
+    }
+    return initial;
+  };
+
+  // Hooks 必须在条件早退前无条件调用，保证流式半包转完整 JSON 时状态与 Hook 顺序稳定
+  const hasInitializedRef = useRef(Boolean(parsed));
+  const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string | string[]>>(() =>
+    buildInitialAnswers(questions)
+  );
+  const [stepSelections, setStepSelections] = useState<Record<number, boolean>>(() =>
+    buildInitialSteps(parsed?.plan_steps)
+  );
+  const [hasSubmitted, setHasSubmitted] = useState(false);
+
+  useEffect(() => {
+    if (!parsed || hasInitializedRef.current) return;
+    hasInitializedRef.current = true;
+    setSelectedAnswers(buildInitialAnswers(questions));
+    setStepSelections(buildInitialSteps(parsed.plan_steps));
+  }, [parsed, questions]);
+
   // 如果解析失败（通常处于流式吐字半包阶段），渲染呼吸骨架屏
   if (!parsed) {
     return (
@@ -72,51 +131,12 @@ export function InteractiveInquiryCard({
   // 兼容老版本或简化协议
   const title = parsed.title || (parsed.phase === 'plan_approval' ? t('实施方案与执行步骤审批') : t('需求与参数交互确认'));
   const summary = parsed.summary || '';
-  const questions: InquiryQuestion[] = parsed.questions || (
-    parsed.type === 'choices' && parsed.options ? [
-      {
-        id: 'q_default',
-        type: 'single_choice',
-        label: parsed.question || t('请选择策略：'),
-        options: parsed.options,
-        default: parsed.options[0]?.value,
-      }
-    ] : []
-  );
   const fillTemplate = parsed.fill_template || (
     parsed.type === 'template' && parsed.template ? {
       label: parsed.title || t('请补充以下填空内容：'),
       template_text: parsed.template,
     } : undefined
   );
-
-  // 表单选择状态
-  const [selectedAnswers, setSelectedAnswers] = useState<Record<string, string | string[]>>(() => {
-    const initial: Record<string, string | string[]> = {};
-    for (const q of questions) {
-      if (q.default !== undefined) {
-        initial[q.id] = q.default;
-      } else if (q.type === 'single_choice' && q.options.length > 0) {
-        initial[q.id] = q.options[0].value;
-      } else if (q.type === 'multi_choice') {
-        initial[q.id] = q.options.map((o) => o.value);
-      }
-    }
-    return initial;
-  });
-
-  // 步骤清单勾选状态 (默认全选)
-  const [stepSelections, setStepSelections] = useState<Record<number, boolean>>(() => {
-    const initial: Record<number, boolean> = {};
-    if (parsed.plan_steps) {
-      for (const step of parsed.plan_steps) {
-        initial[step.step] = step.selected !== false;
-      }
-    }
-    return initial;
-  });
-
-  const [hasSubmitted, setHasSubmitted] = useState(false);
 
   // 单选切换
   const handleSingleSelect = (questionId: string, val: string) => {

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Plus,
@@ -86,6 +86,11 @@ interface AccountModalProps {
 }
 
 export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) {
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   const [data, setData] = useState<DashboardStats | null>(null);
   const [activeTab, setActiveTab] = useState<'accounts' | 'add_account' | 'audit'>('accounts');
   const [addMode, setAddMode] = useState<'pkce_oauth' | 'custom_api' | 'cli' | 'api_key' | 'standard_oauth'>('pkce_oauth');
@@ -560,16 +565,23 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
     } catch (e) { }
   };
 
+  // 独立监听 ESC 关闭事件，避免父组件高频轮询引起 onClose 引用变化时重建弹窗内部轮询器
   useEffect(() => {
     if (!isOpen) return;
-
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen]);
+
+  useEffect(() => {
+    if (!isOpen) return;
 
     fetchAccounts(false);
     fetchProviders();
@@ -587,10 +599,9 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
     }, 3000);
 
     return () => {
-      window.removeEventListener('keydown', handleKeyDown);
       clearInterval(pollTimer);
     };
-  }, [isOpen, activeTab, onClose]);
+  }, [isOpen, activeTab]);
 
   // 监听浏览器跨窗口 OAuth 回调 postMessage
   useEffect(() => {

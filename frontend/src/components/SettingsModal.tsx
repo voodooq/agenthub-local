@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Check,
@@ -68,6 +68,11 @@ export function SettingsModal({
   onModelsUpdated,
   initialTab = 'models',
 }: SettingsModalProps) {
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   const [activeTab, setActiveTab] = useState<'appearance' | 'models' | 'context' | 'about'>(
     initialTab === 'appearance' ? 'appearance' : initialTab === 'models' ? 'models' : 'appearance'
   );
@@ -83,12 +88,12 @@ export function SettingsModal({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onClose();
+        onCloseRef.current();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   useEffect(() => {
     const savedRounds = localStorage.getItem('agenthub_context_rounds') || localStorage.getItem('geminihub_context_rounds');
@@ -423,7 +428,7 @@ export function SettingsModal({
           </div>
 
           <div className="px-2 text-[11px] text-muted-foreground/70 font-mono">
-            v1.1.2 · Strata Edition
+            v1.1.3 · Strata Edition
           </div>
         </div>
 
@@ -831,7 +836,7 @@ export function SettingsModal({
                     <h3 className="text-sm font-bold text-foreground flex items-center space-x-2">
                       <span>AgentHub Local</span>
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-mono">
-                        v1.2.0 · Strata Edition
+                        v1.1.3 · Strata Edition
                       </span>
                     </h3>
                     <p className="text-xs text-muted-foreground mt-0.5">

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   X,
   Upload,
@@ -70,6 +70,11 @@ interface ImportBatchItem {
 }
 
 export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardModalProps) {
+  const onCloseRef = useRef(onClose);
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  }, [onClose]);
+
   const [step, setStep] = useState<1 | 2 | 3 | 4>(1);
   const [selectedSourceCard, setSelectedSourceCard] = useState<
     'chatgpt' | 'claude' | 'ide_rules' | 'custom_json'
@@ -112,27 +117,30 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
     } catch (e) {}
   };
 
+  // 独立监听 ESC 关闭事件，避免父组件重渲染引起 onClose 引用变化时连带重置向导进度
   useEffect(() => {
-    if (isOpen) {
-      const handleKeyDown = (e: KeyboardEvent) => {
-        if (e.key === 'Escape') {
-          e.preventDefault();
-          onClose();
-        }
-      };
-      window.addEventListener('keydown', handleKeyDown);
+    if (!isOpen) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        onCloseRef.current();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen]);
 
-      setStep(1);
-      setPreviewData(null);
-      setCommitResult(null);
-      setParseError(null);
-      fetchBatches();
-
-      return () => {
-        window.removeEventListener('keydown', handleKeyDown);
-      };
-    }
-  }, [isOpen, onClose]);
+  // 仅在向导打开时重置步骤与拉取历史批次，防止在 2/3/4 步中被轮询强制蹦回第 1 步
+  useEffect(() => {
+    if (!isOpen) return;
+    setStep(1);
+    setPreviewData(null);
+    setCommitResult(null);
+    setParseError(null);
+    fetchBatches();
+  }, [isOpen]);
 
   if (!isOpen) return null;
 

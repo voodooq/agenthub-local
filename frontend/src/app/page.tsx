@@ -80,6 +80,7 @@ export default function WorkbenchPage() {
 
   // 当前选中模型及可用模型列表
   const [currentModel, setCurrentModel] = useState<string>('gemini-4-argon');
+  const hasUserSelectedModelRef = useRef(false);
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [modelAccountInfo, setModelAccountInfo] = useState<{
     accountName: string;
@@ -333,8 +334,11 @@ export default function WorkbenchPage() {
       setCurrentModel((prev) => {
         const defaultModel = nextModels.find((m) => m.is_default);
         const stillValid = nextModels.some((m) => m.id === prev);
-        // 若存在明确标记为默认就绪的模型（如已配置就绪的本地/自定义模型），且当前处于占位模型或原模型已失效，自动切换为默认模型
-        if (defaultModel && (!stillValid || prev === 'gemini-4-argon' || prev === 'gemini-2.5-pro')) {
+        // 若存在明确标记为默认就绪的模型（如已配置就绪的本地/自定义模型），且用户尚未手动选择过模型或原模型已失效，自动切换为默认模型
+        if (
+          defaultModel &&
+          (!stillValid || (!hasUserSelectedModelRef.current && (prev === 'gemini-4-argon' || prev === 'gemini-2.5-pro')))
+        ) {
           return defaultModel.id;
         }
         return stillValid ? prev : nextModels[0].id;
@@ -1161,6 +1165,17 @@ export default function WorkbenchPage() {
     }
   };
 
+  // 稳定抽屉与模态框的关闭/刷新回调引用，避免 3 秒状态轮询引发子组件不必要的 Effect 重跑
+  const handleCloseCanvas = useCallback(() => setCanvasState((prev) => ({ ...prev, isOpen: false })), []);
+  const handleCloseActionDrawer = useCallback(() => setIsActionDrawerOpen(false), []);
+  const handleCloseSearch = useCallback(() => setIsSearchOpen(false), []);
+  const handleCloseAccount = useCallback(() => setIsAccountOpen(false), []);
+  const handleCloseSync = useCallback(() => setIsSyncOpen(false), []);
+  const handleCloseSettings = useCallback(() => setIsSettingsOpen(false), []);
+  const handleCloseMemoryHub = useCallback(() => setIsMemoryHubOpen(false), []);
+  const handleCloseSkillPicker = useCallback(() => setIsSkillPickerOpen(false), []);
+  const handleCloseSopDrawer = useCallback(() => setSelectedSopSkill(null), []);
+
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-background text-foreground transition-colors duration-200">
       {/* 侧边栏 */}
@@ -1834,7 +1849,10 @@ export default function WorkbenchPage() {
                     accountName={modelAccountInfo.accountName}
                     authLabel={modelAccountInfo.authLabel}
                     isTested={modelAccountInfo.isTested}
-                    onSelectModel={(m) => setCurrentModel(m)}
+                    onSelectModel={(m) => {
+                      hasUserSelectedModelRef.current = true;
+                      setCurrentModel(m);
+                    }}
                     onSelectThinking={(tl) => setThinkingLevel(tl)}
                     onOpenModelTest={() => {
                       setSettingsInitialTab('models');
@@ -1872,7 +1890,7 @@ export default function WorkbenchPage() {
       {/* 右侧 Canvas 预览抽屉 */}
       <CanvasDrawer
         isOpen={canvasState.isOpen}
-        onClose={() => setCanvasState((prev) => ({ ...prev, isOpen: false }))}
+        onClose={handleCloseCanvas}
         title={canvasState.title}
         content={canvasState.content}
         type={canvasState.type}
@@ -1881,14 +1899,14 @@ export default function WorkbenchPage() {
       {/* 右侧优化验收抽屉 */}
       <RightActionDrawer
         isOpen={isActionDrawerOpen}
-        onClose={() => setIsActionDrawerOpen(false)}
+        onClose={handleCloseActionDrawer}
         pendingCountChange={(count) => setPendingActionCount(count)}
       />
 
       {/* 全局 Ctrl + K 检索模态框 */}
       <SearchModal
         isOpen={isSearchOpen}
-        onClose={() => setIsSearchOpen(false)}
+        onClose={handleCloseSearch}
         onSelectResult={(convId) => {
           setActiveConvId(convId);
         }}
@@ -1897,7 +1915,7 @@ export default function WorkbenchPage() {
       {/* 账号池管理模态框 */}
       <AccountModal
         isOpen={isAccountOpen}
-        onClose={() => setIsAccountOpen(false)}
+        onClose={handleCloseAccount}
         onRefresh={() => {
           fetchStatusPill();
           fetchActiveModels();
@@ -1907,7 +1925,7 @@ export default function WorkbenchPage() {
       {/* 四步跨平台数据迁移与导入向导 (ChatGPT / Claude / GEMINI.md / .cursorrules) */}
       <ImportWizardModal
         isOpen={isSyncOpen}
-        onClose={() => setIsSyncOpen(false)}
+        onClose={handleCloseSync}
         onSuccess={() => {
           fetchConversations();
         }}
@@ -1916,7 +1934,7 @@ export default function WorkbenchPage() {
       {/* 设置中心模态框：包含模型自动识别与一键测试、浅色/深色主题外观、回复性格定制 */}
       <SettingsModal
         isOpen={isSettingsOpen}
-        onClose={() => setIsSettingsOpen(false)}
+        onClose={handleCloseSettings}
         initialTab={settingsInitialTab}
         onModelsUpdated={(state) => applyActiveModelsState(state)}
       />
@@ -1924,7 +1942,7 @@ export default function WorkbenchPage() {
       {/* 记忆中枢、多源大模型 API 与 Skill/MCP 扩展管理模态框 */}
       <MemoryHubModal
         isOpen={isMemoryHubOpen}
-        onClose={() => setIsMemoryHubOpen(false)}
+        onClose={handleCloseMemoryHub}
         onProvidersChanged={() => fetchActiveModels()}
       />
 
@@ -1932,7 +1950,7 @@ export default function WorkbenchPage() {
       <SkillPickerModal
         workspaceId={activeWorkspaceId}
         isOpen={isSkillPickerOpen}
-        onClose={() => setIsSkillPickerOpen(false)}
+        onClose={handleCloseSkillPicker}
         onSelectSkill={(cmd) => {
           setInputPrompt(cmd);
           textareaRef.current?.focus();
@@ -1942,7 +1960,7 @@ export default function WorkbenchPage() {
       <SopDrawer
         skill={selectedSopSkill}
         workspaceId={activeWorkspaceId}
-        onClose={() => setSelectedSopSkill(null)}
+        onClose={handleCloseSopDrawer}
       />
     </div>
   );
