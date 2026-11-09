@@ -26,7 +26,14 @@ class ConversationRepository:
             """
             async with conn.execute(sql, params) as cursor:
                 rows = await cursor.fetchall()
-                return [dict(row) for row in rows]
+                results: list[dict[str, Any]] = []
+                for row in rows:
+                    item = dict(row)
+                    # NOTE: SQLite 无原生布尔类型，返回前规范化为 bool，避免前端 JSX 条件渲染数字 0
+                    item["is_pinned"] = bool(item.get("is_pinned", 0))
+                    item["incognito"] = bool(item.get("incognito", 0))
+                    results.append(item)
+                return results
 
     @staticmethod
     async def get_by_id(conv_id: str) -> ConversationModel | None:

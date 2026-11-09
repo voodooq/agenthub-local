@@ -428,7 +428,7 @@ export function SettingsModal({
           </div>
 
           <div className="px-2 text-[11px] text-muted-foreground/70 font-mono">
-            v1.1.4 · Strata Edition
+            v1.1.5 · Strata Edition
           </div>
         </div>
 
@@ -836,7 +836,7 @@ export function SettingsModal({
                     <h3 className="text-sm font-bold text-foreground flex items-center space-x-2">
                       <span>AgentHub Local</span>
                       <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-mono">
-                        v1.1.4 · Strata Edition
+                        v1.1.5 · Strata Edition
                       </span>
                     </h3>
                     <p className="text-xs text-muted-foreground mt-0.5">
