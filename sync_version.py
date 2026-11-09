@@ -14,6 +14,14 @@ import re
 import sys
 from pathlib import Path
 
+# 强制英文 Windows 控制台等非 UTF-8 环境安全输出中文日志
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
 BASE_DIR = Path(__file__).resolve().parent
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$")
 
@@ -45,6 +53,9 @@ def _read_raw_text(path: Path) -> str | None:
 def _write_if_changed(path: Path, new_text: str) -> bool:
     """仅当文件内容发生变化时落盘，保持原始换行符，避免出现全文件换行符 diff。"""
     old_text = _read_raw_text(path)
+    # 若原文件为 CRLF（例如 Windows Git Runner 自动检出结果），保持原换行符避免误判 diff
+    if old_text is not None and "\r\n" in old_text and "\r\n" not in new_text:
+        new_text = new_text.replace("\n", "\r\n")
     if old_text == new_text:
         return False
     path.parent.mkdir(parents=True, exist_ok=True)

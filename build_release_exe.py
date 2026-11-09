@@ -19,6 +19,16 @@ import subprocess
 import sys
 from pathlib import Path
 
+# 强制开启 UTF-8 IO：防止英文版 Windows CI Runner 默认 cp1252 编码打印中文或 Emoji 崩溃
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+for _stream in (sys.stdout, sys.stderr):
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, OSError, ValueError):
+            pass
+
 from sync_version import load_version_config, sync_all_manifests
 
 BASE_DIR = Path(__file__).resolve().parent

@@ -9,6 +9,11 @@ on:
 permissions:
   contents: write
 
+# 强制所有跨平台 Runner (尤其英文 Windows cp1252 环境) 使用 UTF-8 编码输出构建日志
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: "utf-8"
+
 jobs:
   build-frontend:
     name: Build Frontend Static Export
