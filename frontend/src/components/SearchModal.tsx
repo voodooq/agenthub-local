@@ -8,7 +8,7 @@ import { apiFetch } from '@/utils/apiClient';
 interface SearchModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSelectResult: (conversationId: string) => void;
+  onSelectResult: (result: SearchResult) => void;
 }
 
 export function SearchModal({ isOpen, onClose, onSelectResult }: SearchModalProps) {
@@ -124,7 +124,7 @@ export function SearchModal({ isOpen, onClose, onSelectResult }: SearchModalProp
                 <button
                   key={res.message_id}
                   onClick={() => {
-                    onSelectResult(res.conversation_id);
+                    onSelectResult(res);
                     onClose();
                   }}
                   className="w-full text-left p-3 rounded-xl hover:bg-foreground/[0.05] border border-transparent hover:border-border transition-all group flex flex-col space-y-1.5"

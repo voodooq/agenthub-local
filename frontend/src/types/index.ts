@@ -189,6 +189,7 @@ export interface Message {
   tool_calls_json?: string | null;
   tool_call_id?: string | null;
   tool_events?: ToolExecutionCardItem[];
+  merged_tool_message_ids?: number[];
   memory_refs?: MemoryRefItem[];
   fact_refs?: MemoryFactItem[];
   experience_proposal?: ExperienceProposalItem;
@@ -213,6 +214,7 @@ export interface Message {
 export interface SearchResult {
   message_id: number;
   conversation_id: string;
+  workspace_id?: string;
   role: string;
   content: string;
   executed_by_account: string | null;

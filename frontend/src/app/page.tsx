@@ -61,6 +61,7 @@ import { generateScenarioThinking } from '@/utils/scenarioThinking';
 import {
   Conversation,
   Message,
+  SearchResult,
   StatusPillData,
   SceneMode,
   ToolExecutionCardItem,
@@ -336,12 +337,55 @@ export default function WorkbenchPage() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const pendingJumpTargetRef = useRef<{ convId: string; messageId?: number } | null>(null);
+  const [highlightedMessageId, setHighlightedMessageId] = useState<number | null>(null);
+  const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   };
 
   useEffect(() => {
+    return () => {
+      if (highlightTimerRef.current) {
+        clearTimeout(highlightTimerRef.current);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const pendingJump = pendingJumpTargetRef.current;
+    if (pendingJump && (!pendingJump.convId || pendingJump.convId === activeConvIdRef.current)) {
+      if (pendingJump.messageId) {
+        const matchedMsg = messages.find(
+          (m) =>
+            m.id === pendingJump.messageId ||
+            m.merged_tool_message_ids?.includes(pendingJump.messageId as number)
+        );
+        if (matchedMsg && matchedMsg.id) {
+          pendingJumpTargetRef.current = null;
+          const hostId = matchedMsg.id;
+          const timer = setTimeout(() => {
+            const el = document.getElementById(`chat-msg-${hostId}`);
+            if (el) {
+              el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+            setHighlightedMessageId(hostId);
+            if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+            highlightTimerRef.current = setTimeout(() => setHighlightedMessageId(null), 2800);
+          }, 60);
+          return () => clearTimeout(timer);
+        }
+        // 已切换到目标会话并拿到消息列表但未找到该条记录（如已删除），释放标记后回退至底部
+        if (messages.length > 0 && messages[0].conversation_id === pendingJump.convId) {
+          pendingJumpTargetRef.current = null;
+        } else {
+          return;
+        }
+      } else {
+        pendingJumpTargetRef.current = null;
+      }
+    }
     scrollToBottom();
   }, [messages]);
 
@@ -563,6 +607,12 @@ export default function WorkbenchPage() {
             };
             if (prevModel) {
               prevModel.tool_events = [...(prevModel.tool_events || []), toolItem];
+              if (typeof m.id === 'number') {
+                prevModel.merged_tool_message_ids = [
+                  ...(prevModel.merged_tool_message_ids || []),
+                  m.id,
+                ];
+              }
             }
           } else {
             // 自动清洗历史残存的 [tool_call] 原始标签、孤立的 ```xml / xml 行与内部落盘标记
@@ -617,6 +667,45 @@ export default function WorkbenchPage() {
     fetchMessagesAndState();
     fetchPendingProposals(activeConvId);
   }, [activeConvId, fetchMessagesAndState, fetchPendingProposals]);
+
+  const handleSelectSearchResult = useCallback(
+    async (result: SearchResult) => {
+      setActiveNavHub('chat');
+      if (result.workspace_id && result.workspace_id !== activeWorkspaceId) {
+        setActiveWorkspaceId(result.workspace_id);
+      }
+
+      pendingJumpTargetRef.current = {
+        convId: result.conversation_id,
+        messageId: result.message_id,
+      };
+
+      if (result.conversation_id === activeConvId) {
+        if (!isStreamingRef.current) {
+          await fetchMessagesAndState(result.conversation_id);
+        } else if (result.message_id) {
+          const matchedMsg = messages.find(
+            (m) =>
+              m.id === result.message_id ||
+              m.merged_tool_message_ids?.includes(result.message_id)
+          );
+          if (matchedMsg?.id) {
+            pendingJumpTargetRef.current = null;
+            document.getElementById(`chat-msg-${matchedMsg.id}`)?.scrollIntoView({
+              behavior: 'smooth',
+              block: 'center',
+            });
+            setHighlightedMessageId(matchedMsg.id);
+            if (highlightTimerRef.current) clearTimeout(highlightTimerRef.current);
+            highlightTimerRef.current = setTimeout(() => setHighlightedMessageId(null), 2800);
+          }
+        }
+      } else {
+        setActiveConvId(result.conversation_id);
+      }
+    },
+    [activeWorkspaceId, activeConvId, fetchMessagesAndState, messages]
+  );
 
   const handleSwitchSceneMode = async (nextMode: SceneMode) => {
     setSceneMode(nextMode);
@@ -1938,8 +2027,17 @@ export default function WorkbenchPage() {
               ) : (
                 messages.map((msg, index) => {
                   const isUser = msg.role === 'user';
+                  const isSearchHighlighted = Boolean(msg.id && highlightedMessageId === msg.id);
                   return (
-                    <div key={msg.id || index} className={`flex flex-col space-y-2.5 group ${isUser ? 'items-end' : 'items-start'}`}>
+                    <div
+                      key={msg.id || index}
+                      id={msg.id ? `chat-msg-${msg.id}` : undefined}
+                      className={`flex flex-col space-y-2.5 group transition-all duration-500 ${isUser ? 'items-end' : 'items-start'} ${
+                        isSearchHighlighted
+                          ? 'ring-2 ring-emerald-500/70 bg-emerald-500/5 rounded-2xl p-2 -m-2'
+                          : ''
+                      }`}
+                    >
                       {/* 发言角色标志 */}
                       <div className="flex items-center space-x-2 px-1 text-xs text-muted-foreground">
                         {isUser ? (
@@ -2673,9 +2771,7 @@ export default function WorkbenchPage() {
       <SearchModal
         isOpen={isSearchOpen}
         onClose={handleCloseSearch}
-        onSelectResult={(convId) => {
-          setActiveConvId(convId);
-        }}
+        onSelectResult={handleSelectSearchResult}
       />
 
       {/* 账号池管理模态框 */}

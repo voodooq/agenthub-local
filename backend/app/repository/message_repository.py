@@ -10,13 +10,37 @@ class MessageRepository:
     """消息数据访问对象"""
     
     @staticmethod
-    async def get_by_conversation(conv_id: str, limit: int = 100) -> list[MessageModel]:
-        """获取指定会话的历史消息数组（按创建时间升序排列）"""
+    async def get_by_conversation(
+        conv_id: str,
+        limit: int | None = None,
+        from_latest: bool = True,
+    ) -> list[MessageModel]:
+        """
+        获取指定会话的历史消息数组（始终按创建时间升序返回）。
+
+        NOTE: 必须区分全量读取（limit=None，供前端完整回显超长会话）与滑窗截取
+        （from_latest=True 取最近 N 条再恢复正序），防止超过 100 条的长会话截断最新对话。
+        """
         async with db_manager.get_connection() as conn:
-            async with conn.execute(
-                "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, id ASC LIMIT ?",
-                (conv_id, limit)
-            ) as cursor:
+            if limit is None or limit <= 0:
+                sql = "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, id ASC"
+                params: tuple[Any, ...] = (conv_id,)
+            elif from_latest:
+                sql = """
+                SELECT * FROM (
+                    SELECT * FROM messages
+                    WHERE conversation_id = ?
+                    ORDER BY created_at DESC, id DESC
+                    LIMIT ?
+                )
+                ORDER BY created_at ASC, id ASC
+                """
+                params = (conv_id, limit)
+            else:
+                sql = "SELECT * FROM messages WHERE conversation_id = ? ORDER BY created_at ASC, id ASC LIMIT ?"
+                params = (conv_id, limit)
+
+            async with conn.execute(sql, params) as cursor:
                 rows = await cursor.fetchall()
                 return [MessageModel.from_row(row) for row in rows]
 

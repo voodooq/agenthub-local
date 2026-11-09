@@ -37,6 +37,7 @@ class SearchRepository:
                 SELECT 
                     m.id as message_id,
                     m.conversation_id,
+                    c.workspace_id as workspace_id,
                     m.role,
                     m.content,
                     m.executed_by_account,
@@ -71,6 +72,7 @@ class SearchRepository:
             SELECT 
                 m.id as message_id,
                 m.conversation_id,
+                c.workspace_id as workspace_id,
                 m.role,
                 m.content,
                 m.executed_by_account,

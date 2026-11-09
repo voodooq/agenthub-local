@@ -60,7 +60,12 @@ class EnginePoolService:
         if pre_built_history is not None:
             effective_history_dicts = pre_built_history
         else:
-            history_messages = await MessageRepository.get_by_conversation(conversation_id)
+            history_limit = max(100, context_rounds * 4) if context_rounds > 0 else 100
+            history_messages = await MessageRepository.get_by_conversation(
+                conversation_id,
+                limit=history_limit,
+                from_latest=True,
+            )
             slice_count = max(0, context_rounds * 2) if context_rounds > 0 else 0
             effective_history_dicts = [
                 {"role": m.role, "content": m.content}

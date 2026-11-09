@@ -3,7 +3,7 @@
 """
 import json
 import uuid
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
 from ...schema.conversation_schema import ConversationCreate, ConversationUpdate, MessageResponse
 from ...repository.conversation_repository import ConversationRepository
@@ -98,9 +98,12 @@ async def update_conversation_agent_state(conv_id: str, req: AgentStateUpdateReq
 
 
 @router.get("/{conv_id}/messages", response_model=list[MessageResponse])
-async def get_conversation_messages(conv_id: str):
+async def get_conversation_messages(
+    conv_id: str,
+    limit: int | None = Query(default=None, ge=1, description="可选截取最近 N 条消息；默认返回完整会话历史"),
+):
     """获取会话历史消息列表"""
-    messages = await MessageRepository.get_by_conversation(conv_id)
+    messages = await MessageRepository.get_by_conversation(conv_id, limit=limit)
     return [
         MessageResponse(
             id=m.id or 0,
