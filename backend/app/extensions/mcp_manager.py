@@ -165,7 +165,10 @@ class MCPManager:
     """全局 MCP 客户端常驻连接池（支持热插拔重载与失败熔断）"""
 
     def __init__(self, config_path: str | Path | None = None) -> None:
-        self.base_dir = Path(__file__).resolve().parent.parent.parent.parent
+        if getattr(sys, "frozen", False):
+            self.base_dir = Path(sys.executable).resolve().parent
+        else:
+            self.base_dir = Path(__file__).resolve().parent.parent.parent.parent
         root_cfg = self.base_dir / "mcp_servers.json"
         data_cfg = self.base_dir / "data" / "mcp_servers.json"
 

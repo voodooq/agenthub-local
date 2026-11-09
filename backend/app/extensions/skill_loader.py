@@ -44,7 +44,10 @@ class SkillLoader:
         workspace_skills_dir: str | Path | None = None,
         commercial_suites_dir: str | Path | None = None,
     ) -> None:
-        self.base_dir = Path(__file__).resolve().parent.parent.parent.parent
+        if getattr(sys, "frozen", False):
+            self.base_dir = Path(sys.executable).resolve().parent
+        else:
+            self.base_dir = Path(__file__).resolve().parent.parent.parent.parent
         self.skills_dir = Path(workspace_skills_dir) if workspace_skills_dir else (self.base_dir / "skills")
         self.suites_dir = Path(commercial_suites_dir) if commercial_suites_dir else (self.base_dir / "suites")
         self._ensure_default_skills()

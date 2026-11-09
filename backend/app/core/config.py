@@ -3,6 +3,7 @@
 基于 Pydantic Settings 实现环境变量自适应与安全校验
 """
 import os
+import sys
 import secrets
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -52,6 +53,9 @@ class Settings(BaseSettings):
         if not self.db_path:
             if Path("/app/data").exists() or Path("/app").exists():
                 data_dir = Path("/app/data")
+            elif getattr(sys, "frozen", False):
+                # 独立便携运行环境：数据存放在可执行文件所在目录下的 data/
+                data_dir = Path(sys.executable).resolve().parent / "data"
             else:
                 data_dir = Path(__file__).resolve().parent.parent.parent.parent / "data"
 

@@ -199,7 +199,12 @@ candidates = [
     base_dir.parent / "frontend" / "out",
     base_dir / "static",
     Path(sys.executable).parent / "static",
+    Path(sys.executable).parent / "frontend" / "out",
 ]
+meipass = getattr(sys, "_MEIPASS", None)
+if meipass:
+    candidates.insert(0, Path(meipass) / "static")
+    candidates.insert(1, Path(meipass) / "frontend" / "out")
 static_path = None
 for c in candidates:
     if c.exists() and (c / "index.html").exists():
