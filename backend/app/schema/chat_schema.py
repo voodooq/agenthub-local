@@ -10,6 +10,7 @@ class AttachmentItem(BaseModel):
     url: str | None = Field(default=None, description="前端可访问的静态 URL")
     mime_type: str = Field(default="image/png", description="MIME 类型")
     size_str: str | None = Field(default=None, description="文件大小展示")
+    category: str | None = Field(default=None, description="附件分类: image | pdf | office | text | file")
 
 
 class ConfirmedFactItem(BaseModel):

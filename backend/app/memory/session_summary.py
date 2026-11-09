@@ -16,6 +16,7 @@ from ..core.logging_config import logger
 from ..repository.conversation_repository import ConversationRepository
 from ..repository.db import db_manager
 from ..repository.message_repository import MessageRepository
+from ..service.attachment_service import attachment_service
 from .policy_guard import MemoryPolicyGuard
 
 
@@ -137,6 +138,8 @@ class SessionSummaryManager:
                 if role == "tool"
                 else (row.get("content") or "")
             )
+            if role == "user":
+                raw_text = attachment_service.strip_attachments_for_display(raw_text)
             clean_text, _ = MemoryPolicyGuard.sanitize_text(raw_text)
 
             if role == "user" and not core_goal and clean_text.strip():
@@ -215,6 +218,8 @@ class SessionSummaryManager:
                 if role == "tool"
                 else (row.get("content") or "")
             )
+            if role == "user":
+                text = attachment_service.strip_attachments_for_display(text)
             safe_txt, _ = MemoryPolicyGuard.sanitize_text(text)
             delta_lines.append(f"[Turn {t_id} | {role}] {safe_txt[:500]}")
 

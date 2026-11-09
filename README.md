@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.1.6-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.1.7-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -14,6 +14,22 @@
 > **数据与算力彻底解耦，告别单一模型绑定**：
 > AgentHub Local 是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、Llama.cpp、Nvidia 实例），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、SiliconFlow、Google AI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
+
+---
+
+## 📎 v1.1.7 对话附件规范限制、拖拽放置上传与多轮路径防失忆体系
+
+全面升级对话区附件上传、校验解析与多步执行链路：
+1. **统一前后向格式白名单与体积限额 (`attachment_service` & `attachmentPolicy`)**：
+   - **常见图片（≤ 10 MB）**：`.png / .jpg / .jpeg / .webp / .gif`（支持 `Ctrl+V` 直接粘贴截图）；
+   - **办公与 PDF 文档**：`.pdf`（≤ 10 MB）、现代 Office `.xlsx / .docx / .pptx`（≤ 5 MB）；
+   - **纯文本与源码（≤ 5 MB）**：`.txt / .md / .csv / .tsv / .json / .yaml / .xml / .log / .svg / .py / .ts / .js / .sql` 及无后缀 `Dockerfile / Makefile`；
+   - **安全防伪与原因提示**：支持文件头魔数校验、ZIP OOXML 容器结构检验与 `\x00` 二进制混淆检测，单次最多 5 个附件；针对 `.doc / .xls / .ppt` 老式办公格式、压缩包、可执行程序、音视频、0 字节空文件、超限文件与文件夹拖入提供清晰中文拒绝原因及替代引导（支持展开完整格式说明表）。
+2. **对话区全域拖拽放置上传 (Dropzone)**：
+   - 基于防抖计数器实现全屏零闪烁翡翠绿半透明毛玻璃 Dropzone 放置反馈，自动拦截浏览器/WebView 本地文件误打开跳页，支持点击多选、粘贴与拖拽三大入口统一校验。
+3. **多格式零强依赖解析与 `./attachments` 断层根治**：
+   - 内置 `.xlsx`（`openpyxl` 优先 + 标准库 `zipfile+xml` 兜底）、`.docx`、`.pptx` 正文摘要抽取及 `PDF` 多模态传输；
+   - `AgentRuntime` 与 `ContextBuilder` 通过标准化 `<agenthub_attachments>` 锚点保留附件物理绝对路径并在多步 ReAct (`step_idx > 0`) 与跨轮历史中自动展开路径档案（同时在全文检索与会话摘要层自动折叠清理），彻底根除模型臆测 `./attachments` 引发 `FileNotFoundError` 的缺陷。
 
 ---
 
@@ -200,8 +216,8 @@ flowchart TD
 
 | 客户端版本 | 适用系统 | 包名称 | 运行方式 |
 | :--- | :--- | :--- | :--- |
-| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.6-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
-| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.6-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
+| **Windows 独立便携桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.1.7-windows-x64.zip` | 解压后双击 `启动AgentHub桌面版.bat` 即开即用 |
+| **跨平台便携运行包** | macOS / Linux / Win | `AgentHub-Local-v1.1.7-portable.tar.gz` | 解压后执行 `python desktop_app.py` 或 `uvicorn` |
 | **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
 
 ---
@@ -219,23 +235,23 @@ sequenceDiagram
     participant Actions as GitHub Actions Runner (windows-latest)
     participant Releases as GitHub Releases 页面
 
-    Dev->>Git: git tag v1.1.6
-    Dev->>GH: git push origin v1.1.6
+    Dev->>Git: git tag v1.1.7
+    Dev->>GH: git push origin v1.1.7
     GH->>Actions: 触发 release.yml 流水线
     Actions->>Actions: 安装 Node 20 & Python 3.12
     Actions->>Actions: 编译并导出 Next.js 静态前端 (out/)
     Actions->>Actions: 打包 Windows 便携包 (*-windows-x64.zip)
     Actions->>Actions: 打包跨平台源码包 (*-portable.tar.gz)
-    Actions->>Releases: 自动创建 Release v1.1.6 并上传分发产物
+    Actions->>Releases: 自动创建 Release v1.1.7 并上传分发产物
     Releases-->>Dev: 用户可在页面直接下载执行文件
 ```
 
 ### 如何发布新版本：
 只需在本地执行以下三条命令：
 ```bash
-git tag v1.1.6
+git tag v1.1.7
 git push origin master
-git push origin v1.1.6
+git push origin v1.1.7
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 release 附件，几分钟内即可在 Releases 页面看到生成的下载文件！
 

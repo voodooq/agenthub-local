@@ -4,6 +4,26 @@ import { ResolvedLocale } from '@/context/LanguageContext';
  * 全量多语种词条映射库（按字符长度自动降序排序预处理，先长句后短词，确保 100% 翻译覆盖且不被短词破坏）
  */
 export const PHRASE_DICTIONARY: Record<string, { 'zh-TW': string; en: string; ja: string }> = {
+  // ──────────── v1.1.7 对话附件限制、格式说明与拖拽上传 ────────────
+  '添加常见图片 (PNG/JPG/WebP/GIF ≤10MB)、文档 (PDF ≤10MB · Word/Excel/PPT ≤5MB) 或代码/文本文件（≤5MB）；支持拖拽放置与 Ctrl+V 粘贴，最多 5 个': { 'zh-TW': '新增常見圖片 (PNG/JPG/WebP/GIF ≤10MB)、文件 (PDF ≤10MB · Word/Excel/PPT ≤5MB) 或程式碼/純文字檔案（≤5MB）；支援拖曳放置與 Ctrl+V 貼上，最多 5 個', en: 'Attach images (PNG/JPG/WebP/GIF ≤10MB), docs (PDF ≤10MB · Word/Excel/PPT ≤5MB) or text/code files (≤5MB). Supports Drag & Drop and Ctrl+V paste (max 5).', ja: '画像 (PNG/JPG/WebP/GIF ≤10MB)、文書 (PDF ≤10MB · Word/Excel/PPT ≤5MB)、コード/テキスト (≤5MB) を添付。ドラッグ＆ドロップや Ctrl+V に対応（最大5件）' },
+  '输入消息或指令...（支持拖拽放置文件、Ctrl+V 粘贴图片，Enter 发送，/ 唤起技能）': { 'zh-TW': '輸入訊息或指令...（支援拖曳放置檔案、Ctrl+V 貼上圖片，Enter 傳送，/ 喚起技能）', en: 'Message or command... (Drop files, Ctrl+V paste images, Enter to send, / for skills)', ja: 'メッセージや指示を入力... (ファイルドロップ、Ctrl+Vで画像貼付、Enterで送信、/ でスキル呼出)' },
+  '不支持的格式、压缩包、可执行程序或超限文件将自动拦截并说明原因': { 'zh-TW': '不支援的格式、壓縮檔、可執行程式或超限檔案將自動攔截並說明原因', en: 'Unsupported formats, archives, executables, or oversized files will be blocked with details', ja: '非対応形式・圧縮ファイル・実行ファイル・サイズ超過ファイルは理由付きで自動ブロックされます' },
+  'TXT / MD / CSV / JSON / YAML / XML / LOG / SVG / Python / JS / TS / SQL 等常见源码': { 'zh-TW': 'TXT / MD / CSV / JSON / YAML / XML / LOG / SVG / Python / JS / TS / SQL 等常見原始碼', en: 'TXT / MD / CSV / JSON / YAML / XML / LOG / SVG / Python / JS / TS / SQL & source code', ja: 'TXT / MD / CSV / JSON / YAML / XML / LOG / SVG / Python / JS / TS / SQL 等のソースコード' },
+  '部分文件未加入附件列表（格式受限或超出大小限制）': { 'zh-TW': '部分檔案未加入附件清單（格式受限或超出大小限制）', en: 'Some files were skipped (unsupported format or size limit exceeded)', ja: '一部のファイルは追加されませんでした（形式制限またはサイズ超過）' },
+  'PNG / JPG / JPEG / WebP / GIF（支持 Ctrl+V 粘贴截图）': { 'zh-TW': 'PNG / JPG / JPEG / WebP / GIF（支援 Ctrl+V 貼上截圖）', en: 'PNG / JPG / JPEG / WebP / GIF (Ctrl+V screenshot supported)', ja: 'PNG / JPG / JPEG / WebP / GIF (Ctrl+V スクショ貼付対応)' },
+  'PDF / Word (.docx) / Excel (.xlsx) / PPT (.pptx)': { 'zh-TW': 'PDF / Word (.docx) / Excel (.xlsx) / PPT (.pptx)', en: 'PDF / Word (.docx) / Excel (.xlsx) / PPT (.pptx)', ja: 'PDF / Word (.docx) / Excel (.xlsx) / PPT (.pptx)' },
+  '文档 PDF (≤ 10 MB) · Word/Excel/PPT (≤ 5 MB)': { 'zh-TW': '文件 PDF (≤ 10 MB) · Word/Excel/PPT (≤ 5 MB)', en: 'Docs PDF (≤ 10 MB) · Word/Excel/PPT (≤ 5 MB)', ja: '文書 PDF (≤ 10 MB) · Word/Excel/PPT (≤ 5 MB)' },
+  '办公文档 (PDF ≤ 10 MB · Office ≤ 5 MB)': { 'zh-TW': '辦公文件 (PDF ≤ 10 MB · Office ≤ 5 MB)', en: 'Office Docs (PDF ≤ 10 MB · Office ≤ 5 MB)', ja: 'オフィス文書 (PDF ≤ 10 MB · Office ≤ 5 MB)' },
+  'TXT/MD/CSV/JSON/代码 ≤ 5 MB · 最多': { 'zh-TW': 'TXT/MD/CSV/JSON/程式碼 ≤ 5 MB · 最多', en: 'TXT/MD/CSV/JSON/Code ≤ 5 MB · Max', ja: 'TXT/MD/CSV/JSON/コード ≤ 5 MB · 最大' },
+  '图片 PNG/JPG/WebP/GIF ≤ 10 MB': { 'zh-TW': '圖片 PNG/JPG/WebP/GIF ≤ 10 MB', en: 'Images PNG/JPG/WebP/GIF ≤ 10 MB', ja: '画像 PNG/JPG/WebP/GIF ≤ 10 MB' },
+  '正在校验并上传附件...': { 'zh-TW': '正在校驗並上傳附件...', en: 'Validating & uploading...', ja: '検証・アップロード中...' },
+  '松手即可放置上传附件': { 'zh-TW': '放開即可放置上傳附件', en: 'Drop files here to upload', ja: 'ここにドロップしてアップロード' },
+  '纯文本与源码 (≤ 5 MB)': { 'zh-TW': '純文字與原始碼 (≤ 5 MB)', en: 'Plain Text & Code (≤ 5 MB)', ja: 'テキスト＆ソースコード (≤ 5 MB)' },
+  '常见图片 (≤ 10 MB)': { 'zh-TW': '常見圖片 (≤ 10 MB)', en: 'Common Images (≤ 10 MB)', ja: '一般的な画像 (≤ 10 MB)' },
+  '收起格式说明': { 'zh-TW': '收起格式說明', en: 'Hide Formats', ja: '形式一覧を閉じる' },
+  '查看支持格式': { 'zh-TW': '檢視支援格式', en: 'Supported Formats', ja: '対応形式を見る' },
+  '关闭提示': { 'zh-TW': '關閉提示', en: 'Dismiss', ja: '閉じる' },
+
   // ──────────── v1.1.6 记忆分层治理与 Skill 经验自演化 ────────────
   'L4 确定性 KV 契约 · Append-Only 审计账本 · 长期记忆画像 · 回复性格与自演化 Skill 扩展总线': { 'zh-TW': 'L4 確定性 KV 契約 · Append-Only 審計帳本 · 長期記憶畫像 · 回覆性格與自演化 Skill 擴展總線', en: 'L4 Deterministic KV Facts · Append-Only Ledger · Long-Term Memory · Persona & Self-Evolving Skills', ja: 'L4 確定的KV契約 · Append-Only監査台帳 · 長期記憶プロファイル · 応答スタイル＆自己進化Skillバス' },
   '为防模型幻觉污染知识库，须经您确认后才写入物理 Skill 并刷新 FTS5 索引': { 'zh-TW': '為防模型幻覺污染知識庫，須經您確認後才寫入物理 Skill 並刷新 FTS5 索引', en: 'Human confirmation required before writing to disk Skill and refreshing the FTS5 index.', ja: 'ハルシネーションによる汚染を防ぐため、確認後にのみSkillへ書き込みFTS5インデックスを更新します' },

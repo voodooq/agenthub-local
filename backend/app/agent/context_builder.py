@@ -19,6 +19,7 @@ from ..memory.policy_guard import MemoryPolicyGuard
 from ..memory.session_summary import session_summary_manager
 from ..extensions.skill_loader import skill_loader
 from ..skills.skill_service import SkillService
+from ..service.attachment_service import attachment_service
 from .tool_protocol import ToolProtocolAdapter
 
 
@@ -353,6 +354,8 @@ class ContextBuilder:
                     })
                 else:
                     raw_c = m.content or ""
+                    if m.role == "user":
+                        raw_c = attachment_service.render_attachments_for_llm_history(raw_c)
                     # 消除可能带偏大模型的模式模仿文本 [调用工具: ...]
                     if m.role in ("assistant", "model"):
                         raw_c = re.sub(r"\[调用工具:\s*[^\]]+\]", "", raw_c).strip()

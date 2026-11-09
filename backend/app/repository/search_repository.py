@@ -3,8 +3,18 @@ FTS5 全文检索仓储层 (Search Repository)
 基于 SQLite FTS5 (trigram) 实现毫秒级中英混合、代码符号及子串关键词检索
 支持短词自动降级与关键词高亮提取
 """
+import re
 from typing import Any
 from .db import db_manager
+from ..service.attachment_service import attachment_service
+
+_UNCLOSED_ANCHOR_RE = re.compile(r"<agenthub_attachments>[\s\S]*$", re.IGNORECASE)
+
+
+def _clean_search_snippet(text: str) -> str:
+    """清洗搜索片段末尾的 <agenthub_attachments> 原始锚点及被截断的尾部片段"""
+    cleaned = attachment_service.strip_attachments_for_display(text or "")
+    return _UNCLOSED_ANCHOR_RE.sub("", cleaned).strip()
 
 
 class SearchRepository:
@@ -46,7 +56,13 @@ class SearchRepository:
                     async with conn.execute(fts_sql, (search_term, limit)) as cursor:
                         rows = await cursor.fetchall()
                         if rows:
-                            return [dict(row) for row in rows]
+                            fts_results: list[dict[str, Any]] = []
+                            for row in rows:
+                                item = dict(row)
+                                item["content"] = attachment_service.strip_attachments_for_display(item.get("content", ""))
+                                item["highlighted_snippet"] = _clean_search_snippet(item.get("highlighted_snippet", ""))
+                                fts_results.append(item)
+                            return fts_results
                 except Exception:
                     pass
 
@@ -72,12 +88,13 @@ class SearchRepository:
                 results = []
                 for row in rows:
                     item = dict(row)
-                    # 内存高亮
-                    raw_content = item.get("content", "")
+                    # 内存高亮（先剥离原始附件 JSON 锚点再切片高亮）
+                    raw_content = attachment_service.strip_attachments_for_display(item.get("content", ""))
+                    item["content"] = raw_content
                     highlighted = raw_content.replace(
                         clean_query,
                         f'<mark class="bg-amber-500/30 text-amber-200 px-1 rounded">{clean_query}</mark>'
                     )
-                    item["highlighted_snippet"] = highlighted[:150]
+                    item["highlighted_snippet"] = highlighted[:180]
                     results.append(item)
                 return results

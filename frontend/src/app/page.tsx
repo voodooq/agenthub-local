@@ -18,6 +18,10 @@ import {
   AlertTriangle,
   CheckCircle2,
   Compass,
+  UploadCloud,
+  FileText,
+  FileSpreadsheet,
+  Info,
 } from 'lucide-react';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
@@ -70,6 +74,17 @@ import {
 } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 import { prefetchExtensionSkills, prefetchWorkspaceSkills } from '@/utils/skillCache';
+import {
+  AttachmentCategory,
+  FILE_INPUT_ACCEPT,
+  MAX_ATTACHMENTS_PER_MESSAGE,
+  ParsedUserAttachment,
+  SUPPORTED_ATTACHMENT_GROUPS,
+  buildMessageWithAttachmentsAnchor,
+  formatFileSize,
+  parseMessageAttachments,
+  validateAttachmentCandidate,
+} from '@/utils/attachmentPolicy';
 
 export default function WorkbenchPage() {
   const [conversations, setConversations] = useState<Conversation[]>([]);
@@ -109,11 +124,12 @@ export default function WorkbenchPage() {
   const [cpuPercent, setCpuPercent] = useState(18);
   const [memPercent, setMemPercent] = useState(42);
 
-  // 附件与语音
+  // 附件、上传限制提示与拖拽状态
   interface AttachmentItem {
     name: string;
     size: string;
     type: string; // 'image' | 'text' | 'file'
+    category?: AttachmentCategory;
     dataUrl?: string;
     filePath?: string;
     url?: string;
@@ -121,6 +137,11 @@ export default function WorkbenchPage() {
     textContent?: string;
   }
   const [attachments, setAttachments] = useState<AttachmentItem[]>([]);
+  const [attachmentRejectionNotices, setAttachmentRejectionNotices] = useState<string[]>([]);
+  const [showSupportedFormatsHelp, setShowSupportedFormatsHelp] = useState(false);
+  const [isUploadingAttachment, setIsUploadingAttachment] = useState(false);
+  const [isDraggingFiles, setIsDraggingFiles] = useState(false);
+  const dragCounterRef = useRef(0);
   const [isListening, setIsListening] = useState(false);
 
   // 抽屉与模态框
@@ -283,6 +304,21 @@ export default function WorkbenchPage() {
     }
     return null;
   }, [messages]);
+
+  // 防止文件拖出输入区域外时触发 WebView/浏览器直接导航打开本地文件
+  useEffect(() => {
+    const preventWindowFileNavigation = (e: DragEvent) => {
+      if (e.dataTransfer?.types && Array.from(e.dataTransfer.types).includes('Files')) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener('dragover', preventWindowFileNavigation);
+    window.addEventListener('drop', preventWindowFileNavigation);
+    return () => {
+      window.removeEventListener('dragover', preventWindowFileNavigation);
+      window.removeEventListener('drop', preventWindowFileNavigation);
+    };
+  }, []);
 
   // 全局 F11 全屏切换快捷键支持
   useEffect(() => {
@@ -629,31 +665,56 @@ export default function WorkbenchPage() {
   const handleSendMessage = async (
     customPrompt?: string,
     approvedStepsForRequest?: PlanStepItem[],
-    confirmedFactsForRequest?: ConfirmedFactItem[]
+    confirmedFactsForRequest?: ConfirmedFactItem[],
+    overrideAttachments?: ParsedUserAttachment[]
   ) => {
-    const rawPrompt = customPrompt || inputPrompt;
-    if (!rawPrompt.trim() || isStreaming) return;
+    const usingOverrideAttachments = Array.isArray(overrideAttachments);
+    const currentAttachments: AttachmentItem[] = usingOverrideAttachments
+      ? overrideAttachments.map((att) => ({
+          name: att.name,
+          size: att.size_str || '',
+          type: att.category === 'image' || Boolean(att.mime_type?.startsWith('image/'))
+            ? 'image'
+            : att.category === 'text'
+            ? 'text'
+            : 'file',
+          category: att.category as AttachmentCategory | undefined,
+          filePath: att.file_path,
+          url: att.url,
+          mimeType: att.mime_type,
+        }))
+      : [...attachments];
+    const rawPrompt = (customPrompt || inputPrompt).trim()
+      || (currentAttachments.length > 0 && !customPrompt ? '请结合附带的文件或图片内容进行分析解答。' : '');
+    if (!rawPrompt || isStreaming) return;
 
     let promptToSend = rawPrompt;
     let effectiveConvId = activeConvId;
-    setInputPrompt('');
+    if (!customPrompt) {
+      setInputPrompt('');
+    }
+    setAttachmentRejectionNotices([]);
     // 新一轮提问开始前重置本轮临时 fact_refs 缓存
     if (lastStreamFactRefsRef.current && lastStreamFactRefsRef.current.convId !== activeConvId) {
       lastStreamFactRefsRef.current = null;
     }
 
-    const currentAttachments = [...attachments];
-    setAttachments([]);
-
-    // 将用户消息中附带的图片转换为优雅的 Markdown 预览，供用户气泡直观展示
-    let userDisplayContent = rawPrompt;
-    if (currentAttachments.length > 0) {
-      const imgPreviews = currentAttachments
-        .filter((att) => att.type === 'image' && (att.url || att.dataUrl))
-        .map((att) => `\n\n![${att.name}](${att.url || att.dataUrl})`)
-        .join('');
-      userDisplayContent = `${rawPrompt}${imgPreviews}`;
+    if (!usingOverrideAttachments) {
+      setAttachments([]);
     }
+
+    // 与后端持久化保持绝对同构，确保发出瞬间与刷新历史后气泡均可展示图片与文档徽标
+    const userDisplayContent = buildMessageWithAttachmentsAnchor(
+      rawPrompt,
+      currentAttachments.map((att) => ({
+        name: att.name,
+        file_path: att.filePath,
+        url: att.url || att.dataUrl,
+        mime_type: att.mimeType,
+        size_str: att.size,
+        category: att.category || (att.type === 'image' ? 'image' : 'file'),
+      }))
+    );
 
     if (promptToSend.startsWith('/free-port')) {
       const parts = promptToSend.split(/\s+/);
@@ -774,6 +835,7 @@ export default function WorkbenchPage() {
             url: a.url,
             mime_type: a.mimeType || 'image/png',
             size_str: a.size,
+            category: a.category,
           })),
         }),
       });
@@ -1068,85 +1130,98 @@ export default function WorkbenchPage() {
     }
   };
 
-  const handleAddFileAttachment = async (file: File) => {
-    const isImage = file.type.startsWith('image/');
-    const isText = file.type.startsWith('text/') || /\.(txt|md|js|ts|tsx|jsx|json|py|html|css|yaml|yml|sql|csv)$/i.test(file.name);
+  const readFileAsDataUrl = (file: File): Promise<string> =>
+    new Promise((resolve) => {
+      const reader = new FileReader();
+      reader.onload = (ev) => resolve((ev.target?.result as string) || '');
+      reader.onerror = () => resolve('');
+      reader.readAsDataURL(file);
+    });
 
-    // 立即上传至后端本地存储，获取真实物理路径与静态 URL
-    let uploadedFilePath = '';
-    let uploadedUrl = '';
-    let uploadedSizeStr = (file.size / 1024).toFixed(1) + ' KB';
+  const handleProcessAttachmentFiles = async (files: File[], extraRejections: string[] = []) => {
+    const rejections: string[] = [...extraRejections];
+    let remainingSlots = Math.max(0, MAX_ATTACHMENTS_PER_MESSAGE - attachments.length);
+    const validUploadQueue: { file: File; category: AttachmentCategory; canonicalMime: string }[] = [];
 
-    try {
-      const formData = new FormData();
-      formData.append('file', file);
-      const res = await apiFetch('/api/v1/chat/upload', {
-        method: 'POST',
-        body: formData,
-      });
-      if (res.ok) {
-        const json = await res.json();
-        uploadedFilePath = json.file_path;
-        uploadedUrl = json.url;
-        uploadedSizeStr = json.size_str || uploadedSizeStr;
+    for (const file of files) {
+      if (remainingSlots <= 0) {
+        rejections.push(
+          `已达单条消息附件上限 (${MAX_ATTACHMENTS_PER_MESSAGE} 个)，未添加「${file.name}」。`
+        );
+        continue;
       }
-    } catch (e) {
-      console.warn('本地附件持久化失败，将使用内联兜底:', e);
+      const check = validateAttachmentCandidate(file);
+      if (!check.valid || !check.meta) {
+        rejections.push(check.reason || `不支持文件「${file.name}」。`);
+        continue;
+      }
+      remainingSlots -= 1;
+      validUploadQueue.push({
+        file,
+        category: check.meta.category,
+        canonicalMime: check.meta.canonicalMime,
+      });
     }
 
-    if (isImage) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        setAttachments((prev) => [
-          ...prev,
-          {
-            name: file.name,
-            size: uploadedSizeStr,
-            type: 'image',
-            dataUrl: e.target?.result as string,
-            filePath: uploadedFilePath,
-            url: uploadedUrl,
-            mimeType: file.type || 'image/png',
-          },
-        ]);
-      };
-      reader.readAsDataURL(file);
-    } else if (isText) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        setAttachments((prev) => [
-          ...prev,
-          {
-            name: file.name,
-            size: uploadedSizeStr,
-            type: 'text',
-            textContent: e.target?.result as string,
-            filePath: uploadedFilePath,
-            url: uploadedUrl,
-            mimeType: file.type || 'text/plain',
-          },
-        ]);
-      };
-      reader.readAsText(file);
+    if (validUploadQueue.length > 0) {
+      setIsUploadingAttachment(true);
+      try {
+        const uploadedItems: AttachmentItem[] = [];
+        for (const item of validUploadQueue) {
+          const { file, category, canonicalMime } = item;
+          try {
+            const formData = new FormData();
+            formData.append('file', file);
+            const res = await apiFetch('/api/v1/chat/upload', {
+              method: 'POST',
+              body: formData,
+            });
+            if (!res.ok) {
+              let errDetail = `文件「${file.name}」上传被服务端拒绝 (HTTP ${res.status})。`;
+              try {
+                const errJson = await res.json();
+                if (errJson?.detail) errDetail = String(errJson.detail);
+              } catch {}
+              rejections.push(errDetail);
+              continue;
+            }
+            const json = await res.json();
+            const isImg = (json.category || category) === 'image';
+            const dataUrl = isImg ? await readFileAsDataUrl(file) : undefined;
+            uploadedItems.push({
+              name: json.name || file.name,
+              size: json.size_str || formatFileSize(file.size),
+              type: isImg ? 'image' : category === 'text' ? 'text' : 'file',
+              category: (json.category || category) as AttachmentCategory,
+              dataUrl,
+              filePath: json.file_path,
+              url: json.url,
+              mimeType: json.mime_type || canonicalMime,
+            });
+          } catch (uploadErr) {
+            console.warn('本地附件上传失败:', uploadErr);
+            rejections.push(`文件「${file.name}」上传失败，请检查本地后端服务是否正常运行。`);
+          }
+        }
+        if (uploadedItems.length > 0) {
+          setAttachments((prev) => [...prev, ...uploadedItems].slice(0, MAX_ATTACHMENTS_PER_MESSAGE));
+        }
+      } finally {
+        setIsUploadingAttachment(false);
+      }
+    }
+
+    if (rejections.length > 0) {
+      setAttachmentRejectionNotices(rejections);
     } else {
-      setAttachments((prev) => [
-        ...prev,
-        {
-          name: file.name,
-          size: uploadedSizeStr,
-          type: 'file',
-          filePath: uploadedFilePath,
-          url: uploadedUrl,
-          mimeType: file.type || 'application/octet-stream',
-        },
-      ]);
+      setAttachmentRejectionNotices([]);
     }
   };
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
-    if (files) {
-      Array.from(files).forEach((f) => handleAddFileAttachment(f));
+    if (files && files.length > 0) {
+      void handleProcessAttachmentFiles(Array.from(files));
     }
     e.target.value = '';
   };
@@ -1156,24 +1231,96 @@ export default function WorkbenchPage() {
     const items = e.clipboardData?.items;
     if (!items) return;
 
-    let hasFile = false;
+    const pastedFiles: File[] = [];
     for (let i = 0; i < items.length; i++) {
       const item = items[i];
       if (item.kind === 'file') {
         const file = item.getAsFile();
         if (file) {
-          hasFile = true;
-          // 若复制的是微信截图/无名图片，自动赋予易识别的名字
-          const fileName = file.name === 'image.png' || !file.name
+          // 若复制的是微信截图/无名图片，自动赋予易识别的名字；普通文件保留真实扩展名与 MIME
+          const isUnnamedImg = file.name === 'image.png' || !file.name;
+          const fileName = isUnnamedImg
             ? `微信截图_${new Date().toLocaleTimeString().replace(/:/g, '')}.png`
             : file.name;
-          const renamedFile = new File([file], fileName, { type: file.type });
-          handleAddFileAttachment(renamedFile);
+          pastedFiles.push(
+            new File([file], fileName, {
+              type: file.type || (isUnnamedImg ? 'image/png' : ''),
+            })
+          );
         }
       }
     }
 
-    // 若粘贴的内容包含文件或图片，无需阻止普通文本粘贴（允许图文混排）
+    if (pastedFiles.length > 0) {
+      void handleProcessAttachmentFiles(pastedFiles);
+    }
+  };
+
+  const isFileDragTransfer = (e: React.DragEvent<HTMLElement>): boolean => {
+    const types = e.dataTransfer?.types;
+    return Boolean(types && Array.from(types).includes('Files'));
+  };
+
+  const handleMainDragEnter = (e: React.DragEvent<HTMLElement>) => {
+    if (activeNavHub !== 'chat' || !isFileDragTransfer(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current += 1;
+    setIsDraggingFiles(true);
+  };
+
+  const handleMainDragOver = (e: React.DragEvent<HTMLElement>) => {
+    if (activeNavHub !== 'chat' || !isFileDragTransfer(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.dataTransfer) {
+      e.dataTransfer.dropEffect = 'copy';
+    }
+  };
+
+  const handleMainDragLeave = (e: React.DragEvent<HTMLElement>) => {
+    if (activeNavHub !== 'chat' || !isFileDragTransfer(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current = Math.max(0, dragCounterRef.current - 1);
+    if (dragCounterRef.current === 0) {
+      setIsDraggingFiles(false);
+    }
+  };
+
+  const handleMainDrop = (e: React.DragEvent<HTMLElement>) => {
+    if (activeNavHub !== 'chat') return;
+    if (!isFileDragTransfer(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragCounterRef.current = 0;
+    setIsDraggingFiles(false);
+
+    const droppedFiles: File[] = [];
+    const dirRejections: string[] = [];
+
+    const items = e.dataTransfer?.items;
+    if (items && items.length > 0) {
+      for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        if (item.kind !== 'file') continue;
+        const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
+        if (entry && entry.isDirectory) {
+          dirRejections.push(
+            `暂不支持直接拖入文件夹「${entry.name}」，请拖拽具体文件，或点击左侧工作区「挂载本地目录」。`
+          );
+          continue;
+        }
+        const file = item.getAsFile();
+        if (file) droppedFiles.push(file);
+      }
+    } else if (e.dataTransfer?.files) {
+      droppedFiles.push(...Array.from(e.dataTransfer.files));
+    }
+
+    if (droppedFiles.length > 0 || dirRejections.length > 0) {
+      void handleProcessAttachmentFiles(droppedFiles, dirRejections);
+    }
   };
 
   const handleModifyTone = (tone: 'shorter' | 'longer' | 'simpler' | 'professional') => {
@@ -1332,8 +1479,41 @@ export default function WorkbenchPage() {
         }}
       />
 
-      {/* 主对话区 */}
-      <main className="flex-1 flex flex-col h-full overflow-hidden relative">
+      {/* 主对话区（支持全域文件拖拽放置上传） */}
+      <main
+        onDragEnter={handleMainDragEnter}
+        onDragOver={handleMainDragOver}
+        onDragLeave={handleMainDragLeave}
+        onDrop={handleMainDrop}
+        className="flex-1 flex flex-col h-full overflow-hidden relative"
+      >
+        {/* 拖拽放置上传视觉遮罩 */}
+        {activeNavHub === 'chat' && isDraggingFiles && (
+          <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center p-6 bg-background/70 backdrop-blur-md animate-fade-in">
+            <div className="w-full max-w-xl rounded-3xl border-2 border-dashed border-emerald-500/80 bg-emerald-500/[0.06] px-8 py-10 flex flex-col items-center text-center shadow-2xl">
+              <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center mb-4">
+                <UploadCloud className="w-7 h-7 text-emerald-500 animate-bounce" />
+              </div>
+              <div className="text-base font-bold text-foreground mb-1.5">
+                松手即可放置上传附件
+              </div>
+              <div className="text-xs text-muted-foreground leading-relaxed mb-4">
+                不支持的格式、压缩包、可执行程序或超限文件将自动拦截并说明原因
+              </div>
+              <div className="flex flex-wrap items-center justify-center gap-2 text-[11px]">
+                <span className="px-2.5 py-1 rounded-full bg-surface-100 border border-border text-foreground/90">
+                  图片 PNG/JPG/WebP/GIF ≤ 10 MB
+                </span>
+                <span className="px-2.5 py-1 rounded-full bg-surface-100 border border-border text-foreground/90">
+                  文档 PDF (≤ 10 MB) · Word/Excel/PPT (≤ 5 MB)
+                </span>
+                <span className="px-2.5 py-1 rounded-full bg-surface-100 border border-border text-foreground/90">
+                  TXT/MD/CSV/JSON/代码 ≤ 5 MB · 最多 {MAX_ATTACHMENTS_PER_MESSAGE} 个
+                </span>
+              </div>
+            </div>
+          </div>
+        )}
         {/* 顶部极简状态栏 */}
         <header className="h-13 py-2 border-b border-border/80 px-4 md:px-6 flex items-center justify-between bg-surface-100/50 backdrop-blur-md z-10 select-none">
           <div className="flex items-center space-x-3">
@@ -1565,34 +1745,103 @@ export default function WorkbenchPage() {
                       }`}
                     >
                       {isUser ? (
-                        <div className="text-emerald-950 dark:text-emerald-100 break-anywhere">
-                          <ReactMarkdown
-                            remarkPlugins={[remarkGfm]}
-                            components={{
-                              img({ node, src, alt, ...props }: any) {
-                                if (!src) return null;
-                                return (
-                                  <span className="block my-2">
-                                    <img
-                                      src={src}
-                                      alt={alt || '附带图片'}
-                                      className="rounded-xl border border-emerald-500/20 max-w-full h-auto object-cover max-h-[360px] cursor-pointer shadow-md hover:opacity-95 transition-opacity"
-                                      onClick={() => handleOpenCanvas(src, 'image', alt ? `附带图片: ${alt}` : '上传图片原图预览')}
-                                      {...props}
-                                    />
-                                    {alt && (
-                                      <span className="block text-[11px] text-emerald-700 dark:text-emerald-300 mt-1 opacity-80">
-                                        {alt}
-                                      </span>
-                                    )}
-                                  </span>
-                                );
-                              },
-                            }}
-                          >
-                            {msg.content}
-                          </ReactMarkdown>
-                        </div>
+                        (() => {
+                          const { cleanContent: userBody, parsedAttachments } = parseMessageAttachments(msg.content);
+                          return (
+                            <div className="text-emerald-950 dark:text-emerald-100 break-anywhere space-y-2.5">
+                              {userBody && (
+                                <ReactMarkdown
+                                  remarkPlugins={[remarkGfm]}
+                                  components={{
+                                    img({ node, src, alt, ...props }: any) {
+                                      if (!src) return null;
+                                      return (
+                                        <span className="block my-2">
+                                          <img
+                                            src={src}
+                                            alt={alt || '附带图片'}
+                                            className="rounded-xl border border-emerald-500/20 max-w-full h-auto object-cover max-h-[360px] cursor-pointer shadow-md hover:opacity-95 transition-opacity"
+                                            onClick={() => handleOpenCanvas(src, 'image', alt ? `附带图片: ${alt}` : '上传图片原图预览')}
+                                            {...props}
+                                          />
+                                          {alt && (
+                                            <span className="block text-[11px] text-emerald-700 dark:text-emerald-300 mt-1 opacity-80">
+                                              {alt}
+                                            </span>
+                                          )}
+                                        </span>
+                                      );
+                                    },
+                                  }}
+                                >
+                                  {userBody}
+                                </ReactMarkdown>
+                              )}
+
+                              {parsedAttachments.length > 0 && (
+                                <div className="flex flex-col gap-2 pt-1">
+                                  {parsedAttachments.map((att, attIdx) => {
+                                    const isImg =
+                                      att.category === 'image' ||
+                                      Boolean(att.mime_type && att.mime_type.startsWith('image/'));
+                                    if (isImg && att.url) {
+                                      return (
+                                        <div key={attIdx} className="block">
+                                          <img
+                                            src={att.url}
+                                            alt={att.name}
+                                            className="rounded-xl border border-emerald-500/25 max-w-full h-auto object-cover max-h-[320px] cursor-pointer shadow-md hover:opacity-95 transition-opacity"
+                                            onClick={() =>
+                                              handleOpenCanvas(att.url || '', 'image', `附带图片: ${att.name}`)
+                                            }
+                                          />
+                                          <div className="text-[11px] text-emerald-800 dark:text-emerald-300 mt-1 opacity-80 flex items-center gap-1.5">
+                                            <span>{att.name}</span>
+                                            {att.size_str && <span>· {att.size_str}</span>}
+                                          </div>
+                                        </div>
+                                      );
+                                    }
+
+                                    const isSheet = att.name.toLowerCase().endsWith('.xlsx');
+                                    const isPdf = att.name.toLowerCase().endsWith('.pdf') || att.category === 'pdf';
+                                    return (
+                                      <a
+                                        key={attIdx}
+                                        href={att.url || '#'}
+                                        target="_blank"
+                                        rel="noopener noreferrer"
+                                        onClick={(ev) => {
+                                          if (!att.url) ev.preventDefault();
+                                        }}
+                                        title={att.file_path ? `本地路径: ${att.file_path}` : att.name}
+                                        className="flex items-center space-x-2.5 px-3 py-2 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/20 border border-emerald-500/30 text-xs text-emerald-950 dark:text-emerald-100 transition-colors max-w-full"
+                                      >
+                                        {isSheet ? (
+                                          <FileSpreadsheet className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+                                        ) : (
+                                          <FileText
+                                            className={`w-4 h-4 shrink-0 ${
+                                              isPdf
+                                                ? 'text-rose-500 dark:text-rose-400'
+                                                : 'text-emerald-600 dark:text-emerald-400'
+                                            }`}
+                                          />
+                                        )}
+                                        <span className="font-medium truncate">{att.name}</span>
+                                        {att.size_str && (
+                                          <span className="text-[11px] opacity-75 shrink-0 font-mono">
+                                            {att.size_str}
+                                          </span>
+                                        )}
+                                      </a>
+                                    );
+                                  })}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()
                       ) : (
                         <div className="prose dark:prose-invert max-w-none text-foreground break-anywhere">
                           {msg.content ? (
@@ -1688,7 +1937,15 @@ export default function WorkbenchPage() {
                       onModifyTone={handleModifyTone}
                       onRegenerate={() => {
                         const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
-                        if (lastUserMsg) handleSendMessage(lastUserMsg.content);
+                        if (lastUserMsg) {
+                          const { cleanContent, parsedAttachments } = parseMessageAttachments(lastUserMsg.content);
+                          handleSendMessage(
+                            cleanContent || (parsedAttachments.length > 0 ? '请结合附带的文件或图片内容进行分析解答。' : ''),
+                            undefined,
+                            undefined,
+                            parsedAttachments.length > 0 ? parsedAttachments : undefined
+                          );
+                        }
                       }}
                     />
                   )}
@@ -1738,30 +1995,98 @@ export default function WorkbenchPage() {
               onClose={() => {}}
             />
 
-            {attachments.length > 0 && (
-              <div className="flex items-center flex-wrap gap-2 px-3 pb-1">
-                {attachments.map((att, idx) => (
-                  <div
-                    key={idx}
-                    className="flex items-center space-x-2 px-2.5 py-1.5 rounded-xl bg-surface-100 border border-border text-xs text-foreground animate-scale-in shadow-sm max-w-[240px]"
-                  >
-                    {att.type === 'image' && att.dataUrl ? (
-                      <img src={att.dataUrl} alt="" className="w-6 h-6 rounded object-cover border border-border shrink-0" />
-                    ) : (
-                      <Paperclip className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-                    )}
-                    <span className="truncate flex-1">{att.name}</span>
-                    <span className="text-[10px] text-muted-foreground shrink-0">{att.size}</span>
+            {/* 附件格式限制 / 超限 / 拒收说明横幅 */}
+            {attachmentRejectionNotices.length > 0 && (
+              <div className="px-3.5 py-2.5 rounded-2xl bg-amber-500/12 border border-amber-500/40 text-xs text-amber-900 dark:text-amber-200 animate-fade-in shadow-sm space-y-2">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="flex items-start space-x-2 min-w-0">
+                    <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                    <div className="space-y-1 min-w-0">
+                      <div className="font-semibold text-amber-700 dark:text-amber-300">
+                        部分文件未加入附件列表（格式受限或超出大小限制）
+                      </div>
+                      <ul className="list-disc pl-4 space-y-0.5 text-[11px] leading-relaxed">
+                        {attachmentRejectionNotices.map((reason, rIdx) => (
+                          <li key={rIdx}>{reason}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  </div>
+                  <div className="flex items-center space-x-1.5 shrink-0">
                     <button
                       type="button"
-                      onClick={() => setAttachments(attachments.filter((_, i) => i !== idx))}
-                      className="hover:text-rose-500 p-0.5 rounded transition-colors shrink-0"
-                      title="移除附件"
+                      onClick={() => setShowSupportedFormatsHelp((prev) => !prev)}
+                      className="flex items-center space-x-1 px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-800 dark:text-amber-200 text-[11px] font-medium transition-colors"
                     >
-                      <X className="w-3 h-3" />
+                      <Info className="w-3 h-3" />
+                      <span>{showSupportedFormatsHelp ? '收起格式说明' : '查看支持格式'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setAttachmentRejectionNotices([]);
+                        setShowSupportedFormatsHelp(false);
+                      }}
+                      className="p-1 rounded-lg hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 transition-colors"
+                      title="关闭提示"
+                    >
+                      <X className="w-3.5 h-3.5" />
                     </button>
                   </div>
-                ))}
+                </div>
+
+                {showSupportedFormatsHelp && (
+                  <div className="pt-2 border-t border-amber-500/25 grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px]">
+                    {SUPPORTED_ATTACHMENT_GROUPS.map((grp, gIdx) => (
+                      <div key={gIdx} className="p-2 rounded-xl bg-surface-100/80 border border-border/70">
+                        <div className="font-semibold text-foreground mb-0.5">{grp.title}</div>
+                        <div className="text-muted-foreground leading-snug">{grp.items}</div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {(attachments.length > 0 || isUploadingAttachment) && (
+              <div className="flex items-center flex-wrap gap-2 px-3 pb-1">
+                {attachments.map((att, idx) => {
+                  const isSheet = att.name.toLowerCase().endsWith('.xlsx');
+                  const isPdf = att.category === 'pdf' || att.name.toLowerCase().endsWith('.pdf');
+                  return (
+                    <div
+                      key={idx}
+                      title={att.filePath ? `物理路径: ${att.filePath}` : att.name}
+                      className="flex items-center space-x-2 px-2.5 py-1.5 rounded-xl bg-surface-100 border border-border text-xs text-foreground animate-scale-in shadow-sm max-w-[260px]"
+                    >
+                      {att.type === 'image' && att.dataUrl ? (
+                        <img src={att.dataUrl} alt="" className="w-6 h-6 rounded object-cover border border-border shrink-0" />
+                      ) : isSheet ? (
+                        <FileSpreadsheet className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                      ) : isPdf ? (
+                        <FileText className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                      ) : (
+                        <Paperclip className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                      )}
+                      <span className="truncate flex-1">{att.name}</span>
+                      <span className="text-[10px] text-muted-foreground shrink-0">{att.size}</span>
+                      <button
+                        type="button"
+                        onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
+                        className="hover:text-rose-500 p-0.5 rounded transition-colors shrink-0"
+                        title="移除附件"
+                      >
+                        <X className="w-3 h-3" />
+                      </button>
+                    </div>
+                  );
+                })}
+                {isUploadingAttachment && (
+                  <div className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-[11px] text-emerald-600 dark:text-emerald-400">
+                    <RefreshCw className="w-3 h-3 animate-spin" />
+                    <span>正在校验并上传附件...</span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -1873,7 +2198,7 @@ export default function WorkbenchPage() {
                   }
                 }}
                 rows={1}
-                placeholder="输入消息或指令...（支持 Ctrl+V 粘贴图片与代码，Enter 发送，/ 唤起技能）"
+                placeholder="输入消息或指令...（支持拖拽放置文件、Ctrl+V 粘贴图片，Enter 发送，/ 唤起技能）"
                 className="w-full bg-transparent border-none outline-none text-[14px] text-foreground placeholder-muted-foreground px-3 py-1.5 resize-none leading-relaxed break-anywhere"
               />
 
@@ -1881,9 +2206,15 @@ export default function WorkbenchPage() {
                 <div className="flex items-center space-x-1.5">
                   <label
                     className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-surface-200/80 rounded-lg cursor-pointer transition-colors"
-                    title="添加文件或图片（也支持直接从微信复制后粘贴）"
+                    title="添加常见图片 (PNG/JPG/WebP/GIF ≤10MB)、文档 (PDF ≤10MB · Word/Excel/PPT ≤5MB) 或代码/文本文件（≤5MB）；支持拖拽放置与 Ctrl+V 粘贴，最多 5 个"
                   >
-                    <input type="file" onChange={handleFileUpload} className="hidden" />
+                    <input
+                      type="file"
+                      accept={FILE_INPUT_ACCEPT}
+                      multiple
+                      onChange={handleFileUpload}
+                      className="hidden"
+                    />
                     <Plus className="w-4 h-4" />
                   </label>
 
@@ -2005,7 +2336,7 @@ export default function WorkbenchPage() {
                   <button
                     type="button"
                     onClick={() => handleSendMessage()}
-                    disabled={isStreaming || !inputPrompt.trim()}
+                    disabled={isStreaming || isUploadingAttachment || (!inputPrompt.trim() && attachments.length === 0)}
                     className="p-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm shadow-emerald-600/20"
                     title="发送提问"
                   >

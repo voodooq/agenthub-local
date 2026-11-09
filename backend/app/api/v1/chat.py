@@ -1,50 +1,99 @@
 """
 流式聊天核心接口 (SSE Stream Endpoint) 与多模态上传
 """
-import os
 import json
 import uuid
-import shutil
 from pathlib import Path
 from fastapi import APIRouter, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse
 from ...schema.chat_schema import ChatStreamRequest, ToolApprovalRequest, StopChatRequest
 from ...agent.runtime import agent_runtime
 from ...agent.shell_executor import shell_executor
+from ...core.config import settings
 from ...core.logging_config import logger
+from ...service.attachment_service import attachment_service, AttachmentValidationError
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
 
-# 本地附件持久化目录
-BASE_DIR = Path(__file__).resolve().parent.parent.parent.parent
-UPLOADS_DIR = BASE_DIR / "data" / "uploads"
+# NOTE: 统一锚定至 settings.db_path 同级目录，确保源码模式与 PyInstaller 冻结运行包路径一致
+_DEFAULT_UPLOADS_DIR = Path(settings.db_path).parent / "uploads"
+UPLOADS_DIR = _DEFAULT_UPLOADS_DIR
 UPLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def get_uploads_dir() -> Path:
+    """获取当前有效的附件存储目录（若运行时动态覆盖了 settings.db_path 或模块常量则自动适配）"""
+    target = UPLOADS_DIR if UPLOADS_DIR != _DEFAULT_UPLOADS_DIR else (Path(settings.db_path).parent / "uploads")
+    target.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+@router.get("/upload-rules")
+async def get_upload_rules():
+    """返回当前支持的附件格式白名单、大小上限与单条消息数量限制"""
+    return attachment_service.build_rules_summary()
 
 
 @router.post("/upload")
 async def upload_attachment(file: UploadFile = File(...)):
     """
-    接收前端上传或粘贴的图片/文档，保存到本地 data/uploads 目录，
-    返回本地真实物理绝对路径与前端访问静态 URL，供多模态模型无损读取。
+    接收前端上传或粘贴的图片/文档，经白名单、体积与文件头魔数校验后保存至 data/uploads，
+    返回本地真实物理绝对路径与前端访问静态 URL。
     """
+    raw_name = file.filename or "attachment.png"
+    safe_name = attachment_service.sanitize_filename(raw_name)
+    ext, category, _ = attachment_service.classify_extension(safe_name)
+    if not category:
+        raise HTTPException(
+            status_code=400,
+            detail=attachment_service.build_unsupported_reason(safe_name, ext),
+        )
+
+    max_bytes, limit_label = attachment_service.get_max_bytes_for_category(category)
+
     try:
-        ext = Path(file.filename or "image.png").suffix or ".png"
-        unique_name = f"{uuid.uuid4().hex[:12]}_{file.filename}"
-        save_path = UPLOADS_DIR / unique_name
+        # 分块流式读取并提前拦截超大请求体，防止内存峰值溢出
+        chunks: list[bytes] = []
+        total_read = 0
+        chunk_size = 64 * 1024
+        while True:
+            chunk = await file.read(chunk_size)
+            if not chunk:
+                break
+            total_read += len(chunk)
+            if total_read > max_bytes:
+                actual_mb = total_read / (1024 * 1024)
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"文件「{safe_name}」体积超过 {limit_label} 上限（已接收超过 {actual_mb:.1f} MB），已终止上传。",
+                )
+            chunks.append(chunk)
 
-        with save_path.open("wb") as buffer:
-            shutil.copyfileobj(file.file, buffer)
+        raw_bytes = b"".join(chunks)
+        meta = attachment_service.validate_upload(
+            filename=safe_name,
+            raw_bytes=raw_bytes,
+            content_type=file.content_type,
+        )
 
-        file_size_kb = save_path.stat().st_size / 1024
-        size_str = f"{file_size_kb:.1f} KB" if file_size_kb < 1024 else f"{file_size_kb / 1024:.2f} MB"
+        uploads_root = get_uploads_dir()
+        unique_name = f"{uuid.uuid4().hex[:12]}_{meta['safe_name']}"
+        save_path = uploads_root / unique_name
+        save_path.write_bytes(raw_bytes)
 
         return {
-            "name": file.filename or unique_name,
+            "name": meta["safe_name"],
             "file_path": str(save_path.resolve()),
             "url": f"/api/v1/chat/uploads/{unique_name}",
-            "mime_type": file.content_type or "image/png",
-            "size_str": size_str,
+            "mime_type": meta["mime_type"],
+            "size_str": meta["size_str"],
+            "size_bytes": meta["size_bytes"],
+            "category": meta["category"],
         }
+    except AttachmentValidationError as val_err:
+        raise HTTPException(status_code=val_err.status_code, detail=val_err.message)
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"上传文件保存失败: {e}")
         raise HTTPException(status_code=500, detail=f"保存文件失败: {str(e)}")
@@ -54,7 +103,7 @@ async def upload_attachment(file: UploadFile = File(...)):
 async def get_uploaded_attachment(filename: str):
     """提供本地上传图片的静态预览服务（带防目录穿越安全校验）"""
     safe_filename = Path(filename).name
-    file_path = UPLOADS_DIR / safe_filename
+    file_path = get_uploads_dir() / safe_filename
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="附件不存在")
     return FileResponse(file_path)

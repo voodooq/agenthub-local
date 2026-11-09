@@ -17,6 +17,7 @@ from .agent_runner import run_cli_stream
 from .oauth_service import oauth_service
 from .gemini_client import GeminiClient, GeminiAPIException
 from .audit_service import audit_service
+from .attachment_service import attachment_service
 
 
 class EnginePoolService:
@@ -65,50 +66,98 @@ class EnginePoolService:
                 for m in (history_messages[-slice_count:] if slice_count > 0 else [])
             ]
 
-        # 检查是否有图片或文档附件
+        # 检查是否有图片、PDF、Office 或文本/代码附件，装配多模态 inline_data 与安全正文预览
         attachment_guidance = ""
-        inline_images: list[dict[str, str]] = []
+        inline_blobs: list[dict[str, str]] = []
+        has_visual_or_pdf = False
 
         if attachments:
+            att_sections: list[str] = []
             for att in attachments:
-                att_dict = att if isinstance(att, dict) else att.dict()
-                file_path = att_dict.get("file_path")
-                mime_type = att_dict.get("mime_type", "image/png")
-                name = att_dict.get("name", "附件")
+                att_dict = att if isinstance(att, dict) else att.model_dump()
+                file_path = att_dict.get("file_path") or ""
+                mime_type = att_dict.get("mime_type") or "application/octet-stream"
+                name = att_dict.get("name") or "附件"
+                _, inferred_cat, canonical_mime = attachment_service.classify_extension(name)
+                category = att_dict.get("category") or inferred_cat or ("image" if mime_type.startswith("image/") else "file")
+                effective_mime = canonical_mime or mime_type
 
                 if file_path and os.path.exists(file_path):
-                    if mime_type.startswith("image/"):
-                        attachment_guidance += (
-                            f"\n\n【用户附带上传的本地图片文件】:\n"
+                    if category == "image" or effective_mime.startswith("image/"):
+                        has_visual_or_pdf = True
+                        att_sections.append(
+                            f"【用户附带上传的本地图片文件】:\n"
                             f"- 文件名: {name}\n"
-                            f"- 磁盘绝对路径: {file_path}\n"
-                            f"- 指引: 用户希望你详细分析此图片。请立即读取该图片并对画面中的人物、文本、场景、图表或代码细节进行深度视觉分析解答。\n"
+                            f"- 磁盘绝对路径: `{file_path}`\n"
+                            f"- 指引: 请结合下方多模态图片画面进行视觉分析；如后续需通过脚本二次处理该图片，必须使用上述真实磁盘绝对路径，严禁猜测 `./attachments`。"
                         )
                         try:
                             import base64
                             with open(file_path, "rb") as img_f:
-                                b64 = base64.b64encode(img_f.read()).decode("utf-8")
-                                inline_images.append({"mime_type": mime_type, "data": b64})
+                                raw_b = img_f.read()
+                            if len(raw_b) <= attachment_service.MAX_IMAGE_BYTES:
+                                b64 = base64.b64encode(raw_b).decode("utf-8")
+                                inline_blobs.append({"mime_type": effective_mime, "data": b64})
                         except Exception as e:
                             logger.warning(f"读取图片 base64 失败: {e}")
+
+                    elif category == "pdf" or effective_mime == "application/pdf":
+                        has_visual_or_pdf = True
+                        ctx_info = attachment_service.extract_attachment_context(file_path, effective_mime, name)
+                        att_sections.append(
+                            f"【用户附带上传的 PDF 文档附件】:\n"
+                            f"- 文件名: {name}\n"
+                            f"- 磁盘绝对路径: `{file_path}`\n"
+                            f"- 指引: 若需通过工具脚本抽取内容，必须直接使用上述磁盘绝对路径，严禁猜测或访问不存在的 `./attachments` 目录。\n"
+                            f"- 说明: {ctx_info.get('preview_text', '')}"
+                        )
+                        try:
+                            import base64
+                            with open(file_path, "rb") as pdf_f:
+                                raw_b = pdf_f.read()
+                            if len(raw_b) <= attachment_service.MAX_PDF_BYTES:
+                                b64 = base64.b64encode(raw_b).decode("utf-8")
+                                inline_blobs.append({"mime_type": "application/pdf", "data": b64})
+                        except Exception as e:
+                            logger.warning(f"读取 PDF base64 失败: {e}")
+
                     else:
-                        attachment_guidance += f"\n\n【用户附带上传的文档附件】: {name} (路径: {file_path})\n"
+                        ctx_info = attachment_service.extract_attachment_context(file_path, effective_mime, name)
+                        preview_txt = ctx_info.get("preview_text") or "(未能提取文本预览)"
+                        extractor_name = ctx_info.get("extractor") or "none"
+                        att_sections.append(
+                            f"【用户附带上传的本地文档附件】:\n"
+                            f"- 文件名: `{name}` (分类: {category}, 解析引擎: {extractor_name})\n"
+                            f"- 磁盘绝对路径: `{file_path}`\n"
+                            f"- ⚠️ 路径强约束: 该文件存放在上述真实磁盘绝对路径下，**绝不在 `./attachments` 目录中**！如需运行 Python/终端脚本操作完整文件，请直接使用上述绝对路径。\n"
+                            f"- 文档内容预览:\n```text\n{preview_txt}\n```"
+                        )
+                else:
+                    att_sections.append(
+                        f"【用户提及附件】: `{name}` (本地磁盘暂未定位到文件 `{file_path}`)"
+                    )
+
+            if att_sections:
+                attachment_guidance = "\n\n" + "\n\n".join(att_sections)
 
         prompt_with_attachments = user_prompt + attachment_guidance
 
-        # 组装消息列表 (官方 Gemini REST API 格式)
+        # 组装消息列表 (官方 Gemini REST API 格式，history 中的附件锚点同样展开为真实路径档案)
         contents: list[dict[str, Any]] = []
         for msg in effective_history_dicts:
             r_raw = msg.get("role", "user")
             role = "model" if r_raw in ("model", "assistant") else "user"
             prefix = "[工具执行结果]: " if r_raw == "tool" else ""
-            contents.append({"role": role, "parts": [{"text": f"{prefix}{msg.get('content', '')}"}]})
+            raw_content = str(msg.get("content", "") or "")
+            if r_raw == "user":
+                raw_content = attachment_service.render_attachments_for_llm_history(raw_content)
+            contents.append({"role": role, "parts": [{"text": f"{prefix}{raw_content}"}]})
 
-        # 用户当前提问 parts（支持原生多模态 inline_data）
+        # 用户当前提问 parts（支持图片与 PDF 原生多模态 inline_data + 完整文本附件指引）
         user_parts: list[dict[str, Any]] = []
-        for img in inline_images:
-            user_parts.append({"inline_data": {"mime_type": img["mime_type"], "data": img["data"]}})
-        user_parts.append({"text": user_prompt})
+        for blob in inline_blobs:
+            user_parts.append({"inline_data": {"mime_type": blob["mime_type"], "data": blob["data"]}})
+        user_parts.append({"text": prompt_with_attachments})
         contents.append({"role": "user", "parts": user_parts})
 
         # 组装 CLI 用的历史纯文本上下文
@@ -121,7 +170,10 @@ class EnginePoolService:
                 role_label = "终端/工具输出"
             else:
                 role_label = "用户"
-            lines.append(f"[{role_label}]: {msg.get('content', '')}")
+            raw_content = str(msg.get("content", "") or "")
+            if r_raw == "user":
+                raw_content = attachment_service.render_attachments_for_llm_history(raw_content)
+            lines.append(f"[{role_label}]: {raw_content}")
         context_text = "\n".join(lines) + ("\n\n---\n[当前步骤指令]: " if lines else "")
         full_cli_prompt = context_text + prompt_with_attachments
 
@@ -172,7 +224,22 @@ class EnginePoolService:
                         }
                     else:
                         yield {"type": "start", "account": prov_name, "model": target_m}
-                    custom_msgs = list(effective_history_dicts) + [{"role": "user", "content": prompt_with_attachments}]
+                    non_multimodal_note = (
+                        "\n\n[通道提示: 当前使用纯文本兼容协议接口，图片/PDF 二进制视觉字节流未直接传输；"
+                        "若需直接识图或读取扫描版 PDF，请切换至原生多模态 Gemini 模型，或在任务模式按上方磁盘绝对路径调用本地工具读取。]"
+                        if has_visual_or_pdf
+                        else ""
+                    )
+                    sanitized_history = [
+                        {
+                            **hm,
+                            "content": attachment_service.render_attachments_for_llm_history(str(hm.get("content") or ""))
+                            if hm.get("role") == "user"
+                            else hm.get("content", ""),
+                        }
+                        for hm in effective_history_dicts
+                    ]
+                    custom_msgs = sanitized_history + [{"role": "user", "content": prompt_with_attachments + non_multimodal_note}]
                     full_custom_text = ""
                     try:
                         if ptype == "google_oauth":

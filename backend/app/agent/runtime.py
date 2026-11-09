@@ -18,6 +18,7 @@ from ..repository.message_repository import MessageRepository
 from ..repository.search_repository import SearchRepository
 from ..service.engine_pool import engine_pool
 from ..service.audit_service import audit_service
+from ..service.attachment_service import attachment_service
 from ..memory.fact_manager import fact_manager
 from ..memory.ledger import event_ledger
 from ..memory.long_term import long_term_memory
@@ -301,7 +302,18 @@ class AgentRuntime:
         """
         conv_id = conversation_id
         is_new_conv = False
-        short_title = (user_message or "").strip().split("\n")[0][:24] or "新会话"
+        effective_user_message = (user_message or "").strip()
+        first_att_name = ""
+        if attachments:
+            first_att = attachments[0]
+            first_att_name = str(first_att.get("name") if isinstance(first_att, dict) else getattr(first_att, "name", "") or "").strip()
+        if not effective_user_message and attachments:
+            effective_user_message = "请结合附带的文件或图片内容进行分析解答。"
+        user_message = effective_user_message or user_message
+        if first_att_name and (not (user_message or "").strip() or user_message == "请结合附带的文件或图片内容进行分析解答。"):
+            short_title = f"[附件] {first_att_name}"[:24]
+        else:
+            short_title = (user_message or "").strip().split("\n")[0][:24] or "新会话"
         ws_id = workspace_id or "default"
         target_cwd = None
         try:
@@ -350,14 +362,15 @@ class AgentRuntime:
         active_incognito = bool(conv_obj.incognito) if conv_obj else bool(incognito)
         ws_id = (getattr(conv_obj, "workspace_id", None) if conv_obj else None) or ws_id
 
-        # 2. 计算当前大轮次编号 (turn_id) 并率先落盘用户提问
+        # 2. 计算当前大轮次编号 (turn_id) 并率先落盘用户提问（带附件真实绝对路径锚点，防止多步/跨轮路径失忆）
         max_turn = await MessageRepository.get_max_turn_id(conv_id)
         current_turn_id = max_turn + 1
+        persisted_user_content = attachment_service.append_attachments_anchor(user_message, attachments)
 
         await MessageRepository.save_message(
             conversation_id=conv_id,
             role="user",
-            content=user_message,
+            content=persisted_user_content,
             turn_id=current_turn_id,
         )
         await ConversationRepository.touch(conv_id)
