@@ -13,6 +13,7 @@ import {
   isNavigableLocalFilePath,
   linkifyBareFilePathsInMarkdown,
 } from '@/utils/filePathDetector';
+import { normalizeInteractiveInquiryMarkdown } from '@/utils/inquiryWorkflow';
 import {
   ConfirmedFactItem,
   InquirySubmitAction,
@@ -129,7 +130,7 @@ function CodeRenderer({ inline, className, children, ...props }: any) {
   const rawChildrenText = String(children ?? '');
   const codeString = rawChildrenText.replace(/\n$/, '');
 
-  if (!inline && language === 'interactive_inquiry') {
+  if (!inline && language.toLowerCase() === 'interactive_inquiry') {
     return <InquiryCardSlot rawContent={codeString} />;
   }
 
@@ -287,10 +288,11 @@ function AssistantMarkdownMessageInner({
   onPreviewGeneratedFile,
 }: AssistantMarkdownMessageProps) {
   const renderedMarkdown = useMemo(() => {
-    const normalizedMarkdown = normalizeEscapedContent(content);
+    const normalizedEscaped = normalizeEscapedContent(content);
+    const normalizedInquiry = normalizeInteractiveInquiryMarkdown(normalizedEscaped);
     return isStreaming
-      ? normalizedMarkdown
-      : linkifyBareFilePathsInMarkdown(normalizedMarkdown);
+      ? normalizedInquiry
+      : linkifyBareFilePathsInMarkdown(normalizedInquiry);
   }, [content, isStreaming]);
 
   const contextValue = useMemo<MarkdownMessageRuntimeContextValue>(

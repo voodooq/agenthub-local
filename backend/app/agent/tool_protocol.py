@@ -691,3 +691,140 @@ class ToolProtocolAdapter:
         clean_text = re.sub(r"\[调用工具:\s*[^\]]+\]", "", clean_text).strip()
         return clean_text, tool_calls
 
+    _CODE_FENCE_BLOCK_RE = re.compile(
+        r"(```[^\r\n]*\r?\n[\s\S]*?\r?\n```|~~~[^\r\n]*\r?\n[\s\S]*?\r?\n~~~)",
+        re.MULTILINE,
+    )
+    _INQUIRY_TAG_RE = re.compile(
+        r"<interactive_inquiry(?:\s+[^>]*)?>([\s\S]*?)</interactive_inquiry>|"
+        r"\[interactive_inquiry(?:\s+[^\]]*)?\]([\s\S]*?)\[/interactive_inquiry\]",
+        re.IGNORECASE,
+    )
+    _INQUIRY_FENCE_START_RE = re.compile(
+        r"(?:^|\n)\s*```interactive_inquiry(?:\s|$)",
+        re.IGNORECASE,
+    )
+    _AGENTHUB_LINK_STRIP_RE = re.compile(
+        r"\[([^\[\]\r\n]+)\]\(#agenthub-file=[^)\s]+\)"
+    )
+
+    @classmethod
+    def _extract_inquiry_json_body(cls, raw_inner: str) -> str | None:
+        """从标签或代码块正文中安全抽取出合法交互确认卡 JSON 字符串。"""
+        candidate = (raw_inner or "").strip()
+        if candidate.startswith("```"):
+            candidate = re.sub(r"^```[^\r\n]*\r?\n?", "", candidate)
+            candidate = re.sub(r"\r?\n?```$", "", candidate).strip()
+
+        # 剥离偶发被上游链接器改写的 [path](#agenthub-file=...) 芯片语法
+        if "#agenthub-file=" in candidate:
+            candidate = cls._AGENTHUB_LINK_STRIP_RE.sub(r"\1", candidate)
+
+        try:
+            obj = json.loads(candidate)
+            if isinstance(obj, dict):
+                return json.dumps(obj, ensure_ascii=False)
+        except Exception:
+            pass
+
+        blocks = cls._extract_balanced_json_objects(candidate)
+        for blk in blocks:
+            try:
+                obj = json.loads(blk)
+                if isinstance(obj, dict):
+                    return json.dumps(obj, ensure_ascii=False)
+            except Exception:
+                continue
+        return None
+
+    @classmethod
+    def _is_inquiry_payload_dict(cls, obj: Any, require_strict_id: bool = False) -> bool:
+        """判断 JSON 对象是否符合交互对齐确认卡特征，避免误伤普通文档 JSON 示例。"""
+        if not isinstance(obj, dict):
+            return False
+        has_shape_key = any(
+            k in obj for k in ("questions", "plan_steps", "fill_template", "phase")
+        )
+        if not has_shape_key:
+            return False
+        if require_strict_id:
+            return "inquiry_id" in obj
+        return "inquiry_id" in obj or "title" in obj or "questions" in obj or "plan_steps" in obj
+
+    @classmethod
+    def normalize_interactive_inquiry_markdown(cls, raw_text: str) -> str:
+        """
+        将模型输出的 XML (<interactive_inquiry>...</interactive_inquiry>)、方括号变体及
+        符合交互卡特征的 ```json 代码块统一规范化为标准 ```interactive_inquiry 围栏块。
+        已位于其它普通代码块内部的内容原样保留不被改写。
+        """
+        if not raw_text:
+            return raw_text
+
+        parts = cls._CODE_FENCE_BLOCK_RE.split(raw_text)
+        normalized_parts: list[str] = []
+
+        for idx, segment in enumerate(parts):
+            if not segment:
+                continue
+
+            # 奇数索引命中既有围栏代码块
+            if idx % 2 == 1:
+                header_match = re.match(r"^```([^\r\n]*)\r?\n([\s\S]*?)\r?\n```$", segment)
+                if header_match:
+                    lang = header_match.group(1).strip().lower()
+                    body = header_match.group(2)
+                    if lang == "interactive_inquiry":
+                        cleaned_json = cls._extract_inquiry_json_body(body)
+                        final_body = cleaned_json if cleaned_json is not None else body.strip()
+                        normalized_parts.append(f"```interactive_inquiry\n{final_body}\n```")
+                        continue
+                    if lang in ("", "json"):
+                        cleaned_json = cls._extract_inquiry_json_body(body)
+                        if cleaned_json is not None:
+                            try:
+                                parsed_obj = json.loads(cleaned_json)
+                                if cls._is_inquiry_payload_dict(parsed_obj, require_strict_id=True):
+                                    normalized_parts.append(f"```interactive_inquiry\n{cleaned_json}\n```")
+                                    continue
+                            except Exception:
+                                pass
+                normalized_parts.append(segment)
+                continue
+
+            # 普通 Markdown 段落：转换非围栏内的 <interactive_inquiry> / [interactive_inquiry] 标签
+            def _replace_inquiry_tag(m: re.Match) -> str:
+                inner_body = m.group(1) if m.group(1) is not None else (m.group(2) or "")
+                cleaned_json = cls._extract_inquiry_json_body(inner_body)
+                if cleaned_json is not None:
+                    try:
+                        parsed_obj = json.loads(cleaned_json)
+                        if cls._is_inquiry_payload_dict(parsed_obj, require_strict_id=False):
+                            return f"\n\n```interactive_inquiry\n{cleaned_json}\n```\n\n"
+                    except Exception:
+                        pass
+                return f"\n\n```interactive_inquiry\n{inner_body.strip()}\n```\n\n"
+
+            replaced_segment = cls._INQUIRY_TAG_RE.sub(_replace_inquiry_tag, segment)
+            normalized_parts.append(replaced_segment)
+
+        result = "".join(normalized_parts)
+        result = re.sub(r"\n{3,}", "\n\n", result)
+        return result.strip()
+
+    @classmethod
+    def contains_interactive_inquiry(cls, raw_text: str) -> bool:
+        """
+        精确检测回复中是否包含需要用户交互确认的 interactive_inquiry 结构化卡片，
+        绝不对说明文中的字面量提及产生误判。
+        """
+        if not raw_text:
+            return False
+        normalized = cls.normalize_interactive_inquiry_markdown(raw_text)
+        if cls._INQUIRY_FENCE_START_RE.search(normalized):
+            return True
+        if cls._INQUIRY_TAG_RE.search(raw_text):
+            return True
+        return False
+
+

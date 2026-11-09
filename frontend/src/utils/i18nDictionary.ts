@@ -197,6 +197,7 @@ export const PHRASE_DICTIONARY: Record<string, { 'zh-TW': string; en: string; ja
   '客观验收中 (DoD)': { 'zh-TW': '客觀驗收中 (DoD)', en: 'Verifying (DoD)', ja: '客観的検証中 (DoD)' },
   '自愈反思中': { 'zh-TW': '自癒反思中', en: 'Self-healing & Reflecting', ja: '自己修復・反省中' },
   '等待人工审批': { 'zh-TW': '等待人工審批', en: 'Waiting for Approval', ja: '承認待ち' },
+  '等待确认决策': { 'zh-TW': '等待確認決策', en: 'Awaiting Decision', ja: '確認待ち' },
   '任务已交付': { 'zh-TW': '任務已交付', en: 'Task Delivered', ja: '完了' },
   '任务已交付并验收': { 'zh-TW': '任務已交付並驗收', en: 'Delivered & Accepted', ja: '納品・検収済み' },
   '✕ 归档收起': { 'zh-TW': '✕ 歸檔收起', en: '✕ Archive', ja: '✕ アーカイブ' },

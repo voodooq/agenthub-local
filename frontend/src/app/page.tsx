@@ -82,6 +82,8 @@ import {
 } from '@/utils/filePathDetector';
 import {
   computeInquiryCardLocked,
+  hasInteractiveInquiryBlock,
+  normalizeInteractiveInquiryMarkdown,
   resolveMessageInquiryKey,
 } from '@/utils/inquiryWorkflow';
 import { prefetchExtensionSkills, prefetchWorkspaceSkills } from '@/utils/skillCache';
@@ -564,7 +566,7 @@ export default function WorkbenchPage() {
             }
           } else {
             // 自动清洗历史残存的 [tool_call] 原始标签、孤立的 ```xml / xml 行与内部落盘标记
-            const cleanContent = (m.content || '')
+            const strippedContent = (m.content || '')
               .replace(/[<\[]tool_call(?:\s+name=["']?[^"'\]>]+["']?)?\s*[>\]][\s\S]*?[<\[]\/tool_call[>\]]/gi, '')
               .replace(/<\/?tool_call\b[^>]*>/gi, '')
               .replace(/\[\/?tool_call\b[^\]]*\]/gi, '')
@@ -573,6 +575,12 @@ export default function WorkbenchPage() {
               .replace(/^\s*```xml\s*$/gim, '')
               .replace(/^\s*xml\s*$/gim, '')
               .trim();
+            const cleanContent =
+              m.role !== 'user' &&
+              (strippedContent.toLowerCase().includes('interactive_inquiry') ||
+                strippedContent.includes('"inquiry_id"'))
+                ? normalizeInteractiveInquiryMarkdown(strippedContent)
+                : strippedContent;
             merged.push({ ...m, content: cleanContent });
           }
         }
@@ -857,29 +865,37 @@ export default function WorkbenchPage() {
         Boolean(options?.inquiryConfirmed && options?.inquiryAction === 'execute_now') ||
         hasPriorUnlockInView);
 
-    if (shouldStartLoopHud) {
+    const canResumePendingInquiryLoop = Boolean(
+      activeLoop &&
+        activeLoop.loop_status === 'waiting_approval' &&
+        !activeLoop.pending_approval_call &&
+        (!activeConvId || activeLoop.conversation_id === activeConvId)
+    );
+
+    if (shouldStartLoopHud && !canResumePendingInquiryLoop) {
       const cleanFallbackGoal = rawPrompt.split('\n')[0].slice(0, 120);
       const loopGoalPrompt =
         (options?.loopGoalOverride || '').trim() ||
         (cleanFallbackGoal.startsWith('已确认') || cleanFallbackGoal.startsWith('✅')
           ? '按确认决策执行任务'
           : cleanFallbackGoal);
-      apiFetch('/api/v1/loop/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          workspace_id: activeWorkspaceId,
-          conversation_id: activeConvId || 'default',
-          goal_prompt: loopGoalPrompt,
-        }),
-      })
-        .then(async (r) => {
-          if (r.ok) {
-            const loopData = await r.json();
-            setActiveLoop(loopData);
-          }
-        })
-        .catch(() => { });
+      try {
+        const r = await apiFetch('/api/v1/loop/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            workspace_id: activeWorkspaceId,
+            conversation_id: activeConvId || 'default',
+            goal_prompt: loopGoalPrompt,
+          }),
+        });
+        if (r.ok) {
+          const loopData = await r.json();
+          setActiveLoop(loopData);
+        }
+      } catch {
+        // 忽略启动阶段网络波动，由 chat/stream 兜底初始化
+      }
     }
 
     try {
@@ -985,17 +1001,24 @@ export default function WorkbenchPage() {
             setWorkingMemory(parsed.working_memory || {});
           } else if (parsed.type === 'loop_step') {
             setActiveLoop((prev) => {
+              const nextStatus = parsed.status ?? prev?.loop_status ?? 'executing';
+              const nextPendingApproval =
+                'pending_approval_call' in parsed
+                  ? parsed.pending_approval_call ?? null
+                  : nextStatus !== 'waiting_approval'
+                    ? null
+                    : prev?.pending_approval_call ?? null;
               if (!prev) {
                 return {
                   id: parsed.loop_id,
                   workspace_id: activeWorkspaceId || 'default',
-                  conversation_id: activeConvId || 'default',
+                  conversation_id: effectiveConvId || activeConvId || 'default',
                   goal_prompt: rawPrompt,
                   scratchpad_md: parsed.scratchpad_md,
-                  loop_status: parsed.status || 'executing',
+                  loop_status: nextStatus,
                   current_iteration: parsed.iteration || 0,
                   max_iterations: parsed.max_iterations || 10,
-                  pending_approval_call: null,
+                  pending_approval_call: nextPendingApproval,
                   error_fingerprints: [],
                   created_at: new Date().toISOString(),
                   updated_at: new Date().toISOString(),
@@ -1003,8 +1026,10 @@ export default function WorkbenchPage() {
               }
               return {
                 ...prev,
+                id: parsed.loop_id ?? prev.id,
                 current_iteration: parsed.iteration ?? prev.current_iteration,
-                loop_status: parsed.status ?? prev.loop_status,
+                loop_status: nextStatus,
+                pending_approval_call: nextPendingApproval,
                 scratchpad_md: parsed.scratchpad_md ?? prev.scratchpad_md,
               };
             });
@@ -1141,11 +1166,17 @@ export default function WorkbenchPage() {
             if (parsed.model) {
               setCurrentModel(parsed.model);
             }
+            const strippedDoneText = stripXmlToolTags(partialText);
+            const finalDoneText =
+              strippedDoneText.toLowerCase().includes('interactive_inquiry') ||
+              strippedDoneText.includes('"inquiry_id"')
+                ? normalizeInteractiveInquiryMarkdown(strippedDoneText)
+                : strippedDoneText;
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
-                last.content = stripXmlToolTags(partialText);
+                last.content = finalDoneText;
                 if (parsed.model) {
                   last.model_name = parsed.model;
                 }
@@ -2151,10 +2182,11 @@ export default function WorkbenchPage() {
                         </div>
                       )}
 
-                      {/* 生成文件快捷直达栏（点击默认程序直接打开 / 预览 / 所在目录定位） */}
+                      {/* 生成文件快捷直达栏（点击默认程序直接打开 / 预览 / 所在目录定位；等待交互确认卡消息不提前显示交付栏） */}
                       {!isUser &&
                         msg.content &&
                         !(isStreaming && msg.id === messages[messages.length - 1]?.id) &&
+                        !hasInteractiveInquiryBlock(msg.content) &&
                         (() => {
                           const deliverablePaths = extractGeneratedFilePaths(msg.content);
                           if (deliverablePaths.length === 0) return null;

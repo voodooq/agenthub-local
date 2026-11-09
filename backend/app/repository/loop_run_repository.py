@@ -37,12 +37,20 @@ class TaskLoopRepository:
         )
 
         async with db_manager.get_connection() as conn:
-            # 自动将旧的未完结活跃任务标记为 completed，避免工作区孤儿假死悬挂
+            # 自动将旧的未完结活跃任务标记为 completed，将被新任务取代的旧待确认任务归档为 idle，避免孤儿悬挂
             await conn.execute(
                 """
                 UPDATE task_loop_runs
                 SET loop_status = 'completed', updated_at = ?
                 WHERE workspace_id = ? AND loop_status IN ('planning', 'executing', 'verifying', 'reflecting');
+                """,
+                (now, workspace_id),
+            )
+            await conn.execute(
+                """
+                UPDATE task_loop_runs
+                SET loop_status = 'idle', pending_approval_call = NULL, updated_at = ?
+                WHERE workspace_id = ? AND loop_status = 'waiting_approval';
                 """,
                 (now, workspace_id),
             )

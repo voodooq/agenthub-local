@@ -202,6 +202,7 @@ class ContextBuilder:
                     "   - 先输出结构清晰的 Markdown【实施方案（Implementation Plan）】与【分步执行步骤清单（Step-by-Step Task List）】；\n"
                     "   - 步骤必须按序号标注（如 步骤 1、步骤 2...），并标注对应的工具安全级别（L0 只读 / L1 本地受控文件操作 / L2 终端执行与测试）；\n"
                     "3. 【交互式对齐协议规范 (```interactive_inquiry)】：\n"
+                    '   - **【语法与字段格式硬约束】**：必须使用标准 Markdown 三反引号围栏代码块 ` ```interactive_inquiry ` 包裹合法 JSON；**严禁**使用 XML `<interactive_inquiry>...</interactive_inquiry>` 或 `[interactive_inquiry]` 标签！每道题必须使用 `"id"`（勿用 `question_id`）、`"type"` (`"single_choice"` / `"multi_choice"`)、`"label"`（勿用 `question`）以及对象数组 `"options": [{"value": "...", "label": "...", "desc": "..."}]`（严禁纯字符串数组）；\n'
                     "   - **【单卡一次性收集全部确认项，严禁挤牙膏二次弹卡】**：如果任务存在多个参数设置、路线分歧、填空项或待审批步骤，**必须按问题实际需要，在当前唯一一张 `interactive_inquiry` 卡片的 `questions`、`fill_template` 与 `plan_steps` 中一次性全部列出（不人为限缩数量，切勿拆多轮）**；前端会自动通过分步向导引导用户逐项确认完毕后统一点击执行；\n"
                     "   - **【严禁编造仅有单个无意义批准选项的空转伪选择题】**：`questions` 仅在确实存在 **至少 2 个有实质差异的可选分支或配置参数** 时才使用；绝对禁止在 `questions` 中制造只有一个「确认并立即执行」选项的无意义伪问题！若仅需用户审批步骤清单而无真实多分支分歧，请设 `\"questions\": []`（或省略 `questions`）仅输出 `plan_steps`；\n"
                     "   - 若需求尚存不确定点或缺少关键参数，可在末尾输出带 `questions` / `fill_template` 的标准 JSON 协议块；若已可直接启动实施，请在末尾输出带 `phase: \"plan_approval\"` 与完整 `plan_steps` 的协议块（可同时携带 `questions` 与 `fill_template`，前端会在向导中逐步引导用户确认完再统一开始执行）：\n"
@@ -273,13 +274,13 @@ class ContextBuilder:
                     "### ⚡【同会话方案已解锁 - 清晰指令直接执行到底】：\n"
                     "当前会话此前已通过方案审批并已进入具身执行阶段（全量读写与终端工具现已保持开放）。\n"
                     "1. 若用户本轮指令目标清晰、可执行（例如：修改逻辑、补算数据、调整输出格式、重跑脚本生成文件），**请立即直接调用 `<tool_call>` 完成修改、运行与校验交付**，严禁退回规划态或输出仅有「确认并立即执行」的空转确认卡！\n"
-                    "2. 仅当新要求属于颠覆性重构且确实存在 **至少 2 项真实不可自动推断的互斥分支** 时，方可使用单张完整 `interactive_inquiry` 卡片一次性对齐所有分歧。"
+                    '2. 仅当新要求属于颠覆性重构且确实存在 **至少 2 项真实不可自动推断的互斥分支** 时，方可使用标准 ` ```interactive_inquiry ` 代码块（严禁 XML `<interactive_inquiry>` 标签或纯字符串选项数组）一次性对齐所有分歧。'
                 )
         elif scene_mode == "chat" and clarify_mode:
             system_parts.append(
                 "### 🧭【需求前置主动澄清模式 (Clarify Mode)】：\n"
                 "用户开启了需求澄清模式。当用户的提问涉及多方案分歧、前提假设不明确或缺少场景约束时，切勿盲目输出长篇泛泛而谈的理论；\n"
-                "应先在正文中提炼核心考量，并在末尾通过**唯一一张** ```interactive_inquiry 结构化卡片一次性完整列出所有待确认维度（包含 phase: 'clarification' 与 `questions` 选择题或 `fill_template` 模板；"
+                '应先在正文中提炼核心考量，并在末尾通过**唯一一张**标准 ` ```interactive_inquiry ` 围栏代码块卡片（严禁使用 `<interactive_inquiry>` XML 标签；每题必须包含 `"id"`、`"type"`、`"label"` 与 `{value, label, desc}` 对象数组 `options`）一次性完整列出所有待确认维度（包含 phase: \'clarification\' 与 `questions` 选择题或 `fill_template` 模板；'
                 "当需要确认或明确的维度较多时，务必按问题实际需要**完整逐条列出全部待确认问题，数量不限**，切勿强行拆分成多轮追问；禁止构造只有一个无意义选项的伪选择题；可长期复用的配置问题可附加 fact_key / fact_category / fact_scope），"
                 "供用户按步骤逐项确认完毕后再统一提交解答。"
             )

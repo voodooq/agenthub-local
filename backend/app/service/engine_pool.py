@@ -49,6 +49,7 @@ class EnginePoolService:
         attachments: list[Any] | None = None,
         pre_built_history: list[dict[str, Any]] | None = None,
         task_role: str = "primary",
+        attachments_inline_only: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         带零感知热故障转移与可配置上下文记忆轮数的流式生成执行器。
@@ -75,6 +76,7 @@ class EnginePoolService:
             from pathlib import Path
 
             att_sections: list[str] = []
+            visual_refs: list[str] = []
             for att in attachments:
                 att_dict = att if isinstance(att, dict) else att.model_dump()
                 file_path = att_dict.get("file_path") or ""
@@ -96,13 +98,16 @@ class EnginePoolService:
                 if file_path and os.path.exists(file_path):
                     if category == "image" or effective_mime.startswith("image/"):
                         has_visual_or_pdf = True
-                        att_sections.append(
-                            f"【用户附带上传的本地图片文件】:\n"
-                            f"- 文件名: `{name}`\n"
-                            f"{rel_line}"
-                            f"- 磁盘绝对路径: `{file_path}`\n"
-                            f"- 指引: 请结合多模态图片画面分析；如后续需通过脚本二次处理该图片，必须使用上述真实沙盒路径，严禁自行生成模拟图片。"
-                        )
+                        if attachments_inline_only:
+                            visual_refs.append(f"`{name}` ({rel_path or file_path})")
+                        else:
+                            att_sections.append(
+                                f"【用户附带上传的本地图片文件】:\n"
+                                f"- 文件名: `{name}`\n"
+                                f"{rel_line}"
+                                f"- 磁盘绝对路径: `{file_path}`\n"
+                                f"- 指引: 请结合多模态图片画面分析；如后续需通过脚本二次处理该图片，必须使用上述真实沙盒路径，严禁自行生成模拟图片。"
+                            )
                         try:
                             import base64
                             with open(file_path, "rb") as img_f:
@@ -115,15 +120,18 @@ class EnginePoolService:
 
                     elif category == "pdf" or effective_mime == "application/pdf":
                         has_visual_or_pdf = True
-                        ctx_info = attachment_service.extract_attachment_context(file_path, effective_mime, name)
-                        att_sections.append(
-                            f"【用户附带上传的 PDF 文档附件】:\n"
-                            f"- 文件名: `{name}`\n"
-                            f"{rel_line}"
-                            f"- 磁盘绝对路径: `{file_path}`\n"
-                            f"- 指引: 若需通过脚本抽数，必须直接读取上述真实路径，严禁自行编造文档内容或创建测试替代文件。\n"
-                            f"- 说明: {ctx_info.get('preview_text', '')}"
-                        )
+                        if attachments_inline_only:
+                            visual_refs.append(f"`{name}` ({rel_path or file_path})")
+                        else:
+                            ctx_info = attachment_service.extract_attachment_context(file_path, effective_mime, name)
+                            att_sections.append(
+                                f"【用户附带上传的 PDF 文档附件】:\n"
+                                f"- 文件名: `{name}`\n"
+                                f"{rel_line}"
+                                f"- 磁盘绝对路径: `{file_path}`\n"
+                                f"- 指引: 若需通过脚本抽数，必须直接读取上述真实路径，严禁自行编造文档内容或创建测试替代文件。\n"
+                                f"- 说明: {ctx_info.get('preview_text', '')}"
+                            )
                         try:
                             import base64
                             with open(file_path, "rb") as pdf_f:
@@ -134,7 +142,7 @@ class EnginePoolService:
                         except Exception as e:
                             logger.warning(f"读取 PDF base64 失败: {e}")
 
-                    else:
+                    elif not attachments_inline_only:
                         ctx_info = attachment_service.extract_attachment_context(file_path, effective_mime, name)
                         preview_txt = ctx_info.get("preview_text") or "(未能提取文本预览)"
                         extractor_name = ctx_info.get("extractor") or "none"
@@ -146,12 +154,18 @@ class EnginePoolService:
                             f"- ⚠️ 真实文件与全量读取约束: 该文件已真实落盘于上述路径。若预览仅展示前几行或大表被截断，严禁仅凭预览推断全表或自行创建 Mock/示例数据替代，必须使用脚本直接读取上述路径全量解析！\n"
                             f"- 文档内容预览:\n```text\n{preview_txt}\n```"
                         )
-                else:
+                elif not attachments_inline_only:
                     att_sections.append(
                         f"【用户提及附件】: `{name}` (本地磁盘暂未定位到文件 `{file_path}`；严禁自造 Mock 文件替代，请核查沙盒清单或向用户报错确认)"
                     )
 
-            if att_sections:
+            if attachments_inline_only and visual_refs:
+                attachment_guidance = (
+                    "\n\n[多模态视觉附件续传: 本步继续附带参考文件 "
+                    + "、".join(visual_refs)
+                    + " 的多模态输入（沙盒真实路径保持不变），请结合视觉内容与前置工具输出直接推理并推进任务。]"
+                )
+            elif att_sections:
                 attachment_guidance = "\n\n" + "\n\n".join(att_sections)
 
         prompt_with_attachments = user_prompt + attachment_guidance

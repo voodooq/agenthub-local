@@ -126,6 +126,25 @@ class AgentRuntime:
         return False
 
     @staticmethod
+    def _filter_visual_attachments(attachments: list[Any] | None) -> list[Any]:
+        """提取本轮上传的图片/PDF 视觉附件，用于同 Turn 多步调用中保留多模态视野。"""
+        if not attachments:
+            return []
+        visuals: list[Any] = []
+        for att in attachments:
+            att_dict = att if isinstance(att, dict) else att.model_dump()
+            name = str(att_dict.get("name") or "")
+            mime = str(att_dict.get("mime_type") or "").lower()
+            cat = str(att_dict.get("category") or "").lower()
+            if not cat or not mime:
+                _, inferred_cat, canonical_mime = attachment_service.classify_extension(name)
+                cat = cat or (inferred_cat or "")
+                mime = mime or (canonical_mime or "")
+            if cat in ("image", "pdf") or mime.startswith("image/") or mime == "application/pdf":
+                visuals.append(att)
+        return visuals
+
+    @staticmethod
     async def _ingest_confirmed_facts(
         *,
         confirmed_facts: list[Any] | None,
@@ -578,24 +597,52 @@ class AgentRuntime:
         # 4.5 关联工作区长程自主领航舱 (TaskLoopRunner 闭环驱动)
         active_loop_obj = None
         tracked_loop_id: str | None = None
-        if active_scene == "agent" and ws_id and not is_planning_phase:
+        if active_scene == "agent" and ws_id:
             try:
-                active_loop_obj = await TaskLoopRepository.get_active_loop_by_workspace(ws_id, include_completed=False)
-                if not active_loop_obj:
-                    raw_goal_line = user_message.strip().split("\n")[0][:120]
-                    if raw_goal_line.startswith(("已确认", "✅ 实施方案", "✅")):
-                        raw_goal_line = "按确认决策执行任务"
-                    # 兜底自动初始化当前工作区的自主执行记录
-                    active_loop_obj = await TaskLoopRepository.create_loop(
-                        workspace_id=ws_id,
-                        conversation_id=conv_id,
-                        goal_prompt=raw_goal_line or "执行自主推演任务",
-                        max_iterations=10,
-                    )
+                existing_loop = await TaskLoopRepository.get_active_loop_by_workspace(ws_id, include_completed=False)
+                if not is_planning_phase:
+                    active_loop_obj = existing_loop
+                    if not active_loop_obj:
+                        raw_goal_line = user_message.strip().split("\n")[0][:120]
+                        if raw_goal_line.startswith(("已确认", "✅ 实施方案", "✅")):
+                            raw_goal_line = "按确认决策执行任务"
+                        # 兜底自动初始化当前工作区的自主执行记录
+                        active_loop_obj = await TaskLoopRepository.create_loop(
+                            workspace_id=ws_id,
+                            conversation_id=conv_id,
+                            goal_prompt=raw_goal_line or "执行自主推演任务",
+                            max_iterations=10,
+                        )
+                    elif (
+                        active_loop_obj.loop_status == "waiting_approval"
+                        and active_loop_obj.pending_approval_call is None
+                    ):
+                        # 若上一轮因交互卡停在 waiting_approval，本轮进入执行态时自动恢复为 executing
+                        await TaskLoopRepository.update_loop_status(
+                            loop_id=active_loop_obj.id,
+                            status="executing",
+                        )
+                        refreshed_loop = await TaskLoopRepository.get_loop(active_loop_obj.id)
+                        if refreshed_loop:
+                            active_loop_obj = refreshed_loop
+                        yield {
+                            "type": "loop_step",
+                            "loop_id": active_loop_obj.id,
+                            "iteration": active_loop_obj.current_iteration,
+                            "max_iterations": active_loop_obj.max_iterations,
+                            "status": active_loop_obj.loop_status,
+                            "pending_approval_call": None,
+                            "scratchpad_md": active_loop_obj.scratchpad_md,
+                        }
+                elif existing_loop and existing_loop.conversation_id == conv_id:
+                    active_loop_obj = existing_loop
                 if active_loop_obj:
                     tracked_loop_id = active_loop_obj.id
             except Exception as e:
                 logger.warning(f"初始化任务自主领航舱实例异常: {e}")
+
+        # 抽取本轮视觉附件（图片/PDF），同 Turn 多步调用中保持多模态视觉输入不丢失
+        visual_attachments = self._filter_visual_attachments(attachments)
 
         # 5. 进入单轮内 ReAct 思考与工具执行循环 (Intra-Turn Adaptive Loop)
         step_idx = 0
@@ -663,6 +710,7 @@ class AgentRuntime:
                     history_for_step = history_for_step[:-1]
                 step_prompt = user_message
                 step_attachments = attachments
+                step_attachments_inline_only = False
             else:
                 if last_step_error_info:
                     if last_step_error_info.get("tool") == "inquiry_guard":
@@ -713,7 +761,8 @@ class AgentRuntime:
                         "若你查到了关键路径、失效列表或状态，请务必通过 `update_working_memory` 写入草稿纸，以防多步汇总时遗忘！"
                     )
 
-                step_attachments = None
+                step_attachments = visual_attachments or None
+                step_attachments_inline_only = bool(visual_attachments)
 
             step_raw_text = ""
             encountered_stream_error = False
@@ -729,6 +778,7 @@ class AgentRuntime:
                 context_rounds=context_rounds,
                 attachments=step_attachments,
                 pre_built_history=history_for_step,
+                attachments_inline_only=step_attachments_inline_only,
             ):
                 etype = event.get("type")
                 if etype == "model_downgrade":
@@ -789,7 +839,7 @@ class AgentRuntime:
                     active_scene == "agent"
                     and explicit_execute_unlock
                     and not is_planning_phase
-                    and "interactive_inquiry" in raw_stripped
+                    and ToolProtocolAdapter.contains_interactive_inquiry(raw_stripped)
                     and consecutive_stalls < 2
                     and step_idx < current_max_steps - 1
                 ):
@@ -813,7 +863,20 @@ class AgentRuntime:
                     step_idx += 1
                     continue
 
-                final_saved_text = clean_text if clean_text else step_raw_text
+                raw_final_text = clean_text if clean_text else step_raw_text
+                if raw_final_text and (
+                    "interactive_inquiry" in raw_final_text.lower()
+                    or '"inquiry_id"' in raw_final_text
+                ):
+                    final_saved_text = ToolProtocolAdapter.normalize_interactive_inquiry_markdown(raw_final_text)
+                else:
+                    final_saved_text = raw_final_text
+
+                has_inquiry_card = ToolProtocolAdapter.contains_interactive_inquiry(final_saved_text)
+                is_waiting_user_decision = bool(
+                    active_scene == "agent" and (has_inquiry_card or is_planning_phase)
+                )
+
                 if final_saved_text:
                     await MessageRepository.save_message(
                         conversation_id=conv_id,
@@ -828,36 +891,61 @@ class AgentRuntime:
                         long_term_memory.schedule_extraction(conv_id, delay_seconds=180)
                 accumulated_visible_text += ("\n\n" + final_saved_text if accumulated_visible_text else final_saved_text)
 
-                # ── 任务自主闭环：模型输出最终答复且无后续工具调用，自动验收通过并归档 ──
+                # ── 任务自主闭环门控：包含待确认交互卡或仍在规划停顿期时严禁标为 completed ──
                 if active_loop_obj:
                     try:
-                        summary_snippet = (final_saved_text or accumulated_visible_text).strip().split("\n")[0][:80]
-                        completed_loop = await TaskLoopRepository.complete_loop(
-                            loop_id=active_loop_obj.id,
-                            summary=summary_snippet or "模型已完成自主闭环并输出交付结论",
-                        )
-                        if completed_loop:
+                        if is_waiting_user_decision:
+                            await TaskLoopRepository.update_loop_status(
+                                loop_id=active_loop_obj.id,
+                                status="waiting_approval",
+                            )
+                            waiting_loop = await TaskLoopRepository.get_loop(active_loop_obj.id)
+                            eff_loop = waiting_loop or active_loop_obj
                             if target_cwd:
                                 try:
                                     ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
                                     ws_sp.parent.mkdir(parents=True, exist_ok=True)
-                                    ws_sp.write_text(completed_loop.scratchpad_md or "", encoding="utf-8")
+                                    ws_sp.write_text(eff_loop.scratchpad_md or "", encoding="utf-8")
                                 except Exception:
                                     pass
                             yield {
-                                "type": "loop_completed",
-                                "loop_id": completed_loop.id,
-                                "iteration": completed_loop.current_iteration,
-                                "max_iterations": completed_loop.max_iterations,
-                                "status": "completed",
-                                "scratchpad_md": completed_loop.scratchpad_md,
+                                "type": "loop_step",
+                                "loop_id": eff_loop.id,
+                                "iteration": eff_loop.current_iteration,
+                                "max_iterations": eff_loop.max_iterations,
+                                "status": "waiting_approval",
+                                "pending_approval_call": None,
+                                "scratchpad_md": eff_loop.scratchpad_md,
                             }
-                            active_loop_obj = None
+                            active_loop_obj = eff_loop
+                        else:
+                            summary_snippet = (final_saved_text or accumulated_visible_text).strip().split("\n")[0][:80]
+                            completed_loop = await TaskLoopRepository.complete_loop(
+                                loop_id=active_loop_obj.id,
+                                summary=summary_snippet or "模型已完成自主闭环并输出交付结论",
+                            )
+                            if completed_loop:
+                                if target_cwd:
+                                    try:
+                                        ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
+                                        ws_sp.parent.mkdir(parents=True, exist_ok=True)
+                                        ws_sp.write_text(completed_loop.scratchpad_md or "", encoding="utf-8")
+                                    except Exception:
+                                        pass
+                                yield {
+                                    "type": "loop_completed",
+                                    "loop_id": completed_loop.id,
+                                    "iteration": completed_loop.current_iteration,
+                                    "max_iterations": completed_loop.max_iterations,
+                                    "status": "completed",
+                                    "scratchpad_md": completed_loop.scratchpad_md,
+                                }
+                                active_loop_obj = None
                     except Exception as e:
-                        logger.warning(f"自主循环自动验收完成异常: {e}")
+                        logger.warning(f"自主循环状态收敛更新异常: {e}")
 
-                # Post-Task 经验自动提炼钩子（满足规则 A/B/C 时生成 Diff 提议推送前端）
-                if active_scene == "agent" and not active_incognito and not is_planning_phase:
+                # Post-Task 经验自动提炼钩子（等待用户决策阶段严禁提前提炼，真正交付后触发）
+                if active_scene == "agent" and not active_incognito and not is_waiting_user_decision:
                     exp_proposal = await self._run_post_task_distillation(
                         workspace_id=ws_id,
                         conversation_id=conv_id,
@@ -898,6 +986,8 @@ class AgentRuntime:
             consecutive_stalls = 0
 
             # 情况 B：模型发起了工具调用 -> 规范化工具调用 XML 示范并落盘（杜绝带偏后续历史）
+            if clean_text and "interactive_inquiry" in clean_text.lower():
+                clean_text = ToolProtocolAdapter.normalize_interactive_inquiry_markdown(clean_text)
             accumulated_visible_text += ("\n\n" + clean_text if (accumulated_visible_text and clean_text) else clean_text)
             formatted_tc_xml = "\n".join(
                 f'<tool_call name="{tc.get("function", {}).get("name", "")}">{tc.get("function", {}).get("arguments", "{}")}</tool_call>'

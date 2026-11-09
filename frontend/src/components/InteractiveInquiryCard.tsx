@@ -31,6 +31,7 @@ import {
   buildInquiryWizardSteps,
   extractConfirmedFactsFromTemplate,
   isWizardStepReady,
+  normalizeInquiryPayload,
   parseTemplateFields,
   renderFilledTemplateText,
   resolveLoopGoalHint,
@@ -71,15 +72,9 @@ export function InteractiveInquiryCard({
 }: InteractiveInquiryCardProps) {
   const { t } = useLanguage();
 
-  // 1. 解析 JSON 协议内容（流式吐字半包阶段返回 null 并渲染骨架）
+  // 1. 解析并深度归一化 JSON 协议内容（兼容 XML 包装及变体字段，流式半包阶段返回 null 并渲染骨架）
   const { parsed } = useMemo(() => {
-    try {
-      const clean = rawContent.trim();
-      const obj = JSON.parse(clean) as InteractiveInquiryPayload;
-      return { parsed: obj };
-    } catch {
-      return { parsed: null };
-    }
+    return { parsed: normalizeInquiryPayload(rawContent) };
   }, [rawContent]);
 
   const strategyFallbackLabel = t('请选择策略：');

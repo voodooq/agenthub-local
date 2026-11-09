@@ -72,7 +72,9 @@ export function LoopHUD({ loop, onRefresh, onProposalCreated }: LoopHUDProps) {
       case 'reflecting':
         return { text: t('自愈反思中'), color: 'bg-amber-500/10 text-amber-400 border-amber-500/20' };
       case 'waiting_approval':
-        return { text: t('等待人工审批'), color: 'bg-rose-500/10 text-rose-400 border-rose-500/20 animate-pulse' };
+        return loop.pending_approval_call
+          ? { text: t('等待人工审批'), color: 'bg-rose-500/10 text-rose-400 border-rose-500/20 animate-pulse' }
+          : { text: t('等待确认决策'), color: 'bg-amber-500/10 text-amber-400 border-amber-500/20 animate-pulse' };
       case 'completed':
         return { text: t('任务已交付并验收'), color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' };
       case 'failed':
@@ -96,9 +98,15 @@ export function LoopHUD({ loop, onRefresh, onProposalCreated }: LoopHUDProps) {
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               )}
               <span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                loop.loop_status === 'waiting_approval' ? 'bg-rose-500' :
-                loop.loop_status === 'completed' ? 'bg-emerald-500' :
-                loop.loop_status === 'failed' ? 'bg-red-500' : 'bg-emerald-500'
+                loop.loop_status === 'waiting_approval'
+                  ? loop.pending_approval_call
+                    ? 'bg-rose-500'
+                    : 'bg-amber-500'
+                  : loop.loop_status === 'completed'
+                    ? 'bg-emerald-500'
+                    : loop.loop_status === 'failed'
+                      ? 'bg-red-500'
+                      : 'bg-emerald-500'
               }`}></span>
             </span>
             <span className="text-xs font-semibold tracking-wider uppercase text-muted-foreground">

@@ -216,6 +216,23 @@ export function linkifyBareFilePathsInMarkdown(markdown: string): string {
       continue;
     }
 
+    // 1.5 跳过遗留的 <interactive_inquiry> / [interactive_inquiry] 协议区（防止内部路径芯片化破坏 JSON）
+    if (markdown[i] === '<' || markdown[i] === '[') {
+      const probe = markdown.slice(i, i + 24).toLowerCase();
+      if (probe.startsWith('<interactive_inquiry') || probe.startsWith('[interactive_inquiry')) {
+        const rest = markdown.slice(i);
+        const tagMatch =
+          /^<interactive_inquiry(?:\s+[^>]*)?>[\s\S]*?(?:<\/interactive_inquiry>|$)/i.exec(rest) ||
+          /^\[interactive_inquiry(?:\s+[^\]]*)?\][\s\S]*?(?:\[\/interactive_inquiry\]|$)/i.exec(rest);
+        if (tagMatch) {
+          flushProse();
+          output.push(tagMatch[0]);
+          i += tagMatch[0].length;
+          continue;
+        }
+      }
+    }
+
     // 2. 跳过行内反引号代码 `...` 或 ``...``
     if (markdown[i] === '`') {
       let tickLen = 0;
@@ -283,20 +300,33 @@ function normalizeDedupeKey(filePath: string): string {
 }
 
 /**
- * 从 AI 回复正文中抽取所有去重后的生成文件路径列表（跳过围栏代码块，避免把示例脚本路径当作结果）
+ * 识别工作区用户输入附件只读目录路径（./attachments/、.agenthub/attachments/），
+ * 严禁将其当作“AI 生成交付物”放入生成文件直达栏。
+ */
+export function isAttachmentInputPath(filePath: string): boolean {
+  const norm = cleanFilePathCandidate(filePath).replace(/\\/g, '/').trim();
+  if (!norm) return false;
+  return /(?:^|\/)(?:\.agenthub\/)?attachments\//i.test(norm);
+}
+
+/**
+ * 从 AI 回复正文中抽取所有去重后的生成文件路径列表（跳过围栏代码块及交互确认卡，排除用户输入附件路径）
  */
 export function extractGeneratedFilePaths(markdown: string, limit = 8): string[] {
   if (!markdown) return [];
 
-  // 剥离围栏代码块后再检索
+  // 剥离围栏代码块与 interactive_inquiry 交互卡区间后再检索
   const withoutCodeBlocks = markdown
     .replace(/```[\s\S]*?(?:```|$)/g, '\n')
-    .replace(/~~~[\s\S]*?(?:~~~|$)/g, '\n');
+    .replace(/~~~[\s\S]*?(?:~~~|$)/g, '\n')
+    .replace(/<interactive_inquiry(?:\s+[^>]*)?>[\s\S]*?(?:<\/interactive_inquiry>|$)/gi, '\n')
+    .replace(/\[interactive_inquiry(?:\s+[^\]]*)?\][\s\S]*?(?:\[\/interactive_inquiry\]|$)/gi, '\n');
 
   const collected = new Map<string, string>();
   const tryCollect = (raw: string) => {
     const cleaned = cleanFilePathCandidate(raw);
     if (!isNavigableLocalFilePath(cleaned)) return;
+    if (isAttachmentInputPath(cleaned)) return;
     // 若与“只包含文件名”重复但当前带路径前缀，优先保留带路径的版本
     const key = normalizeDedupeKey(cleaned);
     if (!collected.has(key)) {
