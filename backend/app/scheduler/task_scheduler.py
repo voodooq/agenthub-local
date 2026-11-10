@@ -11,6 +11,7 @@ import subprocess
 import uuid
 from datetime import datetime
 from ..core.logging_config import logger
+from ..core.runtime_paths import get_silent_subprocess_kwargs
 from ..repository.db import db_manager
 
 
@@ -34,7 +35,13 @@ def send_windows_toast(title: str, message: str) -> None:
             f'$notification = [Windows.UI.Notifications.ToastNotification]::new($template); '
             f'$notifier.Show($notification);'
         )
-        subprocess.Popen(["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd])
+        subprocess.Popen(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", ps_cmd],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **get_silent_subprocess_kwargs(),
+        )
     except Exception as e:
         logger.warning(f"发送 Windows Toast 通知失败: {e}")
 

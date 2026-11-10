@@ -19,6 +19,7 @@ from ..core.config import settings
 from ..core.logging_config import logger
 from ..core.runtime_paths import (
     get_bundle_root,
+    get_silent_subprocess_kwargs,
     get_writable_app_root,
     resolve_python_interpreter,
     seed_mcp_config,
@@ -91,6 +92,7 @@ class _StdioMCPConnection:
                 env=merged_env,
                 shell=(sys.platform == "win32" and resolved_cmd.lower().endswith((".cmd", ".bat"))),
                 start_new_session=(sys.platform != "win32"),
+                **get_silent_subprocess_kwargs(),
             )
             init_resp = await self._send_rpc(
                 "initialize",

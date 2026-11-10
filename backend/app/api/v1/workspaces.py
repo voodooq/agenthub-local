@@ -15,6 +15,7 @@ from ...schema.workspace_schema import (
     WorkspaceSaveFileRequest,
 )
 from ...core.logging_config import logger
+from ...core.runtime_paths import get_silent_subprocess_kwargs
 
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
 
@@ -40,6 +41,7 @@ def _show_native_windows_folder_dialog(dialog_title: str = "请选择要挂载�
             capture_output=True,
             text=True,
             timeout=120,
+            **get_silent_subprocess_kwargs(allow_gui=True),
         )
         return proc.stdout.strip()
     except Exception as e:
@@ -184,7 +186,7 @@ async def open_workspace_in_explorer(ws_id: str, subpath: str | None = Query(Non
     target.mkdir(parents=True, exist_ok=True)
     try:
         if os.name == "nt":
-            subprocess.Popen(f'explorer "{str(target)}"', shell=True)
+            subprocess.Popen(["explorer", str(target)])
         return {"success": True, "path": str(target)}
     except Exception as e:
         logger.error(f"打开工作区文件夹失败: {e}")

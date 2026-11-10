@@ -11,9 +11,11 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import subprocess
 import sys
 import uuid
 from pathlib import Path
+from typing import Any
 
 # NOTE: 底层基础路径模块禁止导入 logging_config/config，防止循环导入
 logger = logging.getLogger("agenthub")
@@ -195,3 +197,35 @@ def resolve_python_interpreter() -> str | None:
         return str(found_path)
 
     return None
+
+
+def get_silent_subprocess_kwargs(
+    allow_gui: bool = False,
+    platform: str | None = None,
+) -> dict[str, Any]:
+    """生成跨平台静默子进程参数字典，阻止 Windows GUI 宿主派生后台子进程时弹出终端黑框。
+
+    Args:
+        allow_gui: 若为 True，仅禁止创建控制台窗口而不附带 SW_HIDE，保证 WinForms 等原生弹窗仍正常显示。
+        platform: 可选平台标识，默认取 sys.platform。
+
+    Returns:
+        dict[str, Any]: 可直接解包传给 subprocess.run / subprocess.Popen / create_subprocess_exec 的参数字典。
+    """
+    plat = platform or sys.platform
+    if plat != "win32":
+        return {}
+
+    # NOTE: PyInstaller --windowed 单体 EXE 主进程无控制台宿主，Windows 11 默认终端(Windows Terminal)
+    # 会在任意子进程启动控制台程序(powershell/cmd/python/cli)时自动弹窗，CREATE_NO_WINDOW 可在内核层阻止分配控制台。
+    kwargs: dict[str, Any] = {
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000),
+    }
+    if not allow_gui:
+        startupinfo_cls = getattr(subprocess, "STARTUPINFO", None)
+        if startupinfo_cls is not None:
+            startupinfo = startupinfo_cls()
+            startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0x00000001)
+            startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+            kwargs["startupinfo"] = startupinfo
+    return kwargs

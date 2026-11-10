@@ -29,6 +29,7 @@ import httpx
 from ..core.logging_config import logger
 from ..core.runtime_paths import (
     get_bundle_root,
+    get_silent_subprocess_kwargs,
     get_writable_app_root,
     resolve_python_interpreter,
     seed_builtin_skills,
@@ -1081,6 +1082,7 @@ class SkillLoader:
                 encoding="utf-8",
                 errors="replace",
                 timeout=30.0,
+                **get_silent_subprocess_kwargs(),
             )
             return proc.returncode, proc.stdout, proc.stderr
 
@@ -1340,6 +1342,7 @@ class SkillLoader:
                     capture_output=True,
                     text=True,
                     timeout=45.0,
+                    **get_silent_subprocess_kwargs(),
                 )
                 if proc.returncode != 0:
                     raise RuntimeError(f"Git 克隆失败: {proc.stderr.strip()}")

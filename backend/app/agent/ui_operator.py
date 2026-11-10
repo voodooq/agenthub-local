@@ -19,6 +19,8 @@ import subprocess
 import sys
 from typing import Any
 
+from ..core.runtime_paths import get_silent_subprocess_kwargs
+
 logger = logging.getLogger("agenthub.ui_operator")
 
 if sys.platform == "win32":
@@ -266,6 +268,7 @@ try {{
                 encoding="utf-8",
                 errors="replace",
                 timeout=12,
+                **get_silent_subprocess_kwargs(),
             )
 
             lines = [line.strip() for line in res.stdout.splitlines() if line.strip() and not line.strip().startswith("#<")]
@@ -513,6 +516,7 @@ try {{
                 encoding="utf-8",
                 errors="replace",
                 timeout=12,
+                **get_silent_subprocess_kwargs(),
             )
             raw_out = res.stdout.strip()
             match = re.search(r"RESULT:([A-Z_]+):(.*)", raw_out)

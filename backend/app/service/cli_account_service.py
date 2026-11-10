@@ -15,6 +15,7 @@ from typing import Tuple
 
 from ..core.logging_config import logger
 from ..core.proxy_helper import get_system_proxy_env, get_system_proxy_url
+from ..core.runtime_paths import get_silent_subprocess_kwargs
 from ..repository.account_repository import AccountRepository
 from .agent_runner import _find_cli_binary
 
@@ -39,6 +40,7 @@ class CliLoginProcess:
             stderr=subprocess.PIPE,
             env=env,
             cwd=cwd,
+            **get_silent_subprocess_kwargs(),
         )
         self.pid = self._proc.pid
         self.returncode: int | None = None
@@ -191,7 +193,8 @@ def create_account_dir(alias: str) -> Path:
             subprocess.run(
                 ["icacls", str(account_dir), "/inheritance:r",
                  "/grant:r", f"{username}:(OI)(CI)F"],
-                capture_output=True, check=False
+                capture_output=True, check=False,
+                **get_silent_subprocess_kwargs(),
             )
     except Exception as e:
         logger.warning(f"设置账号目录权限失败（非致命）: {e}")

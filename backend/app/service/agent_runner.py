@@ -4,12 +4,16 @@ class _CompatSubprocess:
     def __init__(self, cmd: list[str], env: dict[str, str], cwd: str) -> None:
         import subprocess
         import threading
+        from ..core.runtime_paths import get_silent_subprocess_kwargs
+
         self._proc = subprocess.Popen(
             cmd,
+            stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
             cwd=cwd,
+            **get_silent_subprocess_kwargs(),
         )
         self.pid = self._proc.pid
         self.returncode: int | None = None
@@ -64,6 +68,7 @@ from typing import AsyncGenerator, Any
 
 from ..core.logging_config import logger
 from ..core.config import settings
+from ..core.runtime_paths import get_silent_subprocess_kwargs
 
 # 单个请求子进程的超时时间（秒）
 PROCESS_TIMEOUT_SECONDS = 180
@@ -208,10 +213,12 @@ async def test_cli_model_availability(
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
+                stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=env,
                 cwd=cwd,
+                **get_silent_subprocess_kwargs(),
             )
         except NotImplementedError:
             proc = _CompatSubprocess(cmd, env, cwd)
@@ -356,10 +363,12 @@ async def run_cli_stream(
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
             cwd=cwd,
+            **get_silent_subprocess_kwargs(),
         )
     except NotImplementedError:
         logger.info("当前环境不支持 asyncio 原生子进程传输，自动切换至 Windows 线程兼容适配器")

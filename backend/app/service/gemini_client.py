@@ -44,8 +44,16 @@ class GeminiClient:
             exe_path = os.path.join(local_appdata, "Programs", "antigravity", "Antigravity.exe")
             if os.path.exists(exe_path):
                 import subprocess
+                from ..core.runtime_paths import get_silent_subprocess_kwargs
+
                 cmd = f"(Get-Item '{exe_path}').VersionInfo.FileVersion"
-                res = subprocess.run(["powershell", "-NoProfile", "-Command", cmd], capture_output=True, text=True, timeout=3)
+                res = subprocess.run(
+                    ["powershell", "-NoProfile", "-Command", cmd],
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                    **get_silent_subprocess_kwargs(),
+                )
                 v = res.stdout.strip()
                 if v and len(v.split(".")) >= 2:
                     cls._DETECTED_UA = f"antigravity/{v} windows/amd64"

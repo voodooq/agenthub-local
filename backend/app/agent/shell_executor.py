@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_config import logger
+from ..core.runtime_paths import get_silent_subprocess_kwargs
 from ..service.audit_service import audit_service
 
 
@@ -172,6 +173,7 @@ class LocalShellExecutor:
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=5,
+                    **get_silent_subprocess_kwargs(),
                 )
             else:
                 os.killpg(os.getpgid(pid), signal.SIGKILL)
@@ -293,6 +295,7 @@ class LocalShellExecutor:
                 stderr=subprocess.PIPE,
                 env=child_env,
                 start_new_session=(sys.platform != "win32"),
+                **get_silent_subprocess_kwargs(),
             )
             if session_id:
                 self._running_pids.setdefault(session_id, set()).add(proc.pid)
