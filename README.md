@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.3.0-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.3.1-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,11 @@
 
 ## 🧭 版本演进总览
 
-### ⚡ v1.3.0 — 工程感知与精准代码手术刀（Code Surgery & Git Checkpoint）
+### ⚡ v1.3.0（最新 v1.3.1）— 工程感知、精准代码手术刀与健壮性修复（Code Surgery & Git Checkpoint）
+- **健壮性与兼容性修复（v1.3.1）**：
+  - **仓储层方法名对齐与别名兼容**：修复工作区回滚 API 路由对 `WorkspaceRepository.get_by_id` 的调用，并在仓储层增设 `get_workspace_by_id` 别名映射，消除类型检查与属性不存在异常。
+  - **静态分析与作用域安全**：对 `replace_in_file` 局域变量 `unified_diff`、`ok`、`syntax_ok` 实施前置初始化，确保在极端读盘异常或中断分支下变量 100% 明确绑定。
+  - **资产库登记双层安全兜底**：修正精准局部补丁写盘后的资产登记为 `ArtifactRepository.register_artifact` 标准规范，并在 `AttachmentService` 增设兼容代理方法，杜绝未重载进程的 Warning 告警。
 - **精准局部补丁与三级容错匹配 (`replace_in_file`)**：彻底颠覆改一行重写全篇文件的传统低效模式。支持多块 `<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE` 原子化应用；支持 Level 1 精确匹配、Level 2 缩进与空行容错归一化对齐、Level 3 相似度诊断提示；生成标准 Unified Diff 红绿增量回传。
 - **带行号切片的精准代码读取 (`read_local_file`)**：支持 `start_line` 与 `end_line` 限制读取窗口，强制添加 `123 |` 行号前缀，防止长代码截断与无意义上下文填充。
 - **Tree-sitter AST 代码大纲感知与语法校验门禁 (`get_repo_skeleton`)**：原生集成 Tree-sitter，轻量提取函数、类、方法签名与文档大纲（0 Token 浪费）；落盘前强制执行 AST 语法门禁（Python / JS / TS），防止损坏语法树。
