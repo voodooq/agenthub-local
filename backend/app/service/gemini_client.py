@@ -257,6 +257,8 @@ class GeminiClient:
         temperature: float = 0.7,
         auth_type: str = "api_key",
         on_downgrade: Any = None,
+        on_usage: Any = None,
+        on_first_byte: Any = None,
     ) -> AsyncGenerator[str, None]:
         """
         流式生成调度入口：自适应判断走 Sidecar 网页通道还是官方 REST 通道
@@ -332,9 +334,19 @@ class GeminiClient:
                                             message=chunk_json.get("error", {}).get("message", "网页端生成失败")
                                         )
                                     choices = chunk_json.get("choices", [])
+                                    if chunk_json.get("usage") and on_usage:
+                                        try:
+                                            on_usage(chunk_json["usage"])
+                                        except Exception:
+                                            pass
                                     if choices:
                                         delta = choices[0].get("delta", {}).get("content", "")
                                         if delta:
+                                            if on_first_byte:
+                                                try:
+                                                    on_first_byte()
+                                                except Exception:
+                                                    pass
                                             yield delta
                                 except json.JSONDecodeError:
                                     continue
@@ -409,14 +421,27 @@ class GeminiClient:
                                     cc_headers["Authorization"] = f"Bearer {active_token}"
                                     async with client.stream("POST", cc_url, headers=cc_headers, json=cc_payload) as retry_resp:
                                         if retry_resp.status_code == 200:
+                                            first_byte_notified = False
                                             async for line in retry_resp.aiter_lines():
                                                 if line and line.startswith("data: "):
+                                                    if not first_byte_notified and on_first_byte:
+                                                        first_byte_notified = True
+                                                        try:
+                                                            on_first_byte()
+                                                        except Exception:
+                                                            pass
                                                     raw_data = line[6:].strip()
                                                     if raw_data == "[DONE]":
                                                         break
                                                     try:
                                                         data_json = json.loads(raw_data)
                                                         inner = data_json.get("response", data_json)
+                                                        usage_meta = inner.get("usageMetadata") or data_json.get("usageMetadata")
+                                                        if usage_meta and on_usage:
+                                                            try:
+                                                                on_usage(usage_meta)
+                                                            except Exception:
+                                                                pass
                                                         for cand in inner.get("candidates", []):
                                                             for part in cand.get("content", {}).get("parts", []):
                                                                 if part.get("text") and not part.get("thought"):
@@ -450,16 +475,29 @@ class GeminiClient:
                                     continue
                                 raise GeminiAPIException(status_code=response.status_code, message=err_msg)
 
+                            first_byte_notified = False
                             async for line in response.aiter_lines():
                                 if not line:
                                     continue
                                 if line.startswith("data: "):
+                                    if not first_byte_notified and on_first_byte:
+                                        first_byte_notified = True
+                                        try:
+                                            on_first_byte()
+                                        except Exception:
+                                            pass
                                     raw_data = line[len("data: "):].strip()
                                     if raw_data == "[DONE]":
                                         break
                                     try:
                                         data_json = json.loads(raw_data)
                                         inner = data_json.get("response", data_json)
+                                        usage_meta = inner.get("usageMetadata") or data_json.get("usageMetadata")
+                                        if usage_meta and on_usage:
+                                            try:
+                                                on_usage(usage_meta)
+                                            except Exception:
+                                                pass
                                         candidates = inner.get("candidates", [])
                                         if candidates:
                                             parts = candidates[0].get("content", {}).get("parts", [])
@@ -543,15 +581,28 @@ class GeminiClient:
                     err_msg = error_text.decode("utf-8", errors="ignore")
                     raise GeminiAPIException(status_code=response.status_code, message=err_msg)
 
+                first_byte_notified = False
                 async for line in response.aiter_lines():
                     if not line:
                         continue
                     if line.startswith("data: "):
+                        if not first_byte_notified and on_first_byte:
+                            first_byte_notified = True
+                            try:
+                                on_first_byte()
+                            except Exception:
+                                pass
                         raw_data = line[len("data: "):].strip()
                         if raw_data == "[DONE]":
                             break
                         try:
                             data_json = json.loads(raw_data)
+                            usage_meta = data_json.get("usageMetadata")
+                            if usage_meta and on_usage:
+                                try:
+                                    on_usage(usage_meta)
+                                except Exception:
+                                    pass
                             candidates = data_json.get("candidates", [])
                             if candidates:
                                 parts = candidates[0].get("content", {}).get("parts", [])

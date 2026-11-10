@@ -404,15 +404,16 @@ async def delete_mcp_server(server_name: str):
 class LLMProviderSaveRequest(BaseModel):
     """保存或更新大模型供应商请求"""
     id: str | None = None
-    name: str = Field(..., description="供应商显示名称，如 DeepSeek 官方 / 本地 Ollama")
-    provider_type: str = Field(default="openai_compat", description="google_pool | gemini_api | openai_compat | anthropic")
-    base_url: str = Field(default="", description="API Base URL，如 https://api.deepseek.com/v1 或 http://127.0.0.1:11434/v1")
+    name: str = Field(..., description="供应商显示名称，如 DeepSeek 官方 / 本地 Ollama / 本地 llama-server")
+    provider_type: str = Field(default="openai_compat", description="google_pool | gemini_api | openai_compat | anthropic | ollama | llama_server")
+    base_url: str = Field(default="", description="API Base URL，如 https://api.deepseek.com/v1 或 http://127.0.0.1:8080/v1")
     api_key: str = Field(default="", description="API Key（留空则在更新时保持原加密 Key）")
     models: list[str] = Field(default_factory=list, description="该通道支持的模型列表")
     role_binding: str = Field(default="both", description="primary(主力推理) | light(后台记忆提炼) | both(通用)")
     tool_call_mode: str = Field(default="auto", description="auto | native | xml_prompt")
     priority: int = Field(default=5, description="调度优先级（越小越优先）")
     is_enabled: int = Field(default=1, description="1=启用, 0=禁用")
+    max_context_tokens: int = Field(default=0, ge=0, description="单槽位上下文窗口上限 (0=按通道自动适配，本地建议8192)")
 
 
 class GoogleOAuthInitRequest(BaseModel):
@@ -518,6 +519,7 @@ async def save_llm_provider(req: LLMProviderSaveRequest):
         priority=req.priority,
         is_enabled=req.is_enabled,
         provider_id=req.id,
+        max_context_tokens=req.max_context_tokens,
     )
     return saved
 

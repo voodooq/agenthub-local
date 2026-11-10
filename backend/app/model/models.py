@@ -60,6 +60,9 @@ class ConversationModel:
     rolling_summary: str = ""
     current_cwd: str | None = None
     workspace_id: str = "default"
+    collapse_anchor_turn_id: int = 0
+    anchored_summary: str = ""
+    collapsed_tokens_saved: int = 0
 
     @classmethod
     def from_row(cls, row: Any) -> "ConversationModel":

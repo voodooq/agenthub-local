@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.2.0-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.2.1-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,11 +19,11 @@
 
 ## 🧭 版本演进总览
 
-### ✨ v1.2.0 — 已有 Skill 迭代演进、多 Skill 协同与交互体验升级（当前版本）
-- **已有 Skill 迭代升级（非重复新建）**：基于已有 Skill 再次执行优化提炼时，支持直接迭代升级原 `SKILL.md` SOP 与语义化版本号（如 `v1.0.0 → v1.1.0`）并追加经验剧本，亦可在经验卡片中自由切换更新目标 Skill 或切换另存为新 Skill。
-- **多 Skill 协同编排**：支持在单条消息中通过 `/` 多次唤起并串联多个不同 Skill 协同完成任务（严格排除文件路径与 URL 误触）；输入区展示协同挂载胶囊栏，后端自动联合加载命中 Skill 四元组并注入协同编排提示词。
-- **长文本半屏编辑 & 执行步骤单行折叠**：长输入支持一键扩展至半屏高度查看与编辑；工具执行步骤区重构为默认单行折叠摘要条，按需展开详情并可随时手动收起（待人工高危审批卡片仍保持独立高亮显示），彻底避免大量步骤把上方 Thinking 思考内容顶出视线。
-- **透明品牌图标 & 关于页开源直达**：全端（Windows EXE、桌面窗口标题栏/任务栏、Web Favicon、侧边栏与关于页）接入裁剪去白后的全新透明 Logo；设置「关于」页展示当前版本与 GitHub 开源地址，支持默认浏览器一键打开与复制。
+### ✨ v1.2.0（最新 v1.2.1）— 本地上下文压缩、KV Cache 守护、双模性能水表与多 Skill 协同
+- **三区上下文压缩与 KV Cache 前缀守护**：划分 Zone 1（绝对不动前缀）+ Zone 2（只增不改热区 + 分块坍缩）+ Zone 3（跨轮零残留尾注），结合 SQLite FTS5 冷历史双路召回与工具长输出旁路脱水（`>1,000` 字符转 `Ref` + `read_tool_ref` 按行切片回查），最大化本地与云端 KV Cache 命中率。
+- **`llama-server` 深度适配与全链路 Token 水表**：原生接入 `llama.cpp`（`/health`、`/props` 单槽位显存探测、`/tokenize` 与 `timings`），在每条回复底部渲染单行实时水表（上下文水位、KV Cache 命中率、脱水节省、TTFT/TPS），支持 `/stats` 查看全会话分角色消耗看板；未配置 Google 账号时自动隐藏未绑定 Gemini 模型，仅显示用户自有算力通道模型。
+- **已有 Skill 迭代升级 & 多 Skill 协同编排**：基于已有 Skill 再次执行优化提炼时，支持直接迭代升级原 `SKILL.md` SOP 与语义化版本号；支持单条消息内通过 `/` 串联多个不同 Skill 协同完成任务。
+- **长文本半屏编辑 & 执行步骤单行折叠**：长输入支持一键扩展至半屏高度查看与编辑；工具执行步骤区默认单行折叠摘要条，全端接入全新透明品牌图标并在设置「关于」页展示版本与开源地址。
 
 ### 🚀 v1.1.0 — 项目工作区中枢、Loop 自主循环、四层记忆治理与跨平台发布体系
 - **通用工作区与零拷贝增量 FTS5**：支持托管虚拟沙盒与本地物理目录零迁移绑定、`.gitignore` 自动过滤与工作区独立 FTS5 trigram 倒排索引；实现基于 4KB Frontmatter 摘要与前端 SWR 的极速 Skill 列表秒开与 `L1/L2` 同名覆盖。
@@ -148,10 +148,10 @@ flowchart TD
 
 | 客户端版本 | 适用系统 | 包名称 | 运行方式 |
 | :--- | :--- | :--- | :--- |
-| **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.2.0-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
-| **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-v1.2.0-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
-| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.2.0-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
-| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.2.0-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
+| **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.2.1-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
+| **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-v1.2.1-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
+| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.2.1-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
+| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.2.1-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
 | **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
 
 ---
@@ -171,7 +171,7 @@ sequenceDiagram
     participant Port as package-portable (ubuntu)
     participant Rel as GitHub Releases 页面
 
-    Dev->>GH: git tag v1.2.0 && git push origin v1.2.0
+    Dev->>GH: git tag v1.2.1 && git push origin v1.2.1
     GH->>FE: 安装 Node 22 并导出静态前端 out/
     FE->>Port: 分发 out/ -> 生成 portable.zip & portable.tar.gz
     FE->>Win: 分发 out/ -> PyInstaller --onefile 生成 *-windows-x64.exe
@@ -184,9 +184,9 @@ sequenceDiagram
 ### 如何发布新版本：
 只需在 `version.json` 更新版本号并运行 `python sync_version.py`（或直接运行 `python sync_version.py <version>`），随后在本地执行以下命令：
 ```bash
-git tag -a v1.2.0 -m "Release v1.2.0"
+git tag -a v1.2.1 -m "Release v1.2.1"
 git push origin master
-git push origin v1.2.0
+git push origin v1.2.1
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 4 类干净的发行资产，几分钟内即可在 Releases 页面看到生成的下载文件！
 

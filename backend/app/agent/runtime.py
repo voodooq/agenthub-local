@@ -30,8 +30,11 @@ from ..extensions.mcp_manager import mcp_manager
 from .shell_executor import shell_executor
 from .tool_protocol import ToolProtocolAdapter
 from .context_builder import ContextBuilder
+from .context_compressor import LocalContextCompressor, read_ephemeral_tool_ref
 from .ui_operator import ui_operator
 from ..repository.loop_run_repository import TaskLoopRepository
+from ..repository.tool_ref_repository import ToolRefRepository
+from ..repository.token_usage_repository import TokenUsageRepository, _build_turn_summary_from_rows
 
 
 class AgentRuntime:
@@ -42,6 +45,7 @@ class AgentRuntime:
 
     PLANNING_SAFE_TOOLS = frozenset({
         "read_local_file",
+        "read_tool_ref",
         "search_memory_history",
         "search_skill_knowledge",
         "load_skill_detail",
@@ -609,6 +613,13 @@ class AgentRuntime:
         # 抽取本轮视觉附件（图片/PDF），同 Turn 多步调用中保持多模态视觉输入不丢失
         visual_attachments = self._filter_visual_attachments(attachments)
 
+        # 预解析当前模型匹配的主算力通道元信息，供 ContextBuilder 识别本地/云端坍缩策略及调用 /tokenize
+        resolved_primary_provider = await engine_pool.resolve_primary_provider_info(model_name)
+        # 同轮多步 ReAct 期间锁死 step_idx == 0 生成的 Zone 3 尾注，既守护同轮前缀命中又保持跨轮零残留
+        frozen_turn_tail_prompt: str | None = None
+        # 进程内存级指标流水收集（兼容无痕模式下零落库依然实时展示底部微水表）
+        in_memory_step_metrics: list[dict[str, Any]] = []
+
         # 5. 进入单轮内 ReAct 思考与工具执行循环 (Intra-Turn Adaptive Loop)
         step_idx = 0
         while step_idx < current_max_steps:
@@ -636,10 +647,14 @@ class AgentRuntime:
                 inquiry_confirmed=inquiry_confirmed,
                 inquiry_action=normalized_inquiry_action,
                 has_prior_execution_unlock=has_prior_execution_unlock,
+                provider_info=resolved_primary_provider,
+                model_name=model_name,
+                frozen_tail_prompt=frozen_turn_tail_prompt,
             )
 
             # 首步向前端推送命中的长期记忆溯源、活跃确定性事实视图与当前任务草稿纸
             if step_idx == 0:
+                frozen_turn_tail_prompt = str(ctx.get("tail_injection_prompt") or "")
                 matched_ids_from_ctx = ctx.get("matched_skill_ids") or []
                 if not matched_ids_from_ctx and ctx.get("matched_skill_id"):
                     matched_ids_from_ctx = [ctx["matched_skill_id"]]
@@ -748,11 +763,20 @@ class AgentRuntime:
                 attachments=step_attachments,
                 pre_built_history=history_for_step,
                 attachments_inline_only=step_attachments_inline_only,
+                turn_id=current_turn_id,
+                step_index=step_idx,
+                agent_role="primary",
+                tail_injection=frozen_turn_tail_prompt or "",
+                incognito=active_incognito,
             ):
                 etype = event.get("type")
                 if etype == "model_downgrade":
                     effective_model_name = event.get("current_model", effective_model_name)
                     yield event
+                elif etype == "step_metrics":
+                    m_dict = event.get("metrics")
+                    if isinstance(m_dict, dict):
+                        in_memory_step_metrics.append(m_dict)
                 elif etype == "stream_reset":
                     # 网络中途断流重连接力：立即清空当前步骤已累加的半截文本，与前端气泡绝对对齐
                     step_raw_text = ""
@@ -920,6 +944,27 @@ class AgentRuntime:
                         await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
                     except Exception as sync_err:
                         logger.debug(f"[AgentRuntime] 任务收尾物理资产同步跳过: {sync_err}")
+
+                # 汇总并推送本轮 Token / KV Cache / TTFT / TPS 微水表事件
+                try:
+                    turn_stats_payload = (
+                        None
+                        if active_incognito
+                        else await TokenUsageRepository.get_turn_summary(conv_id, current_turn_id)
+                    )
+                    if turn_stats_payload is None and in_memory_step_metrics:
+                        turn_stats_payload = _build_turn_summary_from_rows(
+                            current_turn_id, in_memory_step_metrics, 0
+                        )
+                    if turn_stats_payload:
+                        yield {
+                            "type": "token_stats",
+                            "conversation_id": conv_id,
+                            "turn_id": current_turn_id,
+                            "stats": turn_stats_payload,
+                        }
+                except Exception as stats_err:
+                    logger.debug(f"[AgentRuntime] 推送 token_stats 跳过: {stats_err}")
 
                 yield {
                     "type": "done",
@@ -1613,6 +1658,61 @@ class AgentRuntime:
                         "compressed": compressed,
                     }
 
+                # ── 工具 3.5: 按行切片回查超长工具原文引用 (read_tool_ref) ──
+                elif func_name == "read_tool_ref":
+                    target_ref_id = str(args.get("ref_id") or "").strip()
+                    s_line = int(args.get("start_line") or 1)
+                    e_line = int(args.get("end_line") or (s_line + 119))
+                    kw = str(args.get("keyword") or "").strip() or None
+                    yield {
+                        "type": "tool_start",
+                        "call_id": call_id,
+                        "name": func_name,
+                        "command": f"read_tool_ref({target_ref_id}, lines={s_line}..{e_line})",
+                        "reason": f"按需切片回查脱水工具原文引用 {target_ref_id}",
+                        "security": "SAFE",
+                    }
+                    if not target_ref_id:
+                        tool_output = "Error: 缺少必要参数 `ref_id`。"
+                        compressed = "[回查引用失败: 缺少 ref_id]"
+                    else:
+                        slice_res = None
+                        if active_incognito:
+                            slice_res = read_ephemeral_tool_ref(
+                                target_ref_id,
+                                start_line=s_line,
+                                end_line=e_line,
+                                keyword=kw,
+                            )
+                        if slice_res is None:
+                            slice_res = await ToolRefRepository.read_slice(
+                                ref_id=target_ref_id,
+                                start_line=s_line,
+                                end_line=e_line,
+                                keyword=kw,
+                                conversation_id=conv_id,
+                            )
+                        if slice_res.get("found"):
+                            header = (
+                                f"[引用原文切片 | Ref: {target_ref_id} | 工具: {slice_res.get('tool_name', '')} | "
+                                f"范围: L{slice_res.get('returned_start', 0)}~L{slice_res.get('returned_end', 0)} / 共 {slice_res.get('total_lines', 0)} 行]"
+                            )
+                            tool_output = f"{header}\n{slice_res.get('content', '')}"
+                            compressed = f"[已切片回查 `{target_ref_id}` L{slice_res.get('returned_start', 0)}~L{slice_res.get('returned_end', 0)}]"
+                        else:
+                            tool_output = f"Error: {slice_res.get('error', '未找到引用记录')}"
+                            compressed = f"[引用回查未命中 `{target_ref_id}`]"
+                    yield {
+                        "type": "tool_end",
+                        "call_id": call_id,
+                        "name": func_name,
+                        "command": f"read_tool_ref({target_ref_id})",
+                        "reason": f"回查引用 {target_ref_id}",
+                        "status": "completed",
+                        "output": tool_output,
+                        "compressed": compressed,
+                    }
+
                 # ── 工具 4: MCP 扩展工具 (mcp__<server>__<tool>) ──
                 elif func_name.startswith("mcp__"):
                     yield {
@@ -1700,7 +1800,88 @@ class AgentRuntime:
                         if prev_step_error is not None:
                             recovered_error_count += 1
 
-                # 将工具真实输出与单行折叠摘要同时落盘（当前 Turn 用完整 output，后续 Turn 自动用 compressed）
+                # 旁路影子清洗 (Context Scrubber)：对超长工具输出 (>1000 字符) 截留原文至 tool_output_refs 并提炼 <=200 字结论；
+                # 严格遵守 Write-Once 铁律：一次脱水后统一写入 content 与 compressed_content，热区内绝不二次改写！
+                if func_name != "read_tool_ref" and len(tool_output or "") > 1000:
+                    try:
+                        scrub_res = await LocalContextCompressor.scrub_tool_output(
+                            conversation_id=conv_id,
+                            turn_id=current_turn_id,
+                            tool_name=func_name,
+                            tool_args_summary=json.dumps(args, ensure_ascii=False)[:180],
+                            raw_output=tool_output,
+                            incognito=active_incognito,
+                            primary_provider_info=resolved_primary_provider,
+                        )
+                        if scrub_res.get("was_scrubbed"):
+                            tool_output = str(scrub_res["content"])
+                            compressed = tool_output
+                            saved_est = int(scrub_res.get("saved_tokens") or 0)
+                            scrubber_m = scrub_res.get("scrubber_metrics")
+                            if isinstance(scrubber_m, dict):
+                                scrubber_record = dict(scrubber_m)
+                                scrubber_record["turn_id"] = current_turn_id
+                                scrubber_record["step_index"] = step_idx
+                                scrubber_record["agent_role"] = "scrubber"
+                                scrubber_record["saved_tokens"] = saved_est
+                                in_memory_step_metrics.append(scrubber_record)
+                                if not active_incognito:
+                                    await TokenUsageRepository.record_usage(
+                                        conversation_id=conv_id,
+                                        turn_id=current_turn_id,
+                                        step_index=step_idx,
+                                        agent_role="scrubber",
+                                        provider_id=str(scrubber_record.get("provider_id") or ""),
+                                        provider_name=str(scrubber_record.get("provider_name") or ""),
+                                        provider_type=str(scrubber_record.get("provider_type") or ""),
+                                        model_name=str(scrubber_record.get("model_name") or ""),
+                                        prompt_tokens=int(scrubber_record.get("prompt_tokens") or 0),
+                                        cached_tokens=int(scrubber_record.get("cached_tokens") or 0),
+                                        eval_tokens=int(scrubber_record.get("eval_tokens") or 0),
+                                        completion_tokens=int(scrubber_record.get("completion_tokens") or 0),
+                                        saved_tokens=saved_est,
+                                        context_limit=int(scrubber_record.get("context_limit") or 0),
+                                        ttft_ms=float(scrubber_record.get("ttft_ms") or 0.0),
+                                        prefill_ms=float(scrubber_record.get("prefill_ms") or 0.0),
+                                        tps=float(scrubber_record.get("tps") or 0.0),
+                                        is_estimated=bool(scrubber_record.get("is_estimated", False)),
+                                    )
+                            elif saved_est > 0:
+                                det_record = {
+                                    "turn_id": current_turn_id,
+                                    "step_index": step_idx,
+                                    "agent_role": "scrubber",
+                                    "provider_type": "local_rule",
+                                    "provider_name": "ContextScrubber",
+                                    "model_name": "deterministic_scrubber",
+                                    "prompt_tokens": 0,
+                                    "cached_tokens": 0,
+                                    "eval_tokens": 0,
+                                    "completion_tokens": 0,
+                                    "saved_tokens": saved_est,
+                                    "context_limit": 0,
+                                    "ttft_ms": 0.0,
+                                    "prefill_ms": 0.0,
+                                    "tps": 0.0,
+                                    "is_estimated": True,
+                                }
+                                in_memory_step_metrics.append(det_record)
+                                if not active_incognito:
+                                    await TokenUsageRepository.record_usage(
+                                        conversation_id=conv_id,
+                                        turn_id=current_turn_id,
+                                        step_index=step_idx,
+                                        agent_role="scrubber",
+                                        provider_name="ContextScrubber",
+                                        provider_type="local_rule",
+                                        model_name="deterministic_scrubber",
+                                        saved_tokens=saved_est,
+                                        is_estimated=True,
+                                    )
+                    except Exception as scrub_err:
+                        logger.debug(f"[AgentRuntime] 旁路工具清洗跳过: {scrub_err}")
+
+                # 将工具输出与单行折叠摘要同时落盘
                 await MessageRepository.save_message(
                     conversation_id=conv_id,
                     role="tool",
@@ -1834,16 +2015,35 @@ class AgentRuntime:
                         await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
                     except Exception as sync_err:
                         logger.debug(f"[AgentRuntime] 达到步数上限时物理资产同步跳过: {sync_err}")
+                try:
+                    turn_stats_payload = (
+                        None
+                        if active_incognito
+                        else await TokenUsageRepository.get_turn_summary(conv_id, current_turn_id)
+                    )
+                    if turn_stats_payload is None and in_memory_step_metrics:
+                        turn_stats_payload = _build_turn_summary_from_rows(
+                            current_turn_id, in_memory_step_metrics, 0
+                        )
+                    if turn_stats_payload:
+                        yield {
+                            "type": "token_stats",
+                            "conversation_id": conv_id,
+                            "turn_id": current_turn_id,
+                            "stats": turn_stats_payload,
+                        }
+                except Exception:
+                    pass
                 yield {
                     "type": "done",
                     "full_content": accumulated_visible_text.strip() or f"已完成深度推演与自主闭环执行（共执行 {step_idx} 步）。若需进一步处理请继续告知。",
                     "account": final_account,
                 }
 
-        # 7. 回合后异步记忆提炼、增量会话摘要推进与自然衰减维护（非阻塞后台任务）
+        # 7. 回合后异步记忆提炼与自然衰减维护（长程上下文分块坍缩已由 LocalContextCompressor 守护前缀复用，避免后台频繁改写摘要）
         if active_scene != "oneshot" and not active_incognito:
             asyncio.create_task(self._post_turn_memory_maintenance(user_message))
-            window_limit = 12 if active_scene == "chat" else 10
+            window_limit = 24 if active_scene == "chat" else 20
             asyncio.create_task(
                 session_summary_manager.maybe_update_summary(
                     conv_id,

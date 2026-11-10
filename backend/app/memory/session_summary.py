@@ -447,6 +447,134 @@ class SessionSummaryManager:
             "updated_at": now_ts,
         }
 
+    @classmethod
+    async def collapse_turn_range(
+        cls,
+        conversation_id: str,
+        *,
+        old_anchor_turn_id: int,
+        new_anchor_turn_id: int,
+        existing_summary_markdown: str = "",
+        workspace_id: str = "default",
+        incognito: bool = False,
+        use_llm: bool = True,
+    ) -> dict[str, Any] | None:
+        """按精确轮次区间 (old_anchor_turn_id, new_anchor_turn_id] 执行分块坍缩合并。
+
+        NOTE: 供 LocalContextCompressor 在触发 Chunk Collapse 时调用；
+        当 incognito=True 时仅在内存返回合并摘要，严禁写入 SQLite 持久化表。
+        """
+        clean_conv = (conversation_id or "").strip()
+        if not clean_conv or new_anchor_turn_id <= old_anchor_turn_id:
+            return None
+
+        async with db_manager.get_connection() as conn:
+            async with conn.execute(
+                """
+                SELECT id, turn_id, role, content, compressed_content, created_at
+                FROM messages
+                WHERE conversation_id = ?
+                  AND COALESCE(turn_id, 1) > ?
+                  AND COALESCE(turn_id, 1) <= ?
+                ORDER BY COALESCE(turn_id, 1) ASC, id ASC
+                """,
+                (clean_conv, int(old_anchor_turn_id), int(new_anchor_turn_id)),
+            ) as cur:
+                delta_rows = [dict(r) for r in await cur.fetchall()]
+
+        if not delta_rows:
+            return None
+
+        existing = None if incognito else await cls.get_summary(clean_conv)
+        if not existing and existing_summary_markdown.strip():
+            existing = {
+                "core_goal": "",
+                "confirmed_params": {},
+                "produced_artifacts": [],
+                "open_issues": [],
+                "summary_markdown": existing_summary_markdown.strip(),
+            }
+
+        merged: dict[str, Any] | None = None
+        used_llm = False
+        if use_llm:
+            merged = await cls._llm_merge(
+                conversation_id=clean_conv,
+                existing_summary=existing,
+                delta_rows=delta_rows,
+                watermark_turn_id=int(new_anchor_turn_id),
+            )
+            if merged is not None:
+                used_llm = True
+
+        if merged is None:
+            merged = cls._heuristic_merge(
+                existing_goal=(existing or {}).get("core_goal", ""),
+                existing_params=(existing or {}).get("confirmed_params", {}),
+                existing_artifacts=(existing or {}).get("produced_artifacts", []),
+                existing_issues=(existing or {}).get("open_issues", []),
+                delta_rows=delta_rows,
+                watermark_turn_id=int(new_anchor_turn_id),
+            )
+
+        sanitized_merged, _ = MemoryPolicyGuard.sanitize_payload(merged)
+        core_goal = str(sanitized_merged.get("core_goal") or "")[:160]
+        confirmed_params = sanitized_merged.get("confirmed_params") or {}
+        produced_artifacts = sanitized_merged.get("produced_artifacts") or []
+        open_issues = sanitized_merged.get("open_issues") or []
+        summary_markdown = str(sanitized_merged.get("summary_markdown") or "")[: cls.MAX_SUMMARY_CHARS]
+
+        now_ts = datetime.now(timezone.utc).isoformat()
+        if not incognito:
+            resolved_ws = (workspace_id or "default").strip() or "default"
+            async with db_manager.get_connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO session_summaries (
+                        conversation_id, workspace_id, watermark_turn_id,
+                        core_goal, confirmed_params_json, produced_artifacts_json,
+                        open_issues_json, summary_markdown, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(conversation_id) DO UPDATE SET
+                        workspace_id = excluded.workspace_id,
+                        watermark_turn_id = excluded.watermark_turn_id,
+                        core_goal = excluded.core_goal,
+                        confirmed_params_json = excluded.confirmed_params_json,
+                        produced_artifacts_json = excluded.produced_artifacts_json,
+                        open_issues_json = excluded.open_issues_json,
+                        summary_markdown = excluded.summary_markdown,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        clean_conv,
+                        resolved_ws,
+                        int(new_anchor_turn_id),
+                        core_goal,
+                        json.dumps(confirmed_params, ensure_ascii=False),
+                        json.dumps(produced_artifacts, ensure_ascii=False),
+                        json.dumps(open_issues, ensure_ascii=False),
+                        summary_markdown,
+                        now_ts,
+                    ),
+                )
+                await conn.execute(
+                    "UPDATE conversations SET rolling_summary = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                    (summary_markdown, clean_conv),
+                )
+                await conn.commit()
+
+        return {
+            "watermark_turn_id": int(new_anchor_turn_id),
+            "core_goal": core_goal,
+            "confirmed_params": confirmed_params,
+            "produced_artifacts": produced_artifacts,
+            "open_issues": open_issues,
+            "summary_markdown": summary_markdown,
+            "delta_rows": delta_rows,
+            "used_llm": used_llm,
+            "updated_at": now_ts,
+        }
+
 
 session_summary_manager = SessionSummaryManager()
 

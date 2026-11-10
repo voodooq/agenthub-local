@@ -252,6 +252,35 @@ class ToolProtocolAdapter:
                     "required": ["action"],
                 },
             },
+            {
+                "name": "read_tool_ref",
+                "description": (
+                    "按引用 ID（如 tool_ref_xxxxxxxx）精准按行号区间或关键词回查被旁路脱水折留的超长工具原始输出。"
+                    "当历史消息中的精简摘要不足以定位某一行代码、堆栈或配置细节时调用。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "ref_id": {
+                            "type": "string",
+                            "description": "工具摘要中标注的引用 ID（例如 'tool_ref_a1b2c3d4'）。",
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "起始行号（从 1 开始，默认 1）。",
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "结束行号（默认 120，单次最多返回 200 行）。",
+                        },
+                        "keyword": {
+                            "type": "string",
+                            "description": "可选检索关键词。传入时自动定位匹配行及其上下 ±10 行上下文。",
+                        },
+                    },
+                    "required": ["ref_id"],
+                },
+            },
         ]
 
     @classmethod
@@ -279,8 +308,9 @@ class ToolProtocolAdapter:
             "当前已激活的工具列表：",
         ]
 
-        for t in tools:
-            params_str = json.dumps(t.get("parameters", {}).get("properties", {}), ensure_ascii=False)
+        # NOTE: 按 tool name 字典序固定排序，保证同一工具集合在每轮生成字节级完全一致的前缀提示词，守护 KV Cache
+        for t in sorted(tools, key=lambda item: str(item.get("name", ""))):
+            params_str = json.dumps(t.get("parameters", {}).get("properties", {}), ensure_ascii=False, sort_keys=True)
             tool_Wait_lines.append(f"- **`{t['name']}`**: {t.get('description', '')} | 参数: `{params_str}`")
 
         return "\n".join(tool_Wait_lines)
@@ -350,6 +380,7 @@ class ToolProtocolAdapter:
         "search_memory_history",
         "write_local_file",
         "read_local_file",
+        "read_tool_ref",
         "web_fetch",
         "update_working_memory",
         "load_skill_detail",

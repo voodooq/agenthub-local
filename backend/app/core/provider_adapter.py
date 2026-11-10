@@ -1,23 +1,43 @@
 """
 多协议大模型统一接入与适配层 (ProviderAdapter)
-支持四大通道类型：
+支持通道类型：
 1. google_pool: 原有 Google OAuth / Antigravity CLI 多账号算力池 (<50ms 429 自动接力)
 2. gemini_api: 用户自定义 Google AI Studio API Key
 3. openai_compat: 兼容 OpenAI / DeepSeek / 硅基流动 / OpenRouter / 本地 Ollama (http://127.0.0.1:11434/v1)
-4. anthropic: 兼容 Claude 官方与中转 Messages API
+4. llama_server: 本地 llama.cpp 原生服务 (http://127.0.0.1:8080/v1)，支持 /health、/props 单槽位探针、/tokenize 与 timings
+5. anthropic: 兼容 Claude 官方与中转 Messages API
 
 同时支持「主力推理 (primary)」与「后台轻量记忆提炼 (light)」双角色绑定策略。
 """
 import base64
 import json
+import time
+from typing import Any, AsyncGenerator, Callable
 import uuid
 from datetime import datetime, timezone, timedelta
-from typing import Any, AsyncGenerator
 import httpx
 
 from .logging_config import logger
 from ..repository.db import db_manager
 from ..service.gemini_client import GeminiClient
+
+# 进程级缓存：不支持 stream_options.include_usage 的第三方兼容节点 URL 集合
+_STREAM_OPTIONS_UNSUPPORTED_HOSTS: set[str] = set()
+# 进程级缓存：本地服务 /props 槽位与 n_ctx 探测结果 {host: (ts, info_dict)}，TTL 60 秒
+_LOCAL_SLOTS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
+_LOCAL_SLOTS_TTL_SECS = 60.0
+
+
+def _extract_host_root(base_url: str, default_host: str = "http://127.0.0.1:8080") -> str:
+    """从 OpenAI 兼容 Base URL 推导宿主根地址（剥离 /v1 与 /chat/completions）"""
+    clean = (base_url or "").strip().rstrip("/")
+    if not clean:
+        return default_host
+    if clean.endswith("/chat/completions"):
+        clean = clean[:-len("/chat/completions")].rstrip("/")
+    if clean.endswith("/v1"):
+        clean = clean[:-3].rstrip("/")
+    return clean or default_host
 
 
 class ProviderAdapter:
@@ -129,17 +149,33 @@ class ProviderAdapter:
         priority: int = 10,
         is_enabled: int = 1,
         provider_id: str | None = None,
+        max_context_tokens: int = 0,
     ) -> dict[str, Any]:
-        """新增或更新一个大模型供应商通道"""
+        """新增或更新一个大模型供应商通道（支持 llama_server 与 max_context_tokens 上限配置）"""
         pid = provider_id or f"prov_{uuid.uuid4().hex[:8]}"
         valid_type = (
             provider_type
-            if provider_type in ("google_pool", "google_oauth", "gemini_api", "openai_compat", "anthropic", "ollama")
+            if provider_type in (
+                "google_pool",
+                "google_oauth",
+                "gemini_api",
+                "openai_compat",
+                "anthropic",
+                "ollama",
+                "llama_server",
+            )
             else "openai_compat"
         )
         effective_base_url = base_url.strip().rstrip("/")
         if valid_type == "ollama" and not effective_base_url:
             effective_base_url = "http://127.0.0.1:11434/v1"
+        elif valid_type == "llama_server" and not effective_base_url:
+            effective_base_url = "http://127.0.0.1:8080/v1"
+
+        resolved_max_ctx = max(0, int(max_context_tokens or 0))
+        if resolved_max_ctx == 0 and valid_type in ("llama_server", "ollama"):
+            resolved_max_ctx = 8192
+
         models_str = json.dumps(models or [], ensure_ascii=False)
 
         async with db_manager.get_connection() as conn:
@@ -160,8 +196,8 @@ class ProviderAdapter:
             await conn.execute(
                 """
                 INSERT OR REPLACE INTO llm_providers
-                (id, name, provider_type, base_url, api_key_encrypted, refresh_token_encrypted, models_json, role_binding, tool_call_mode, priority, is_enabled)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (id, name, provider_type, base_url, api_key_encrypted, refresh_token_encrypted, models_json, role_binding, tool_call_mode, priority, is_enabled, max_context_tokens)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pid,
@@ -175,6 +211,7 @@ class ProviderAdapter:
                     tool_call_mode,
                     int(priority),
                     1 if is_enabled else 0,
+                    resolved_max_ctx,
                 ),
             )
             await conn.commit()
@@ -189,7 +226,64 @@ class ProviderAdapter:
             "tool_call_mode": tool_call_mode,
             "priority": int(priority),
             "is_enabled": 1 if is_enabled else 0,
+            "max_context_tokens": resolved_max_ctx,
         }
+
+    @classmethod
+    async def probe_local_slots(cls, base_url: str, force: bool = False) -> dict[str, Any]:
+        """探测本地 llama-server 的 /props 元信息（单槽位 n_ctx 与并发 total_slots），带 60s 缓存。
+
+        NOTE: 在 llama.cpp 机制中 `-c` 为全部槽位共享总上下文池，
+        `/props` 返回的 `default_generation_settings.n_ctx` 即服务端已除以 `total_slots` 后的单槽位真实可用上限。
+        """
+        host_root = _extract_host_root(base_url)
+        now = time.time()
+        if not force and host_root in _LOCAL_SLOTS_CACHE:
+            cached_ts, cached_info = _LOCAL_SLOTS_CACHE[host_root]
+            if now - cached_ts < _LOCAL_SLOTS_TTL_SECS:
+                return cached_info
+
+        info: dict[str, Any] = {"detected_n_ctx": 0, "total_slots": 0}
+        try:
+            async with httpx.AsyncClient(timeout=1.2) as client:
+                resp = await client.get(f"{host_root}/props")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    gen_settings = data.get("default_generation_settings") or {}
+                    n_ctx = int(gen_settings.get("n_ctx") or 0)
+                    slots = int(data.get("total_slots") or 0)
+                    info = {"detected_n_ctx": n_ctx, "total_slots": slots}
+        except Exception:
+            pass
+
+        _LOCAL_SLOTS_CACHE[host_root] = (now, info)
+        return info
+
+    @classmethod
+    async def tokenize_count(
+        cls,
+        base_url: str,
+        content: str,
+        timeout: float = 0.8,
+    ) -> int | None:
+        """调用 llama-server 原生 POST /tokenize 精准测算完整文本 Token 数；失败或超时即返回 None"""
+        if not content:
+            return 0
+        host_root = _extract_host_root(base_url)
+        try:
+            async with httpx.AsyncClient(timeout=timeout) as client:
+                resp = await client.post(
+                    f"{host_root}/tokenize",
+                    json={"content": content, "add_special": True},
+                )
+                if resp.status_code == 200:
+                    data = resp.json()
+                    tokens = data.get("tokens")
+                    if isinstance(tokens, list):
+                        return len(tokens)
+        except Exception:
+            pass
+        return None
 
     @classmethod
     async def delete_provider(cls, provider_id: str) -> bool:
@@ -249,6 +343,69 @@ class ProviderAdapter:
                     "latency_ms": int((time.time() - start_t) * 1000),
                     "models": [],
                     "message": f"连接本地 Ollama 服务失败 (请确认 Ollama 已启动): {str(e)}",
+                }
+
+        # 1.5 本地 llama-server (llama.cpp) 专属探测：/health + /v1/models + /props 单槽位嗅探
+        if ptype == "llama_server":
+            host_root = _extract_host_root(base_url, default_host="http://127.0.0.1:8080")
+            try:
+                async with httpx.AsyncClient(timeout=4.0) as client:
+                    health_resp = await client.get(f"{host_root}/health")
+                    latency = int((time.time() - start_t) * 1000)
+                    if health_resp.status_code == 503:
+                        return {
+                            "success": False,
+                            "latency_ms": latency,
+                            "models": [],
+                            "message": "llama-server 正在加载 GGUF 模型权重中 (503 Loading model)，请稍等数秒后再试。",
+                        }
+                    if health_resp.status_code != 200:
+                        return {
+                            "success": False,
+                            "latency_ms": latency,
+                            "models": [],
+                            "message": f"llama-server /health 返回异常状态 {health_resp.status_code}: {health_resp.text[:120]}",
+                        }
+
+                    model_list: list[str] = []
+                    try:
+                        m_resp = await client.get(f"{host_root}/v1/models")
+                        if m_resp.status_code == 200:
+                            m_data = m_resp.json()
+                            if isinstance(m_data, dict) and isinstance(m_data.get("data"), list):
+                                model_list = [item.get("id") for item in m_data["data"] if item.get("id")]
+                    except Exception:
+                        pass
+
+                    props_info = await cls.probe_local_slots(host_root, force=True)
+                    detected_n_ctx = int(props_info.get("detected_n_ctx") or 0)
+                    total_slots = int(props_info.get("total_slots") or 0)
+
+                    msg_parts = [f"成功连通本地 llama-server！延迟 {latency}ms"]
+                    if model_list:
+                        msg_parts.append(f"已加载模型: {model_list[0]}")
+                    if detected_n_ctx > 0:
+                        slot_hint = (
+                            f"，并发槽位={total_slots}（单槽位真实 n_ctx={detected_n_ctx:,}"
+                            + ("；单槽位模式下旁路清洗将自动走零开销规则提取" if total_slots == 1 else "")
+                            + "）"
+                        )
+                        msg_parts.append(slot_hint)
+
+                    return {
+                        "success": True,
+                        "latency_ms": latency,
+                        "models": model_list[:20],
+                        "detected_n_ctx": detected_n_ctx,
+                        "total_slots": total_slots,
+                        "message": "".join(msg_parts),
+                    }
+            except Exception as e:
+                return {
+                    "success": False,
+                    "latency_ms": int((time.time() - start_t) * 1000),
+                    "models": [],
+                    "message": f"连接本地 llama-server ({host_root}) 失败，请确认已启动 llama-server 服务: {str(e)}",
                 }
 
         # 2. 通用 OpenAI 兼容 / DeepSeek / 硅基流动 / Gemini API 探测
@@ -314,10 +471,11 @@ class ProviderAdapter:
         messages: list[dict[str, Any]],
         system_instruction: str | None = None,
         temperature: float = 0.7,
+        on_usage: Callable[[dict[str, Any] | None, dict[str, Any] | None], None] | None = None,
     ) -> AsyncGenerator[str, None]:
         """
         调用标准 OpenAI 兼容接口 (/v1/chat/completions) 流式生成：
-        无缝支持 DeepSeek、OpenAI、硅基流动、OpenRouter 以及本地 Ollama (http://127.0.0.1:11434/v1)
+        无缝支持 DeepSeek、OpenAI、硅基流动、OpenRouter、本地 Ollama 以及 llama-server (timings/cache_n)
         """
         effective_base = (base_url or "https://api.openai.com/v1").rstrip("/")
         if not effective_base.endswith("/chat/completions"):
@@ -339,36 +497,59 @@ class ProviderAdapter:
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
-        payload = {
+        include_usage = endpoint not in _STREAM_OPTIONS_UNSUPPORTED_HOSTS
+        payload: dict[str, Any] = {
             "model": model_name,
             "messages": oai_messages,
             "temperature": temperature,
             "stream": True,
         }
+        if include_usage:
+            payload["stream_options"] = {"include_usage": True}
 
         async with httpx.AsyncClient(timeout=90.0) as client:
-            async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
-                if resp.status_code != 200:
-                    err_body = (await resp.aread()).decode("utf-8", errors="replace")[:300]
-                    raise RuntimeError(f"OpenAI 兼容接口报错 ({resp.status_code}): {err_body}")
+            for attempt in range(2):
+                async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
+                    if resp.status_code != 200:
+                        err_body = (await resp.aread()).decode("utf-8", errors="replace")[:300]
+                        # 若第三方兼容中转拒收 stream_options，则自动记忆剔除该字段并当场重连重试
+                        if (
+                            attempt == 0
+                            and "stream_options" in payload
+                            and resp.status_code in (400, 422)
+                            and any(k in err_body.lower() for k in ("stream_options", "extra inputs", "unrecognized", "unknown field"))
+                        ):
+                            _STREAM_OPTIONS_UNSUPPORTED_HOSTS.add(endpoint)
+                            payload.pop("stream_options", None)
+                            logger.info(f"[ProviderAdapter] 节点 {endpoint} 不支持 stream_options，已自动降级移除并透明重试")
+                            continue
+                        raise RuntimeError(f"OpenAI 兼容接口报错 ({resp.status_code}): {err_body}")
 
-                async for line in resp.aiter_lines():
-                    line_str = line.strip()
-                    if not line_str or not line_str.startswith("data:"):
-                        continue
-                    data_part = line_str[5:].strip()
-                    if data_part == "[DONE]":
-                        break
-                    try:
-                        chunk_json = json.loads(data_part)
-                        choices = chunk_json.get("choices") or []
-                        if choices:
-                            delta = choices[0].get("delta") or {}
-                            content_piece = delta.get("content") or ""
-                            if content_piece:
-                                yield content_piece
-                    except Exception:
-                        continue
+                    async for line in resp.aiter_lines():
+                        line_str = line.strip()
+                        if not line_str or not line_str.startswith("data:"):
+                            continue
+                        data_part = line_str[5:].strip()
+                        if data_part == "[DONE]":
+                            break
+                        try:
+                            chunk_json = json.loads(data_part)
+                            chunk_usage = chunk_json.get("usage")
+                            chunk_timings = chunk_json.get("timings")
+                            if (chunk_usage or chunk_timings) and on_usage:
+                                try:
+                                    on_usage(chunk_usage, chunk_timings)
+                                except Exception:
+                                    pass
+                            choices = chunk_json.get("choices") or []
+                            if choices:
+                                delta = choices[0].get("delta") or {}
+                                content_piece = delta.get("content") or ""
+                                if content_piece:
+                                    yield content_piece
+                        except Exception:
+                            continue
+                    return
 
     @classmethod
     async def stream_anthropic(
@@ -379,6 +560,7 @@ class ProviderAdapter:
         messages: list[dict[str, Any]],
         system_instruction: str | None = None,
         temperature: float = 0.7,
+        on_usage: Callable[[dict[str, Any] | None, dict[str, Any] | None], None] | None = None,
     ) -> AsyncGenerator[str, None]:
         """调用 Anthropic Claude (/v1/messages) 流式接口"""
         effective_base = (base_url or "https://api.anthropic.com/v1").rstrip("/")
@@ -423,7 +605,22 @@ class ProviderAdapter:
                     data_part = line_str[5:].strip()
                     try:
                         ev = json.loads(data_part)
-                        if ev.get("type") == "content_block_delta":
+                        ev_type = ev.get("type")
+                        if ev_type == "message_start" and on_usage:
+                            msg_usage = (ev.get("message") or {}).get("usage")
+                            if isinstance(msg_usage, dict):
+                                try:
+                                    on_usage(msg_usage, None)
+                                except Exception:
+                                    pass
+                        elif ev_type == "message_delta" and on_usage:
+                            delta_usage = ev.get("usage")
+                            if isinstance(delta_usage, dict):
+                                try:
+                                    on_usage(delta_usage, None)
+                                except Exception:
+                                    pass
+                        elif ev_type == "content_block_delta":
                             text_piece = (ev.get("delta") or {}).get("text") or ""
                             if text_piece:
                                 yield text_piece
@@ -443,11 +640,18 @@ class ProviderAdapter:
             target_model = models[0] if models else "gpt-4o-mini"
 
             try:
-                if ptype == "openai_compat" and (prov.get("api_key") or "11434" in (prov.get("base_url") or "")):
+                if ptype in ("openai_compat", "ollama", "llama_server") and (
+                    prov.get("api_key") or ptype in ("ollama", "llama_server") or "11434" in (prov.get("base_url") or "")
+                ):
+                    default_url = (
+                        "http://127.0.0.1:8080/v1"
+                        if ptype == "llama_server"
+                        else ("http://127.0.0.1:11434/v1" if ptype == "ollama" else "")
+                    )
                     out = []
                     async for ch in cls.stream_openai_compatible(
-                        base_url=prov.get("base_url") or "",
-                        api_key=prov.get("api_key") or "",
+                        base_url=prov.get("base_url") or default_url,
+                        api_key=prov.get("api_key") or ("local" if ptype in ("ollama", "llama_server") else ""),
                         model_name=target_model,
                         messages=[{"role": "user", "content": prompt}],
                         system_instruction=system_prompt,

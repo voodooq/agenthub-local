@@ -117,6 +117,18 @@ const STATIC_COMMAND_LIST: CommandItem[] = [
       '# /free-port 端口死锁排查与释放\n\n## 用法示例\n- `/free-port 8080`\n- `/free-port 3000`\n\n## 执行流程\n自动通过 `netstat -ano` 与 `Get-Process` 定位占用指定端口的进程 PID 与路径，并协助释放端口。',
   },
   {
+    id: 'slash_stats',
+    trigger: '/',
+    label: '/stats',
+    description: '查看当前会话 Token 消耗、KV Cache 命中率与分块坍缩收益看板（别名 /tokens）',
+    insertText: '/stats',
+    icon: Sparkles,
+    badge: '监控看板',
+    hasDoc: true,
+    docBody:
+      '# /stats 会话上下文与 KV Cache 性能看板\n\n## 功能说明\n- 输入 `/stats` 或 `/tokens` 并发送，立即在本地打开当前会话的完整 Token 统计弹窗（**不消耗任何模型推理配额**）；\n- 展示每轮 Prompt 实算 vs 缓存复用率、旁路工具脱水节省 Tokens、分块坍缩锚点与首字延迟 (TTFT / TPS)。',
+  },
+  {
     id: 'slash_clean_cache',
     trigger: '/',
     label: '/clean-cache',

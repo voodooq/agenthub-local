@@ -55,6 +55,8 @@ import { ApprovalCard } from '@/components/ApprovalCard';
 import { SkillPickerModal } from '@/components/SkillPickerModal';
 import { SopDrawer } from '@/components/SopDrawer';
 import { AssistantMarkdownMessage } from '@/components/AssistantMarkdownMessage';
+import { TokenMetricsFooterBar } from '@/components/TokenMetricsFooterBar';
+import { TokenStatsModal } from '@/components/TokenStatsModal';
 
 import { GeneratedFileChip } from '@/components/GeneratedFileChip';
 import { buildActiveSystemOverride } from '@/utils/personalityHelper';
@@ -74,6 +76,7 @@ import {
   PlanStepItem,
   ConfirmedFactItem,
   MemoryFactItem,
+  TurnTokenMetrics,
 } from '@/types';
 import { apiFetch, getAccessToken } from '@/utils/apiClient';
 import {
@@ -123,7 +126,7 @@ export default function WorkbenchPage() {
   const [statusPill, setStatusPill] = useState<StatusPillData | null>(null);
 
   // 当前选中模型及可用模型列表
-  const [currentModel, setCurrentModel] = useState<string>('gemini-4-argon');
+  const [currentModel, setCurrentModel] = useState<string>('');
   const hasUserSelectedModelRef = useRef(false);
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
   const [modelAccountInfo, setModelAccountInfo] = useState<{
@@ -191,6 +194,7 @@ export default function WorkbenchPage() {
   const [isSyncOpen, setIsSyncOpen] = useState(false);
   const [isMemoryHubOpen, setIsMemoryHubOpen] = useState(false);
   const [memoryHubInitialTab, setMemoryHubInitialTab] = useState<MemoryHubTab>('memories');
+  const [isTokenStatsModalOpen, setIsTokenStatsModalOpen] = useState(false);
 
   // 三层记忆与微内核 Agent 状态
   const [sceneMode, setSceneMode] = useState<SceneMode>('agent');
@@ -306,6 +310,8 @@ export default function WorkbenchPage() {
 
   // 流式结束重载数据库消息时，保留最新一轮收到的 fact_refs 溯源状态
   const lastStreamFactRefsRef = useRef<{ convId: string; facts: MemoryFactItem[] } | null>(null);
+  // 流式结束重载消息时保活最新一轮实时 token_stats 水表（兼顾无痕模式不闪灭）
+  const lastStreamTokenStatsRef = useRef<{ convId: string; stats: TurnTokenMetrics } | null>(null);
 
   const [canvasState, setCanvasState] = useState<{
     isOpen: boolean;
@@ -488,16 +494,19 @@ export default function WorkbenchPage() {
     if (nextModels.length > 0) {
       setCurrentModel((prev) => {
         const defaultModel = nextModels.find((m) => m.is_default);
-        const stillValid = nextModels.some((m) => m.id === prev);
-        // 若存在明确标记为默认就绪的模型（如已配置就绪的本地/自定义模型），且用户尚未手动选择过模型或原模型已失效，自动切换为默认模型
-        if (
-          defaultModel &&
-          (!stillValid || (!hasUserSelectedModelRef.current && (prev === 'gemini-4-argon' || prev === 'gemini-2.5-pro')))
-        ) {
+        const stillValid = Boolean(prev) && nextModels.some((m) => m.id === prev);
+        // 若尚未选定模型、原模型已不在可用列表中，或用户未手动指定且存在明确默认模型，自动切换至用户拥有的默认/首个模型
+        if (!stillValid) {
+          return defaultModel ? defaultModel.id : nextModels[0].id;
+        }
+        if (defaultModel && !hasUserSelectedModelRef.current) {
           return defaultModel.id;
         }
-        return stillValid ? prev : nextModels[0].id;
+        return prev;
       });
+    } else {
+      hasUserSelectedModelRef.current = false;
+      setCurrentModel('');
     }
   };
 
@@ -743,6 +752,18 @@ export default function WorkbenchPage() {
             }
           }
         }
+        // 保活当前会话最新一轮实时 Token 水表（在无痕模式未落库时防重载闪灭）
+        const preservedStats = lastStreamTokenStatsRef.current;
+        if (preservedStats && preservedStats.convId === cid && preservedStats.stats) {
+          for (let i = merged.length - 1; i >= 0; i--) {
+            if (merged[i].role === 'model') {
+              if (!merged[i].token_stats) {
+                merged[i].token_stats = preservedStats.stats;
+              }
+              break;
+            }
+          }
+        }
         setMessages(merged);
       }
     } catch (e) {
@@ -938,6 +959,23 @@ export default function WorkbenchPage() {
       || (currentAttachments.length > 0 && !customPrompt ? '请结合附带的文件或图片内容进行分析解答。' : '');
     if (!rawPrompt || isStreaming) return;
 
+    // 静默拦截本地监控看板指令 /stats 与 /tokens，不消耗模型配额直接呼出弹窗
+    const lowerSlashCmd = rawPrompt.toLowerCase();
+    if (
+      lowerSlashCmd === '/stats' ||
+      lowerSlashCmd === '/tokens' ||
+      lowerSlashCmd.startsWith('/stats ') ||
+      lowerSlashCmd.startsWith('/tokens ')
+    ) {
+      if (!customPrompt) {
+        setInputPrompt('');
+        setIsInputExpanded(false);
+        setInputCursorPos(0);
+      }
+      setIsTokenStatsModalOpen(true);
+      return;
+    }
+
     let promptToSend = rawPrompt;
     let effectiveConvId = activeConvId;
     if (!customPrompt) {
@@ -1101,7 +1139,7 @@ export default function WorkbenchPage() {
           conversation_id: activeConvId,
           workspace_id: activeWorkspaceId,
           message: promptToSend,
-          model_name: currentModel,
+          model_name: currentModel || availableModels[0]?.id || '',
           thinking_level: thinkingLevel,
           system_override: await buildActiveSystemOverride(),
           context_rounds: memoryRounds,
@@ -1361,6 +1399,18 @@ export default function WorkbenchPage() {
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
                 last.content = '';
+              }
+              return updated;
+            });
+          } else if (parsed.type === 'token_stats' && parsed.stats) {
+            const turnStats = parsed.stats as TurnTokenMetrics;
+            const targetConvId = effectiveConvId || activeConvIdRef.current || '';
+            lastStreamTokenStatsRef.current = { convId: targetConvId, stats: turnStats };
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                last.token_stats = turnStats;
               }
               return updated;
             });
@@ -2429,6 +2479,14 @@ export default function WorkbenchPage() {
                         />
                       )}
 
+                      {/* 单行轻量 Token 与 KV Cache 水表 */}
+                      {!isUser && msg.token_stats && (
+                        <TokenMetricsFooterBar
+                          stats={msg.token_stats}
+                          onOpenStats={() => setIsTokenStatsModalOpen(true)}
+                        />
+                      )}
+
                       {/* AI 消息交互底栏 */}
                       {!isUser && msg.content && (
                         <MessageActions
@@ -2884,6 +2942,7 @@ export default function WorkbenchPage() {
                           setSettingsInitialTab('models');
                           setIsSettingsOpen(true);
                         }}
+                        onOpenAccountModal={() => setIsAccountOpen(true)}
                       />
 
                       {/* 发送按钮 */}
@@ -3000,6 +3059,16 @@ export default function WorkbenchPage() {
         skill={selectedSopSkill}
         workspaceId={activeWorkspaceId}
         onClose={handleCloseSopDrawer}
+      />
+
+      {/* 会话级 Token 消耗、KV Cache 命中率与本地算力吞吐看板弹窗 */}
+      <TokenStatsModal
+        isOpen={isTokenStatsModalOpen}
+        onClose={() => setIsTokenStatsModalOpen(false)}
+        conversationId={activeConvId}
+        liveTurnMetrics={messages
+          .filter((m) => m.role === 'model' && m.token_stats)
+          .map((m) => m.token_stats as TurnTokenMetrics)}
       />
     </div>
   );

@@ -1,6 +1,7 @@
 """
 会话与消息请求/响应校验契约
 """
+from typing import Any
 from pydantic import BaseModel, Field
 
 
@@ -31,6 +32,7 @@ class MessageResponse(BaseModel):
     compressed_content: str | None = None
     tool_calls_json: str | None = None
     tool_call_id: str | None = None
+    token_stats: dict[str, Any] | None = None
 
 
 class ConversationResponse(BaseModel):

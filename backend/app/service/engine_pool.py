@@ -10,6 +10,8 @@ from typing import AsyncGenerator, Any
 
 from ..core.config import settings
 from ..core.logging_config import logger
+from ..core.token_metrics import TokenMetricsCollector
+from ..agent.context_compressor import estimate_messages_tokens, estimate_tokens
 from ..repository.account_repository import AccountRepository
 from ..repository.message_repository import MessageRepository
 from .quota_monitor import quota_monitor
@@ -34,6 +36,24 @@ class EnginePoolService:
                 logger.warning(f"读取全局个人档案失败: {e}")
         return ""
 
+    @staticmethod
+    async def resolve_primary_provider_info(model_name: str = "") -> dict[str, Any] | None:
+        """预解析当前优先命中的算力通道元信息（用于 ContextBuilder 判断本地/云端坍缩阈值与 /tokenize）"""
+        try:
+            from ..core.provider_adapter import provider_adapter
+
+            providers = await provider_adapter.get_enabled_providers_for_role("primary")
+            for prov in providers:
+                ptype = prov.get("provider_type")
+                if ptype == "google_pool":
+                    continue
+                prov_models = prov.get("models") or []
+                if model_name in prov_models or ptype == "google_oauth" or int(prov.get("priority", 10)) < 1:
+                    return prov
+        except Exception:
+            pass
+        return None
+
     @classmethod
     async def execute_stream_with_failover(
         cls,
@@ -50,15 +70,20 @@ class EnginePoolService:
         pre_built_history: list[dict[str, Any]] | None = None,
         task_role: str = "primary",
         attachments_inline_only: bool = False,
+        turn_id: int = 1,
+        step_index: int = 0,
+        agent_role: str | None = None,
+        tail_injection: str = "",
+        incognito: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
-        带零感知热故障转移与可配置上下文记忆轮数的流式生成执行器。
-        当账号遇到 rate_limited 或 auth_error 时，自动冷却并切换到下一个可用账号。
+        带零感知热故障转移、三区尾注动态注入与全通道真实 Token/KV Cache 采集的流式生成执行器。
         """
         retries_left = max_retries or settings.auto_failover_retry
+        effective_agent_role = agent_role or ("scrubber" if task_role == "light" else "primary")
 
         if pre_built_history is not None:
-            effective_history_dicts = pre_built_history
+            effective_history_dicts = [dict(item) for item in pre_built_history]
         else:
             history_limit = max(100, context_rounds * 4) if context_rounds > 0 else 100
             history_messages = await MessageRepository.get_by_conversation(
@@ -175,6 +200,23 @@ class EnginePoolService:
 
         prompt_with_attachments = user_prompt + attachment_guidance
 
+        # NOTE: Zone 3 尾部注入挂接策略：
+        # - step_index == 0 时挂在当前 user_prompt 末尾；
+        # - step_index >= 1（同轮多步 ReAct）时挂回本轮最初那条 user 消息发送副本末尾，
+        #   既实现同轮多步 100% 前缀字节冻结，又确保跨轮次时彻底丢弃不写库、不污染 Zone 2！
+        clean_tail = (tail_injection or "").strip()
+        if clean_tail:
+            tail_block = f"\n\n<agenthub_tail_context>\n{clean_tail}\n</agenthub_tail_context>"
+            attached_to_turn_user = False
+            if int(step_index or 0) > 0:
+                for h_item in effective_history_dicts:
+                    if h_item.get("role") == "user" and int(h_item.get("turn_id") or 1) == int(turn_id or 1):
+                        h_item["content"] = str(h_item.get("content") or "") + tail_block
+                        attached_to_turn_user = True
+                        break
+            if not attached_to_turn_user:
+                prompt_with_attachments = prompt_with_attachments + tail_block
+
         # 组装消息列表 (官方 Gemini REST API 格式，history 中的附件锚点同样展开为真实路径档案)
         contents: list[dict[str, Any]] = []
         for msg in effective_history_dicts:
@@ -273,7 +315,22 @@ class EnginePoolService:
                         for hm in effective_history_dicts
                     ]
                     custom_msgs = sanitized_history + [{"role": "user", "content": prompt_with_attachments + non_multimodal_note}]
+                    est_prompt_tokens = (
+                        estimate_tokens(system_instruction)
+                        + (8 if system_instruction else 0)
+                        + estimate_messages_tokens(custom_msgs)
+                    )
+                    collector = TokenMetricsCollector(
+                        turn_id=turn_id,
+                        step_index=step_index,
+                        agent_role=effective_agent_role,
+                        provider_info=prov,
+                        model_name=target_m,
+                        estimated_prompt_tokens=est_prompt_tokens,
+                    )
                     full_custom_text = ""
+                    stream_completed = False
+                    should_persist_on_abort = False
                     try:
                         if ptype == "google_oauth":
                             valid_token = await google_oauth_manager.ensure_valid_access_token(prov)
@@ -289,6 +346,7 @@ class EnginePoolService:
                                     "message": f"检测到原模型「{from_m}」当前配额耗尽或容量不足 ({reason})，已自动切换至高可用模型「{to_m}」继续生成。",
                                 })
 
+                            should_persist_on_abort = True
                             async for ch in GeminiClient.stream_generate_content(
                                 api_key=valid_token,
                                 model_name=target_m,
@@ -298,26 +356,39 @@ class EnginePoolService:
                                 temperature=temperature,
                                 auth_type="oauth_google_one",
                                 on_downgrade=on_custom_downgrade,
+                                on_usage=lambda u: collector.record_raw_usage(usage=u),
+                                on_first_byte=collector.mark_first_byte,
                             ):
                                 while custom_downgrades:
                                     yield custom_downgrades.pop(0)
                                 full_custom_text += ch
+                                collector.mark_chunk(ch)
                                 yield {"type": "chunk", "content": ch, "account": prov_name}
 
                             while custom_downgrades:
                                 yield custom_downgrades.pop(0)
-                        elif ptype in ("openai_compat", "ollama"):
+                        elif ptype in ("openai_compat", "ollama", "llama_server"):
+                            default_local_url = (
+                                "http://127.0.0.1:8080/v1"
+                                if ptype == "llama_server"
+                                else ("http://127.0.0.1:11434/v1" if ptype == "ollama" else "")
+                            )
+                            default_local_key = "local" if ptype in ("ollama", "llama_server") else ""
+                            should_persist_on_abort = True
                             async for ch in provider_adapter.stream_openai_compatible(
-                                base_url=prov.get("base_url") or ("http://127.0.0.1:11434/v1" if ptype == "ollama" else ""),
-                                api_key=prov.get("api_key") or ("ollama" if ptype == "ollama" else ""),
+                                base_url=prov.get("base_url") or default_local_url,
+                                api_key=prov.get("api_key") or default_local_key,
                                 model_name=target_m,
                                 messages=custom_msgs,
                                 system_instruction=system_instruction,
                                 temperature=temperature,
+                                on_usage=lambda u, t: collector.record_raw_usage(usage=u, timings=t),
                             ):
                                 full_custom_text += ch
+                                collector.mark_chunk(ch)
                                 yield {"type": "chunk", "content": ch, "account": prov_name}
                         elif ptype == "anthropic":
+                            should_persist_on_abort = True
                             async for ch in provider_adapter.stream_anthropic(
                                 base_url=prov.get("base_url") or "",
                                 api_key=prov.get("api_key") or "",
@@ -325,10 +396,13 @@ class EnginePoolService:
                                 messages=custom_msgs,
                                 system_instruction=system_instruction,
                                 temperature=temperature,
+                                on_usage=lambda u, t: collector.record_raw_usage(usage=u, timings=t),
                             ):
                                 full_custom_text += ch
+                                collector.mark_chunk(ch)
                                 yield {"type": "chunk", "content": ch, "account": prov_name}
                         elif ptype == "gemini_api" and prov.get("api_key"):
+                            should_persist_on_abort = True
                             async for ch in GeminiClient.stream_generate_content(
                                 api_key=prov["api_key"],
                                 model_name=target_m,
@@ -337,31 +411,58 @@ class EnginePoolService:
                                 thinking_level=thinking_level,
                                 temperature=temperature,
                                 auth_type="api_key",
+                                on_usage=lambda u: collector.record_raw_usage(usage=u),
+                                on_first_byte=collector.mark_first_byte,
                             ):
                                 full_custom_text += ch
+                                collector.mark_chunk(ch)
                                 yield {"type": "chunk", "content": ch, "account": prov_name}
 
                         if full_custom_text:
-                            custom_tokens = max(1, (len(user_prompt) + len(full_custom_text)) // 3)
-                            # 若自定义通道名称匹配本地账号库，原子累加调用频次与 Token
-                            await AccountRepository.record_usage(prov_name, tokens_spent=custom_tokens)
+                            stream_completed = True
+                            step_res = await collector.persist(
+                                conversation_id=conversation_id,
+                                incognito=incognito,
+                                aborted=False,
+                            )
+                            total_spent = max(1, step_res.prompt_tokens + step_res.completion_tokens)
+                            await AccountRepository.record_usage(prov_name, tokens_spent=total_spent)
+                            yield {"type": "step_metrics", "metrics": step_res.to_dict()}
                             yield {
                                 "type": "done",
                                 "full_content": full_custom_text,
                                 "account": prov_name,
-                                "usage": {"totalTokenCount": custom_tokens},
+                                "usage": {
+                                    "promptTokenCount": step_res.prompt_tokens,
+                                    "candidatesTokenCount": step_res.completion_tokens,
+                                    "cachedContentTokenCount": step_res.cached_tokens,
+                                    "totalTokenCount": total_spent,
+                                },
                             }
                             return
                     except GeminiAPIException as g_err:
+                        should_persist_on_abort = False
                         if g_err.status_code in (429, 503):
                             await provider_adapter.mark_provider_cooldown(prov["id"], cooldown_seconds=60)
                             prev_failed_prov_name = prov_name
                         logger.warning(f"算力通道 [{prov_name}] 触发限流或异常 ({g_err})，<50ms 无缝接力至下一节点")
                     except Exception as custom_err:
+                        should_persist_on_abort = False
                         if "429" in str(custom_err):
                             await provider_adapter.mark_provider_cooldown(prov["id"], cooldown_seconds=60)
                             prev_failed_prov_name = prov_name
                         logger.warning(f"自定义算力通道 [{prov_name}] 异常 ({custom_err})，自动故障转移至下一节点")
+                    finally:
+                        # 用户中途点“停止生成”(GeneratorExit / CancelledError) 时强制保底写入 is_estimated=True 记录
+                        if not stream_completed and should_persist_on_abort:
+                            try:
+                                await collector.persist(
+                                    conversation_id=conversation_id,
+                                    incognito=incognito,
+                                    aborted=True,
+                                )
+                            except Exception:
+                                pass
         except Exception as e:
             logger.debug(f"检查多协议供应商跳过: {e}")
 
@@ -426,6 +527,28 @@ class EnginePoolService:
 
             # ──────────────────── 通道 1: 标准 Google 官方 REST 通道 (API Key / OAuth) ────────────────────
             if account.auth_type in ("oauth_google_one", "oauth_personal", "api_key"):
+                est_prompt_tokens = (
+                    estimate_tokens(system_instruction)
+                    + (8 if system_instruction else 0)
+                    + estimate_messages_tokens(effective_history_dicts)
+                    + estimate_tokens(prompt_with_attachments)
+                    + 8
+                )
+                legacy_prov_meta = {
+                    "id": f"account_{getattr(account, 'id', None) or account.name}",
+                    "name": account.name,
+                    "provider_type": "google_oauth" if account.auth_type.startswith("oauth") else "gemini_api",
+                }
+                collector = TokenMetricsCollector(
+                    turn_id=turn_id,
+                    step_index=step_index,
+                    agent_role=effective_agent_role,
+                    provider_info=legacy_prov_meta,
+                    model_name=model_name,
+                    estimated_prompt_tokens=est_prompt_tokens,
+                )
+                stream_completed = False
+                should_persist_on_abort = False
                 try:
                     # 若为 OAuth 通道，自动检查并续期 Access Token；若为 API Key，直接使用 credentials
                     if account.auth_type.startswith("oauth"):
@@ -441,6 +564,7 @@ class EnginePoolService:
                     def on_model_downgrade(from_m: str, to_m: str, reason: str):
                         nonlocal actual_model
                         actual_model = to_m
+                        collector.model_name = to_m
                         downgrade_events.append({
                             "type": "model_downgrade",
                             "original_model": from_m,
@@ -450,6 +574,7 @@ class EnginePoolService:
                             "message": f"检测到原模型「{from_m}」当前配额耗尽或容量不足 ({reason})，已自动为您无缝切换至高可用模型「{to_m}」继续生成。",
                         })
 
+                    should_persist_on_abort = True
                     async for chunk in GeminiClient.stream_generate_content(
                         api_key=valid_token,
                         model_name=model_name,
@@ -459,33 +584,50 @@ class EnginePoolService:
                         temperature=temperature,
                         auth_type=active_auth_type,
                         on_downgrade=on_model_downgrade,
+                        on_usage=lambda u: collector.record_raw_usage(usage=u),
+                        on_first_byte=collector.mark_first_byte,
                     ):
                         while downgrade_events:
                             yield downgrade_events.pop(0)
                         full_response_text += chunk
+                        collector.mark_chunk(chunk)
                         yield {"type": "chunk", "content": chunk, "account": account.name, "model": actual_model}
 
                     while downgrade_events:
                         yield downgrade_events.pop(0)
 
-                    total_tokens = max(1, (len(user_prompt) + len(full_response_text)) // 3)
+                    stream_completed = True
+                    step_res = await collector.persist(
+                        conversation_id=conversation_id,
+                        incognito=incognito,
+                        aborted=False,
+                    )
+                    total_tokens = max(1, step_res.prompt_tokens + step_res.completion_tokens)
                     latency_ms = (time.time() - start_time) * 1000
                     tracker.record_request_end(latency_ms, tokens=total_tokens)
                     await AccountRepository.record_usage(account.name, tokens_spent=total_tokens)
+                    yield {"type": "step_metrics", "metrics": step_res.to_dict()}
                     yield {
                         "type": "done",
                         "full_content": full_response_text,
                         "account": account.name,
                         "model": actual_model,
-                        "usage": {"totalTokenCount": total_tokens}
+                        "usage": {
+                            "promptTokenCount": step_res.prompt_tokens,
+                            "candidatesTokenCount": step_res.completion_tokens,
+                            "cachedContentTokenCount": step_res.cached_tokens,
+                            "totalTokenCount": total_tokens,
+                        },
                     }
                     return
 
                 except GeminiAPIException as g_err:
+                    should_persist_on_abort = False
                     logger.warning(f"OAuth 账号 [{account.name}] 响应异常 [{g_err.status_code}]: {g_err.message}")
                     if g_err.status_code in (429, 503, 502):
                         encountered_rate_limit = True
                         if full_response_text:
+                            collector.reset_stream_buffer()
                             yield {
                                 "type": "stream_reset",
                                 "reason": "mid_flight_retry",
@@ -498,79 +640,130 @@ class EnginePoolService:
                         yield {"type": "error", "content": f"Google API 报错: {g_err.message}"}
                         return
                 except Exception as e:
+                    should_persist_on_abort = False
                     logger.error(f"OAuth 账号 [{account.name}] 生成异常: {e}")
                     encountered_rate_limit = True
                     if full_response_text:
+                        collector.reset_stream_buffer()
                         yield {
                             "type": "stream_reset",
                             "reason": "mid_flight_retry",
                             "message": "检测到网络断流，正在无缝重试...",
                         }
                         full_response_text = ""
+                finally:
+                    if not stream_completed and should_persist_on_abort:
+                        try:
+                            await collector.persist(
+                                conversation_id=conversation_id,
+                                incognito=incognito,
+                                aborted=True,
+                            )
+                        except Exception:
+                            pass
 
             # ──────────────────── 通道 2: Antigravity / Gemini CLI 引擎 ────────────────────
             elif account.cli_home_dir:
-                async for event in run_cli_stream(
-                    cli_home_dir=account.cli_home_dir,
-                    prompt=full_cli_prompt,
-                    model=model_name if model_name != "default" else None,
-                    thinking_level=thinking_level,
-                    work_dir=work_dir,
-                    approval_mode="auto_edit",
-                ):
-                    etype = event.get("type")
+                cli_prov_meta = {
+                    "id": f"cli_{account.id or account.name}",
+                    "name": account.name,
+                    "provider_type": "gemini_cli",
+                }
+                cli_collector = TokenMetricsCollector(
+                    turn_id=turn_id,
+                    step_index=step_index,
+                    agent_role=effective_agent_role,
+                    provider_info=cli_prov_meta,
+                    model_name=model_name,
+                    estimated_prompt_tokens=estimate_tokens(full_cli_prompt),
+                )
+                cli_completed = False
+                try:
+                    async for event in run_cli_stream(
+                        cli_home_dir=account.cli_home_dir,
+                        prompt=full_cli_prompt,
+                        model=model_name if model_name != "default" else None,
+                        thinking_level=thinking_level,
+                        work_dir=work_dir,
+                        approval_mode="auto_edit",
+                    ):
+                        etype = event.get("type")
 
-                    if etype == "content":
-                        text = event.get("text", "")
-                        full_response_text += text
-                        yield {"type": "chunk", "content": text, "account": account.name}
+                        if etype == "content":
+                            text = event.get("text", "")
+                            full_response_text += text
+                            cli_collector.mark_chunk(text)
+                            yield {"type": "chunk", "content": text, "account": account.name}
 
-                    elif etype == "tool_request":
-                        yield {
-                            "type": "tool_request",
-                            "tool_name": event.get("tool_name"),
-                            "tool_input": event.get("tool_input"),
-                            "account": account.name,
-                        }
+                        elif etype == "tool_request":
+                            yield {
+                                "type": "tool_request",
+                                "tool_name": event.get("tool_name"),
+                                "tool_input": event.get("tool_input"),
+                                "account": account.name,
+                            }
 
-                    elif etype == "tool_result":
-                        yield {
-                            "type": "tool_result",
-                            "tool_name": event.get("tool_name"),
-                            "output": event.get("output"),
-                        }
+                        elif etype == "tool_result":
+                            yield {
+                                "type": "tool_result",
+                                "tool_name": event.get("tool_name"),
+                                "output": event.get("output"),
+                            }
 
-                    elif etype == "rate_limited":
-                        encountered_rate_limit = True
-                        logger.warning(f"账号 [{account.name}] 触发限流，准备切号")
-                        break
+                        elif etype == "rate_limited":
+                            encountered_rate_limit = True
+                            logger.warning(f"账号 [{account.name}] 触发限流，准备切号")
+                            break
 
-                    elif etype == "auth_error":
-                        encountered_auth_error = True
-                        logger.error(f"账号 [{account.name}] 认证失效，准备切号")
-                        break
+                        elif etype == "auth_error":
+                            encountered_auth_error = True
+                            logger.error(f"账号 [{account.name}] 认证失效，准备切号")
+                            break
 
-                    elif etype == "timeout":
-                        yield {"type": "error", "content": "请求超时，请重试"}
-                        return
+                        elif etype == "timeout":
+                            yield {"type": "error", "content": "请求超时，请重试"}
+                            return
 
-                    elif etype == "error":
-                        yield {"type": "error", "content": event.get("message", "未知错误")}
-                        return
+                        elif etype == "error":
+                            yield {"type": "error", "content": event.get("message", "未知错误")}
+                            return
 
-                    elif etype == "done":
-                        usage = event.get("usage", {})
-                        total_tokens = usage.get("totalTokenCount", len(full_response_text) // 3)
-                        latency_ms = (time.time() - start_time) * 1000
-                        tracker.record_request_end(latency_ms, tokens=total_tokens)
-                        await AccountRepository.record_usage(account.name, tokens_spent=total_tokens)
-                        yield {
-                            "type": "done",
-                            "full_content": full_response_text,
-                            "account": account.name,
-                            "usage": usage,
-                        }
-                        return
+                        elif etype == "done":
+                            cli_completed = True
+                            usage = event.get("usage", {})
+                            if isinstance(usage, dict) and usage:
+                                cli_collector.record_raw_usage(usage=usage)
+                            step_res = await cli_collector.persist(
+                                conversation_id=conversation_id,
+                                incognito=incognito,
+                                aborted=False,
+                            )
+                            total_tokens = max(
+                                1,
+                                usage.get("totalTokenCount")
+                                or (step_res.prompt_tokens + step_res.completion_tokens),
+                            )
+                            latency_ms = (time.time() - start_time) * 1000
+                            tracker.record_request_end(latency_ms, tokens=total_tokens)
+                            await AccountRepository.record_usage(account.name, tokens_spent=total_tokens)
+                            yield {"type": "step_metrics", "metrics": step_res.to_dict()}
+                            yield {
+                                "type": "done",
+                                "full_content": full_response_text,
+                                "account": account.name,
+                                "usage": usage,
+                            }
+                            return
+                finally:
+                    if not cli_completed and not encountered_rate_limit and not encountered_auth_error and cli_collector.accumulated_text:
+                        try:
+                            await cli_collector.persist(
+                                conversation_id=conversation_id,
+                                incognito=incognito,
+                                aborted=True,
+                            )
+                        except Exception:
+                            pass
             else:
                 logger.error(f"账号 [{account.name}] 未知认证模式且无 cli_home_dir，跳过")
                 retries_left -= 1

@@ -76,6 +76,9 @@ class DatabaseManager:
             "tenant_id": "TEXT DEFAULT 'default'",
             "project_id": "TEXT DEFAULT 'default'",
             "workspace_id": "TEXT DEFAULT 'default'",
+            "collapse_anchor_turn_id": "INTEGER DEFAULT 0",
+            "anchored_summary": "TEXT DEFAULT ''",
+            "collapsed_tokens_saved": "INTEGER DEFAULT 0",
         }
         for col, col_type in new_columns.items():
             if col not in columns:
@@ -174,6 +177,7 @@ class DatabaseManager:
         new_columns = {
             "refresh_token_encrypted": "TEXT",
             "cooldown_until": "DATETIME",
+            "max_context_tokens": "INTEGER DEFAULT 0",
         }
         for col, col_type in new_columns.items():
             if col not in columns:
@@ -607,6 +611,63 @@ class DatabaseManager:
             """)
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_exp_prop_status ON experience_proposals(status, workspace_id, created_at);"
+            )
+
+            # 19. 工具超长原始输出按需引用表 (tool_output_refs - 支持旁路脱水原文溯源与按行切片回查)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS tool_output_refs (
+                ref_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                turn_id INTEGER NOT NULL DEFAULT 1,
+                tool_name TEXT NOT NULL,
+                tool_args_summary TEXT DEFAULT '',
+                storage_mode TEXT NOT NULL DEFAULT 'inline_db',
+                raw_content TEXT,
+                disk_path TEXT,
+                raw_chars INTEGER NOT NULL DEFAULT 0,
+                raw_tokens_est INTEGER NOT NULL DEFAULT 0,
+                scrubbed_summary TEXT NOT NULL DEFAULT '',
+                scrubbed_tokens_est INTEGER NOT NULL DEFAULT 0,
+                saved_tokens_est INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_tool_refs_conv_turn ON tool_output_refs(conversation_id, turn_id);"
+            )
+
+            # 20. 推理与辅助清洗 Token/KV Cache/耗时明细表 (token_usage_logs)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS token_usage_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                conversation_id TEXT NOT NULL,
+                turn_id INTEGER NOT NULL DEFAULT 1,
+                step_index INTEGER NOT NULL DEFAULT 0,
+                agent_role TEXT NOT NULL DEFAULT 'primary',
+                provider_id TEXT DEFAULT '',
+                provider_name TEXT DEFAULT '',
+                provider_type TEXT DEFAULT '',
+                model_name TEXT NOT NULL DEFAULT '',
+                prompt_tokens INTEGER NOT NULL DEFAULT 0,
+                cached_tokens INTEGER NOT NULL DEFAULT 0,
+                eval_tokens INTEGER NOT NULL DEFAULT 0,
+                completion_tokens INTEGER NOT NULL DEFAULT 0,
+                saved_tokens INTEGER NOT NULL DEFAULT 0,
+                context_limit INTEGER NOT NULL DEFAULT 0,
+                ttft_ms REAL DEFAULT 0.0,
+                prefill_ms REAL DEFAULT 0.0,
+                tps REAL DEFAULT 0.0,
+                is_estimated INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_token_logs_conv_turn ON token_usage_logs(conversation_id, turn_id, step_index);"
+            )
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_token_logs_created ON token_usage_logs(created_at);"
             )
 
             await conn.commit()

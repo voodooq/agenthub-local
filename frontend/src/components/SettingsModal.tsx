@@ -516,7 +516,7 @@ export function SettingsModal({
                   <button
                     type="button"
                     onClick={handleTestAllModels}
-                    disabled={testingAll || loadingModels}
+                    disabled={testingAll || loadingModels || !modelState || modelState.candidates.length === 0}
                     className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-all shadow-md shadow-emerald-500/25 flex items-center justify-center space-x-2 shrink-0 disabled:opacity-50 min-h-[38px]"
                   >
                     {testingAll ? (
@@ -566,6 +566,15 @@ export function SettingsModal({
                     <div className="p-8 text-center text-muted-foreground text-xs flex items-center justify-center space-x-2">
                       <RefreshCw className="w-4 h-4 animate-spin text-emerald-500" />
                       <span>正在根据账号属性加载模型库...</span>
+                    </div>
+                  ) : modelState && modelState.candidates.length === 0 ? (
+                    <div className="p-6 rounded-2xl bg-surface-100 border border-border text-center space-y-2">
+                      <div className="text-xs font-bold text-foreground">
+                        当前尚未绑定任何 Google 账号或自定义模型通道
+                      </div>
+                      <p className="text-[11px] text-muted-foreground leading-relaxed">
+                        未登录 Google 账号时，系统不会默认展示 Gemini 系列模型。请先前往「账号与算力池」添加本地模型（如 llama-server / Ollama）或 API / Google 账号。
+                      </p>
                     </div>
                   ) : (
                     <div className="space-y-2.5">

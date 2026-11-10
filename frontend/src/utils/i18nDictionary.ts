@@ -4,6 +4,25 @@ import { ResolvedLocale } from '@/context/LanguageContext';
  * 全量多语种词条映射库（按字符长度自动降序排序预处理，先长句后短词，确保 100% 翻译覆盖且不被短词破坏）
  */
 export const PHRASE_DICTIONARY: Record<string, { 'zh-TW': string; en: string; ja: string }> = {
+  // ──────────── v1.2.1 本地上下文压缩、KV Cache 守护与全链路 Token 水表 ────────────
+  '全链路追踪实算 Prompt / KV Cache 命中率、本地旁路工具脱水与分块坍缩净收益': { 'zh-TW': '全鏈路追蹤實算 Prompt / KV Cache 命中率、本地旁路工具脫水與分塊坍縮淨收益', en: 'End-to-end tracking of Prompt/KV Cache hit rate, local tool scrubbing & chunk collapse savings', ja: 'Prompt / KV Cache ヒット率、ローカルツール圧縮、チャンク集約の削減効果を全追跡' },
+  '单槽位上下文窗口上限 (max_context_tokens，0 表示自动探测)': { 'zh-TW': '單槽位上下文視窗上限 (max_context_tokens，0 表示自動探測)', en: 'Per-slot context limit (max_context_tokens, 0 = auto-detect)', ja: 'スロット単体コンテキスト上限 (max_context_tokens, 0 = 自動検出)' },
+  '会话上下文压缩与 KV Cache 性能看板': { 'zh-TW': '工作階段上下文壓縮與 KV Cache 效能看板', en: 'Session Context Compression & KV Cache Dashboard', ja: 'セッション文脈圧縮＆KV Cache パフォーマンス' },
+  '8GB VRAM 显存黄金启动命令（双槽位并发 + KV Cache 量化）': { 'zh-TW': '8GB VRAM 顯存黃金啟動命令（雙槽位並發 + KV Cache 量化）', en: '8GB VRAM Optimal Launch Command (2 Slots + KV Quantization)', ja: '8GB VRAM 推奨起動コマンド（2スロット並列 + KV量子化）' },
+  '上下文压缩与本地缓存诊断报告': { 'zh-TW': '上下文壓縮與本地快取診斷報告', en: 'Context Compression & Local Cache Diagnostics', ja: 'コンテキスト圧縮＆ローカルキャッシュ診断レポート' },
+  '逐轮上下文水位与缓存复用明细': { 'zh-TW': '逐輪上下文水位與快取複用明細', en: 'Per-Turn Context Watermark & Cache Reuse', ja: 'ターン別コンテキスト水位＆キャッシュ再利用明細' },
+  '按智能体角色算力分账': { 'zh-TW': '按智慧體角色算力分帳', en: 'Token Breakdown by Agent Role', ja: 'エージェント役割別トークン内訳' },
+  '实际路由通道与模型分布': { 'zh-TW': '實際路由通道與模型分佈', en: 'Routed Providers & Models', ja: 'ルーティング先プロバイダー＆モデル分布' },
+  '平均首字延迟 & 吞吐': { 'zh-TW': '平均首字延遲 & 吞吐', en: 'Avg TTFT & Throughput', ja: '平均TTFT＆スループット' },
+  '全局 KV Cache 命中率': { 'zh-TW': '全域 KV Cache 命中率', en: 'Global KV Cache Hit Rate', ja: '全体 KV Cache ヒット率' },
+  '累计新算 Eval / 输出': { 'zh-TW': '累計新算 Eval / 輸出', en: 'Cumulative Eval / Completion', ja: '累計新規Eval / 出力トークン' },
+  '累计脱水 + 坍缩节省': { 'zh-TW': '累計脫水 + 坍縮節省', en: 'Total Scrubbed + Collapsed Saved', ja: '累計圧縮＋集約削減トークン' },
+  '已脱水节省:': { 'zh-TW': '已脫水節省:', en: 'Saved:', ja: '削減済み:' },
+  '未复用缓存': { 'zh-TW': '未複用快取', en: 'Cache Miss', ja: 'キャッシュ未利用' },
+  '缓存命中:': { 'zh-TW': '快取命中:', en: 'Cache Hit:', ja: 'キャッシュヒット:' },
+  '上下文:': { 'zh-TW': '上下文:', en: 'Context:', ja: 'コンテキスト:' },
+  '复制命令': { 'zh-TW': '複製命令', en: 'Copy Command', ja: 'コマンドをコピー' },
+
   // ──────────── v1.2.0 技能迭代版本升级、多 Skill 协同、半屏输入与折叠步骤 ────────────
   '输入消息或指令...（支持多次 / 联合协同多个技能，Ctrl+V 粘贴图片，Enter 发送）': { 'zh-TW': '輸入訊息或指令...（支援多次 / 聯合協同多個技能，Ctrl+V 貼上圖片，Enter 發送）', en: 'Type a message or command... (use multiple /skills to chain, Ctrl+V to paste images, Enter to send)', ja: 'メッセージや指示を入力... (複数 /スキル連携、Ctrl+V画像貼付、Enter送信)' },
   '扩展至半屏高度查看与编辑长文本': { 'zh-TW': '擴展至半螢幕高度檢視與編輯長文本', en: 'Expand input to half-screen height for long text', ja: '長文表示・編集のため半画面に拡大' },

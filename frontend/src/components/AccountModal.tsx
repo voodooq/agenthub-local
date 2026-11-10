@@ -25,7 +25,7 @@ import {
   Edit3,
 } from 'lucide-react';
 import { apiFetch } from '@/utils/apiClient';
-import { AuditLogItem } from '@/types';
+import { AuditLogItem, LLMProviderItem, LLMProviderType } from '@/types';
 
 interface AccountItem {
   id: number;
@@ -62,23 +62,6 @@ interface DashboardStats {
   };
 }
 
-interface LLMProviderItem {
-  id: string;
-  name: string;
-  provider_type: 'google_pool' | 'google_oauth' | 'gemini_api' | 'openai_compat' | 'anthropic' | 'ollama';
-  base_url: string;
-  api_key_masked: string;
-  has_api_key: boolean;
-  has_refresh_token?: boolean;
-  cooldown_until?: string | null;
-  is_cooling_down?: boolean;
-  models: string[];
-  role_binding: 'primary' | 'light' | 'both';
-  tool_call_mode: 'auto' | 'native' | 'xml_prompt';
-  priority: number;
-  is_enabled: number;
-}
-
 interface AccountModalProps {
   isOpen: boolean;
   onClose: () => void;
@@ -103,18 +86,35 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
   // 多源大模型供应商状态 (llm_providers)
   const [providers, setProviders] = useState<LLMProviderItem[]>([]);
   const [provName, setProvName] = useState('');
-  const [provType, setProvType] = useState<'openai_compat' | 'gemini_api' | 'anthropic' | 'ollama'>('openai_compat');
+  const [provType, setProvType] = useState<
+    'openai_compat' | 'gemini_api' | 'anthropic' | 'ollama' | 'llama_server'
+  >('openai_compat');
   const [provBaseUrl, setProvBaseUrl] = useState('https://api.deepseek.com/v1');
   const [provApiKey, setProvApiKey] = useState('');
   const [provModels, setProvModels] = useState('deepseek-chat, deepseek-reasoner');
   const [provRole, setProvRole] = useState<'both' | 'primary' | 'light'>('both');
   const [provPriority, setProvPriority] = useState<number>(2);
+  const [provMaxContextTokens, setProvMaxContextTokens] = useState<number>(0);
+  const [copiedLlamaCmd, setCopiedLlamaCmd] = useState<boolean>(false);
   const [savingProvider, setSavingProvider] = useState(false);
   const [editingProviderId, setEditingProviderId] = useState<string | null>(null);
   const [testingProvId, setTestingProvId] = useState<string | null>(null);
-  const [provTestResult, setProvTestResult] = useState<{ id: string; success: boolean; latency_ms?: number; msg: string; models?: string[] } | null>(null);
+  const [provTestResult, setProvTestResult] = useState<{
+    id: string;
+    success: boolean;
+    latency_ms?: number;
+    msg: string;
+    models?: string[];
+  } | null>(null);
   const [probingCustom, setProbingCustom] = useState<boolean>(false);
-  const [probeResult, setProbeResult] = useState<{ success: boolean; latency_ms?: number; msg: string; models?: string[] } | null>(null);
+  const [probeResult, setProbeResult] = useState<{
+    success: boolean;
+    latency_ms?: number;
+    msg: string;
+    models?: string[];
+    detected_n_ctx?: number;
+    total_slots?: number;
+  } | null>(null);
 
   // Google OAuth 三合一子 Tab: 'browser' | 'token' | 'batch'
   const [googleSubTab, setGoogleSubTab] = useState<'browser' | 'token' | 'batch'>('browser');
@@ -330,16 +330,27 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
     }
   };
 
-  // 保存自定义 API / Ollama 通道
-  const applyPresetTemplate = (preset: 'deepseek' | 'siliconflow' | 'ollama' | 'openrouter' | 'gemini_api') => {
+  // 保存自定义 API / 本地推理引擎通道
+  const applyPresetTemplate = (
+    preset: 'llama_server' | 'deepseek' | 'siliconflow' | 'ollama' | 'openrouter' | 'gemini_api'
+  ) => {
     setProbeResult(null);
-    if (preset === 'deepseek') {
+    if (preset === 'llama_server') {
+      setProvName('本地 llama.cpp (llama-server)');
+      setProvType('llama_server');
+      setProvBaseUrl('http://127.0.0.1:8080/v1');
+      setProvModels('qwen2.5-coder-7b-instruct');
+      setProvRole('both');
+      setProvPriority(1);
+      setProvMaxContextTokens(8192);
+    } else if (preset === 'deepseek') {
       setProvName('DeepSeek 官方');
       setProvType('openai_compat');
       setProvBaseUrl('https://api.deepseek.com/v1');
       setProvModels('deepseek-chat, deepseek-reasoner');
       setProvRole('primary');
       setProvPriority(1);
+      setProvMaxContextTokens(0);
     } else if (preset === 'siliconflow') {
       setProvName('硅基流动');
       setProvType('openai_compat');
@@ -347,6 +358,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
       setProvModels('Qwen/Qwen2.5-72B-Instruct, deepseek-ai/DeepSeek-V3');
       setProvRole('both');
       setProvPriority(2);
+      setProvMaxContextTokens(0);
     } else if (preset === 'ollama') {
       setProvName('本地 Ollama');
       setProvType('ollama');
@@ -354,6 +366,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
       setProvModels('qwen2.5-coder:14b, deepseek-r1:14b');
       setProvRole('light');
       setProvPriority(3);
+      setProvMaxContextTokens(8192);
     } else if (preset === 'openrouter') {
       setProvName('OpenRouter');
       setProvType('openai_compat');
@@ -361,6 +374,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
       setProvModels('anthropic/claude-3.5-sonnet, openai/gpt-4o');
       setProvRole('primary');
       setProvPriority(2);
+      setProvMaxContextTokens(0);
     } else if (preset === 'gemini_api') {
       setProvName('Gemini API (OpenAI 兼容)');
       setProvType('openai_compat');
@@ -368,6 +382,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
       setProvModels('gemini-2.5-pro, gemini-2.5-flash');
       setProvRole('both');
       setProvPriority(1);
+      setProvMaxContextTokens(0);
     }
   };
 
@@ -386,9 +401,15 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
         }),
       });
       const resData = await res.json();
-      setProbeResult(resData);
+      setProbeResult({
+        ...resData,
+        msg: resData.message || resData.msg || '',
+      });
       if (resData.success && resData.models && resData.models.length > 0) {
         setProvModels(resData.models.join(', '));
+      }
+      if (resData.success && Number(resData.detected_n_ctx || 0) > 0 && provMaxContextTokens === 0) {
+        setProvMaxContextTokens(Number(resData.detected_n_ctx));
       }
     } catch (e: any) {
       setProbeResult({ success: false, msg: e.message || '连通性测试异常' });
@@ -433,12 +454,13 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
   const handleStartEditProvider = (p: LLMProviderItem) => {
     setEditingProviderId(p.id);
     setProvName(p.name);
-    setProvType(p.provider_type === 'ollama' ? 'ollama' : (p.provider_type as any) || 'openai_compat');
+    setProvType((p.provider_type as LLMProviderType as any) || 'openai_compat');
     setProvBaseUrl(p.base_url || '');
     setProvApiKey('');
     setProvModels((p.models || []).join(', '));
     setProvRole(p.role_binding || 'both');
     setProvPriority(p.priority || 1);
+    setProvMaxContextTokens(Number(p.max_context_tokens || 0));
     setProbeResult(null);
     setAddMode('custom_api');
     setActiveTab('add_account');
@@ -506,6 +528,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
           api_key: provApiKey.trim(),
           models: modelList,
           role_binding: provRole,
+          max_context_tokens: Math.max(0, Number(provMaxContextTokens) || 0),
           priority: Number(provPriority) || 2,
           is_enabled: 1,
         }),
@@ -521,6 +544,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
         setEditingProviderId(null);
         setProvName('');
         setProvApiKey('');
+        setProvMaxContextTokens(0);
         setProbeResult(null);
         fetchProviders();
         onRefresh?.();
@@ -545,6 +569,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
           models: p.models,
           role_binding: p.role_binding,
           tool_call_mode: p.tool_call_mode,
+          max_context_tokens: Number(p.max_context_tokens || 0),
           priority: p.priority,
           is_enabled: p.is_enabled ? 0 : 1,
         }),
@@ -1331,6 +1356,11 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                             <span className="px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 text-[10px]">
                               职责: {p.role_binding === 'primary' ? '主力推理' : p.role_binding === 'light' ? '后台轻量提炼' : '主力+后台通用'}
                             </span>
+                            {Number(p.max_context_tokens || 0) > 0 && (
+                              <span className="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 text-[10px] font-mono">
+                                单槽位上限: {Number(p.max_context_tokens).toLocaleString()}
+                              </span>
+                            )}
                             {p.is_cooling_down ? (
                               <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 text-[10px] font-semibold">
                                 ⏳ 429 冷却至 {p.cooldown_until}
@@ -1782,13 +1812,20 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     )}
                   </div>
 
-                  {/* 5 个一键填充预设胶囊按钮 */}
+                  {/* 6 个一键填充预设胶囊按钮 */}
                   <div className="space-y-1.5 pt-1">
                     <div className="text-[11px] font-medium text-slate-300 flex items-center space-x-1.5">
                       <Sparkles className="w-3.5 h-3.5 text-amber-400" />
                       <span>一键填充预设配置模板：</span>
                     </div>
                     <div className="flex items-center flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => applyPresetTemplate('llama_server')}
+                        className="px-3 py-1.5 rounded-xl bg-teal-500/15 hover:bg-teal-500/25 text-teal-300 border border-teal-500/40 text-xs font-semibold transition-all flex items-center space-x-1"
+                      >
+                        <span>🚀 本地 llama.cpp (llama-server)</span>
+                      </button>
                       <button
                         type="button"
                         onClick={() => applyPresetTemplate('deepseek')}
@@ -1835,7 +1872,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         required
                         value={provName}
                         onChange={(e) => setProvName(e.target.value)}
-                        placeholder="如 DeepSeek 官方 / 本地 Ollama"
+                        placeholder="如 本地 llama-server / DeepSeek 官方"
                         className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-emerald-500"
                       />
                     </div>
@@ -1846,6 +1883,11 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         onChange={(e) => {
                           const v = e.target.value as any;
                           setProvType(v);
+                          if (v === 'llama_server') {
+                            setProvBaseUrl('http://127.0.0.1:8080/v1');
+                            setProvModels('qwen2.5-coder-7b-instruct');
+                            if (provMaxContextTokens === 0) setProvMaxContextTokens(8192);
+                          }
                           if (v === 'openai_compat') {
                             setProvBaseUrl('https://api.deepseek.com/v1');
                             setProvModels('deepseek-chat, deepseek-reasoner');
@@ -1853,6 +1895,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           if (v === 'ollama') {
                             setProvBaseUrl('http://127.0.0.1:11434/v1');
                             setProvModels('qwen2.5-coder:14b, deepseek-r1:14b');
+                            if (provMaxContextTokens === 0) setProvMaxContextTokens(8192);
                           }
                           if (v === 'anthropic') {
                             setProvBaseUrl('https://api.anthropic.com/v1');
@@ -1865,6 +1908,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         }}
                         className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white outline-none focus:border-emerald-500"
                       >
+                        <option value="llama_server">llama.cpp 本地服务器 (llama-server · /props 探活)</option>
                         <option value="openai_compat">OpenAI 兼容 (DeepSeek / 硅基流动 / Gemini API / OpenRouter)</option>
                         <option value="ollama">Ollama 本地大模型 (http://127.0.0.1:11434/v1)</option>
                         <option value="gemini_api">Google AI Studio API Key (原生端点)</option>
@@ -1888,7 +1932,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                     <div className="md:col-span-2">
                       <label className="block text-slate-300 mb-1.5 font-medium">
-                        Base URL (Ollama 填 http://127.0.0.1:11434/v1)
+                        Base URL (llama-server 默认 http://127.0.0.1:8080/v1)
                       </label>
                       <input
                         type="text"
@@ -1899,13 +1943,13 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     </div>
                     <div>
                       <label className="block text-slate-300 mb-1.5 font-medium">
-                        API Key (本地加密存储，Ollama 可留空)
+                        API Key (本地引擎可留空)
                       </label>
                       <input
                         type="password"
                         value={provApiKey}
                         onChange={(e) => setProvApiKey(e.target.value)}
-                        placeholder={editingProviderId ? '留空表示沿用已加密 Key' : 'sk-...'}
+                        placeholder={editingProviderId ? '留空表示沿用已加密 Key' : 'sk-... (本地可留空)'}
                         className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-emerald-500"
                       />
                     </div>
@@ -1915,7 +1959,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                   <div className="p-3 rounded-xl bg-surface-100 border border-border/60 flex items-center justify-between flex-wrap gap-2">
                     <div className="text-slate-300 text-[11px] flex items-center space-x-1.5">
                       <Activity className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>连通性探测：在保存前实时测速并自动嗅探可用模型列表</span>
+                      <span>连通性探测：实时测速、嗅探可用模型列表及 llama-server 单槽位真实 n_ctx</span>
                     </div>
                     <button
                       type="button"
@@ -1940,10 +1984,22 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                       ) : (
                         <AlertTriangle className="w-4 h-4 text-rose-400 mt-0.5 shrink-0" />
                       )}
-                      <div className="space-y-1">
+                      <div className="space-y-1.5 flex-1">
                         <div>{probeResult.msg}</div>
+                        {probeResult.success && Number(probeResult.detected_n_ctx || 0) > 0 && (
+                          <div className="flex items-center flex-wrap gap-2">
+                            <button
+                              type="button"
+                              onClick={() => setProvMaxContextTokens(Number(probeResult.detected_n_ctx))}
+                              className="px-2.5 py-1 rounded-lg bg-teal-500/20 hover:bg-teal-500/30 text-teal-200 border border-teal-500/40 text-[11px] font-medium transition-colors"
+                            >
+                              ✓ 采纳实测单槽位上限: {Number(probeResult.detected_n_ctx).toLocaleString()} tokens
+                              {probeResult.total_slots ? ` (共 ${probeResult.total_slots} 槽位)` : ''}
+                            </button>
+                          </div>
+                        )}
                         {probeResult.models && probeResult.models.length > 0 && (
-                          <div className="flex items-center flex-wrap gap-1 pt-1">
+                          <div className="flex items-center flex-wrap gap-1 pt-0.5">
                             <span className="text-[10px] text-slate-400">点击模型添加到列表:</span>
                             {probeResult.models.slice(0, 10).map((m) => (
                               <button
@@ -1966,21 +2022,36 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     </div>
                   )}
 
-                  <div className="grid grid-cols-1 md:grid-cols-4 gap-3 items-end">
+                  <div className="grid grid-cols-1 md:grid-cols-6 gap-3 items-end">
                     <div className="md:col-span-3">
                       <label className="block text-slate-300 mb-1.5 font-medium">
-                        可用模型 ID 列表（逗号分隔，保存后出现在顶部模型选择器中）
+                        可用模型 ID 列表（逗号分隔）
                       </label>
                       <input
                         type="text"
                         value={provModels}
                         onChange={(e) => setProvModels(e.target.value)}
-                        placeholder="deepseek-chat, qwen2.5-coder:14b, gpt-4o"
+                        placeholder="qwen2.5-coder-7b-instruct, deepseek-chat"
+                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-emerald-500"
+                      />
+                    </div>
+                    <div className="md:col-span-2">
+                      <label className="block text-slate-300 mb-1.5 font-medium">
+                        单槽位上下文窗口上限 (max_context_tokens，0 表示自动探测)
+                      </label>
+                      <input
+                        type="number"
+                        min={0}
+                        max={2000000}
+                        step={512}
+                        value={provMaxContextTokens}
+                        onChange={(e) => setProvMaxContextTokens(Math.max(0, Number(e.target.value) || 0))}
+                        placeholder="8192"
                         className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-emerald-500"
                       />
                     </div>
                     <div>
-                      <label className="block text-slate-300 mb-1.5 font-medium">调度优先级 (越小越优先)</label>
+                      <label className="block text-slate-300 mb-1.5 font-medium">优先级</label>
                       <input
                         type="number"
                         min={1}
@@ -1991,6 +2062,38 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                       />
                     </div>
                   </div>
+
+                  {/* llama-server 8GB VRAM 黄金启动参数一键复制面板 */}
+                  {provType === 'llama_server' && (
+                    <div className="p-3.5 rounded-xl bg-teal-950/35 border border-teal-500/35 space-y-2 animate-fadeIn">
+                      <div className="flex items-center justify-between gap-2">
+                        <div className="text-xs font-semibold text-teal-300 flex items-center space-x-1.5">
+                          <Terminal className="w-3.5 h-3.5 shrink-0" />
+                          <span>8GB VRAM 显存黄金启动命令（双槽位并发 + KV Cache 量化）</span>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const cmd =
+                              'llama-server -m models/qwen2.5-coder-7b-instruct-q4_k_m.gguf -c 16384 -np 2 --cache-reuse 256 --cache-type-k q8_0 --cache-type-v q8_0 -fa';
+                            navigator.clipboard?.writeText(cmd).catch(() => {});
+                            setCopiedLlamaCmd(true);
+                            setTimeout(() => setCopiedLlamaCmd(false), 2200);
+                          }}
+                          className="px-2.5 py-1 rounded-lg bg-teal-500/20 hover:bg-teal-500/30 text-teal-200 border border-teal-500/40 text-[11px] font-medium flex items-center space-x-1 transition-colors shrink-0"
+                        >
+                          {copiedLlamaCmd ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                          <span>{copiedLlamaCmd ? '已复制' : '复制命令'}</span>
+                        </button>
+                      </div>
+                      <pre className="p-2.5 rounded-lg bg-black/50 border border-border/60 text-[11px] font-mono text-teal-200 overflow-x-auto select-all">
+                        llama-server -m models/qwen2.5-coder-7b-instruct-q4_k_m.gguf -c 16384 -np 2 --cache-reuse 256 --cache-type-k q8_0 --cache-type-v q8_0 -fa
+                      </pre>
+                      <p className="text-[11px] text-slate-400 leading-relaxed">
+                        参数解析：<code>-c 16384 -np 2</code> 将总上下文池等分为 2 个独立 <strong>8,192</strong> 槽位（主力对话 + 后台脱水互不阻塞）；<code>--cache-reuse 256</code> 启用跨轮 KV Cache 前缀秒级复用；<code>q8_0 + -fa</code> 在 8GB 显存下压缩 50% KV Cache 显存占用。
+                      </p>
+                    </div>
+                  )}
 
                   <button
                     type="submit"

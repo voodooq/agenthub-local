@@ -2,6 +2,8 @@
 会话仓储层 (Conversation Repository)
 封装会话创建、列表置顶查询、更新与级联删除
 """
+from pathlib import Path
+import shutil
 from typing import Any
 from ..model.models import ConversationModel
 from .db import db_manager
@@ -116,6 +118,29 @@ class ConversationRepository:
             await conn.commit()
 
     @staticmethod
+    async def update_collapse_anchor(
+        conv_id: str,
+        anchor_turn_id: int,
+        anchored_summary: str,
+        added_saved_tokens: int = 0,
+    ) -> None:
+        """原子推进分块坍缩锚点水位线、固化前缀摘要并累加省下的 Token 总数"""
+        safe_added = max(0, int(added_saved_tokens or 0))
+        async with db_manager.get_connection() as conn:
+            await conn.execute(
+                """
+                UPDATE conversations
+                SET collapse_anchor_turn_id = MAX(COALESCE(collapse_anchor_turn_id, 0), ?),
+                    anchored_summary = ?,
+                    collapsed_tokens_saved = COALESCE(collapsed_tokens_saved, 0) + ?,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (int(anchor_turn_id), anchored_summary, safe_added, conv_id),
+            )
+            await conn.commit()
+
+    @staticmethod
     async def update(conv_id: str, title: str | None = None, is_pinned: bool | None = None) -> None:
         """更新会话标题或置顶状态"""
         updates = []
@@ -225,16 +250,35 @@ class ConversationRepository:
                 deleted_count += 1
 
             await conn.commit()
-            return deleted_count
 
+        # NOTE: 在数据库事务提交后同步清理对应会话的磁盘 tool_refs 目录，避免孤儿大文件残留
+        for del_id in to_delete_ids:
+            ConversationRepository.cleanup_tool_refs_dir(del_id)
+
+        return deleted_count
+
+    @staticmethod
+    def cleanup_tool_refs_dir(conv_id: str) -> None:
+        """清理指定会话留在磁盘上的 tool_refs 大文件目录，防止磁盘泄漏"""
+        if not conv_id:
+            return
+        safe_conv_id = Path(conv_id).name
+        if not safe_conv_id or safe_conv_id in {".", ".."}:
+            return
+        refs_dir = Path(db_manager.db_path).resolve().parent / "tool_refs" / safe_conv_id
+        if refs_dir.exists():
+            shutil.rmtree(refs_dir, ignore_errors=True)
 
     @staticmethod
     async def delete(conv_id: str) -> bool:
-        """级联删除会话及其所有关联消息"""
+        """级联删除会话及其所有关联消息，并同步回收磁盘 tool_refs 大文件目录"""
         async with db_manager.get_connection() as conn:
             cursor = await conn.execute("DELETE FROM conversations WHERE id = ?", (conv_id,))
             await conn.commit()
-            return cursor.rowcount > 0
+            deleted = cursor.rowcount > 0
+        if deleted:
+            ConversationRepository.cleanup_tool_refs_dir(conv_id)
+        return deleted
 
     @staticmethod
     async def move_to_workspace(conv_id: str, new_workspace_id: str) -> None:

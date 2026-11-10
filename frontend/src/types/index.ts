@@ -231,6 +231,103 @@ export interface Message {
     tool_input: Record<string, any>;
     status?: 'pending' | 'approved' | 'rejected';
   };
+  token_stats?: TurnTokenMetrics | null;
+}
+
+/** 单轮聚合 Token 消耗、KV Cache 命中与推理延迟水表指标 */
+export interface TurnTokenMetrics {
+  turn_id: number;
+  context_tokens: number;
+  context_limit: number;
+  context_usage_pct: number;
+  cached_tokens: number;
+  cache_hit_pct: number;
+  eval_tokens: number;
+  completion_tokens: number;
+  saved_tokens: number;
+  turn_saved_tokens?: number;
+  session_collapsed_saved_tokens?: number;
+  ttft_ms: number;
+  prefill_ms?: number;
+  tps: number;
+  provider_type: string;
+  provider_name: string;
+  model_name: string;
+  react_steps?: number;
+  is_estimated: boolean;
+}
+
+export interface ConversationTokenStatsRoleBucket {
+  agent_role: 'primary' | 'scrubber' | 'summarizer' | string;
+  call_count: number;
+  prompt_tokens: number;
+  cached_tokens: number;
+  eval_tokens: number;
+  completion_tokens: number;
+  saved_tokens: number;
+}
+
+export interface ConversationTokenStatsProviderBucket {
+  provider_type: string;
+  provider_name: string;
+  model_name: string;
+  call_count: number;
+  prompt_tokens: number;
+  cached_tokens: number;
+  eval_tokens: number;
+  completion_tokens: number;
+}
+
+export interface ConversationTokenStatsSummary {
+  total_turns: number;
+  total_calls: number;
+  total_prompt_tokens: number;
+  total_cached_tokens: number;
+  total_eval_tokens: number;
+  total_completion_tokens: number;
+  avg_cache_hit_pct: number;
+  total_saved_tokens: number;
+  scrub_saved_tokens: number;
+  collapsed_saved_tokens: number;
+  collapse_anchor_turn_id: number;
+  avg_ttft_ms: number;
+  avg_tps: number;
+  hints: string[];
+}
+
+export interface ConversationTokenStats {
+  conversation_id: string;
+  summary: ConversationTokenStatsSummary;
+  by_role: ConversationTokenStatsRoleBucket[];
+  by_provider: ConversationTokenStatsProviderBucket[];
+  turns: TurnTokenMetrics[];
+}
+
+export type LLMProviderType =
+  | 'google_pool'
+  | 'google_oauth'
+  | 'gemini_api'
+  | 'openai_compat'
+  | 'anthropic'
+  | 'ollama'
+  | 'llama_server';
+
+export interface LLMProviderItem {
+  id: string;
+  name: string;
+  provider_type: LLMProviderType;
+  base_url: string;
+  api_key_masked: string;
+  has_api_key: boolean;
+  has_refresh_token?: boolean;
+  cooldown_until?: string | null;
+  is_cooling_down?: boolean;
+  models: string[];
+  role_binding: 'primary' | 'light' | 'both';
+  tool_call_mode: 'auto' | 'native' | 'xml_prompt';
+  max_context_tokens?: number;
+  priority: number;
+  is_enabled: number;
 }
 
 export interface SearchResult {

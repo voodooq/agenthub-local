@@ -8,6 +8,7 @@ from pydantic import BaseModel
 from ...schema.conversation_schema import ConversationCreate, ConversationUpdate, MessageResponse
 from ...repository.conversation_repository import ConversationRepository
 from ...repository.message_repository import MessageRepository
+from ...repository.token_usage_repository import TokenUsageRepository
 from ...repository.workspace_repository import WorkspaceRepository
 
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
@@ -102,8 +103,16 @@ async def get_conversation_messages(
     conv_id: str,
     limit: int | None = Query(default=None, ge=1, description="可选截取最近 N 条消息；默认返回完整会话历史"),
 ):
-    """获取会话历史消息列表"""
+    """获取会话历史消息列表（批量回显每轮末条 AI 回复的持久化 Token 水表）"""
     messages = await MessageRepository.get_by_conversation(conv_id, limit=limit)
+    turn_stats_map = await TokenUsageRepository.get_turn_summaries_map(conv_id)
+
+    # 定位每个 turn_id 最后一条 AI 交付消息的索引位置，避免单轮多步重复显示多个水表
+    last_model_idx_by_turn: dict[int, int] = {}
+    for idx, m in enumerate(messages):
+        if m.role in ("model", "assistant"):
+            last_model_idx_by_turn[m.turn_id or 1] = idx
+
     return [
         MessageResponse(
             id=m.id or 0,
@@ -117,9 +126,23 @@ async def get_conversation_messages(
             compressed_content=m.compressed_content,
             tool_calls_json=m.tool_calls_json,
             tool_call_id=m.tool_call_id,
+            token_stats=(
+                turn_stats_map.get(m.turn_id or 1)
+                if last_model_idx_by_turn.get(m.turn_id or 1) == idx
+                else None
+            ),
         )
-        for m in messages
+        for idx, m in enumerate(messages)
     ]
+
+
+@router.get("/{conv_id}/token-stats")
+async def get_conversation_token_stats(conv_id: str):
+    """获取当前会话完整 Token 消耗、KV Cache 命中率、省流统计与逐轮性能趋势（服务 /stats 看板）"""
+    conv = await ConversationRepository.get_by_id(conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return await TokenUsageRepository.get_conversation_detailed_stats(conv_id)
 
 
 @router.post("/cleanup-duplicates")

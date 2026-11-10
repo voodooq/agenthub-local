@@ -43,6 +43,7 @@ interface ModelSelectorProps {
   onSelectModel: (modelId: string) => void;
   onSelectThinking: (level: ThinkingLevel) => void;
   onOpenModelTest?: () => void;
+  onOpenAccountModal?: () => void;
 }
 
 export const REAL_MODEL_LIST: ModelOption[] = [
@@ -128,12 +129,14 @@ export function ModelSelector({
   onSelectModel,
   onSelectThinking,
   onOpenModelTest,
+  onOpenAccountModal,
 }: ModelSelectorProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [isThinkingSubmenuOpen, setIsThinkingSubmenuOpen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  const activeList = models && models.length > 0 ? models : REAL_MODEL_LIST;
+  // 严格只展示当前账号或自定义通道实际可用的模型列表，未绑定 Google 账号时不默认显示 Gemini 模型
+  const activeList = models || [];
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -153,7 +156,7 @@ export function ModelSelector({
   const selectedOpt = activeList.find((m) => m.id === currentModel) || activeList[0];
 
   const getButtonLabel = () => {
-    if (!selectedOpt) return currentModel;
+    if (!selectedOpt) return currentModel || '未配置模型';
     if (supportsThinking(selectedOpt)) {
       const levelMap: Record<ThinkingLevel, string> = { low: '低', medium: '中', high: '高' };
       return `${selectedOpt.name} (${levelMap[thinkingLevel]})`;
@@ -176,9 +179,11 @@ export function ModelSelector({
       >
         <span
           className={`w-2 h-2 rounded-full shrink-0 ${
-            selectedOpt?.test_status?.available
-              ? 'bg-emerald-500'
-              : 'bg-emerald-500 animate-pulse'
+            activeList.length === 0
+              ? 'bg-amber-500 animate-pulse'
+              : selectedOpt?.test_status?.available
+                ? 'bg-emerald-500'
+                : 'bg-emerald-500 animate-pulse'
           }`}
         ></span>
         <span className="truncate max-w-[150px]">{getButtonLabel()}</span>
@@ -194,11 +199,15 @@ export function ModelSelector({
         <div className="absolute right-0 bottom-full mb-2 w-84 rounded-2xl glass-modal p-2 shadow-2xl border border-border z-50 animate-scale-in">
           <div className="px-3 py-1.5 text-[10px] font-bold text-muted-foreground flex items-center justify-between border-b border-border/80 mb-1.5">
             <span className="truncate max-w-[170px]">
-              {accountName && accountName !== 'default'
+              {accountName && accountName !== 'default' && accountName !== '未配置'
                 ? `账号 [${accountName}] 匹配模型`
-                : authLabel || '当前账号可用模型'}
+                : authLabel || '当前可用模型'}
             </span>
-            {isTested ? (
+            {activeList.length === 0 ? (
+              <span className="text-[9px] text-amber-600 dark:text-amber-400 font-medium shrink-0">
+                暂无可用模型
+              </span>
+            ) : isTested ? (
               <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 flex items-center space-x-1 shrink-0 font-medium">
                 <CheckCircle2 className="w-2.5 h-2.5" />
                 <span>实测可用 ({activeList.length})</span>
@@ -211,7 +220,29 @@ export function ModelSelector({
           </div>
 
           <div className="space-y-1 max-h-80 overflow-y-auto pr-0.5">
-            {activeList.map((m) => {
+            {activeList.length === 0 ? (
+              <div className="p-4 rounded-xl bg-surface-200/50 border border-border/70 text-center space-y-2.5">
+                <div className="text-xs font-semibold text-foreground">
+                  尚未配置任何可用的模型或算力账号
+                </div>
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  请先在「账号与算力池」中添加本地模型（如 llama-server / Ollama）或第三方 API / Google 账号，系统将自动识别并显示您拥有的模型。
+                </p>
+                {onOpenAccountModal && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsOpen(false);
+                      onOpenAccountModal();
+                    }}
+                    className="w-full px-3 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-colors shadow-xs"
+                  >
+                    前往添加账号或本地模型
+                  </button>
+                )}
+              </div>
+            ) : (
+              activeList.map((m) => {
               const isSelected = selectedOpt?.id === m.id;
               const hasThink = supportsThinking(m);
               const latencySec =
@@ -325,11 +356,12 @@ export function ModelSelector({
                   )}
                 </div>
               );
-            })}
+            })
+            )}
           </div>
 
           {/* 底部快捷进入设置测试模型按钮 */}
-          {onOpenModelTest && (
+          {onOpenModelTest && activeList.length > 0 && (
             <div className="mt-1.5 pt-1.5 border-t border-border">
               <button
                 type="button"

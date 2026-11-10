@@ -284,61 +284,71 @@ async def _resolve_target_account():
 
 
 async def _build_active_models_response() -> ActiveModelsResponse:
-    """组装当前账号属性对应的候选模型与已保留可用模型响应"""
+    """组装当前账号属性对应的候选模型与已保留可用模型响应（无 Google 账号时不默认显示 Gemini 模型）"""
     account = await _resolve_target_account()
-    account_name = account.name if account else "default"
-    auth_type = account.auth_type if account else "gemini_cli"
-    cli_home_dir = account.cli_home_dir if account else None
-    auth_label = _get_auth_label(auth_type)
-
-    candidates = _get_candidates_for_auth_type(auth_type, cli_home_dir)
     store = _load_verified_store()
-    acc_record = store.get("accounts", {}).get(account_name, {})
 
-    # 校验存储记录的 auth_type 是否与当前账号一致
-    if acc_record.get("auth_type") and acc_record.get("auth_type") != auth_type:
-        acc_record = {}
+    candidates: List[ModelMeta] = []
+    active_models: List[ModelMeta] = []
+    valid_verified_ids: List[str] = []
+    test_results_map: Dict[str, Any] = {}
+    is_tested = False
 
-    test_results_map: Dict[str, Any] = acc_record.get("test_results", {})
-    saved_verified_ids: List[str] = acc_record.get("verified_model_ids", [])
-    is_tested = bool(test_results_map)
+    if account:
+        account_name = account.name
+        auth_type = account.auth_type or "gemini_cli"
+        cli_home_dir = account.cli_home_dir
+        auth_label = _get_auth_label(auth_type)
 
-    # 为每个候选模型挂载最近一次测试结果
-    for m in candidates:
-        res = test_results_map.get(m.id)
-        if res and isinstance(res, dict):
-            m.test_status = ModelTestStatus(
-                available=bool(res.get("available", False)),
-                latency_ms=float(res.get("latency_ms", 0)),
-                error=res.get("error"),
-                tested_at=res.get("tested_at"),
-            )
+        candidates = _get_candidates_for_auth_type(auth_type, cli_home_dir)
+        acc_record = store.get("accounts", {}).get(account_name, {})
 
-    candidate_id_set = {m.id for m in candidates}
-    valid_verified_ids = [mid for mid in saved_verified_ids if mid in candidate_id_set]
+        # 校验存储记录的 auth_type 是否与当前账号一致
+        if acc_record.get("auth_type") and acc_record.get("auth_type") != auth_type:
+            acc_record = {}
 
-    # 智能代际自适应：若当前账号历史上仅保存了旧版模型（如 2.x 系列），检测到候选库包含最新代际模型（如 4.0 Argon、3.8 Flash）
-    # 且最新模型未被当前账号明确标记为不可用时，自动将其并入输入框可用列表中并置顶，避免用户被困在老旧模型中
-    latest_flagship_ids = ["gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
-    available_new_ids = [
-        mid for mid in latest_flagship_ids
-        if mid in candidate_id_set and test_results_map.get(mid, {}).get("available") is not False
-    ]
+        test_results_map = acc_record.get("test_results", {})
+        saved_verified_ids: List[str] = acc_record.get("verified_model_ids", [])
+        is_tested = bool(test_results_map)
 
-    if valid_verified_ids:
-        # 如果当前保留列表尚未包含任何最新代际模型，自动将可用的最新模型置顶加入
-        has_any_latest = any(mid in valid_verified_ids for mid in latest_flagship_ids)
-        if not has_any_latest and available_new_ids:
-            for new_id in reversed(available_new_ids):
-                if new_id not in valid_verified_ids:
-                    valid_verified_ids.insert(0, new_id)
-        active_models = [m for m in candidates if m.id in valid_verified_ids]
+        # 为每个候选模型挂载最近一次测试结果
+        for m in candidates:
+            res = test_results_map.get(m.id)
+            if res and isinstance(res, dict):
+                m.test_status = ModelTestStatus(
+                    available=bool(res.get("available", False)),
+                    latency_ms=float(res.get("latency_ms", 0)),
+                    error=res.get("error"),
+                    tested_at=res.get("tested_at"),
+                )
+
+        candidate_id_set = {m.id for m in candidates}
+        valid_verified_ids = [mid for mid in saved_verified_ids if mid in candidate_id_set]
+
+        # 智能代际自适应：若当前账号历史上仅保存了旧版模型（如 2.x 系列），检测到候选库包含最新代际模型（如 4.0 Argon、3.8 Flash）
+        # 且最新模型未被当前账号明确标记为不可用时，自动将其并入输入框可用列表中并置顶，避免用户被困在老旧模型中
+        latest_flagship_ids = ["gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+        available_new_ids = [
+            mid for mid in latest_flagship_ids
+            if mid in candidate_id_set and test_results_map.get(mid, {}).get("available") is not False
+        ]
+
+        if valid_verified_ids:
+            has_any_latest = any(mid in valid_verified_ids for mid in latest_flagship_ids)
+            if not has_any_latest and available_new_ids:
+                for new_id in reversed(available_new_ids):
+                    if new_id not in valid_verified_ids:
+                        valid_verified_ids.insert(0, new_id)
+            active_models = [m for m in candidates if m.id in valid_verified_ids]
+        else:
+            active_models = [m.model_copy(deep=True) for m in candidates]
+            valid_verified_ids = [m.id for m in active_models]
     else:
-        # 尚未测试或无匹配记录时，默认展示该账号属性下的全部候选模型
-        active_models = [m.model_copy(deep=True) for m in candidates]
-        valid_verified_ids = [m.id for m in active_models]
+        account_name = "未配置"
+        auth_type = "none"
+        auth_label = "未配置 Google 账号"
 
-    # 追加用户已启用的第三方自定义大模型供应商 (OpenAI / DeepSeek / Ollama / Anthropic)
+    # 加载用户已启用的第三方/本地自定义大模型供应商 (llama-server / Ollama / DeepSeek / OpenAI / Anthropic)
     try:
         from ...core.provider_adapter import provider_adapter
         custom_provs = await provider_adapter.get_enabled_providers_for_role("primary")
@@ -347,6 +357,14 @@ async def _build_active_models_response() -> ActiveModelsResponse:
         custom_model_metas: List[ModelMeta] = []
         now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
+        # 若无 Google 账号，尝试读取首个自定义通道的测试与勾选记录
+        if not account and custom_provs:
+            first_name = custom_provs[0].get("name", "本地算力")
+            custom_acc_record = store.get("accounts", {}).get(first_name, {})
+            if custom_acc_record.get("test_results"):
+                test_results_map = custom_acc_record["test_results"]
+                is_tested = True
+
         for cp in custom_provs:
             ptype = cp.get("provider_type")
             # Google 官方 OAuth、API Key 及算力池账号由官方模型库管理与测试，严禁作为第三方通道重复注入
@@ -354,10 +372,16 @@ async def _build_active_models_response() -> ActiveModelsResponse:
                 continue
             prov_name = cp.get("name", "Custom API")
             base_url = str(cp.get("base_url") or "")
-            is_local = "127.0.0.1" in base_url or "localhost" in base_url or ptype == "ollama"
+            is_local = "127.0.0.1" in base_url or "localhost" in base_url or ptype in ("ollama", "llama_server")
+            max_ctx = int(cp.get("max_context_tokens") or 0)
+            ctx_note = f" · {max_ctx:,} ctx" if max_ctx > 0 else ""
+            badge_label = (
+                "llama.cpp · 本地直连"
+                if ptype == "llama_server"
+                else ("本地 API · 极速" if is_local else "自定义 API")
+            )
             for mid in (cp.get("models") or []):
                 if mid and mid not in existing_ids and mid not in candidate_ids:
-                    # 若历史记录中未测过该自定义模型，默认根据已启用且就绪状态挂载初始就绪状态
                     init_status = None
                     if mid in test_results_map:
                         res = test_results_map[mid]
@@ -380,8 +404,8 @@ async def _build_active_models_response() -> ActiveModelsResponse:
                             id=mid,
                             name=f"{mid} ({prov_name})",
                             provider=prov_name,
-                            description=f"多协议算力通道 [{prov_name}] ({ptype} · {base_url})",
-                            badge="本地 API · 极速" if is_local else "自定义 API",
+                            description=f"多协议算力通道 [{prov_name}] ({ptype} · {base_url}{ctx_note})",
+                            badge=badge_label,
                             has_thinking=False,
                             is_default=False,
                             supported_auth_types=[ptype or "openai_compat"],
@@ -390,8 +414,37 @@ async def _build_active_models_response() -> ActiveModelsResponse:
                     )
                     existing_ids.add(mid)
 
-        # 核心优化：若当前未绑定有效 Google 账号或全冷却，而存在已就绪的本地/自定义模型，将自定义模型提升置顶并作为默认选择
-        if custom_model_metas and (not account or getattr(account, "status", "") != "active"):
+        if not account:
+            # 无 Google 账号时：仅展示用户实际配置的自定义/本地模型，绝不混入未绑定的 Gemini 模型
+            if custom_model_metas:
+                custom_model_metas[0].is_default = True
+                first_cp = custom_provs[0]
+                first_base_url = str(first_cp.get("base_url") or "")
+                first_ptype = first_cp.get("provider_type", "openai_compat")
+                is_first_local = (
+                    "127.0.0.1" in first_base_url
+                    or "localhost" in first_base_url
+                    or first_ptype in ("ollama", "llama_server")
+                )
+                account_name = first_cp.get("name", "本地算力")
+                auth_type = first_ptype
+                auth_label = (
+                    f"已就绪本地算力通道 [{account_name}]"
+                    if is_first_local
+                    else f"已就绪算力通道 [{account_name}]"
+                )
+                candidates = [cm.model_copy(deep=True) for cm in custom_model_metas]
+                saved_custom_ids = store.get("accounts", {}).get(account_name, {}).get("verified_model_ids", [])
+                custom_id_set = {cm.id for cm in custom_model_metas}
+                filtered_custom_ids = [mid for mid in saved_custom_ids if mid in custom_id_set]
+                if filtered_custom_ids:
+                    active_models = [cm for cm in custom_model_metas if cm.id in filtered_custom_ids]
+                    valid_verified_ids = filtered_custom_ids
+                else:
+                    active_models = custom_model_metas
+                    valid_verified_ids = [cm.id for cm in custom_model_metas]
+        elif custom_model_metas and getattr(account, "status", "") != "active":
+            # Google 账号存在但全部冷却/不可用时，将已就绪自定义模型置顶并设为默认
             custom_model_metas[0].is_default = True
             for m in active_models:
                 m.is_default = False
@@ -399,7 +452,6 @@ async def _build_active_models_response() -> ActiveModelsResponse:
             for cm in reversed(custom_model_metas):
                 if cm.id not in valid_verified_ids:
                     valid_verified_ids.insert(0, cm.id)
-            # 关键：同步将自定义模型置顶合并至设置界面的 candidates 候选列表中！
             candidates = [cm.model_copy(deep=True) for cm in custom_model_metas] + [c for c in candidates if c.id not in {cm.id for cm in custom_model_metas}]
             first_cp = custom_provs[0]
             account_name = first_cp.get("name", "本地算力")
