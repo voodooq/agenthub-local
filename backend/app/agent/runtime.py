@@ -484,6 +484,16 @@ class AgentRuntime:
             approved_plan_steps
             or (inquiry_confirmed and normalized_inquiry_action == "execute_now")
         )
+
+        # 对话模式下需求澄清解锁落盘：若用户已确认方案并授权立即执行或批准步骤，平滑升舱为 agent 模式并解除只读限制
+        if active_scene == "chat" and explicit_execute_unlock:
+            active_scene = "agent"
+            try:
+                await ConversationRepository.update_agent_state(conv_id, scene_mode="agent")
+                logger.info(f"[AgentRuntime] 用户确认方案并授权执行，会话 {conv_id} 从对话模式自动升舱为 Agent 任务模式 (解锁工具与落盘权限)")
+            except Exception as up_err:
+                logger.warning(f"[AgentRuntime] 升舱更新会话模式异常: {up_err}")
+
         is_planning_phase = self.compute_planning_phase(
             active_scene=active_scene,
             execution_strategy=execution_strategy,

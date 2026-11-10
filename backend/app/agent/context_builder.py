@@ -159,20 +159,32 @@ class ContextBuilder:
             }
 
         # ── Zone 1 (Immutable Prefix): 静态人设 + 物理能力红线 + 字典序工具协议 ──
+        normalized_action = (inquiry_action or "").strip().lower() or None
+        explicit_execute_unlock = bool(
+            approved_plan_steps
+            or (inquiry_confirmed and normalized_action == "execute_now")
+        )
+        explicit_clarify_lock = (
+            normalized_action == "clarify_only"
+            and not approved_plan_steps
+        )
+        # 对话模式下需求澄清解锁落盘：若收到明确方案确认与执行授权，自动视同 Agent 任务态挂载工具与落盘铁律
+        effective_scene_mode = "agent" if (explicit_execute_unlock and scene_mode == "chat") else scene_mode
+
         zone1_static_parts: list[str] = []
         if base_system_prompt:
             zone1_static_parts.append(base_system_prompt)
         else:
             zone1_static_parts.append("你是 AgentHub Local 智能研发中枢，运行在用户本地私有环境中。")
 
-        if scene_mode == "chat":
+        if effective_scene_mode == "chat":
             zone1_static_parts.append(
                 "### ⚠️ 运行模式与物理能力红线（强制遵守）：\n"
                 "你当前处于【💬 标准对话模式 / 纯文本咨询】。在此模式下，你【没有】被挂载任何本地磁盘写入工具、Shell 执行工具或操作系统修改权限！\n"
                 "1. 【严禁虚构已执行操作】：绝对禁止声称“我已经为你写入了文件”、“已在本地创建了目录/代码”、“已执行了命令”或“请刷新查看磁盘”！此类虚构言论属于严重的 AI 代码幻觉，受到系统安全审计监控！\n"
                 "2. 【诚实交付代码】：你编写的所有代码必须直接在回复的 Markdown 代码块中完整呈现，并明确提示用户：“当前处于标准对话模式，我无法直接修改本地磁盘，请手动复制上方代码保存；若需我自动为你落地到本地文件，请点击输入框下方切换至【Agent 任务】模式”。"
             )
-        elif scene_mode == "agent":
+        elif effective_scene_mode == "agent":
             zone1_static_parts.append(
                 "### ⚠️ Agent 任务模式落盘真实性与自主自愈铁律（强制遵守）：\n"
                 "1. 你拥有真实的本地工具调用能力（支持 write_local_file, read_local_file, read_tool_ref, execute_local_command 等）。\n"
@@ -216,23 +228,14 @@ class ContextBuilder:
                 zone3_parts.append(f"当前本地终端持久化工作目录 (CWD): `{current_cwd}`")
 
             # Plan-First / Execute-Unlock / Clarify 状态门控放到 Zone 3，避免状态切换时击穿 Zone 1 前缀缓存
-            normalized_action = (inquiry_action or "").strip().lower() or None
-            explicit_execute_unlock = bool(
-                approved_plan_steps
-                or (inquiry_confirmed and normalized_action == "execute_now")
-            )
-            explicit_clarify_lock = (
-                normalized_action == "clarify_only"
-                and not approved_plan_steps
-            )
             effective_planning_gate = (
-                scene_mode == "agent"
+                effective_scene_mode == "agent"
                 and execution_strategy == "plan_first"
                 and not explicit_execute_unlock
                 and (not has_prior_execution_unlock or explicit_clarify_lock)
             )
 
-            if scene_mode == "agent":
+            if effective_scene_mode == "agent":
                 if effective_planning_gate:
                     clarify_follow_tip = (
                         "\n0. **【上一轮澄清结论已汇入本轮上下文】**：用户上一轮选择先补充方案条件，请基于用户已确认结论完善方案；"
@@ -603,7 +606,7 @@ class ContextBuilder:
             "compression_policy": policy,
             "matched_skill_id": matched_skill["id"] if matched_skill else None,
             "matched_skill_ids": [s["id"] for s in matched_skills],
-            "scene_mode": scene_mode,
+            "scene_mode": effective_scene_mode,
             "working_memory": working_memory,
             "current_cwd": current_cwd,
         }

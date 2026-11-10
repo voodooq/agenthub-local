@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.2.2-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.2.3-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,9 @@
 
 ## 🧭 版本演进总览
 
-### ✨ v1.2.0（最新 v1.2.2）— 本地上下文压缩、KV Cache 守护、双模性能水表与多源算力稳定化
+### ✨ v1.2.0（最新 v1.2.3）— 本地上下文压缩、KV Cache 守护、双模性能水表与多源算力稳定化
+- **对话澄清自动升舱与真实落盘闭环（v1.2.3）**：在对话模式（chat）下启用需求澄清后，当用户在交互卡片中点击批准计划或立即执行时，前后端自适应联动升舱为 Agent 任务执行态，解开只读红线与工具安全限制，真实调用 `write_local_file` 与终端工具完成物理落盘并拉起 LOOP 自主领航舱。
+- **过程思考与执行步骤流水线体验升级（v1.2.3）**：重构工具卡片与执行步骤可视化，单步工具彻底取消嵌套折叠直显关键文件路径与命令输出；深度思考卡片采用高质感弱化排版与流式微光状态，去除同轮次重复的模型头标识，呈现连贯丝滑的执行流水线。
 - **多源算力稳定化与抗卡死治理（v1.2.2）**：严格隔离后台轻量旁路与 CLI/算力池异常告警，新增 KIMI 等模型 `temperature=1` 参数自适应与 400 非限流隔离；补全前端 SSE「停止生成」按钮、首包/空闲看门狗、宿主机探针主循环异步解耦与启动孤儿 Loop 自愈；同步落地算力池今日总消耗汇总、多源通道精准计数、DSML 工具标签防泄漏及思考过程样式弱化。
 - **三区上下文压缩与 KV Cache 前缀守护**：划分 Zone 1（绝对不动前缀）+ Zone 2（只增不改热区 + 分块坍缩）+ Zone 3（跨轮零残留尾注），结合 SQLite FTS5 冷历史双路召回与工具长输出旁路脱水（`>1,000` 字符转 `Ref` + `read_tool_ref` 按行切片回查），最大化本地与云端 KV Cache 命中率。
 - **`llama-server` 深度适配与全链路 Token 水表**：原生接入 `llama.cpp`（`/health`、`/props` 单槽位显存探测、`/tokenize` 与 `timings`），在每条回复底部渲染单行实时水表（上下文水位、KV Cache 命中率、脱水节省、TTFT/TPS），支持 `/stats` 查看全会话分角色消耗看板；未配置 Google 账号时自动隐藏未绑定 Gemini 模型，仅显示用户自有算力通道模型。

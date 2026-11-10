@@ -301,6 +301,13 @@ export default function WorkbenchPage() {
     confirmedFacts?: ConfirmedFactItem[],
     loopGoalHint?: string
   ) => {
+    // 联动自动将当前会话/界面模式升舱为 'agent'
+    if (sceneMode !== 'agent') {
+      setSceneMode('agent');
+      try {
+        localStorage.setItem('agenthub_scene_mode', 'agent');
+      } catch { }
+    }
     await handleSendMessage(feedbackText, steps, confirmedFacts, undefined, {
       inquiryConfirmed: true,
       inquiryAction: 'execute_now',
@@ -1202,6 +1209,18 @@ export default function WorkbenchPage() {
     setMessages((prev) => [...prev, tempUserMsg, tempAssistantMsg]);
     scrollToBottom(true);
 
+    const isExecuteUnlock = Boolean(
+      (approvedStepsForRequest && approvedStepsForRequest.length > 0) ||
+      (options?.inquiryConfirmed && options?.inquiryAction === 'execute_now')
+    );
+    const effectiveSceneMode = (isExecuteUnlock && sceneMode === 'chat') ? 'agent' : sceneMode;
+    if (effectiveSceneMode === 'agent' && sceneMode !== 'agent') {
+      setSceneMode('agent');
+      try {
+        localStorage.setItem('agenthub_scene_mode', 'agent');
+      } catch { }
+    }
+
     const hasPriorUnlockInView = messages.some(
       (m) =>
         (m.role === 'model' && Array.isArray(m.tool_events) && m.tool_events.length > 0) ||
@@ -1210,7 +1229,7 @@ export default function WorkbenchPage() {
             m.content.includes('全部确认完毕')))
     );
     const shouldStartLoopHud =
-      sceneMode === 'agent' &&
+      effectiveSceneMode === 'agent' &&
       options?.inquiryAction !== 'clarify_only' &&
       (executionStrategy !== 'plan_first' ||
         Boolean(approvedStepsForRequest && approvedStepsForRequest.length > 0) ||
@@ -1311,10 +1330,10 @@ export default function WorkbenchPage() {
           thinking_level: thinkingLevel,
           system_override: systemOverride,
           context_rounds: memoryRounds,
-          scene_mode: sceneMode,
+          scene_mode: effectiveSceneMode,
           incognito: incognito,
-          execution_strategy: sceneMode === 'agent' ? executionStrategy : 'direct',
-          clarify_mode: sceneMode === 'chat' ? clarifyMode : false,
+          execution_strategy: effectiveSceneMode === 'agent' ? executionStrategy : 'direct',
+          clarify_mode: effectiveSceneMode === 'chat' ? clarifyMode : false,
           approved_plan_steps: approvedStepsForRequest || null,
           confirmed_facts: confirmedFactsForRequest && confirmedFactsForRequest.length > 0 ? confirmedFactsForRequest : null,
           inquiry_confirmed: Boolean(options?.inquiryConfirmed),
@@ -1371,6 +1390,13 @@ export default function WorkbenchPage() {
         try {
           const parsed = JSON.parse(rawData);
           if (parsed.type === 'conv_init') {
+            // 若后端自适应升舱或调整了场景模式，同步刷新前端视图
+            if (parsed.scene_mode && parsed.scene_mode !== sceneMode) {
+              setSceneMode(parsed.scene_mode);
+              try {
+                localStorage.setItem('agenthub_scene_mode', parsed.scene_mode);
+              } catch { }
+            }
             // 关键：收到会话初始化事件，立即绑定 conversation_id，防止后续生成重复会话并保证继承上下文记忆
             if (parsed.conversation_id && getAbortReason() !== 'switch') {
               effectiveConvId = parsed.conversation_id;
@@ -2234,9 +2260,16 @@ export default function WorkbenchPage() {
       inquiryAction?: InquirySubmitAction,
       loopGoalHint?: string
     ) => {
+      const action = inquiryAction || 'execute_now';
+      if (action === 'execute_now' && sceneMode !== 'agent') {
+        setSceneMode('agent');
+        try {
+          localStorage.setItem('agenthub_scene_mode', 'agent');
+        } catch { }
+      }
       void handleSendMessage(feedback, undefined, confirmedFacts, undefined, {
         inquiryConfirmed: true,
-        inquiryAction: inquiryAction || 'execute_now',
+        inquiryAction: action,
         loopGoalOverride: loopGoalHint,
       });
     },
@@ -2255,9 +2288,16 @@ export default function WorkbenchPage() {
       inquiryAction?: InquirySubmitAction,
       loopGoalHint?: string
     ) => {
+      const action = inquiryAction || 'execute_now';
+      if (action === 'execute_now' && sceneMode !== 'agent') {
+        setSceneMode('agent');
+        try {
+          localStorage.setItem('agenthub_scene_mode', 'agent');
+        } catch { }
+      }
       void handleSendMessage(feedback, undefined, confirmedFacts, undefined, {
         inquiryConfirmed: true,
-        inquiryAction: inquiryAction || 'execute_now',
+        inquiryAction: action,
         loopGoalOverride: loopGoalHint,
       });
     },
@@ -2583,6 +2623,18 @@ export default function WorkbenchPage() {
                       (msg.tool_calls_json && msg.tool_calls_json !== '[]') ||
                       msg.is_process_step
                     );
+                  // 检查上一条消息是否也是同一发言序列中的中间过程步骤，用于去噪聚合
+                  const prevMsg = index > 0 ? messages[index - 1] : null;
+                  const isPrevProcessStep =
+                    prevMsg &&
+                    prevMsg.role !== 'user' &&
+                    !hasInteractiveInquiryBlock(prevMsg.content || '') &&
+                    Boolean(
+                      (prevMsg.tool_events && prevMsg.tool_events.length > 0) ||
+                      (prevMsg.tool_calls_json && prevMsg.tool_calls_json !== '[]') ||
+                      prevMsg.is_process_step
+                    );
+                  const isContinuousProcessStep = isProcessStep && Boolean(isPrevProcessStep);
                   const msgKey = String(msg.id ?? `idx_${index}`);
                   const rawBody = msg.content || '';
                   const isLongProcessText =
@@ -2593,72 +2645,74 @@ export default function WorkbenchPage() {
                     <div
                       key={msg.id || index}
                       id={msg.id ? `chat-msg-${msg.id}` : undefined}
-                      className={`flex flex-col group transition-all duration-500 ${
-                        isProcessStep ? 'space-y-1.5' : 'space-y-2.5'
+                      className={`flex flex-col group transition-all duration-300 ${
+                        isContinuousProcessStep
+                          ? 'space-y-1 pl-3.5 border-l-2 border-border/40 ml-1.5 mt-1'
+                          : isProcessStep
+                            ? 'space-y-1.5 pl-3.5 border-l-2 border-emerald-500/30 ml-1.5 mt-2.5'
+                            : 'space-y-2.5'
                       } ${isUser ? 'items-end' : 'items-start'} ${
                         isSearchHighlighted
                           ? 'ring-2 ring-emerald-500/70 bg-emerald-500/5 rounded-2xl p-2 -m-2'
                           : ''
                       }`}
                     >
-                      {/* 发言角色标志 */}
-                      <div
-                        className={`flex items-center space-x-2 px-1 ${
-                          isProcessStep ? 'text-[11px] text-muted-foreground/70' : 'text-xs text-muted-foreground'
-                        }`}
-                      >
-                        {isUser ? (
-                          <span className="font-semibold text-foreground">您</span>
-                        ) : (
-                          <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
-                            <Sparkles
-                              className={
-                                isProcessStep
-                                  ? 'w-3 h-3 text-muted-foreground/60'
-                                  : 'w-3.5 h-3.5 text-emerald-500'
-                              }
-                            />
-                            {(() => {
-                              const rawModel = msg.downgrade_info?.current_model || msg.model_name || currentModel || '';
-                              const isGemini = rawModel.toLowerCase().includes('gemini');
-                              const modelDisplayName = isGemini ? `Gemini (${rawModel})` : (rawModel || 'AI Assistant');
-                              return (
-                                <span
-                                  className={
-                                    isProcessStep
-                                      ? 'font-medium text-muted-foreground/75'
-                                      : 'font-bold text-foreground'
-                                  }
-                                >
-                                  {modelDisplayName}
-                                </span>
-                              );
-                            })()}
-                            {isProcessStep && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-200/55 border border-border/45 text-muted-foreground/65">
-                                过程思考
-                              </span>
-                            )}
-                            {msg.downgrade_info && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 font-medium flex items-center space-x-1">
-                                <AlertTriangle className="w-2.5 h-2.5 text-amber-500" />
-                                <span>已自动降级</span>
-                              </span>
-                            )}
-                            {msg.executed_by_account && (
-                              <span
-                                className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                      {/* 发言角色标志：连续过程步骤中隐藏重复的头像与角色头，仅在过程起点与交付答复展示 */}
+                      {(!isContinuousProcessStep || isUser) && (
+                        <div
+                          className={`flex items-center space-x-2 px-1 ${
+                            isProcessStep ? 'text-[11px] text-muted-foreground/70' : 'text-xs text-muted-foreground'
+                          }`}
+                        >
+                          {isUser ? (
+                            <span className="font-semibold text-foreground">您</span>
+                          ) : (
+                            <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
+                              <Sparkles
+                                className={
                                   isProcessStep
-                                    ? 'bg-surface-200/45 border border-border/45 text-muted-foreground/60'
-                                    : 'bg-surface-200 border border-border'
-                                }`}
-                              >
-                                调度: {msg.executed_by_account}
-                              </span>
-                            )}
-                          </div>
-                        )}
-                      </div>
+                                    ? 'w-3 h-3 text-emerald-500/70'
+                                    : 'w-3.5 h-3.5 text-emerald-500'
+                                }
+                              />
+                              {(() => {
+                                const rawModel = msg.downgrade_info?.current_model || msg.model_name || currentModel || '';
+                                const isGemini = rawModel.toLowerCase().includes('gemini');
+                                const modelDisplayName = isGemini ? `Gemini (${rawModel})` : (rawModel || 'AI Assistant');
+                                return (
+                                  <span
+                                    className={
+                                      isProcessStep
+                                        ? 'font-medium text-muted-foreground/80'
+                                        : 'font-bold text-foreground'
+                                    }
+                                  >
+                                    {modelDisplayName}
+                                  </span>
+                                );
+                              })()}
+                              {/* 彻底移除误导性的 过程思考 徽标 */}
+                              {msg.downgrade_info && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 font-medium flex items-center space-x-1">
+                                  <AlertTriangle className="w-2.5 h-2.5 text-amber-500" />
+                                  <span>已自动降级</span>
+                                </span>
+                              )}
+                              {msg.executed_by_account && (
+                                <span
+                                  className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                                    isProcessStep
+                                      ? 'bg-surface-200/45 border border-border/45 text-muted-foreground/60'
+                                      : 'bg-surface-200 border border-border'
+                                  }`}
+                                >
+                                  调度: {msg.executed_by_account}
+                                </span>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
 
                       {/* 模型自动降级提示横幅 */}
                       {!isUser && msg.downgrade_info && (
@@ -2722,17 +2776,35 @@ export default function WorkbenchPage() {
                         </div>
                       )}
 
-                      {/* 消息正文主体：正式交付回复保留高清晰卡片，中间过程步骤降权为柔和左竖线旁白块 */}
+                      {/* 消息正文主体：正式交付回复保留高清晰卡片，中间过程步骤降权为柔和旁白或微提示 */}
                       {(isUser || msg.content || (isCurrentStreamingMsg && (!msg.tool_events || msg.tool_events.length === 0))) && (
-                        <div
-                          className={`max-w-[88%] md:max-w-[82%] break-anywhere ${
-                            isUser
-                              ? 'rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] shadow-sm bg-emerald-100 dark:bg-emerald-950/70 text-emerald-950 dark:text-emerald-100 border border-emerald-300/60 dark:border-emerald-500/30 rounded-tr-none shadow-emerald-500/5'
-                              : isProcessStep
-                                ? 'ml-0.5 pl-3.5 pr-3 py-2 border-l-2 border-border/65 bg-surface-200/20 dark:bg-surface-200/10 rounded-r-xl text-[12px] leading-[1.58] text-muted-foreground/75'
-                                : 'rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] shadow-sm bg-surface-card text-foreground rounded-tl-none border border-border/80'
-                          }`}
-                        >
+                        (() => {
+                          const rawTrimmed = (msg.content || '').trim();
+                          const isBriefProcessNarrative =
+                            isProcessStep &&
+                            Boolean(rawTrimmed) &&
+                            rawTrimmed.length < 120 &&
+                            !rawTrimmed.includes('```');
+
+                          if (isBriefProcessNarrative) {
+                            return (
+                              <div className="text-[11px] text-muted-foreground/70 font-mono italic px-1 py-0.5 flex items-center space-x-1.5 animate-fade-in">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/50 shrink-0"></span>
+                                <span>{rawTrimmed}</span>
+                              </div>
+                            );
+                          }
+
+                          return (
+                            <div
+                              className={`max-w-[88%] md:max-w-[82%] break-anywhere ${
+                                isUser
+                                  ? 'rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] shadow-sm bg-emerald-100 dark:bg-emerald-950/70 text-emerald-950 dark:text-emerald-100 border border-emerald-300/60 dark:border-emerald-500/30 rounded-tr-none shadow-emerald-500/5'
+                                  : isProcessStep
+                                    ? 'ml-0.5 pl-3.5 pr-3 py-2 border-l-2 border-border/65 bg-surface-200/20 dark:bg-surface-200/10 rounded-r-xl text-[12px] leading-[1.58] text-muted-foreground/75'
+                                    : 'rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] shadow-sm bg-surface-card text-foreground rounded-tl-none border border-border/80'
+                              }`}
+                            >
                           {isUser ? (
                             (() => {
                               const { cleanContent: userBody, parsedAttachments } = parseMessageAttachments(msg.content);
@@ -2907,7 +2979,9 @@ export default function WorkbenchPage() {
                             })()
                           )}
                         </div>
-                      )}
+                      );
+                    })()
+                  )}
 
                       {/* 生成文件快捷直达栏（点击默认程序直接打开 / 预览 / 所在目录定位；过程步骤与待确认卡不重复显示交付栏） */}
                       {!isUser &&
