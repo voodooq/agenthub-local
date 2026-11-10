@@ -10,12 +10,13 @@ import os
 import re
 import uuid
 from pathlib import Path
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Awaitable, Callable
 
 from ..core.logging_config import logger
 from ..repository.conversation_repository import ConversationRepository
 from ..repository.message_repository import MessageRepository
 from ..repository.search_repository import SearchRepository
+from ..service.agent_runner import cancel_cli_processes
 from ..service.engine_pool import engine_pool
 from ..service.audit_service import audit_service
 from ..service.attachment_service import attachment_service
@@ -30,7 +31,11 @@ from ..extensions.mcp_manager import mcp_manager
 from .shell_executor import shell_executor
 from .tool_protocol import ToolProtocolAdapter
 from .context_builder import ContextBuilder
-from .context_compressor import LocalContextCompressor, read_ephemeral_tool_ref
+from .context_compressor import (
+    LocalContextCompressor,
+    read_ephemeral_tool_ref,
+    resolve_scrub_char_threshold,
+)
 from .ui_operator import ui_operator
 from ..repository.loop_run_repository import TaskLoopRepository
 from ..repository.tool_ref_repository import ToolRefRepository
@@ -42,6 +47,24 @@ class AgentRuntime:
 
     DEFAULT_REACT_STEPS = 16
     MAX_REACT_STEPS = 40  # 任务深度自愈与多步推进时的绝对动态扩展上限
+
+    # 活跃流式执行注册表：conversation_id -> {"token": str, "cancel_event": asyncio.Event}
+    _active_streams: dict[str, dict[str, Any]] = {}
+
+    @classmethod
+    def cancel_session_stream(cls, conversation_id: str) -> bool:
+        """主动中止指定会话正在执行的 ReAct 推理流与关联 CLI 子进程"""
+        if not conversation_id:
+            return False
+        entry = cls._active_streams.get(conversation_id)
+        cancelled = False
+        if entry:
+            ev = entry.get("cancel_event")
+            if ev and not ev.is_set():
+                ev.set()
+                cancelled = True
+        killed_cli = cancel_cli_processes(conversation_id)
+        return cancelled or killed_cli > 0
 
     PLANNING_SAFE_TOOLS = frozenset({
         "read_local_file",
@@ -354,6 +377,7 @@ class AgentRuntime:
         confirmed_facts: list[Any] | None = None,
         inquiry_confirmed: bool = False,
         inquiry_action: str | None = None,
+        is_disconnected: Callable[[], Awaitable[bool]] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行双层循环流式推理与工具编排，向外输出标准化 SSE 字典事件流。
@@ -419,6 +443,9 @@ class AgentRuntime:
         active_scene = (conv_obj.scene_mode if conv_obj else (scene_mode or "agent")) or "agent"
         active_incognito = bool(conv_obj.incognito) if conv_obj else bool(incognito)
         ws_id = (getattr(conv_obj, "workspace_id", None) if conv_obj else None) or ws_id
+
+        # 用户发起新一轮消息，立即取消该会话挂起的后台记忆提炼定时器，避免争抢算力
+        long_term_memory.cancel_extraction(conv_id)
 
         # 2. 对齐当前工作区沙盒附件并率先落盘用户提问（确保无论切换工作区或重发旧消息均落盘当前沙盒）
         if attachments:
@@ -621,310 +648,1500 @@ class AgentRuntime:
         in_memory_step_metrics: list[dict[str, Any]] = []
 
         # 5. 进入单轮内 ReAct 思考与工具执行循环 (Intra-Turn Adaptive Loop)
-        step_idx = 0
-        while step_idx < current_max_steps:
-            # 步数自适应动态扩展检查：当步数接近预算、任务仍在深度自愈且未触发死循环熔断时，自动扩展步数
-            if active_scene == "agent" and allow_step_extension and step_idx >= current_max_steps - 2:
-                if current_max_steps < self.MAX_REACT_STEPS:
-                    current_max_steps = min(current_max_steps + 8, self.MAX_REACT_STEPS)
-                    yield {
-                        "type": "step_extend",
-                        "step": step_idx + 1,
-                        "max_steps": current_max_steps,
-                        "message": f"任务正在深度自主推演与闭环攻坚中，已自动扩展执行预算至第 {current_max_steps} 步...",
-                    }
+        cancel_event = asyncio.Event()
+        run_token = uuid.uuid4().hex
+        prev_stream = self._active_streams.get(conv_id)
+        if prev_stream and prev_stream.get("cancel_event"):
+            prev_stream["cancel_event"].set()
+        self._active_streams[conv_id] = {
+            "token": run_token,
+            "cancel_event": cancel_event,
+        }
 
-            ctx = await ContextBuilder.build(
-                conversation_id=conv_id,
-                current_turn_id=current_turn_id,
-                user_query=user_message,
-                tools=active_tools if active_scene == "agent" else None,
-                context_rounds_override=0 if active_scene == "oneshot" else context_rounds,
-                base_system_prompt=system_override,
-                execution_strategy=execution_strategy,
-                clarify_mode=clarify_mode,
-                approved_plan_steps=approved_plan_steps,
-                inquiry_confirmed=inquiry_confirmed,
-                inquiry_action=normalized_inquiry_action,
-                has_prior_execution_unlock=has_prior_execution_unlock,
-                provider_info=resolved_primary_provider,
-                model_name=model_name,
-                frozen_tail_prompt=frozen_turn_tail_prompt,
-            )
+        async def _check_cancelled() -> bool:
+            if cancel_event.is_set():
+                return True
+            if is_disconnected is not None:
+                try:
+                    if await is_disconnected():
+                        cancel_event.set()
+                        return True
+                except Exception:
+                    pass
+            return False
 
-            # 首步向前端推送命中的长期记忆溯源、活跃确定性事实视图与当前任务草稿纸
-            if step_idx == 0:
-                frozen_turn_tail_prompt = str(ctx.get("tail_injection_prompt") or "")
-                matched_ids_from_ctx = ctx.get("matched_skill_ids") or []
-                if not matched_ids_from_ctx and ctx.get("matched_skill_id"):
-                    matched_ids_from_ctx = [ctx["matched_skill_id"]]
-                for m_id in matched_ids_from_ctx:
-                    clean_sk_id = str(m_id or "").strip()
-                    if clean_sk_id and clean_sk_id not in active_skill_ids:
-                        active_skill_ids.append(clean_sk_id)
-                if ctx.get("active_facts"):
-                    yield {
-                        "type": "fact_refs",
-                        "facts": ctx["active_facts"],
-                    }
-                if ctx.get("referenced_memories"):
-                    yield {
-                        "type": "memory_refs",
-                        "memories": [
-                            {
-                                "id": m["id"],
-                                "category": m["category"],
-                                "content": m["content"],
-                                "confidence": m["confidence"],
-                            }
-                            for m in ctx["referenced_memories"]
-                        ],
-                    }
-                if ctx.get("working_memory"):
-                    yield {
-                        "type": "scratchpad_update",
-                        "working_memory": ctx["working_memory"],
-                    }
+        step_raw_text = ""
+        encountered_stream_error = False
+        stream_error_message = ""
+        was_cancelled = False
+        stream_completed_normally = False
 
-            # 构造本步传给算力池的 pre_built_history 与 step_prompt
-            history_for_step = list(ctx.get("history_messages", []))
-            if step_idx == 0:
-                # 剥离刚刚入库的当前用户消息，交由 execute_stream_with_failover 作为最新 user_prompt 附带附件发送
-                if history_for_step and history_for_step[-1].get("role") == "user":
-                    history_for_step = history_for_step[:-1]
-                step_prompt = user_message
-                step_attachments = attachments
-                step_attachments_inline_only = False
-            else:
-                if last_step_error_info:
-                    if last_step_error_info.get("tool") == "inquiry_guard":
-                        step_prompt = (
-                            "[🚨 禁止二次弹卡强纠偏]:\n"
-                            "用户已经在前端交互卡片中完成全部确认并点击「统一开始执行」，全部执行工具已物理开放！\n"
-                            "1. 本轮严禁再次输出任何 `interactive_inquiry` 代码块或请求用户确认的废话；\n"
-                            "2. 立即输出标准 `<tool_call>`（如 `write_local_file` / `execute_local_command` / `read_local_file`）完成实际修改、脚本执行与验收验证！"
-                        )
-                    elif last_step_error_info.get("circuit_breaker"):
-                        failed_c = last_step_error_info.get("failed_cmd", "")
-                        step_prompt = (
-                            f"[🚨 语义级死循环物理熔断已触发 - 强制切换执行路径]:\n"
-                            f"系统检测到你连续多次尝试执行完全相同的失败命令: `{failed_c}`！\n"
-                            f"【死循环熔断强制铁律】:\n"
-                            f"1. 严禁再次尝试该相同命令！自动步数扩展权限已被系统安全锁定；\n"
-                            f"2. 必须立即切换为完全不同的工具或实现路径（例如: 换用 Python 脚本操作文件、检查工作目录或权限）；\n"
-                            f"3. 若确认该问题属于外部不可解物理障碍（如系统内核锁死文件、缺少系统管理员权限、网络断开），请立即停止发起任何工具调用，直接向用户详细陈述排查事实与物理卡点，请求人工支持！"
-                        )
-                    else:
-                        err_msg = last_step_error_info.get("summary", "执行返回异常或报错")
-                        step_prompt = (
-                            f"[🚨 第一性原理自愈与深度推演调度]:\n"
-                            f"上一步执行返回异常: {err_msg}。\n"
-                            f"【自主攻坚铁律 - 绝不允许卡住或直接退出】:\n"
-                            f"1. 仔细阅读上方工具返回的真实报错（特别是诊断日志与 STDERR 堆栈）；\n"
-                            f"2. 深度分析报错根因（例如: 若出现 `.Name : The term '.Name' is not recognized`，说明在 PowerShell 双引号内 `$_` 被外层提前展开丢失，应在单引号内书写脚本块，或改用标准的 Python 脚本 `python -c ...` 执行扫描与清理；若缺少依赖或文件请检查相对路径与 `--prefix`）；\n"
-                            f"3. 紧扣用户最终目标，自己构思可靠的替代解决方案；\n"
-                            f"4. 严禁向用户复述错误或只输出声明！所有工具调用均会自动确认执行，必须立即输出标准 `<tool_call>` 标签执行具体命令纠偏自愈，直到彻底达成目标：\n"
-                            f"```xml\n"
-                            f'<tool_call name="execute_local_command">\n'
-                            f'{{"command": "修正后的终端命令或 Python 替代执行脚本", "reason": "分析日志与语法根因后的自愈攻坚操作"}}\n'
-                            f"</tool_call>\n"
-                            f"```"
-                        )
-                else:
-                    step_prompt = (
-                        "[系统工作流推进]: 上述工具已成功执行并返回真实结果（见上方记录）。\n"
-                        "请基于上述真实结果深度思考并推进实现用户的最终目标：\n"
-                        "- 若任务尚未彻底达成（例如刚完成扫描，仍需进一步分析、删除无效项、修改文件或验证），请立即输出下一个 `<tool_call>` 继续执行；\n"
-                        "- 只有当用户的目标已经物理完成并验证通过时，才向用户输出最终完整的成果解答。"
-                    )
-
-                # 轮内防失忆与工作草稿纸联动提醒：当步数进入第 4 步及以后，早期输出开始微缩折叠
-                if active_scene == "agent" and step_idx >= 3:
-                    step_prompt += (
-                        "\n\n💡 [系统防失忆提醒]: 前期步骤的详细终端输出已按滑动窗口微缩折叠。"
-                        "若你查到了关键路径、失效列表或状态，请务必通过 `update_working_memory` 写入草稿纸，以防多步汇总时遗忘！"
-                    )
-
-                step_attachments = visual_attachments or None
-                step_attachments_inline_only = bool(visual_attachments)
-
-            step_raw_text = ""
-            encountered_stream_error = False
-
-            async for event in engine_pool.execute_stream_with_failover(
-                conversation_id=conv_id,
-                user_prompt=step_prompt,
-                model_name=model_name,
-                thinking_level=thinking_level,
-                system_override=ctx.get("system_instruction"),
-                temperature=temperature,
-                work_dir=ctx.get("current_cwd"),
-                context_rounds=context_rounds,
-                attachments=step_attachments,
-                pre_built_history=history_for_step,
-                attachments_inline_only=step_attachments_inline_only,
-                turn_id=current_turn_id,
-                step_index=step_idx,
-                agent_role="primary",
-                tail_injection=frozen_turn_tail_prompt or "",
-                incognito=active_incognito,
-            ):
-                etype = event.get("type")
-                if etype == "model_downgrade":
-                    effective_model_name = event.get("current_model", effective_model_name)
-                    yield event
-                elif etype == "step_metrics":
-                    m_dict = event.get("metrics")
-                    if isinstance(m_dict, dict):
-                        in_memory_step_metrics.append(m_dict)
-                elif etype == "stream_reset":
-                    # 网络中途断流重连接力：立即清空当前步骤已累加的半截文本，与前端气泡绝对对齐
-                    step_raw_text = ""
-                    yield event
-                elif etype == "chunk":
-                    chunk_str = event.get("content", "")
-                    step_raw_text += chunk_str
-                    final_account = event.get("account", final_account)
-                    yield event
-                elif etype == "done":
-                    step_raw_text = event.get("full_content", step_raw_text)
-                    final_account = event.get("account", final_account)
-                elif etype == "error":
-                    encountered_stream_error = True
-                    yield event
+        try:
+            step_idx = 0
+            while step_idx < current_max_steps:
+                if await _check_cancelled():
+                    was_cancelled = True
                     break
-                else:
-                    # 透传 start / relay / tool_request 等事件
-                    yield event
 
-            if encountered_stream_error:
-                return
+                # 步数自适应动态扩展检查：当步数接近预算、任务仍在深度自愈且未触发死循环熔断时，自动扩展步数
+                if active_scene == "agent" and allow_step_extension and step_idx >= current_max_steps - 2:
+                    if current_max_steps < self.MAX_REACT_STEPS:
+                        current_max_steps = min(current_max_steps + 8, self.MAX_REACT_STEPS)
+                        yield {
+                            "type": "step_extend",
+                            "step": step_idx + 1,
+                            "max_steps": current_max_steps,
+                            "message": f"任务正在深度自主推演与闭环攻坚中，已自动扩展执行预算至第 {current_max_steps} 步...",
+                        }
 
-            # 6. 解析本步输出是否包含工具调用 (<tool_call>)
-            clean_text, tool_calls = ToolProtocolAdapter.parse_xml_tool_calls(step_raw_text)
-
-            # ── 关键反停滞与伪调用拦截（Anti-Stall & Steer）带精准白名单 ──
-            raw_stripped = (step_raw_text or "").strip()
-
-            # 白名单判据：模型礼貌向用户发起确认提问（如询问是否允许删除），或完成了正常完整总结
-            is_user_confirmation_request = bool(re.search(
-                r"(?:是否允许|请问是否|请确认|需要您确认|是否继续|是否需要|是否删除|请选择|如需继续|？|\?)",
-                raw_stripped
-            ))
-            has_explicit_pseudo_tags = bool(re.search(
-                r"(?:\[调用工具|\[tool_call|<tool_call|<function=|</tool_code>|```xml\s*<tool_call)",
-                raw_stripped,
-                re.IGNORECASE
-            ))
-            is_bare_json_command = bool(re.search(r'\{\s*"command"\s*:', raw_stripped))
-
-            # 仅当命中机器伪标签，或上步报错且模型输出极简敷衍且非提问时，才触发强制推偏
-            is_abnormal_stall = (
-                has_explicit_pseudo_tags
-                or is_bare_json_command
-                or (last_step_error_info is not None and len(raw_stripped) < 60 and not is_user_confirmation_request)
-            )
-
-            # 情况 A：模型未发起真实工具调用
-            if not tool_calls or active_scene != "agent":
-                # 防止用户已点确认执行后，模型仍违背指令二次吐出 interactive_inquiry 卡空转
-                if (
-                    active_scene == "agent"
-                    and explicit_execute_unlock
-                    and not is_planning_phase
-                    and ToolProtocolAdapter.contains_interactive_inquiry(raw_stripped)
-                    and consecutive_stalls < 2
-                    and step_idx < current_max_steps - 1
-                ):
-                    consecutive_stalls += 1
-                    logger.warning(f"[AgentRuntime] 拦截确认后非法二次 interactive_inquiry 弹窗，触发执行纠正 (第{consecutive_stalls}次)")
-                    yield {"type": "stream_reset"}
-                    last_step_error_info = {
-                        "tool": "inquiry_guard",
-                        "summary": "用户已完成全部确认并点击开始执行，严禁重复输出 interactive_inquiry 确认卡",
-                    }
-                    step_idx += 1
-                    continue
-
-                if active_scene == "agent" and is_abnormal_stall and not is_user_confirmation_request and consecutive_stalls < 3 and step_idx < current_max_steps - 1:
-                    consecutive_stalls += 1
-                    logger.warning(f"[AgentRuntime] 捕获模型伪工具调用声明/卡顿: '{raw_stripped}'，激活强制纠偏推进器 (第{consecutive_stalls}次)")
-                    last_step_error_info = {
-                        "tool": "steering",
-                        "summary": "模型输出了未执行的伪工具声明，未包含系统能够执行的具体 <tool_call> 标签与有效参数",
-                    }
-                    step_idx += 1
-                    continue
-
-                raw_final_text = clean_text if clean_text else step_raw_text
-                if raw_final_text and (
-                    "interactive_inquiry" in raw_final_text.lower()
-                    or '"inquiry_id"' in raw_final_text
-                ):
-                    final_saved_text = ToolProtocolAdapter.normalize_interactive_inquiry_markdown(raw_final_text)
-                else:
-                    final_saved_text = raw_final_text
-
-                has_inquiry_card = ToolProtocolAdapter.contains_interactive_inquiry(final_saved_text)
-                is_waiting_user_decision = bool(
-                    active_scene == "agent" and (has_inquiry_card or is_planning_phase)
+                ctx = await ContextBuilder.build(
+                    conversation_id=conv_id,
+                    current_turn_id=current_turn_id,
+                    user_query=user_message,
+                    tools=active_tools if active_scene == "agent" else None,
+                    context_rounds_override=0 if active_scene == "oneshot" else context_rounds,
+                    base_system_prompt=system_override,
+                    execution_strategy=execution_strategy,
+                    clarify_mode=clarify_mode,
+                    approved_plan_steps=approved_plan_steps,
+                    inquiry_confirmed=inquiry_confirmed,
+                    inquiry_action=normalized_inquiry_action,
+                    has_prior_execution_unlock=has_prior_execution_unlock,
+                    provider_info=resolved_primary_provider,
+                    model_name=model_name,
+                    frozen_tail_prompt=frozen_turn_tail_prompt,
                 )
 
-                if final_saved_text:
-                    await MessageRepository.save_message(
-                        conversation_id=conv_id,
-                        role="model",
-                        content=final_saved_text,
-                        executed_by_account=final_account,
-                        token_count=len(final_saved_text) // 3,
-                        turn_id=current_turn_id,
-                    )
-                    await ConversationRepository.touch(conv_id)
-                    if conv_id and not active_incognito:
-                        long_term_memory.schedule_extraction(conv_id, delay_seconds=180)
-                accumulated_visible_text += ("\n\n" + final_saved_text if accumulated_visible_text else final_saved_text)
+                if await _check_cancelled():
+                    was_cancelled = True
+                    break
 
-                # ── 任务自主闭环门控：包含待确认交互卡或仍在规划停顿期时严禁标为 completed ──
-                if active_loop_obj:
-                    try:
-                        if is_waiting_user_decision:
+                # 首步向前端推送命中的长期记忆溯源、活跃确定性事实视图与当前任务草稿纸
+                if step_idx == 0:
+                    frozen_turn_tail_prompt = str(ctx.get("tail_injection_prompt") or "")
+                    matched_ids_from_ctx = ctx.get("matched_skill_ids") or []
+                    if not matched_ids_from_ctx and ctx.get("matched_skill_id"):
+                        matched_ids_from_ctx = [ctx["matched_skill_id"]]
+                    for m_id in matched_ids_from_ctx:
+                        clean_sk_id = str(m_id or "").strip()
+                        if clean_sk_id and clean_sk_id not in active_skill_ids:
+                            active_skill_ids.append(clean_sk_id)
+                    if ctx.get("active_facts"):
+                        yield {
+                            "type": "fact_refs",
+                            "facts": ctx["active_facts"],
+                        }
+                    if ctx.get("referenced_memories"):
+                        yield {
+                            "type": "memory_refs",
+                            "memories": [
+                                {
+                                    "id": m["id"],
+                                    "category": m["category"],
+                                    "content": m["content"],
+                                    "confidence": m["confidence"],
+                                }
+                                for m in ctx["referenced_memories"]
+                            ],
+                        }
+                    if ctx.get("working_memory"):
+                        yield {
+                            "type": "scratchpad_update",
+                            "working_memory": ctx["working_memory"],
+                        }
+
+                # 构造本步传给算力池的 pre_built_history 与 step_prompt
+                history_for_step = list(ctx.get("history_messages", []))
+                if step_idx == 0:
+                    # 剥离刚刚入库的当前用户消息，交由 execute_stream_with_failover 作为最新 user_prompt 附带附件发送
+                    if history_for_step and history_for_step[-1].get("role") == "user":
+                        history_for_step = history_for_step[:-1]
+                    step_prompt = user_message
+                    step_attachments = attachments
+                    step_attachments_inline_only = False
+                else:
+                    if last_step_error_info:
+                        if last_step_error_info.get("tool") == "inquiry_guard":
+                            step_prompt = (
+                                "[🚨 禁止二次弹卡强纠偏]:\n"
+                                "用户已经在前端交互卡片中完成全部确认并点击「统一开始执行」，全部执行工具已物理开放！\n"
+                                "1. 本轮严禁再次输出任何 `interactive_inquiry` 代码块或请求用户确认的废话；\n"
+                                "2. 立即输出标准 `<tool_call>`（如 `write_local_file` / `execute_local_command` / `read_local_file`）完成实际修改、脚本执行与验收验证！"
+                            )
+                        elif last_step_error_info.get("circuit_breaker"):
+                            failed_c = last_step_error_info.get("failed_cmd", "")
+                            step_prompt = (
+                                f"[🚨 语义级死循环物理熔断已触发 - 强制切换执行路径]:\n"
+                                f"系统检测到你连续多次尝试执行完全相同的失败命令: `{failed_c}`！\n"
+                                f"【死循环熔断强制铁律】:\n"
+                                f"1. 严禁再次尝试该相同命令！自动步数扩展权限已被系统安全锁定；\n"
+                                f"2. 必须立即切换为完全不同的工具或实现路径（例如: 换用 Python 脚本操作文件、检查工作目录或权限）；\n"
+                                f"3. 若确认该问题属于外部不可解物理障碍（如系统内核锁死文件、缺少系统管理员权限、网络断开），请立即停止发起任何工具调用，直接向用户详细陈述排查事实与物理卡点，请求人工支持！"
+                            )
+                        else:
+                            err_msg = last_step_error_info.get("summary", "执行返回异常或报错")
+                            step_prompt = (
+                                f"[🚨 第一性原理自愈与深度推演调度]:\n"
+                                f"上一步执行返回异常: {err_msg}。\n"
+                                f"【自主攻坚铁律 - 绝不允许卡住或直接退出】:\n"
+                                f"1. 仔细阅读上方工具返回的真实报错（特别是诊断日志与 STDERR 堆栈）；\n"
+                                f"2. 深度分析报错根因（例如: 若出现 `.Name : The term '.Name' is not recognized`，说明在 PowerShell 双引号内 `$_` 被外层提前展开丢失，应在单引号内书写脚本块，或改用标准的 Python 脚本 `python -c ...` 执行扫描与清理；若缺少依赖或文件请检查相对路径与 `--prefix`）；\n"
+                                f"3. 紧扣用户最终目标，自己构思可靠的替代解决方案；\n"
+                                f"4. 严禁向用户复述错误或只输出声明！所有工具调用均会自动确认执行，必须立即输出标准 `<tool_call>` 标签执行具体命令纠偏自愈，直到彻底达成目标：\n"
+                                f"```xml\n"
+                                f'<tool_call name="execute_local_command">\n'
+                                f'{{"command": "修正后的终端命令或 Python 替代执行脚本", "reason": "分析日志与语法根因后的自愈攻坚操作"}}\n'
+                                f"</tool_call>\n"
+                                f"```"
+                            )
+                    else:
+                        step_prompt = (
+                            "[系统工作流推进]: 上述工具已成功执行并返回真实结果（见上方记录）。\n"
+                            "请基于上述真实结果深度思考并推进实现用户的最终目标：\n"
+                            "- 若任务尚未彻底达成（例如刚完成扫描，仍需进一步分析、删除无效项、修改文件或验证），请立即输出下一个 `<tool_call>` 继续执行；\n"
+                            "- 只有当用户的目标已经物理完成并验证通过时，才向用户输出最终完整的成果解答。"
+                        )
+
+                    # 轮内工作草稿纸协同提醒：多步执行时可将关键结论沉淀至草稿纸，防止长任务遗忘
+                    if active_scene == "agent" and step_idx >= 4:
+                        step_prompt += (
+                            "\n\n💡 [多步任务协同提醒]: 若你已查明关键文件路径、数据结构或中间状态，"
+                            "请适时通过 `update_working_memory` 记录关键结论，以便后续步骤高效直达。"
+                        )
+
+                    step_attachments = visual_attachments or None
+                    step_attachments_inline_only = bool(visual_attachments)
+
+                step_raw_text = ""
+                encountered_stream_error = False
+                stream_error_message = ""
+
+                async for event in engine_pool.execute_stream_with_failover(
+                    conversation_id=conv_id,
+                    user_prompt=step_prompt,
+                    model_name=model_name,
+                    thinking_level=thinking_level,
+                    system_override=ctx.get("system_instruction"),
+                    temperature=temperature,
+                    work_dir=ctx.get("current_cwd"),
+                    context_rounds=context_rounds,
+                    attachments=step_attachments,
+                    pre_built_history=history_for_step,
+                    attachments_inline_only=step_attachments_inline_only,
+                    turn_id=current_turn_id,
+                    step_index=step_idx,
+                    agent_role="primary",
+                    tail_injection=frozen_turn_tail_prompt or "",
+                    incognito=active_incognito,
+                    cancel_event=cancel_event,
+                ):
+                    if await _check_cancelled():
+                        was_cancelled = True
+                        break
+                    etype = event.get("type")
+                    if etype == "cancelled":
+                        was_cancelled = True
+                        break
+                    elif etype == "start":
+                        yield {**event, "step_index": step_idx}
+                    elif etype == "thinking_chunk":
+                        yield event
+                    elif etype == "model_downgrade":
+                        effective_model_name = event.get("current_model", effective_model_name)
+                        yield event
+                    elif etype == "step_metrics":
+                        m_dict = event.get("metrics")
+                        if isinstance(m_dict, dict):
+                            in_memory_step_metrics.append(m_dict)
+                    elif etype == "stream_reset":
+                        # 网络中途断流重连接力：立即清空当前步骤已累加的半截文本，与前端气泡绝对对齐
+                        step_raw_text = ""
+                        yield event
+                    elif etype == "chunk":
+                        chunk_str = event.get("content", "")
+                        step_raw_text += chunk_str
+                        final_account = event.get("account", final_account)
+                        yield event
+                    elif etype == "done":
+                        step_raw_text = event.get("full_content", step_raw_text)
+                        final_account = event.get("account", final_account)
+                    elif etype == "error":
+                        encountered_stream_error = True
+                        stream_error_message = str(event.get("content") or "算力调度发生错误")
+                        yield event
+                        break
+                    else:
+                        # 透传 start / relay / tool_request 等事件
+                        yield event
+
+                if was_cancelled or await _check_cancelled():
+                    was_cancelled = True
+                    break
+
+                if encountered_stream_error:
+                    # 异常中断也要保留用户可见报错并终结活跃 Loop，防止重开或切换后只剩孤零零用户消息
+                    err_banner = f"⚠️ {stream_error_message or '模型响应异常，本次执行已终止。'}"
+                    partial_clean = (
+                        ToolProtocolAdapter.parse_xml_tool_calls(step_raw_text)[0].strip()
+                        if step_raw_text
+                        else ""
+                    )
+                    persisted_err = f"{partial_clean}\n\n{err_banner}" if partial_clean else err_banner
+                    if not active_incognito and conv_id:
+                        try:
+                            await MessageRepository.save_message(
+                                conversation_id=conv_id,
+                                role="model",
+                                content=persisted_err,
+                                executed_by_account=final_account,
+                                token_count=len(persisted_err) // 3,
+                                turn_id=current_turn_id,
+                            )
+                            await ConversationRepository.touch(conv_id)
+                        except Exception as save_err:
+                            logger.warning(f"[AgentRuntime] 保存流式报错消息失败: {save_err}")
+                    if active_loop_obj:
+                        try:
+                            err_pad = active_loop_obj.scratchpad_md or ""
+                            err_note = f"\n\n> ⚠️ 终止原因: {stream_error_message[:200]}" if stream_error_message else ""
                             await TaskLoopRepository.update_loop_status(
                                 loop_id=active_loop_obj.id,
-                                status="waiting_approval",
+                                status="failed",
+                                scratchpad_md=(f"{err_pad}{err_note}" if err_pad and err_note else None),
                             )
-                            waiting_loop = await TaskLoopRepository.get_loop(active_loop_obj.id)
-                            eff_loop = waiting_loop or active_loop_obj
-                            if target_cwd:
-                                try:
-                                    ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
-                                    ws_sp.parent.mkdir(parents=True, exist_ok=True)
-                                    ws_sp.write_text(eff_loop.scratchpad_md or "", encoding="utf-8")
-                                except Exception:
-                                    pass
                             yield {
-                                "type": "loop_step",
-                                "loop_id": eff_loop.id,
-                                "iteration": eff_loop.current_iteration,
-                                "max_iterations": eff_loop.max_iterations,
-                                "status": "waiting_approval",
-                                "pending_approval_call": None,
-                                "scratchpad_md": eff_loop.scratchpad_md,
+                                "type": "loop_failed",
+                                "loop_id": active_loop_obj.id,
+                                "iteration": active_loop_obj.current_iteration,
+                                "max_iterations": active_loop_obj.max_iterations,
+                                "status": "failed",
+                                "error": stream_error_message,
                             }
-                            active_loop_obj = eff_loop
-                        else:
-                            summary_snippet = (final_saved_text or accumulated_visible_text).strip().split("\n")[0][:80]
-                            completed_loop = await TaskLoopRepository.complete_loop(
-                                loop_id=active_loop_obj.id,
-                                summary=summary_snippet or "模型已完成自主闭环并输出交付结论",
-                            )
-                            if completed_loop:
+                            active_loop_obj = None
+                        except Exception as loop_err:
+                            logger.warning(f"[AgentRuntime] 报错收敛 Loop 状态失败: {loop_err}")
+                    break
+
+                # 6. 解析本步输出是否包含工具调用 (<tool_call>)
+                clean_text, tool_calls = ToolProtocolAdapter.parse_xml_tool_calls(step_raw_text)
+
+                # ── 关键反停滞与伪调用拦截（Anti-Stall & Steer）带精准白名单 ──
+                raw_stripped = (step_raw_text or "").strip()
+
+                # 白名单判据：模型礼貌向用户发起确认提问（如询问是否允许删除），或完成了正常完整总结
+                is_user_confirmation_request = bool(re.search(
+                    r"(?:是否允许|请问是否|请确认|需要您确认|是否继续|是否需要|是否删除|请选择|如需继续|？|\?)",
+                    raw_stripped
+                ))
+                has_explicit_pseudo_tags = bool(re.search(
+                    r"(?:\[调用工具|\[tool_call|<tool_call|<function=|</tool_code>|```xml\s*<tool_call|<\s*/?\s*[\uFF5C|][\uFF5C|\s]*DSML\b)",
+                    raw_stripped,
+                    re.IGNORECASE
+                ))
+                is_bare_json_command = bool(re.search(r'\{\s*"command"\s*:', raw_stripped))
+
+                # 仅当命中机器伪标签，或上步报错且模型输出极简敷衍且非提问时，才触发强制推偏
+                is_abnormal_stall = (
+                    has_explicit_pseudo_tags
+                    or is_bare_json_command
+                    or (last_step_error_info is not None and len(raw_stripped) < 60 and not is_user_confirmation_request)
+                )
+
+                # 情况 A：模型未发起真实工具调用
+                if not tool_calls or active_scene != "agent":
+                    # 防止用户已点确认执行后，模型仍违背指令二次吐出 interactive_inquiry 卡空转
+                    if (
+                        active_scene == "agent"
+                        and explicit_execute_unlock
+                        and not is_planning_phase
+                        and ToolProtocolAdapter.contains_interactive_inquiry(raw_stripped)
+                        and consecutive_stalls < 2
+                        and step_idx < current_max_steps - 1
+                    ):
+                        consecutive_stalls += 1
+                        logger.warning(f"[AgentRuntime] 拦截确认后非法二次 interactive_inquiry 弹窗，触发执行纠正 (第{consecutive_stalls}次)")
+                        yield {"type": "stream_reset"}
+                        last_step_error_info = {
+                            "tool": "inquiry_guard",
+                            "summary": "用户已完成全部确认并点击开始执行，严禁重复输出 interactive_inquiry 确认卡",
+                        }
+                        step_idx += 1
+                        continue
+
+                    if active_scene == "agent" and is_abnormal_stall and not is_user_confirmation_request and consecutive_stalls < 3 and step_idx < current_max_steps - 1:
+                        consecutive_stalls += 1
+                        logger.warning(f"[AgentRuntime] 捕获模型伪工具调用声明/卡顿: '{raw_stripped}'，激活强制纠偏推进器 (第{consecutive_stalls}次)")
+                        last_step_error_info = {
+                            "tool": "steering",
+                            "summary": "模型输出了未执行的伪工具声明，未包含系统能够执行的具体 <tool_call> 标签与有效参数",
+                        }
+                        step_idx += 1
+                        continue
+
+                    if clean_text:
+                        raw_final_text = clean_text
+                    elif has_explicit_pseudo_tags:
+                        raw_final_text = "（模型输出的工具调用协议未正确闭合或已达推演步数上限，已自动过滤内部协议文本；如需继续执行请重试。）"
+                    else:
+                        raw_final_text = step_raw_text
+                    if raw_final_text and (
+                        "interactive_inquiry" in raw_final_text.lower()
+                        or '"inquiry_id"' in raw_final_text
+                    ):
+                        final_saved_text = ToolProtocolAdapter.normalize_interactive_inquiry_markdown(raw_final_text)
+                    else:
+                        final_saved_text = raw_final_text
+
+                    has_inquiry_card = ToolProtocolAdapter.contains_interactive_inquiry(final_saved_text)
+                    is_waiting_user_decision = bool(
+                        active_scene == "agent" and (has_inquiry_card or is_planning_phase)
+                    )
+
+                    if final_saved_text:
+                        await MessageRepository.save_message(
+                            conversation_id=conv_id,
+                            role="model",
+                            content=final_saved_text,
+                            executed_by_account=final_account,
+                            token_count=len(final_saved_text) // 3,
+                            turn_id=current_turn_id,
+                        )
+                        await ConversationRepository.touch(conv_id)
+                        if conv_id and not active_incognito:
+                            long_term_memory.schedule_extraction(conv_id, delay_seconds=180)
+                    accumulated_visible_text += ("\n\n" + final_saved_text if accumulated_visible_text else final_saved_text)
+
+                    # ── 任务自主闭环门控：包含待确认交互卡或仍在规划停顿期时严禁标为 completed ──
+                    if active_loop_obj:
+                        try:
+                            if is_waiting_user_decision:
+                                await TaskLoopRepository.update_loop_status(
+                                    loop_id=active_loop_obj.id,
+                                    status="waiting_approval",
+                                )
+                                waiting_loop = await TaskLoopRepository.get_loop(active_loop_obj.id)
+                                eff_loop = waiting_loop or active_loop_obj
                                 if target_cwd:
                                     try:
                                         ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
                                         ws_sp.parent.mkdir(parents=True, exist_ok=True)
-                                        ws_sp.write_text(completed_loop.scratchpad_md or "", encoding="utf-8")
+                                        ws_sp.write_text(eff_loop.scratchpad_md or "", encoding="utf-8")
                                     except Exception:
                                         pass
+                                yield {
+                                    "type": "loop_step",
+                                    "loop_id": eff_loop.id,
+                                    "iteration": eff_loop.current_iteration,
+                                    "max_iterations": eff_loop.max_iterations,
+                                    "status": "waiting_approval",
+                                    "pending_approval_call": None,
+                                    "scratchpad_md": eff_loop.scratchpad_md,
+                                }
+                                active_loop_obj = eff_loop
+                            else:
+                                summary_snippet = (final_saved_text or accumulated_visible_text).strip().split("\n")[0][:80]
+                                completed_loop = await TaskLoopRepository.complete_loop(
+                                    loop_id=active_loop_obj.id,
+                                    summary=summary_snippet or "模型已完成自主闭环并输出交付结论",
+                                )
+                                if completed_loop:
+                                    if target_cwd:
+                                        try:
+                                            ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
+                                            ws_sp.parent.mkdir(parents=True, exist_ok=True)
+                                            ws_sp.write_text(completed_loop.scratchpad_md or "", encoding="utf-8")
+                                        except Exception:
+                                            pass
+                                    yield {
+                                        "type": "loop_completed",
+                                        "loop_id": completed_loop.id,
+                                        "iteration": completed_loop.current_iteration,
+                                        "max_iterations": completed_loop.max_iterations,
+                                        "status": "completed",
+                                        "scratchpad_md": completed_loop.scratchpad_md,
+                                    }
+                                    active_loop_obj = None
+                        except Exception as e:
+                            logger.warning(f"自主循环状态收敛更新异常: {e}")
+
+                    # 若本轮执行过终端命令/脚本或写盘操作，收尾增量同步一次工作区物理资产
+                    if has_workspace_mutations and ws_id:
+                        try:
+                            from ..repository.artifact_repository import ArtifactRepository
+                            await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
+                        except Exception as sync_err:
+                            logger.debug(f"[AgentRuntime] 任务收尾物理资产同步跳过: {sync_err}")
+
+                    # 汇总并推送本轮 Token / KV Cache / TTFT / TPS 微水表事件
+                    try:
+                        turn_stats_payload = (
+                            None
+                            if active_incognito
+                            else await TokenUsageRepository.get_turn_summary(conv_id, current_turn_id)
+                        )
+                        if turn_stats_payload is None and in_memory_step_metrics:
+                            turn_stats_payload = _build_turn_summary_from_rows(
+                                current_turn_id, in_memory_step_metrics, 0
+                            )
+                        if turn_stats_payload:
+                            yield {
+                                "type": "token_stats",
+                                "conversation_id": conv_id,
+                                "turn_id": current_turn_id,
+                                "stats": turn_stats_payload,
+                            }
+                    except Exception as stats_err:
+                        logger.debug(f"[AgentRuntime] 推送 token_stats 跳过: {stats_err}")
+
+                    stream_completed_normally = True
+                    yield {
+                        "type": "done",
+                        "full_content": accumulated_visible_text.strip(),
+                        "final_step_content": final_saved_text,
+                        "account": final_account,
+                        "model": effective_model_name,
+                    }
+                    break
+
+                consecutive_stalls = 0
+
+                # 情况 B：模型发起了工具调用 -> 规范化工具调用 XML 示范并落盘（杜绝带偏后续历史）
+                if clean_text and "interactive_inquiry" in clean_text.lower():
+                    clean_text = ToolProtocolAdapter.normalize_interactive_inquiry_markdown(clean_text)
+                accumulated_visible_text += ("\n\n" + clean_text if (accumulated_visible_text and clean_text) else clean_text)
+                formatted_tc_xml = "\n".join(
+                    f'<tool_call name="{tc.get("function", {}).get("name", "")}">{tc.get("function", {}).get("arguments", "{}")}</tool_call>'
+                    for tc in tool_calls
+                )
+                saved_content = (clean_text + "\n" + formatted_tc_xml).strip() if clean_text else formatted_tc_xml
+
+                await MessageRepository.save_message(
+                    conversation_id=conv_id,
+                    role="model",
+                    content=saved_content,
+                    executed_by_account=final_account,
+                    token_count=len(step_raw_text) // 3,
+                    turn_id=current_turn_id,
+                    tool_calls_json=json.dumps(tool_calls, ensure_ascii=False),
+                )
+
+                # 逐个执行本步拦截到的工具调用
+                for tc in tool_calls:
+                    if await _check_cancelled():
+                        was_cancelled = True
+                        break
+                    call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
+                    func_info = tc.get("function", {})
+                    func_name = func_info.get("name", "")
+                    raw_args = func_info.get("arguments", "{}")
+                    try:
+                        args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                    except Exception:
+                        args = {}
+
+                    tool_output = ""
+                    compressed = ""
+
+                    # 🛡️ 物理只读硬门控拦截：若处于规划阶段，绝对禁止执行任何破坏性写入或终端命令
+                    if is_planning_phase and func_name not in PLANNING_SAFE_TOOLS:
+                        deny_reason = (
+                            f"Denied: 【安全只读硬门控】当前处于「谋定而后动 (Plan-First)」方案规划阶段，写盘与终端执行权限已被物理锁定。"
+                            f"工具 [{func_name}] 禁止调用。请先向用户展示完整的【实施方案】与【分步执行步骤清单】，"
+                            f"并在末尾输出 ```interactive_inquiry 协议块等待用户确认批准。"
+                        )
+                        compressed = f"[只读门控硬拦截 `{func_name}`]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "status": "denied",
+                            "output": deny_reason,
+                            "compressed": compressed,
+                        }
+                        await MessageRepository.save_message(
+                            conversation_id=conv_id,
+                            turn_id=current_turn_id,
+                            role="tool",
+                            content=deny_reason,
+                            compressed_content=compressed,
+                            tool_call_id=call_id,
+                        )
+                        last_step_error_info = {
+                            "tool": func_name,
+                            "summary": deny_reason,
+                        }
+                        continue
+
+                    # ── 工具 1: 受控本地终端命令 (execute_local_command) ──
+                    if func_name == "execute_local_command":
+                        cmd_str = str(args.get("command", "")).strip()
+                        reason_str = str(args.get("reason", "执行本地终端诊断或操作")).strip()
+                        norm_cmd = re.sub(r"\s+", " ", cmd_str)
+
+                        # 语义级死循环物理硬阻断：若模型在收到熔断警告后仍顽固输出同一条失败命令，直接封禁执行
+                        is_hard_loop_blocked = bool(
+                            last_step_error_info
+                            and last_step_error_info.get("circuit_breaker")
+                            and last_step_error_info.get("failed_cmd") == norm_cmd
+                        )
+
+                        sec_level = "DENY" if is_hard_loop_blocked else shell_executor.check_security(cmd_str)
+
+                        if sec_level == "DENY":
+                            deny_reason = (
+                                f"Denied: 【死循环物理硬阻断】命令 `{cmd_str}` 已经触发死循环熔断，系统已物理封禁重复执行此失败操作。"
+                                f"请立即停止调用工具，直接向用户详细陈述排查事实与物理卡点，说明无法自动完成的原因并请求人工介入。"
+                                if is_hard_loop_blocked
+                                else f"Denied: 命令 `{cmd_str}` 触发系统高危安全黑名单已被强制拦截。严禁执行破坏性指令，请改用安全的替代方式回答用户。"
+                            )
+                            await audit_service.log(
+                                event_type="shell_command_denied",
+                                actor="agent",
+                                detail={"command": cmd_str, "reason": reason_str, "loop_blocked": is_hard_loop_blocked},
+                                approved=False,
+                            )
+                            tool_output = deny_reason
+                            compressed = f"[死循环物理硬阻断 `{norm_cmd[:45]}`]" if is_hard_loop_blocked else f"[安全红线拦截高危命令 `{cmd_str[:50]}`]"
+                            yield {
+                                "type": "tool_end",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": cmd_str,
+                                "reason": reason_str,
+                                "status": "denied",
+                                "output": tool_output,
+                                "compressed": compressed,
+                            }
+
+                        else:
+                            # 全自动确认直通执行（包含 CONFIRM 与 SAFE 级命令），无需用户手动点击确认
+                            yield {
+                                "type": "tool_start",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": cmd_str,
+                                "reason": reason_str,
+                                "security": "AUTO_CONFIRMED" if sec_level == "CONFIRM" else "SAFE",
+                            }
+                            exec_res = await shell_executor.run(
+                                command=cmd_str,
+                                cwd=ctx.get("current_cwd"),
+                                session_id=conv_id,
+                            )
+                            tool_output = exec_res["output"]
+                            new_cwd = exec_res["new_cwd"]
+                            if new_cwd and new_cwd != ctx.get("current_cwd"):
+                                ctx["current_cwd"] = new_cwd
+                                await ConversationRepository.update_agent_state(conv_id, current_cwd=new_cwd)
+
+                            compressed = shell_executor.compress_output(
+                                cmd_str, tool_output, exec_res["exit_code"]
+                            )
+                            yield {
+                                "type": "tool_end",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": cmd_str,
+                                "reason": reason_str,
+                                "status": "completed",
+                                "exit_code": exec_res["exit_code"],
+                                "output": tool_output,
+                                "compressed": compressed,
+                                "cwd": new_cwd,
+                            }
+
+                    # ── 工具 1.5: 按需 FTS5 记忆与工作区历史检索 (search_memory_history) ──
+                    elif func_name == "search_memory_history":
+                        mem_query = str(args.get("query", "")).strip()
+                        mem_scope = str(args.get("scope", "all")).strip()
+                        mem_limit = int(args.get("limit", 5) or 5)
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"search_memory_history('{mem_query}', scope='{mem_scope}')",
+                            "reason": f"按需 FTS5 检索历史记忆与工作区轨迹: {mem_query}",
+                            "security": "SAFE",
+                        }
+                        tool_output = await self._execute_search_memory_history(
+                            query=mem_query,
+                            scope=mem_scope,
+                            limit=mem_limit,
+                            workspace_id=ws_id,
+                            target_cwd=ctx.get("current_cwd") or target_cwd,
+                            incognito=active_incognito,
+                        )
+                        compressed = f"[已按需检索历史记忆 ({mem_scope}): '{mem_query[:40]}']"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"search_memory_history('{mem_query[:40]}')",
+                            "reason": f"按需检索历史记忆: {mem_query}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具 2: 更新任务工作草稿纸 (update_working_memory) ──
+                    elif func_name == "update_working_memory":
+                        current_wm = dict(ctx.get("working_memory") or {})
+                        if args.get("task_completed") is True:
+                            current_wm = {}
+                            tool_output = "任务标记为已完成，工作记忆草稿纸已归档并清空。"
+                            compressed = "[已清空归档任务工作草稿纸]"
+                        else:
+                            if args.get("goal"):
+                                current_wm["goal"] = str(args["goal"])
+                            if isinstance(args.get("notes"), dict):
+                                existing_notes = current_wm.get("notes")
+                                if not isinstance(existing_notes, dict):
+                                    existing_notes = {}
+                                existing_notes.update(args["notes"])
+                                current_wm["notes"] = existing_notes
+                            tool_output = f"工作记忆草稿纸已更新: {json.dumps(current_wm, ensure_ascii=False)}"
+                            compressed = f"[已更新工作草稿纸: {json.dumps(current_wm, ensure_ascii=False)[:80]}]"
+
+                        ctx["working_memory"] = current_wm
+                        await ConversationRepository.update_agent_state(
+                            conv_id,
+                            working_memory_json=json.dumps(current_wm, ensure_ascii=False),
+                        )
+                        yield {
+                            "type": "scratchpad_update",
+                            "working_memory": current_wm,
+                        }
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": "update_working_memory",
+                            "reason": "更新当前任务关键状态草稿",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具 2.5: 直接写入长期记忆库 (save_long_term_memory) ──
+                    elif func_name == "save_long_term_memory":
+                        cat = str(args.get("category", "preference")).strip()
+                        mem_content = str(args.get("content", "")).strip()
+                        pinned = bool(args.get("is_pinned", True))
+                        if active_incognito:
+                            tool_output = "Skipped: 当前处于无痕模式 (incognito=True)，禁止写入长期记忆库。"
+                            compressed = "[无痕模式跳过写入长期记忆]"
+                        elif not mem_content:
+                            tool_output = "Error: 长期记忆内容 content 不能为空。"
+                            compressed = "[长期记忆写入失败: 内容为空]"
+                        else:
+                            safe_mem_content, _ = MemoryPolicyGuard.sanitize_text(mem_content)
+                            saved_mem = await long_term_memory.add_memory(
+                                category=cat,
+                                content=safe_mem_content,
+                                confidence=0.98,
+                                source="user_explicit",
+                                is_pinned=1 if pinned else 0,
+                            )
+                            tool_output = f"✅ 已成功写入本地 SQLite 长期记忆库 (ID: `{saved_mem['id']}`, 分类: `{cat}`, 置顶: `{pinned}`): {safe_mem_content}"
+                            compressed = f"[已植入长期记忆 ({cat}): {safe_mem_content[:45]}...]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"save_long_term_memory({cat})",
+                            "reason": "持久化写入本地长期记忆库",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具 3: 按需加载 Skill 详情 (load_skill_detail) ──
+                    elif func_name == "load_skill_detail":
+                        skill_name = str(args.get("skill_name", "")).strip()
+                        eff_ws_root = ctx.get("current_cwd") or target_cwd
+                        tool_output = skill_loader.get_full_skill_markdown(
+                            skill_name,
+                            workspace_root=eff_ws_root,
+                        )
+                        clean_sid = skill_name.lstrip("/")
+                        if clean_sid and clean_sid not in active_skill_ids and not str(tool_output).startswith("Error:"):
+                            active_skill_ids.append(clean_sid)
+                        compressed = f"[已加载专业技能 `{skill_name}` 操作规程与四元组清单]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"load_skill_detail({skill_name})",
+                            "reason": f"读取技能包 {skill_name} 详细指南",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具 3.1: FTS5 检索 Skill 领域知识库 (search_skill_knowledge) ──
+                    elif func_name == "search_skill_knowledge":
+                        sk_name = str(args.get("skill_name", "")).strip()
+                        kb_query = str(args.get("query", "")).strip()
+                        eff_ws_root = ctx.get("current_cwd") or target_cwd
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"search_skill_knowledge({sk_name}, '{kb_query}')",
+                            "reason": f"FTS5 毫秒级检索技能 {sk_name} 的领域知识库",
+                            "security": "SAFE",
+                        }
+                        tool_output = await skill_loader.search_knowledge(
+                            sk_name,
+                            kb_query,
+                            workspace_root=eff_ws_root,
+                        )
+                        clean_sid = sk_name.lstrip("/")
+                        if clean_sid and clean_sid not in active_skill_ids:
+                            active_skill_ids.append(clean_sid)
+                        compressed = f"[已检索 `{sk_name}` 领域知识库: 关键词 '{kb_query}']"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"search_skill_knowledge({sk_name})",
+                            "reason": f"检索技能知识库: {kb_query}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具 3.2: 执行 Skill 随包确定性算子 (run_skill_tool) ──
+                    elif func_name == "run_skill_tool":
+                        sk_name = str(args.get("skill_name", "")).strip()
+                        scr_name = str(args.get("script_name", "")).strip()
+                        scr_args = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
+                        eff_ws_root = ctx.get("current_cwd") or target_cwd
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"run_skill_tool({sk_name}/tools/{scr_name})",
+                            "reason": f"运行技能 {sk_name} 随包专属算子 {scr_name}",
+                            "security": "AUTO_CONFIRMED",
+                        }
+                        tool_output = await skill_loader.execute_skill_tool(
+                            sk_name,
+                            scr_name,
+                            scr_args,
+                            workspace_root=eff_ws_root,
+                        )
+                        clean_sid = sk_name.lstrip("/")
+                        if clean_sid and clean_sid not in active_skill_ids:
+                            active_skill_ids.append(clean_sid)
+                        compressed = f"[已运行随包算子 `{sk_name}/tools/{scr_name}`]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"run_skill_tool({sk_name}/{scr_name})",
+                            "reason": f"执行技能专属算子 {scr_name}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 物理写入本地文件 (write_local_file - 绝不幻觉) ──
+                    elif func_name == "write_local_file":
+                        raw_path = str(args.get("file_path") or args.get("path") or "").strip()
+                        file_content = str(args.get("content", ""))
+                        overwrite = bool(args.get("overwrite", True))
+                        current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
+                        ws_guard_root = Path(target_cwd or current_work_dir).resolve()
+
+                        if not raw_path:
+                            tool_output = "Error: 缺少必要参数 `file_path`。"
+                            compressed = "[写入失败: 未指定目标路径]"
+                            yield {
+                                "type": "tool_end",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": "write_file()",
+                                "reason": "参数缺失拒绝写入",
+                                "status": "completed",
+                                "output": tool_output,
+                                "compressed": compressed,
+                                "cwd": str(current_work_dir),
+                            }
+                        else:
+                            target_file = Path(raw_path)
+                            if not target_file.is_absolute():
+                                target_file = (current_work_dir / target_file).resolve()
+                            else:
+                                target_file = target_file.resolve()
+
+                            rel_display = str(target_file)
+                            try:
+                                rel_display = str(target_file.relative_to(current_work_dir))
+                            except Exception:
+                                pass
+
+                            # 🛡️ 物理只读硬拦截：严禁向工作区用户附件目录写入或伪造 Mock 输入
+                            if (
+                                attachment_service.is_path_in_attachments_dir(target_file, workspace_root=ws_guard_root)
+                                or attachment_service.is_path_in_attachments_dir(target_file, workspace_root=current_work_dir)
+                            ):
+                                deny_att_msg = (
+                                    f"Denied: 安全红线拦截！工作区输入附件目录 (`attachments/` 与 `.agenthub/attachments/`) "
+                                    f"为用户原始输入只读区，严禁 Agent 写入、修改或伪造测试文件 (`{rel_display}`)。\n"
+                                    "请将输出报告或中间产物写入 `./output/` 目录；若发现预期输入文件缺失，严禁生成 Mock 测试数据替代分析，必须立即向用户如实报告！"
+                                )
+                                await audit_service.log(
+                                    event_type="write_attachments_denied",
+                                    actor="agent",
+                                    detail={"target_file": str(target_file), "reason": "read_only_attachments_guard"},
+                                    approved=False,
+                                )
+                                tool_output = deny_att_msg
+                                compressed = f"[红线拦截写附件目录 `{rel_display}`]"
+                                yield {
+                                    "type": "tool_end",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": f"write_file({rel_display})",
+                                    "reason": f"只读附件目录保护拦截 {rel_display}",
+                                    "status": "denied",
+                                    "output": tool_output,
+                                    "compressed": compressed,
+                                    "cwd": str(current_work_dir),
+                                }
+                            else:
+                                # 全自动确认直通写入物理文件，无需用户手动点击确认
+                                yield {
+                                    "type": "tool_start",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": f"write_file -> {rel_display} ({len(file_content)} 字符)",
+                                    "reason": f"真实落盘本地文件 {rel_display}",
+                                    "security": "AUTO_CONFIRMED",
+                                }
+                                try:
+                                    if target_file.exists() and not overwrite:
+                                        tool_output = f"Error: 文件 `{rel_display}` 已存在且 overwrite=False，取消写入。"
+                                        compressed = f"[写入取消: 文件已存在 `{rel_display}`]"
+                                    else:
+                                        target_file.parent.mkdir(parents=True, exist_ok=True)
+                                        target_file.write_text(file_content, encoding="utf-8")
+                                        hotplug_note = ""
+                                        if target_file.name.upper() == "SKILL.MD":
+                                            target_file = skill_loader.normalize_skill_file(target_file)
+                                            hotplug_note = "\n🎯 [SKILL 标准校验与热插拔已激活]: 已自动规范化 YAML Frontmatter 与 kebab-case 命名，前端输入框 `/` 菜单现已可实时调用并查看该技能说明。"
+                                        elif target_file.name.lower() == "mcp_servers.json":
+                                            created_docs = skill_loader.ensure_mcp_companion_skills()
+                                            active_tools = ToolProtocolAdapter.get_builtin_tools() + await mcp_manager.get_enabled_tools()
+                                            doc_tip = f"（已自动补全 {created_docs} 个 MCP 伴生 SKILL 说明文档）" if created_docs else ""
+                                            hotplug_note = f"\n🔌 [MCP 热插拔已重载]: 已重新扫描 mcp_servers.json，当前可用工具总数: {len(active_tools)}{doc_tip}。"
+                                        tool_output = (
+                                            f"✅ 成功物理落盘文件: `{target_file}`\n"
+                                            f"文件大小: {len(file_content.encode('utf-8'))} 字节\n"
+                                            f"状态: 真实写入磁盘已验证完成。{hotplug_note}"
+                                        )
+                                        compressed = f"[已真实物理落盘文件 `{rel_display}` ({len(file_content)} 字符)]"
+
+                                        # 自动联动登记到当前工作区资产库
+                                        try:
+                                            from ..repository.artifact_repository import ArtifactRepository
+                                            f_type = ArtifactRepository._detect_file_type(target_file)
+                                            await ArtifactRepository.register_artifact(
+                                                workspace_id=ws_id,
+                                                file_path=str(target_file),
+                                                file_name=target_file.name,
+                                                file_type=f_type,
+                                                file_size=len(file_content.encode("utf-8")),
+                                                conversation_id=conv_id,
+                                                source="ai_generated",
+                                                summary=f"AI 自主编写落盘: {target_file.name}",
+                                            )
+                                        except Exception as art_err:
+                                            logger.warning(f"资产库落盘自动登记异常: {art_err}")
+                                except Exception as write_err:
+                                    tool_output = f"Error: 写入文件 `{target_file}` 失败: {write_err}"
+                                    compressed = f"[写入文件异常: {str(write_err)[:40]}]"
+
+                                yield {
+                                    "type": "tool_end",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": f"write_file({rel_display})",
+                                    "reason": f"写入本地文件 {rel_display}",
+                                    "status": "completed",
+                                    "output": tool_output,
+                                    "compressed": compressed,
+                                    "cwd": str(current_work_dir),
+                                }
+
+                    # ── 工具: 物理读取本地文件 (read_local_file - 原生支持文本与 Office 结构化解析) ──
+                    elif func_name == "read_local_file":
+                        raw_path = str(args.get("file_path") or args.get("path") or "").strip()
+                        current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
+                        ws_search_root = Path(target_cwd or current_work_dir).resolve()
+
+                        if not raw_path:
+                            tool_output = "Error: 缺少必要参数 `file_path`。"
+                            compressed = "[读取失败: 未指定目标路径]"
+                            yield {
+                                "type": "tool_end",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": "read_file()",
+                                "reason": "缺少文件路径参数",
+                                "status": "completed",
+                                "output": tool_output,
+                                "compressed": compressed,
+                            }
+                        else:
+                            target_file = Path(raw_path)
+                            if not target_file.is_absolute():
+                                target_file = (current_work_dir / target_file).resolve()
+
+                            if not target_file.exists() or not target_file.is_file():
+                                # 回退检索：依次尝试工作区沙盒附件目录与项目底座根目录
+                                proj_root = Path(__file__).resolve().parent.parent.parent.parent
+                                pure_name = Path(raw_path).name
+                                fallback_candidates = [
+                                    (ws_search_root / "attachments" / pure_name).resolve(),
+                                    (ws_search_root / ".agenthub" / "attachments" / pure_name).resolve(),
+                                    (current_work_dir / "attachments" / pure_name).resolve(),
+                                    (current_work_dir / ".agenthub" / "attachments" / pure_name).resolve(),
+                                    (proj_root / raw_path).resolve(),
+                                ]
+                                for cand in fallback_candidates:
+                                    if cand.exists() and cand.is_file():
+                                        target_file = cand
+                                        break
+
+                            rel_display = str(target_file)
+                            try:
+                                rel_display = str(target_file.relative_to(current_work_dir))
+                            except Exception:
+                                pass
+
+                            yield {
+                                "type": "tool_start",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": f"read_file({rel_display})",
+                                "reason": f"读取本地文件内容: {rel_display}",
+                                "security": "SAFE",
+                            }
+                            if not target_file.exists() or not target_file.is_file():
+                                sandbox_atts = attachment_service.list_workspace_sandbox_attachments(ws_search_root, limit=10)
+                                if sandbox_atts:
+                                    att_hint = "\n当前工作区沙盒真实存在的附件:\n" + "\n".join(
+                                        f"- `{item['rel_path']}` ({item['size_str']}, 绝对路径: `{item['file_path']}`)"
+                                        for item in sandbox_atts
+                                    )
+                                else:
+                                    att_hint = "\n当前工作区附件目录暂为空。"
+                                tool_output = (
+                                    f"Error: 目标文件不存在: `{target_file}`{att_hint}\n"
+                                    "⚠️ 严禁在文件不存在时自行创建 Mock 或模拟数据替代！请核对上述清单或向用户报错。"
+                                )
+                                compressed = f"[读取失败: 文件不存在 `{rel_display}`]"
+                            else:
+                                try:
+                                    ext, category, canonical_mime = attachment_service.classify_extension(target_file.name)
+                                    if category == "office" or ext in (".xlsx", ".docx", ".pptx", ".pdf"):
+                                        ctx_info = attachment_service.extract_attachment_context(
+                                            target_file,
+                                            canonical_mime,
+                                            target_file.name,
+                                        )
+                                        preview_txt = ctx_info.get("preview_text") or "(未提取到可读内容)"
+                                        tool_output = (
+                                            f"【结构化文档读取: `{target_file.name}` (分类: {category}, 引擎: {ctx_info.get('extractor')})】\n"
+                                            f"物理路径: `{target_file}`\n\n"
+                                            f"{preview_txt}"
+                                        )
+                                        compressed = f"[已结构化读取文档 `{rel_display}` ({ctx_info.get('extractor')}): 共 {len(tool_output)} 字符]"
+                                    else:
+                                        raw_bytes = target_file.read_bytes()
+                                        content_text = attachment_service.decode_text_bytes(raw_bytes)
+                                        if len(content_text) > 120000:
+                                            content_text = (
+                                                content_text[:80000]
+                                                + f"\n\n... [文件过长，中间已省略 {len(content_text) - 100000} 字符；建议用脚本分段处理] ...\n\n"
+                                                + content_text[-20000:]
+                                            )
+                                        tool_output = content_text
+                                        compressed = f"[成功读取文件 `{rel_display}`: 共 {len(content_text)} 字符]"
+                                except Exception as read_err:
+                                    tool_output = f"Error: 读取文件失败: {read_err}"
+                                    compressed = f"[读取文件异常: {str(read_err)[:40]}]"
+
+                            yield {
+                                "type": "tool_end",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": f"read_file({rel_display})",
+                                "reason": f"读取本地文件 {rel_display}",
+                                "status": "completed",
+                                "output": tool_output,
+                                "compressed": compressed,
+                            }
+
+                    # ── 工具: 实时网络正文抓取与微服务健康探测 (web_fetch) ──
+                    elif func_name == "web_fetch":
+                        target_url = str(args.get("url", "")).strip()
+                        extract_main = bool(args.get("extract_main_text", True))
+                        from ..extensions.web_tools import web_tools
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"web_fetch({target_url})",
+                            "reason": f"访问并提纯目标网页/探测服务: {target_url}",
+                            "security": "SAFE",
+                        }
+                        fetch_res = await web_tools.fetch_url(target_url, extract_main_text=extract_main)
+                        tool_output = fetch_res["content"]
+                        st_code = fetch_res["status_code"]
+                        compressed = f"[已抓取 `{target_url[:45]}`: HTTP {st_code}, 共 {len(tool_output)} 字符]"
+
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"web_fetch({target_url})",
+                            "reason": f"抓取网络正文: {target_url}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: Windows UI 自动化操作 (ui_action) ──
+                    elif func_name == "ui_action":
+                        act = str(args.get("action", "list")).strip().lower()
+                        target_win = str(args.get("target_window", "")).strip()
+                        selector = str(args.get("control_selector", "")).strip()
+                        val = str(args.get("value", ""))
+
+                        is_read_only = act in ["list", "inspect"]
+                        sec_level = "SAFE" if is_read_only else "AUTO_CONFIRMED"
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"ui_action({act}, target='{target_win}', selector='{selector}')",
+                            "reason": f"Windows 桌面 UI 操作: {act}",
+                            "security": sec_level,
+                        }
+
+                        if not is_read_only:
+                            await audit_service.log(
+                                event_type=f"ui_{act.lower()}",
+                                actor="agent",
+                                detail={
+                                    "action": act,
+                                    "window": target_win,
+                                    "selector": selector,
+                                    "value": val,
+                                    "security_level": sec_level,
+                                },
+                                approved=True,
+                            )
+
+                        if act == "list":
+                            wins = ui_operator.list_windows(pattern=target_win)
+                            if not wins:
+                                tool_output = f"当前未找到匹配 '{target_win}' 的可见窗口。"
+                            else:
+                                win_lines = [f"| HWND | 标题 | 窗口类名 |", "| :--- | :--- | :--- |"]
+                                for w in wins:
+                                    win_lines.append(f"| {w['hwnd']} | {w['title']} | `{w['class_name']}` |")
+                                tool_output = "### 🖥️ 当前可见桌面窗口列表：\n" + "\n".join(win_lines)
+                            compressed = f"[已枚举可见窗口: 共 {len(wins)} 个]"
+
+                        elif act == "inspect":
+                            tool_output = ui_operator.inspect_window(target_win)
+                            compressed = f"[已分析窗口 `{target_win}` 控件树: {len(tool_output.splitlines())} 行]"
+
+                        elif act in ["click", "input", "focus"]:
+                            action_res = ui_operator.perform_action(
+                                target=target_win,
+                                control_selector=selector,
+                                action=act,
+                                value=val,
+                                press_enter=bool(args.get("press_enter", False)),
+                            )
+                            tool_output = json.dumps(action_res, ensure_ascii=False, indent=2)
+                            st_txt = "成功" if action_res.get("success") else "失败"
+                            compressed = f"[UI {act} {st_txt}: {action_res.get('message') or action_res.get('error')}]"
+
+                        else:
+                            tool_output = f"Error: 不支持的 UI action: '{act}'。有效选项为 list, inspect, click, input, focus。"
+                            compressed = f"[UI 操作参数错误: {act}]"
+
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"ui_action({act})",
+                            "reason": f"桌面 UI 操作: {act}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具 3.5: 按行切片回查超长工具原文引用 (read_tool_ref) ──
+                    elif func_name == "read_tool_ref":
+                        target_ref_id = str(args.get("ref_id") or "").strip()
+                        s_line = int(args.get("start_line") or 1)
+                        e_line = int(args.get("end_line") or (s_line + 119))
+                        kw = str(args.get("keyword") or "").strip() or None
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"read_tool_ref({target_ref_id}, lines={s_line}..{e_line})",
+                            "reason": f"按需切片回查脱水工具原文引用 {target_ref_id}",
+                            "security": "SAFE",
+                        }
+                        if not target_ref_id:
+                            tool_output = "Error: 缺少必要参数 `ref_id`。"
+                            compressed = "[回查引用失败: 缺少 ref_id]"
+                        else:
+                            slice_res = None
+                            if active_incognito:
+                                slice_res = read_ephemeral_tool_ref(
+                                    target_ref_id,
+                                    start_line=s_line,
+                                    end_line=e_line,
+                                    keyword=kw,
+                                )
+                            if slice_res is None:
+                                slice_res = await ToolRefRepository.read_slice(
+                                    ref_id=target_ref_id,
+                                    start_line=s_line,
+                                    end_line=e_line,
+                                    keyword=kw,
+                                    conversation_id=conv_id,
+                                )
+                            if slice_res.get("found"):
+                                header = (
+                                    f"[引用原文切片 | Ref: {target_ref_id} | 工具: {slice_res.get('tool_name', '')} | "
+                                    f"范围: L{slice_res.get('returned_start', 0)}~L{slice_res.get('returned_end', 0)} / 共 {slice_res.get('total_lines', 0)} 行]"
+                                )
+                                tool_output = f"{header}\n{slice_res.get('content', '')}"
+                                compressed = f"[已切片回查 `{target_ref_id}` L{slice_res.get('returned_start', 0)}~L{slice_res.get('returned_end', 0)}]"
+                            else:
+                                tool_output = f"Error: {slice_res.get('error', '未找到引用记录')}"
+                                compressed = f"[引用回查未命中 `{target_ref_id}`]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"read_tool_ref({target_ref_id})",
+                            "reason": f"回查引用 {target_ref_id}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具 4: MCP 扩展工具 (mcp__<server>__<tool>) ──
+                    elif func_name.startswith("mcp__"):
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"{func_name}({json.dumps(args, ensure_ascii=False)})",
+                            "reason": "调用 MCP 外部扩展工具",
+                            "security": "MCP",
+                        }
+                        tool_output = await mcp_manager.call_mcp_tool(func_name, args)
+                        is_err = tool_output.startswith("Error:")
+                        compressed = shell_executor.compress_output(
+                            command=f"{func_name}({json.dumps(args, ensure_ascii=False)[:30]})",
+                            raw_output=tool_output,
+                            exit_code=1 if is_err else 0,
+                        )
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": func_name,
+                            "reason": "调用 MCP 外部扩展工具",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    else:
+                        tool_output = f"Error: 未知的工具名称 `{func_name}`。"
+                        compressed = f"[未知工具调用 `{func_name}`]"
+
+                    # 智能异常探测：判断该步骤是否遇到报错，并为下一步自愈循环激活调度器
+                    if (
+                        func_name in ("execute_local_command", "write_local_file", "run_skill_tool")
+                        and not str(tool_output or "").startswith("Denied:")
+                    ):
+                        has_workspace_mutations = True
+                    prev_step_error = last_step_error_info
+                    out_lower = (tool_output or "").lower()
+                    is_step_abnormal = any(
+                        err_kw in out_lower
+                        for err_kw in (
+                            "npm error", "enoent", "error:", "traceback", "syntaxerror",
+                            "command not found", "cannot find module", "failed", "denied"
+                        )
+                    )
+                    if is_step_abnormal:
+                        # 语义级死循环判定 (LoopBreaker)
+                        is_circuit_breaker = False
+                        if func_name == "execute_local_command":
+                            cmd_entry = str(args.get("command", "")).strip()
+                            norm_entry = re.sub(r"\s+", " ", cmd_entry)
+                            command_history.append({"cmd": norm_entry, "abnormal": True})
+                            # 规则 1: 连续 2 次执行完全相同的命令均异常
+                            if len(command_history) >= 2 and command_history[-1]["cmd"] == command_history[-2]["cmd"] and command_history[-2]["abnormal"]:
+                                is_circuit_breaker = True
+                            # 规则 2: 最近 5 步中出现 3 次相同失败命令
+                            recent_same = [h for h in command_history[-5:] if h["cmd"] == norm_entry and h["abnormal"]]
+                            if len(recent_same) >= 3:
+                                is_circuit_breaker = True
+
+                            if is_circuit_breaker:
+                                allow_step_extension = False
+                                circuit_breaker_triggered = True
+                                logger.warning(f"[AgentRuntime] 触发死循环熔断 (LoopBreaker): {norm_entry}")
+
+                        last_step_error_info = {
+                            "tool": func_name,
+                            "summary": compressed or (tool_output.strip().split("\n")[0][:120]),
+                            "circuit_breaker": is_circuit_breaker,
+                            "failed_cmd": re.sub(r"\s+", " ", str(args.get("command", "")).strip()) if func_name == "execute_local_command" else "",
+                        }
+                    else:
+                        if func_name == "execute_local_command":
+                            cmd_entry = str(args.get("command", "")).strip()
+                            command_history.append({"cmd": re.sub(r"\s+", " ", cmd_entry), "abnormal": False})
+                        last_step_error_info = None
+                        if not str(tool_output or "").startswith("Error:"):
+                            total_tool_steps += 1
+                            if func_name == "write_local_file":
+                                fp = str(args.get("file_path") or args.get("path") or "").strip()
+                                if fp and fp not in produced_artifacts:
+                                    produced_artifacts.append(fp)
+                            if prev_step_error is not None:
+                                recovered_error_count += 1
+
+                    # 旁路影子清洗 (Context Scrubber)：按“工具语义 + 通道上下文上限”自适应判定阈值，
+                    # 确保 Skill SOP 与常规文件读取一次看全、零多轮翻页浪费；仅对超限大输出截流转 Ref；
+                    # 严格遵守 Write-Once 铁律：一次决定后再写入 messages.content，且保留前端人类可读单行 `compressed`。
+                    scrub_threshold = resolve_scrub_char_threshold(
+                        tool_name=func_name,
+                        primary_provider_info=resolved_primary_provider,
+                        model_name=model_name,
+                    )
+                    if len(tool_output or "") > scrub_threshold:
+                        try:
+                            scrub_res = await LocalContextCompressor.scrub_tool_output(
+                                conversation_id=conv_id,
+                                turn_id=current_turn_id,
+                                tool_name=func_name,
+                                tool_args_summary=json.dumps(args, ensure_ascii=False)[:180],
+                                raw_output=tool_output,
+                                incognito=active_incognito,
+                                primary_provider_info=resolved_primary_provider,
+                            )
+                            if scrub_res.get("was_scrubbed"):
+                                tool_output = str(scrub_res["content"])
+                                # 仅当此前无可读单行摘要时兜底填充，保留如 `[已结构化读取文档 ...]` 等友好UI展示
+                                if not compressed:
+                                    compressed = tool_output.splitlines()[0][:120]
+                                saved_est = int(scrub_res.get("saved_tokens") or 0)
+                                scrubber_m = scrub_res.get("scrubber_metrics")
+                                if isinstance(scrubber_m, dict):
+                                    scrubber_record = dict(scrubber_m)
+                                    scrubber_record["turn_id"] = current_turn_id
+                                    scrubber_record["step_index"] = step_idx
+                                    scrubber_record["agent_role"] = "scrubber"
+                                    scrubber_record["saved_tokens"] = saved_est
+                                    in_memory_step_metrics.append(scrubber_record)
+                                    if not active_incognito:
+                                        await TokenUsageRepository.record_usage(
+                                            conversation_id=conv_id,
+                                            turn_id=current_turn_id,
+                                            step_index=step_idx,
+                                            agent_role="scrubber",
+                                            provider_id=str(scrubber_record.get("provider_id") or ""),
+                                            provider_name=str(scrubber_record.get("provider_name") or ""),
+                                            provider_type=str(scrubber_record.get("provider_type") or ""),
+                                            model_name=str(scrubber_record.get("model_name") or ""),
+                                            prompt_tokens=int(scrubber_record.get("prompt_tokens") or 0),
+                                            cached_tokens=int(scrubber_record.get("cached_tokens") or 0),
+                                            eval_tokens=int(scrubber_record.get("eval_tokens") or 0),
+                                            completion_tokens=int(scrubber_record.get("completion_tokens") or 0),
+                                            saved_tokens=saved_est,
+                                            context_limit=int(scrubber_record.get("context_limit") or 0),
+                                            ttft_ms=float(scrubber_record.get("ttft_ms") or 0.0),
+                                            prefill_ms=float(scrubber_record.get("prefill_ms") or 0.0),
+                                            tps=float(scrubber_record.get("tps") or 0.0),
+                                            is_estimated=bool(scrubber_record.get("is_estimated", False)),
+                                        )
+                                elif saved_est > 0:
+                                    det_record = {
+                                        "turn_id": current_turn_id,
+                                        "step_index": step_idx,
+                                        "agent_role": "scrubber",
+                                        "provider_type": "local_rule",
+                                        "provider_name": "ContextScrubber",
+                                        "model_name": "deterministic_scrubber",
+                                        "prompt_tokens": 0,
+                                        "cached_tokens": 0,
+                                        "eval_tokens": 0,
+                                        "completion_tokens": 0,
+                                        "saved_tokens": saved_est,
+                                        "context_limit": 0,
+                                        "ttft_ms": 0.0,
+                                        "prefill_ms": 0.0,
+                                        "tps": 0.0,
+                                        "is_estimated": True,
+                                    }
+                                    in_memory_step_metrics.append(det_record)
+                                    if not active_incognito:
+                                        await TokenUsageRepository.record_usage(
+                                            conversation_id=conv_id,
+                                            turn_id=current_turn_id,
+                                            step_index=step_idx,
+                                            agent_role="scrubber",
+                                            provider_name="ContextScrubber",
+                                            provider_type="local_rule",
+                                            model_name="deterministic_scrubber",
+                                            saved_tokens=saved_est,
+                                            is_estimated=True,
+                                        )
+                        except Exception as scrub_err:
+                            logger.debug(f"[AgentRuntime] 旁路工具清洗跳过: {scrub_err}")
+
+                    # 将工具输出与单行折叠摘要同时落盘
+                    await MessageRepository.save_message(
+                        conversation_id=conv_id,
+                        role="tool",
+                        content=tool_output,
+                        compressed_content=compressed,
+                        turn_id=current_turn_id,
+                        tool_call_id=call_id,
+                    )
+
+                    # 追加写入 Event Ledger（tool_executed / artifact_produced / tool_error_recovered）
+                    if not active_incognito and active_scene != "oneshot":
+                        step_skill_id = (
+                            str(args.get("skill_name") or "").strip().lstrip("/")
+                            or (active_skill_ids[0] if active_skill_ids else None)
+                        )
+                        current_loop_id = tracked_loop_id or (active_loop_obj.id if active_loop_obj else None)
+                        try:
+                            await event_ledger.append_event(
+                                workspace_id=ws_id,
+                                conversation_id=conv_id,
+                                turn_id=current_turn_id,
+                                loop_id=current_loop_id,
+                                event_type="tool_executed",
+                                actor="agent",
+                                skill_id=step_skill_id,
+                                payload={
+                                    "tool": func_name,
+                                    "args": args,
+                                    "compressed": compressed,
+                                    "is_error": is_step_abnormal,
+                                    "output_preview": (tool_output or "")[:400],
+                                },
+                                incognito=False,
+                            )
+                            if (
+                                func_name == "write_local_file"
+                                and not is_step_abnormal
+                                and not str(tool_output).startswith("Error:")
+                            ):
+                                await event_ledger.append_event(
+                                    workspace_id=ws_id,
+                                    conversation_id=conv_id,
+                                    turn_id=current_turn_id,
+                                    loop_id=current_loop_id,
+                                    event_type="artifact_produced",
+                                    actor="agent",
+                                    skill_id=step_skill_id,
+                                    payload={
+                                        "file_path": str(args.get("file_path") or args.get("path") or ""),
+                                        "compressed": compressed,
+                                    },
+                                    incognito=False,
+                                )
+                            if prev_step_error is not None and not is_step_abnormal:
+                                await event_ledger.append_event(
+                                    workspace_id=ws_id,
+                                    conversation_id=conv_id,
+                                    turn_id=current_turn_id,
+                                    loop_id=current_loop_id,
+                                    event_type="tool_error_recovered",
+                                    actor="agent",
+                                    skill_id=step_skill_id,
+                                    payload={
+                                        "failed_tool": prev_step_error.get("tool"),
+                                        "failed_summary": prev_step_error.get("summary"),
+                                        "recovery_tool": func_name,
+                                        "recovery_args": args,
+                                        "recovery_compressed": compressed,
+                                    },
+                                    incognito=False,
+                                )
+                        except Exception as ledger_err:
+                            logger.debug(f"[AgentRuntime] 写入工具账本事件跳过: {ledger_err}")
+
+                    # ── 具身状态联动：推进 Loop 轮次并动态记事板 ──
+                    if active_loop_obj:
+                        try:
+                            summary_text = compressed or (str(args.get("command", "")) if func_name == "execute_local_command" else f"{func_name}")
+                            is_succ = not is_step_abnormal
+                            updated_loop = await TaskLoopRepository.record_tool_step(
+                                loop_id=active_loop_obj.id,
+                                tool_name=func_name,
+                                summary=summary_text,
+                                is_success=is_succ,
+                            )
+                            if updated_loop:
+                                active_loop_obj = updated_loop
+                                if target_cwd:
+                                    try:
+                                        ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
+                                        ws_sp.parent.mkdir(parents=True, exist_ok=True)
+                                        ws_sp.write_text(updated_loop.scratchpad_md or "", encoding="utf-8")
+                                    except Exception:
+                                        pass
+                                yield {
+                                    "type": "loop_step",
+                                    "loop_id": updated_loop.id,
+                                    "iteration": updated_loop.current_iteration,
+                                    "max_iterations": updated_loop.max_iterations,
+                                    "status": updated_loop.loop_status,
+                                    "scratchpad_md": updated_loop.scratchpad_md,
+                                }
+                        except Exception as e:
+                            logger.warning(f"自主循环步进同步异常: {e}")
+
+                if was_cancelled or await _check_cancelled():
+                    was_cancelled = True
+                    break
+
+                step_idx += 1
+
+                # 若已到达自适应最大步数上限（最高动态扩展至 40 步），给出收尾完成信号
+                if step_idx >= current_max_steps:
+                    if active_loop_obj:
+                        try:
+                            completed_loop = await TaskLoopRepository.complete_loop(
+                                loop_id=active_loop_obj.id,
+                                summary=f"已达当前执行步数上限 ({step_idx} 步)，已输出阶段性成果",
+                            )
+                            if completed_loop:
                                 yield {
                                     "type": "loop_completed",
                                     "loop_id": completed_loop.id,
@@ -934,1114 +2151,178 @@ class AgentRuntime:
                                     "scratchpad_md": completed_loop.scratchpad_md,
                                 }
                                 active_loop_obj = None
-                    except Exception as e:
-                        logger.warning(f"自主循环状态收敛更新异常: {e}")
-
-                # 若本轮执行过终端命令/脚本或写盘操作，收尾增量同步一次工作区物理资产
-                if has_workspace_mutations and ws_id:
-                    try:
-                        from ..repository.artifact_repository import ArtifactRepository
-                        await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
-                    except Exception as sync_err:
-                        logger.debug(f"[AgentRuntime] 任务收尾物理资产同步跳过: {sync_err}")
-
-                # 汇总并推送本轮 Token / KV Cache / TTFT / TPS 微水表事件
-                try:
-                    turn_stats_payload = (
-                        None
-                        if active_incognito
-                        else await TokenUsageRepository.get_turn_summary(conv_id, current_turn_id)
-                    )
-                    if turn_stats_payload is None and in_memory_step_metrics:
-                        turn_stats_payload = _build_turn_summary_from_rows(
-                            current_turn_id, in_memory_step_metrics, 0
-                        )
-                    if turn_stats_payload:
-                        yield {
-                            "type": "token_stats",
-                            "conversation_id": conv_id,
-                            "turn_id": current_turn_id,
-                            "stats": turn_stats_payload,
-                        }
-                except Exception as stats_err:
-                    logger.debug(f"[AgentRuntime] 推送 token_stats 跳过: {stats_err}")
-
-                yield {
-                    "type": "done",
-                    "full_content": accumulated_visible_text.strip(),
-                    "account": final_account,
-                    "model": effective_model_name,
-                }
-                break
-
-            consecutive_stalls = 0
-
-            # 情况 B：模型发起了工具调用 -> 规范化工具调用 XML 示范并落盘（杜绝带偏后续历史）
-            if clean_text and "interactive_inquiry" in clean_text.lower():
-                clean_text = ToolProtocolAdapter.normalize_interactive_inquiry_markdown(clean_text)
-            accumulated_visible_text += ("\n\n" + clean_text if (accumulated_visible_text and clean_text) else clean_text)
-            formatted_tc_xml = "\n".join(
-                f'<tool_call name="{tc.get("function", {}).get("name", "")}">{tc.get("function", {}).get("arguments", "{}")}</tool_call>'
-                for tc in tool_calls
-            )
-            saved_content = (clean_text + "\n" + formatted_tc_xml).strip() if clean_text else formatted_tc_xml
-
-            await MessageRepository.save_message(
-                conversation_id=conv_id,
-                role="model",
-                content=saved_content,
-                executed_by_account=final_account,
-                token_count=len(step_raw_text) // 3,
-                turn_id=current_turn_id,
-                tool_calls_json=json.dumps(tool_calls, ensure_ascii=False),
-            )
-
-            # 逐个执行本步拦截到的工具调用
-            for tc in tool_calls:
-                call_id = tc.get("id") or f"call_{uuid.uuid4().hex[:8]}"
-                func_info = tc.get("function", {})
-                func_name = func_info.get("name", "")
-                raw_args = func_info.get("arguments", "{}")
-                try:
-                    args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
-                except Exception:
-                    args = {}
-
-                tool_output = ""
-                compressed = ""
-
-                # 🛡️ 物理只读硬门控拦截：若处于规划阶段，绝对禁止执行任何破坏性写入或终端命令
-                if is_planning_phase and func_name not in PLANNING_SAFE_TOOLS:
-                    deny_reason = (
-                        f"Denied: 【安全只读硬门控】当前处于「谋定而后动 (Plan-First)」方案规划阶段，写盘与终端执行权限已被物理锁定。"
-                        f"工具 [{func_name}] 禁止调用。请先向用户展示完整的【实施方案】与【分步执行步骤清单】，"
-                        f"并在末尾输出 ```interactive_inquiry 协议块等待用户确认批准。"
-                    )
-                    compressed = f"[只读门控硬拦截 `{func_name}`]"
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "status": "denied",
-                        "output": deny_reason,
-                        "compressed": compressed,
-                    }
-                    await MessageRepository.save_message(
-                        conversation_id=conv_id,
-                        turn_id=current_turn_id,
-                        role="tool",
-                        content=deny_reason,
-                        compressed_content=compressed,
-                        tool_call_id=call_id,
-                    )
-                    last_step_error_info = {
-                        "tool": func_name,
-                        "summary": deny_reason,
-                    }
-                    continue
-
-                # ── 工具 1: 受控本地终端命令 (execute_local_command) ──
-                if func_name == "execute_local_command":
-                    cmd_str = str(args.get("command", "")).strip()
-                    reason_str = str(args.get("reason", "执行本地终端诊断或操作")).strip()
-                    norm_cmd = re.sub(r"\s+", " ", cmd_str)
-
-                    # 语义级死循环物理硬阻断：若模型在收到熔断警告后仍顽固输出同一条失败命令，直接封禁执行
-                    is_hard_loop_blocked = bool(
-                        last_step_error_info
-                        and last_step_error_info.get("circuit_breaker")
-                        and last_step_error_info.get("failed_cmd") == norm_cmd
-                    )
-
-                    sec_level = "DENY" if is_hard_loop_blocked else shell_executor.check_security(cmd_str)
-
-                    if sec_level == "DENY":
-                        deny_reason = (
-                            f"Denied: 【死循环物理硬阻断】命令 `{cmd_str}` 已经触发死循环熔断，系统已物理封禁重复执行此失败操作。"
-                            f"请立即停止调用工具，直接向用户详细陈述排查事实与物理卡点，说明无法自动完成的原因并请求人工介入。"
-                            if is_hard_loop_blocked
-                            else f"Denied: 命令 `{cmd_str}` 触发系统高危安全黑名单已被强制拦截。严禁执行破坏性指令，请改用安全的替代方式回答用户。"
-                        )
-                        await audit_service.log(
-                            event_type="shell_command_denied",
-                            actor="agent",
-                            detail={"command": cmd_str, "reason": reason_str, "loop_blocked": is_hard_loop_blocked},
-                            approved=False,
-                        )
-                        tool_output = deny_reason
-                        compressed = f"[死循环物理硬阻断 `{norm_cmd[:45]}`]" if is_hard_loop_blocked else f"[安全红线拦截高危命令 `{cmd_str[:50]}`]"
-                        yield {
-                            "type": "tool_end",
-                            "call_id": call_id,
-                            "name": func_name,
-                            "command": cmd_str,
-                            "reason": reason_str,
-                            "status": "denied",
-                            "output": tool_output,
-                            "compressed": compressed,
-                        }
-
-                    else:
-                        # 全自动确认直通执行（包含 CONFIRM 与 SAFE 级命令），无需用户手动点击确认
-                        yield {
-                            "type": "tool_start",
-                            "call_id": call_id,
-                            "name": func_name,
-                            "command": cmd_str,
-                            "reason": reason_str,
-                            "security": "AUTO_CONFIRMED" if sec_level == "CONFIRM" else "SAFE",
-                        }
-                        exec_res = await shell_executor.run(
-                            command=cmd_str,
-                            cwd=ctx.get("current_cwd"),
-                            session_id=conv_id,
-                        )
-                        tool_output = exec_res["output"]
-                        new_cwd = exec_res["new_cwd"]
-                        if new_cwd and new_cwd != ctx.get("current_cwd"):
-                            ctx["current_cwd"] = new_cwd
-                            await ConversationRepository.update_agent_state(conv_id, current_cwd=new_cwd)
-
-                        compressed = shell_executor.compress_output(
-                            cmd_str, tool_output, exec_res["exit_code"]
-                        )
-                        yield {
-                            "type": "tool_end",
-                            "call_id": call_id,
-                            "name": func_name,
-                            "command": cmd_str,
-                            "reason": reason_str,
-                            "status": "completed",
-                            "exit_code": exec_res["exit_code"],
-                            "output": tool_output,
-                            "compressed": compressed,
-                            "cwd": new_cwd,
-                        }
-
-                # ── 工具 1.5: 按需 FTS5 记忆与工作区历史检索 (search_memory_history) ──
-                elif func_name == "search_memory_history":
-                    mem_query = str(args.get("query", "")).strip()
-                    mem_scope = str(args.get("scope", "all")).strip()
-                    mem_limit = int(args.get("limit", 5) or 5)
-                    yield {
-                        "type": "tool_start",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"search_memory_history('{mem_query}', scope='{mem_scope}')",
-                        "reason": f"按需 FTS5 检索历史记忆与工作区轨迹: {mem_query}",
-                        "security": "SAFE",
-                    }
-                    tool_output = await self._execute_search_memory_history(
-                        query=mem_query,
-                        scope=mem_scope,
-                        limit=mem_limit,
-                        workspace_id=ws_id,
-                        target_cwd=ctx.get("current_cwd") or target_cwd,
-                        incognito=active_incognito,
-                    )
-                    compressed = f"[已按需检索历史记忆 ({mem_scope}): '{mem_query[:40]}']"
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"search_memory_history('{mem_query[:40]}')",
-                        "reason": f"按需检索历史记忆: {mem_query}",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                    }
-
-                # ── 工具 2: 更新任务工作草稿纸 (update_working_memory) ──
-                elif func_name == "update_working_memory":
-                    current_wm = dict(ctx.get("working_memory") or {})
-                    if args.get("task_completed") is True:
-                        current_wm = {}
-                        tool_output = "任务标记为已完成，工作记忆草稿纸已归档并清空。"
-                        compressed = "[已清空归档任务工作草稿纸]"
-                    else:
-                        if args.get("goal"):
-                            current_wm["goal"] = str(args["goal"])
-                        if isinstance(args.get("notes"), dict):
-                            existing_notes = current_wm.get("notes")
-                            if not isinstance(existing_notes, dict):
-                                existing_notes = {}
-                            existing_notes.update(args["notes"])
-                            current_wm["notes"] = existing_notes
-                        tool_output = f"工作记忆草稿纸已更新: {json.dumps(current_wm, ensure_ascii=False)}"
-                        compressed = f"[已更新工作草稿纸: {json.dumps(current_wm, ensure_ascii=False)[:80]}]"
-
-                    ctx["working_memory"] = current_wm
-                    await ConversationRepository.update_agent_state(
-                        conv_id,
-                        working_memory_json=json.dumps(current_wm, ensure_ascii=False),
-                    )
-                    yield {
-                        "type": "scratchpad_update",
-                        "working_memory": current_wm,
-                    }
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": "update_working_memory",
-                        "reason": "更新当前任务关键状态草稿",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                    }
-
-                # ── 工具 2.5: 直接写入长期记忆库 (save_long_term_memory) ──
-                elif func_name == "save_long_term_memory":
-                    cat = str(args.get("category", "preference")).strip()
-                    mem_content = str(args.get("content", "")).strip()
-                    pinned = bool(args.get("is_pinned", True))
-                    if active_incognito:
-                        tool_output = "Skipped: 当前处于无痕模式 (incognito=True)，禁止写入长期记忆库。"
-                        compressed = "[无痕模式跳过写入长期记忆]"
-                    elif not mem_content:
-                        tool_output = "Error: 长期记忆内容 content 不能为空。"
-                        compressed = "[长期记忆写入失败: 内容为空]"
-                    else:
-                        safe_mem_content, _ = MemoryPolicyGuard.sanitize_text(mem_content)
-                        saved_mem = await long_term_memory.add_memory(
-                            category=cat,
-                            content=safe_mem_content,
-                            confidence=0.98,
-                            source="user_explicit",
-                            is_pinned=1 if pinned else 0,
-                        )
-                        tool_output = f"✅ 已成功写入本地 SQLite 长期记忆库 (ID: `{saved_mem['id']}`, 分类: `{cat}`, 置顶: `{pinned}`): {safe_mem_content}"
-                        compressed = f"[已植入长期记忆 ({cat}): {safe_mem_content[:45]}...]"
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"save_long_term_memory({cat})",
-                        "reason": "持久化写入本地长期记忆库",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                    }
-
-                # ── 工具 3: 按需加载 Skill 详情 (load_skill_detail) ──
-                elif func_name == "load_skill_detail":
-                    skill_name = str(args.get("skill_name", "")).strip()
-                    eff_ws_root = ctx.get("current_cwd") or target_cwd
-                    tool_output = skill_loader.get_full_skill_markdown(
-                        skill_name,
-                        workspace_root=eff_ws_root,
-                    )
-                    clean_sid = skill_name.lstrip("/")
-                    if clean_sid and clean_sid not in active_skill_ids and not str(tool_output).startswith("Error:"):
-                        active_skill_ids.append(clean_sid)
-                    compressed = f"[已加载专业技能 `{skill_name}` 操作规程与四元组清单]"
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"load_skill_detail({skill_name})",
-                        "reason": f"读取技能包 {skill_name} 详细指南",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                    }
-
-                # ── 工具 3.1: FTS5 检索 Skill 领域知识库 (search_skill_knowledge) ──
-                elif func_name == "search_skill_knowledge":
-                    sk_name = str(args.get("skill_name", "")).strip()
-                    kb_query = str(args.get("query", "")).strip()
-                    eff_ws_root = ctx.get("current_cwd") or target_cwd
-                    yield {
-                        "type": "tool_start",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"search_skill_knowledge({sk_name}, '{kb_query}')",
-                        "reason": f"FTS5 毫秒级检索技能 {sk_name} 的领域知识库",
-                        "security": "SAFE",
-                    }
-                    tool_output = await skill_loader.search_knowledge(
-                        sk_name,
-                        kb_query,
-                        workspace_root=eff_ws_root,
-                    )
-                    clean_sid = sk_name.lstrip("/")
-                    if clean_sid and clean_sid not in active_skill_ids:
-                        active_skill_ids.append(clean_sid)
-                    compressed = f"[已检索 `{sk_name}` 领域知识库: 关键词 '{kb_query}']"
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"search_skill_knowledge({sk_name})",
-                        "reason": f"检索技能知识库: {kb_query}",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                    }
-
-                # ── 工具 3.2: 执行 Skill 随包确定性算子 (run_skill_tool) ──
-                elif func_name == "run_skill_tool":
-                    sk_name = str(args.get("skill_name", "")).strip()
-                    scr_name = str(args.get("script_name", "")).strip()
-                    scr_args = args.get("arguments") if isinstance(args.get("arguments"), dict) else {}
-                    eff_ws_root = ctx.get("current_cwd") or target_cwd
-                    yield {
-                        "type": "tool_start",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"run_skill_tool({sk_name}/tools/{scr_name})",
-                        "reason": f"运行技能 {sk_name} 随包专属算子 {scr_name}",
-                        "security": "AUTO_CONFIRMED",
-                    }
-                    tool_output = await skill_loader.execute_skill_tool(
-                        sk_name,
-                        scr_name,
-                        scr_args,
-                        workspace_root=eff_ws_root,
-                    )
-                    clean_sid = sk_name.lstrip("/")
-                    if clean_sid and clean_sid not in active_skill_ids:
-                        active_skill_ids.append(clean_sid)
-                    compressed = f"[已运行随包算子 `{sk_name}/tools/{scr_name}`]"
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"run_skill_tool({sk_name}/{scr_name})",
-                        "reason": f"执行技能专属算子 {scr_name}",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                    }
-
-                # ── 工具: 物理写入本地文件 (write_local_file - 绝不幻觉) ──
-                elif func_name == "write_local_file":
-                    raw_path = str(args.get("file_path") or args.get("path") or "").strip()
-                    file_content = str(args.get("content", ""))
-                    overwrite = bool(args.get("overwrite", True))
-                    current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
-                    ws_guard_root = Path(target_cwd or current_work_dir).resolve()
-
-                    if not raw_path:
-                        tool_output = "Error: 缺少必要参数 `file_path`。"
-                        compressed = "[写入失败: 未指定目标路径]"
-                        yield {
-                            "type": "tool_end",
-                            "call_id": call_id,
-                            "name": func_name,
-                            "command": "write_file()",
-                            "reason": "参数缺失拒绝写入",
-                            "status": "completed",
-                            "output": tool_output,
-                            "compressed": compressed,
-                            "cwd": str(current_work_dir),
-                        }
-                    else:
-                        target_file = Path(raw_path)
-                        if not target_file.is_absolute():
-                            target_file = (current_work_dir / target_file).resolve()
-                        else:
-                            target_file = target_file.resolve()
-
-                        rel_display = str(target_file)
-                        try:
-                            rel_display = str(target_file.relative_to(current_work_dir))
                         except Exception:
                             pass
-
-                        # 🛡️ 物理只读硬拦截：严禁向工作区用户附件目录写入或伪造 Mock 输入
-                        if (
-                            attachment_service.is_path_in_attachments_dir(target_file, workspace_root=ws_guard_root)
-                            or attachment_service.is_path_in_attachments_dir(target_file, workspace_root=current_work_dir)
-                        ):
-                            deny_att_msg = (
-                                f"Denied: 安全红线拦截！工作区输入附件目录 (`attachments/` 与 `.agenthub/attachments/`) "
-                                f"为用户原始输入只读区，严禁 Agent 写入、修改或伪造测试文件 (`{rel_display}`)。\n"
-                                "请将输出报告或中间产物写入 `./output/` 目录；若发现预期输入文件缺失，严禁生成 Mock 测试数据替代分析，必须立即向用户如实报告！"
-                            )
-                            await audit_service.log(
-                                event_type="write_attachments_denied",
-                                actor="agent",
-                                detail={"target_file": str(target_file), "reason": "read_only_attachments_guard"},
-                                approved=False,
-                            )
-                            tool_output = deny_att_msg
-                            compressed = f"[红线拦截写附件目录 `{rel_display}`]"
-                            yield {
-                                "type": "tool_end",
-                                "call_id": call_id,
-                                "name": func_name,
-                                "command": f"write_file({rel_display})",
-                                "reason": f"只读附件目录保护拦截 {rel_display}",
-                                "status": "denied",
-                                "output": tool_output,
-                                "compressed": compressed,
-                                "cwd": str(current_work_dir),
-                            }
-                        else:
-                            # 全自动确认直通写入物理文件，无需用户手动点击确认
-                            yield {
-                                "type": "tool_start",
-                                "call_id": call_id,
-                                "name": func_name,
-                                "command": f"write_file -> {rel_display} ({len(file_content)} 字符)",
-                                "reason": f"真实落盘本地文件 {rel_display}",
-                                "security": "AUTO_CONFIRMED",
-                            }
-                            try:
-                                if target_file.exists() and not overwrite:
-                                    tool_output = f"Error: 文件 `{rel_display}` 已存在且 overwrite=False，取消写入。"
-                                    compressed = f"[写入取消: 文件已存在 `{rel_display}`]"
-                                else:
-                                    target_file.parent.mkdir(parents=True, exist_ok=True)
-                                    target_file.write_text(file_content, encoding="utf-8")
-                                    hotplug_note = ""
-                                    if target_file.name.upper() == "SKILL.MD":
-                                        target_file = skill_loader.normalize_skill_file(target_file)
-                                        hotplug_note = "\n🎯 [SKILL 标准校验与热插拔已激活]: 已自动规范化 YAML Frontmatter 与 kebab-case 命名，前端输入框 `/` 菜单现已可实时调用并查看该技能说明。"
-                                    elif target_file.name.lower() == "mcp_servers.json":
-                                        created_docs = skill_loader.ensure_mcp_companion_skills()
-                                        active_tools = ToolProtocolAdapter.get_builtin_tools() + await mcp_manager.get_enabled_tools()
-                                        doc_tip = f"（已自动补全 {created_docs} 个 MCP 伴生 SKILL 说明文档）" if created_docs else ""
-                                        hotplug_note = f"\n🔌 [MCP 热插拔已重载]: 已重新扫描 mcp_servers.json，当前可用工具总数: {len(active_tools)}{doc_tip}。"
-                                    tool_output = (
-                                        f"✅ 成功物理落盘文件: `{target_file}`\n"
-                                        f"文件大小: {len(file_content.encode('utf-8'))} 字节\n"
-                                        f"状态: 真实写入磁盘已验证完成。{hotplug_note}"
-                                    )
-                                    compressed = f"[已真实物理落盘文件 `{rel_display}` ({len(file_content)} 字符)]"
-
-                                    # 自动联动登记到当前工作区资产库
-                                    try:
-                                        from ..repository.artifact_repository import ArtifactRepository
-                                        f_type = ArtifactRepository._detect_file_type(target_file)
-                                        await ArtifactRepository.register_artifact(
-                                            workspace_id=ws_id,
-                                            file_path=str(target_file),
-                                            file_name=target_file.name,
-                                            file_type=f_type,
-                                            file_size=len(file_content.encode("utf-8")),
-                                            conversation_id=conv_id,
-                                            source="ai_generated",
-                                            summary=f"AI 自主编写落盘: {target_file.name}",
-                                        )
-                                    except Exception as art_err:
-                                        logger.warning(f"资产库落盘自动登记异常: {art_err}")
-                            except Exception as write_err:
-                                tool_output = f"Error: 写入文件 `{target_file}` 失败: {write_err}"
-                                compressed = f"[写入文件异常: {str(write_err)[:40]}]"
-
-                            yield {
-                                "type": "tool_end",
-                                "call_id": call_id,
-                                "name": func_name,
-                                "command": f"write_file({rel_display})",
-                                "reason": f"写入本地文件 {rel_display}",
-                                "status": "completed",
-                                "output": tool_output,
-                                "compressed": compressed,
-                                "cwd": str(current_work_dir),
-                            }
-
-                # ── 工具: 物理读取本地文件 (read_local_file - 原生支持文本与 Office 结构化解析) ──
-                elif func_name == "read_local_file":
-                    raw_path = str(args.get("file_path") or args.get("path") or "").strip()
-                    current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
-                    ws_search_root = Path(target_cwd or current_work_dir).resolve()
-
-                    if not raw_path:
-                        tool_output = "Error: 缺少必要参数 `file_path`。"
-                        compressed = "[读取失败: 未指定目标路径]"
-                        yield {
-                            "type": "tool_end",
-                            "call_id": call_id,
-                            "name": func_name,
-                            "command": "read_file()",
-                            "reason": "缺少文件路径参数",
-                            "status": "completed",
-                            "output": tool_output,
-                            "compressed": compressed,
-                        }
-                    else:
-                        target_file = Path(raw_path)
-                        if not target_file.is_absolute():
-                            target_file = (current_work_dir / target_file).resolve()
-
-                        if not target_file.exists() or not target_file.is_file():
-                            # 回退检索：依次尝试工作区沙盒附件目录与项目底座根目录
-                            proj_root = Path(__file__).resolve().parent.parent.parent.parent
-                            pure_name = Path(raw_path).name
-                            fallback_candidates = [
-                                (ws_search_root / "attachments" / pure_name).resolve(),
-                                (ws_search_root / ".agenthub" / "attachments" / pure_name).resolve(),
-                                (current_work_dir / "attachments" / pure_name).resolve(),
-                                (current_work_dir / ".agenthub" / "attachments" / pure_name).resolve(),
-                                (proj_root / raw_path).resolve(),
-                            ]
-                            for cand in fallback_candidates:
-                                if cand.exists() and cand.is_file():
-                                    target_file = cand
-                                    break
-
-                        rel_display = str(target_file)
+                    if has_workspace_mutations and ws_id:
                         try:
-                            rel_display = str(target_file.relative_to(current_work_dir))
-                        except Exception:
-                            pass
-
-                        yield {
-                            "type": "tool_start",
-                            "call_id": call_id,
-                            "name": func_name,
-                            "command": f"read_file({rel_display})",
-                            "reason": f"读取本地文件内容: {rel_display}",
-                            "security": "SAFE",
-                        }
-                        if not target_file.exists() or not target_file.is_file():
-                            sandbox_atts = attachment_service.list_workspace_sandbox_attachments(ws_search_root, limit=10)
-                            if sandbox_atts:
-                                att_hint = "\n当前工作区沙盒真实存在的附件:\n" + "\n".join(
-                                    f"- `{item['rel_path']}` ({item['size_str']}, 绝对路径: `{item['file_path']}`)"
-                                    for item in sandbox_atts
-                                )
-                            else:
-                                att_hint = "\n当前工作区附件目录暂为空。"
-                            tool_output = (
-                                f"Error: 目标文件不存在: `{target_file}`{att_hint}\n"
-                                "⚠️ 严禁在文件不存在时自行创建 Mock 或模拟数据替代！请核对上述清单或向用户报错。"
-                            )
-                            compressed = f"[读取失败: 文件不存在 `{rel_display}`]"
-                        else:
-                            try:
-                                ext, category, canonical_mime = attachment_service.classify_extension(target_file.name)
-                                if category == "office" or ext in (".xlsx", ".docx", ".pptx", ".pdf"):
-                                    ctx_info = attachment_service.extract_attachment_context(
-                                        target_file,
-                                        canonical_mime,
-                                        target_file.name,
-                                    )
-                                    preview_txt = ctx_info.get("preview_text") or "(未提取到可读内容)"
-                                    tool_output = (
-                                        f"【结构化文档读取: `{target_file.name}` (分类: {category}, 引擎: {ctx_info.get('extractor')})】\n"
-                                        f"物理路径: `{target_file}`\n\n"
-                                        f"{preview_txt}"
-                                    )
-                                    compressed = f"[已结构化读取文档 `{rel_display}` ({ctx_info.get('extractor')}): 共 {len(tool_output)} 字符]"
-                                else:
-                                    raw_bytes = target_file.read_bytes()
-                                    content_text = attachment_service.decode_text_bytes(raw_bytes)
-                                    if len(content_text) > 120000:
-                                        content_text = (
-                                            content_text[:80000]
-                                            + f"\n\n... [文件过长，中间已省略 {len(content_text) - 100000} 字符；建议用脚本分段处理] ...\n\n"
-                                            + content_text[-20000:]
-                                        )
-                                    tool_output = content_text
-                                    compressed = f"[成功读取文件 `{rel_display}`: 共 {len(content_text)} 字符]"
-                            except Exception as read_err:
-                                tool_output = f"Error: 读取文件失败: {read_err}"
-                                compressed = f"[读取文件异常: {str(read_err)[:40]}]"
-
-                        yield {
-                            "type": "tool_end",
-                            "call_id": call_id,
-                            "name": func_name,
-                            "command": f"read_file({rel_display})",
-                            "reason": f"读取本地文件 {rel_display}",
-                            "status": "completed",
-                            "output": tool_output,
-                            "compressed": compressed,
-                        }
-
-                # ── 工具: 实时网络正文抓取与微服务健康探测 (web_fetch) ──
-                elif func_name == "web_fetch":
-                    target_url = str(args.get("url", "")).strip()
-                    extract_main = bool(args.get("extract_main_text", True))
-                    from ..extensions.web_tools import web_tools
-
-                    yield {
-                        "type": "tool_start",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"web_fetch({target_url})",
-                        "reason": f"访问并提纯目标网页/探测服务: {target_url}",
-                        "security": "SAFE",
-                    }
-                    fetch_res = await web_tools.fetch_url(target_url, extract_main_text=extract_main)
-                    tool_output = fetch_res["content"]
-                    st_code = fetch_res["status_code"]
-                    compressed = f"[已抓取 `{target_url[:45]}`: HTTP {st_code}, 共 {len(tool_output)} 字符]"
-
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"web_fetch({target_url})",
-                        "reason": f"抓取网络正文: {target_url}",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                    }
-
-                # ── 工具: Windows UI 自动化操作 (ui_action) ──
-                elif func_name == "ui_action":
-                    act = str(args.get("action", "list")).strip().lower()
-                    target_win = str(args.get("target_window", "")).strip()
-                    selector = str(args.get("control_selector", "")).strip()
-                    val = str(args.get("value", ""))
-
-                    is_read_only = act in ["list", "inspect"]
-                    sec_level = "SAFE" if is_read_only else "AUTO_CONFIRMED"
-
-                    yield {
-                        "type": "tool_start",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"ui_action({act}, target='{target_win}', selector='{selector}')",
-                        "reason": f"Windows 桌面 UI 操作: {act}",
-                        "security": sec_level,
-                    }
-
-                    if not is_read_only:
-                        await audit_service.log(
-                            event_type=f"ui_{act.lower()}",
-                            actor="agent",
-                            detail={
-                                "action": act,
-                                "window": target_win,
-                                "selector": selector,
-                                "value": val,
-                                "security_level": sec_level,
-                            },
-                            approved=True,
-                        )
-
-                    if act == "list":
-                        wins = ui_operator.list_windows(pattern=target_win)
-                        if not wins:
-                            tool_output = f"当前未找到匹配 '{target_win}' 的可见窗口。"
-                        else:
-                            win_lines = [f"| HWND | 标题 | 窗口类名 |", "| :--- | :--- | :--- |"]
-                            for w in wins:
-                                win_lines.append(f"| {w['hwnd']} | {w['title']} | `{w['class_name']}` |")
-                            tool_output = "### 🖥️ 当前可见桌面窗口列表：\n" + "\n".join(win_lines)
-                        compressed = f"[已枚举可见窗口: 共 {len(wins)} 个]"
-
-                    elif act == "inspect":
-                        tool_output = ui_operator.inspect_window(target_win)
-                        compressed = f"[已分析窗口 `{target_win}` 控件树: {len(tool_output.splitlines())} 行]"
-
-                    elif act in ["click", "input", "focus"]:
-                        action_res = ui_operator.perform_action(
-                            target=target_win,
-                            control_selector=selector,
-                            action=act,
-                            value=val,
-                            press_enter=bool(args.get("press_enter", False)),
-                        )
-                        tool_output = json.dumps(action_res, ensure_ascii=False, indent=2)
-                        st_txt = "成功" if action_res.get("success") else "失败"
-                        compressed = f"[UI {act} {st_txt}: {action_res.get('message') or action_res.get('error')}]"
-
-                    else:
-                        tool_output = f"Error: 不支持的 UI action: '{act}'。有效选项为 list, inspect, click, input, focus。"
-                        compressed = f"[UI 操作参数错误: {act}]"
-
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"ui_action({act})",
-                        "reason": f"桌面 UI 操作: {act}",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                    }
-
-                # ── 工具 3.5: 按行切片回查超长工具原文引用 (read_tool_ref) ──
-                elif func_name == "read_tool_ref":
-                    target_ref_id = str(args.get("ref_id") or "").strip()
-                    s_line = int(args.get("start_line") or 1)
-                    e_line = int(args.get("end_line") or (s_line + 119))
-                    kw = str(args.get("keyword") or "").strip() or None
-                    yield {
-                        "type": "tool_start",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"read_tool_ref({target_ref_id}, lines={s_line}..{e_line})",
-                        "reason": f"按需切片回查脱水工具原文引用 {target_ref_id}",
-                        "security": "SAFE",
-                    }
-                    if not target_ref_id:
-                        tool_output = "Error: 缺少必要参数 `ref_id`。"
-                        compressed = "[回查引用失败: 缺少 ref_id]"
-                    else:
-                        slice_res = None
-                        if active_incognito:
-                            slice_res = read_ephemeral_tool_ref(
-                                target_ref_id,
-                                start_line=s_line,
-                                end_line=e_line,
-                                keyword=kw,
-                            )
-                        if slice_res is None:
-                            slice_res = await ToolRefRepository.read_slice(
-                                ref_id=target_ref_id,
-                                start_line=s_line,
-                                end_line=e_line,
-                                keyword=kw,
-                                conversation_id=conv_id,
-                            )
-                        if slice_res.get("found"):
-                            header = (
-                                f"[引用原文切片 | Ref: {target_ref_id} | 工具: {slice_res.get('tool_name', '')} | "
-                                f"范围: L{slice_res.get('returned_start', 0)}~L{slice_res.get('returned_end', 0)} / 共 {slice_res.get('total_lines', 0)} 行]"
-                            )
-                            tool_output = f"{header}\n{slice_res.get('content', '')}"
-                            compressed = f"[已切片回查 `{target_ref_id}` L{slice_res.get('returned_start', 0)}~L{slice_res.get('returned_end', 0)}]"
-                        else:
-                            tool_output = f"Error: {slice_res.get('error', '未找到引用记录')}"
-                            compressed = f"[引用回查未命中 `{target_ref_id}`]"
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"read_tool_ref({target_ref_id})",
-                        "reason": f"回查引用 {target_ref_id}",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                    }
-
-                # ── 工具 4: MCP 扩展工具 (mcp__<server>__<tool>) ──
-                elif func_name.startswith("mcp__"):
-                    yield {
-                        "type": "tool_start",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": f"{func_name}({json.dumps(args, ensure_ascii=False)})",
-                        "reason": "调用 MCP 外部扩展工具",
-                        "security": "MCP",
-                    }
-                    tool_output = await mcp_manager.call_mcp_tool(func_name, args)
-                    is_err = tool_output.startswith("Error:")
-                    compressed = shell_executor.compress_output(
-                        command=f"{func_name}({json.dumps(args, ensure_ascii=False)[:30]})",
-                        raw_output=tool_output,
-                        exit_code=1 if is_err else 0,
-                    )
-                    yield {
-                        "type": "tool_end",
-                        "call_id": call_id,
-                        "name": func_name,
-                        "command": func_name,
-                        "reason": "调用 MCP 外部扩展工具",
-                        "status": "completed",
-                        "output": tool_output,
-                        "compressed": compressed,
-                    }
-
-                else:
-                    tool_output = f"Error: 未知的工具名称 `{func_name}`。"
-                    compressed = f"[未知工具调用 `{func_name}`]"
-
-                # 智能异常探测：判断该步骤是否遇到报错，并为下一步自愈循环激活调度器
-                if (
-                    func_name in ("execute_local_command", "write_local_file", "run_skill_tool")
-                    and not str(tool_output or "").startswith("Denied:")
-                ):
-                    has_workspace_mutations = True
-                prev_step_error = last_step_error_info
-                out_lower = (tool_output or "").lower()
-                is_step_abnormal = any(
-                    err_kw in out_lower
-                    for err_kw in (
-                        "npm error", "enoent", "error:", "traceback", "syntaxerror",
-                        "command not found", "cannot find module", "failed", "denied"
-                    )
-                )
-                if is_step_abnormal:
-                    # 语义级死循环判定 (LoopBreaker)
-                    is_circuit_breaker = False
-                    if func_name == "execute_local_command":
-                        cmd_entry = str(args.get("command", "")).strip()
-                        norm_entry = re.sub(r"\s+", " ", cmd_entry)
-                        command_history.append({"cmd": norm_entry, "abnormal": True})
-                        # 规则 1: 连续 2 次执行完全相同的命令均异常
-                        if len(command_history) >= 2 and command_history[-1]["cmd"] == command_history[-2]["cmd"] and command_history[-2]["abnormal"]:
-                            is_circuit_breaker = True
-                        # 规则 2: 最近 5 步中出现 3 次相同失败命令
-                        recent_same = [h for h in command_history[-5:] if h["cmd"] == norm_entry and h["abnormal"]]
-                        if len(recent_same) >= 3:
-                            is_circuit_breaker = True
-
-                        if is_circuit_breaker:
-                            allow_step_extension = False
-                            circuit_breaker_triggered = True
-                            logger.warning(f"[AgentRuntime] 触发死循环熔断 (LoopBreaker): {norm_entry}")
-
-                    last_step_error_info = {
-                        "tool": func_name,
-                        "summary": compressed or (tool_output.strip().split("\n")[0][:120]),
-                        "circuit_breaker": is_circuit_breaker,
-                        "failed_cmd": re.sub(r"\s+", " ", str(args.get("command", "")).strip()) if func_name == "execute_local_command" else "",
-                    }
-                else:
-                    if func_name == "execute_local_command":
-                        cmd_entry = str(args.get("command", "")).strip()
-                        command_history.append({"cmd": re.sub(r"\s+", " ", cmd_entry), "abnormal": False})
-                    last_step_error_info = None
-                    if not str(tool_output or "").startswith("Error:"):
-                        total_tool_steps += 1
-                        if func_name == "write_local_file":
-                            fp = str(args.get("file_path") or args.get("path") or "").strip()
-                            if fp and fp not in produced_artifacts:
-                                produced_artifacts.append(fp)
-                        if prev_step_error is not None:
-                            recovered_error_count += 1
-
-                # 旁路影子清洗 (Context Scrubber)：对超长工具输出 (>1000 字符) 截留原文至 tool_output_refs 并提炼 <=200 字结论；
-                # 严格遵守 Write-Once 铁律：一次脱水后统一写入 content 与 compressed_content，热区内绝不二次改写！
-                if func_name != "read_tool_ref" and len(tool_output or "") > 1000:
+                            from ..repository.artifact_repository import ArtifactRepository
+                            await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
+                        except Exception as sync_err:
+                            logger.debug(f"[AgentRuntime] 达到步数上限时物理资产同步跳过: {sync_err}")
                     try:
-                        scrub_res = await LocalContextCompressor.scrub_tool_output(
-                            conversation_id=conv_id,
-                            turn_id=current_turn_id,
-                            tool_name=func_name,
-                            tool_args_summary=json.dumps(args, ensure_ascii=False)[:180],
-                            raw_output=tool_output,
-                            incognito=active_incognito,
-                            primary_provider_info=resolved_primary_provider,
+                        turn_stats_payload = (
+                            None
+                            if active_incognito
+                            else await TokenUsageRepository.get_turn_summary(conv_id, current_turn_id)
                         )
-                        if scrub_res.get("was_scrubbed"):
-                            tool_output = str(scrub_res["content"])
-                            compressed = tool_output
-                            saved_est = int(scrub_res.get("saved_tokens") or 0)
-                            scrubber_m = scrub_res.get("scrubber_metrics")
-                            if isinstance(scrubber_m, dict):
-                                scrubber_record = dict(scrubber_m)
-                                scrubber_record["turn_id"] = current_turn_id
-                                scrubber_record["step_index"] = step_idx
-                                scrubber_record["agent_role"] = "scrubber"
-                                scrubber_record["saved_tokens"] = saved_est
-                                in_memory_step_metrics.append(scrubber_record)
-                                if not active_incognito:
-                                    await TokenUsageRepository.record_usage(
-                                        conversation_id=conv_id,
-                                        turn_id=current_turn_id,
-                                        step_index=step_idx,
-                                        agent_role="scrubber",
-                                        provider_id=str(scrubber_record.get("provider_id") or ""),
-                                        provider_name=str(scrubber_record.get("provider_name") or ""),
-                                        provider_type=str(scrubber_record.get("provider_type") or ""),
-                                        model_name=str(scrubber_record.get("model_name") or ""),
-                                        prompt_tokens=int(scrubber_record.get("prompt_tokens") or 0),
-                                        cached_tokens=int(scrubber_record.get("cached_tokens") or 0),
-                                        eval_tokens=int(scrubber_record.get("eval_tokens") or 0),
-                                        completion_tokens=int(scrubber_record.get("completion_tokens") or 0),
-                                        saved_tokens=saved_est,
-                                        context_limit=int(scrubber_record.get("context_limit") or 0),
-                                        ttft_ms=float(scrubber_record.get("ttft_ms") or 0.0),
-                                        prefill_ms=float(scrubber_record.get("prefill_ms") or 0.0),
-                                        tps=float(scrubber_record.get("tps") or 0.0),
-                                        is_estimated=bool(scrubber_record.get("is_estimated", False)),
-                                    )
-                            elif saved_est > 0:
-                                det_record = {
-                                    "turn_id": current_turn_id,
-                                    "step_index": step_idx,
-                                    "agent_role": "scrubber",
-                                    "provider_type": "local_rule",
-                                    "provider_name": "ContextScrubber",
-                                    "model_name": "deterministic_scrubber",
-                                    "prompt_tokens": 0,
-                                    "cached_tokens": 0,
-                                    "eval_tokens": 0,
-                                    "completion_tokens": 0,
-                                    "saved_tokens": saved_est,
-                                    "context_limit": 0,
-                                    "ttft_ms": 0.0,
-                                    "prefill_ms": 0.0,
-                                    "tps": 0.0,
-                                    "is_estimated": True,
-                                }
-                                in_memory_step_metrics.append(det_record)
-                                if not active_incognito:
-                                    await TokenUsageRepository.record_usage(
-                                        conversation_id=conv_id,
-                                        turn_id=current_turn_id,
-                                        step_index=step_idx,
-                                        agent_role="scrubber",
-                                        provider_name="ContextScrubber",
-                                        provider_type="local_rule",
-                                        model_name="deterministic_scrubber",
-                                        saved_tokens=saved_est,
-                                        is_estimated=True,
-                                    )
-                    except Exception as scrub_err:
-                        logger.debug(f"[AgentRuntime] 旁路工具清洗跳过: {scrub_err}")
-
-                # 将工具输出与单行折叠摘要同时落盘
-                await MessageRepository.save_message(
-                    conversation_id=conv_id,
-                    role="tool",
-                    content=tool_output,
-                    compressed_content=compressed,
-                    turn_id=current_turn_id,
-                    tool_call_id=call_id,
-                )
-
-                # 追加写入 Event Ledger（tool_executed / artifact_produced / tool_error_recovered）
-                if not active_incognito and active_scene != "oneshot":
-                    step_skill_id = (
-                        str(args.get("skill_name") or "").strip().lstrip("/")
-                        or (active_skill_ids[0] if active_skill_ids else None)
-                    )
-                    current_loop_id = tracked_loop_id or (active_loop_obj.id if active_loop_obj else None)
-                    try:
-                        await event_ledger.append_event(
-                            workspace_id=ws_id,
-                            conversation_id=conv_id,
-                            turn_id=current_turn_id,
-                            loop_id=current_loop_id,
-                            event_type="tool_executed",
-                            actor="agent",
-                            skill_id=step_skill_id,
-                            payload={
-                                "tool": func_name,
-                                "args": args,
-                                "compressed": compressed,
-                                "is_error": is_step_abnormal,
-                                "output_preview": (tool_output or "")[:400],
-                            },
-                            incognito=False,
-                        )
-                        if (
-                            func_name == "write_local_file"
-                            and not is_step_abnormal
-                            and not str(tool_output).startswith("Error:")
-                        ):
-                            await event_ledger.append_event(
-                                workspace_id=ws_id,
-                                conversation_id=conv_id,
-                                turn_id=current_turn_id,
-                                loop_id=current_loop_id,
-                                event_type="artifact_produced",
-                                actor="agent",
-                                skill_id=step_skill_id,
-                                payload={
-                                    "file_path": str(args.get("file_path") or args.get("path") or ""),
-                                    "compressed": compressed,
-                                },
-                                incognito=False,
+                        if turn_stats_payload is None and in_memory_step_metrics:
+                            turn_stats_payload = _build_turn_summary_from_rows(
+                                current_turn_id, in_memory_step_metrics, 0
                             )
-                        if prev_step_error is not None and not is_step_abnormal:
-                            await event_ledger.append_event(
-                                workspace_id=ws_id,
-                                conversation_id=conv_id,
-                                turn_id=current_turn_id,
-                                loop_id=current_loop_id,
-                                event_type="tool_error_recovered",
-                                actor="agent",
-                                skill_id=step_skill_id,
-                                payload={
-                                    "failed_tool": prev_step_error.get("tool"),
-                                    "failed_summary": prev_step_error.get("summary"),
-                                    "recovery_tool": func_name,
-                                    "recovery_args": args,
-                                    "recovery_compressed": compressed,
-                                },
-                                incognito=False,
-                            )
-                    except Exception as ledger_err:
-                        logger.debug(f"[AgentRuntime] 写入工具账本事件跳过: {ledger_err}")
-
-                # ── 具身状态联动：推进 Loop 轮次并动态记事板 ──
-                if active_loop_obj:
-                    try:
-                        summary_text = compressed or (str(args.get("command", "")) if func_name == "execute_local_command" else f"{func_name}")
-                        is_succ = not is_step_abnormal
-                        updated_loop = await TaskLoopRepository.record_tool_step(
-                            loop_id=active_loop_obj.id,
-                            tool_name=func_name,
-                            summary=summary_text,
-                            is_success=is_succ,
-                        )
-                        if updated_loop:
-                            active_loop_obj = updated_loop
-                            if target_cwd:
-                                try:
-                                    ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
-                                    ws_sp.parent.mkdir(parents=True, exist_ok=True)
-                                    ws_sp.write_text(updated_loop.scratchpad_md or "", encoding="utf-8")
-                                except Exception:
-                                    pass
+                        if turn_stats_payload:
                             yield {
-                                "type": "loop_step",
-                                "loop_id": updated_loop.id,
-                                "iteration": updated_loop.current_iteration,
-                                "max_iterations": updated_loop.max_iterations,
-                                "status": updated_loop.loop_status,
-                                "scratchpad_md": updated_loop.scratchpad_md,
+                                "type": "token_stats",
+                                "conversation_id": conv_id,
+                                "turn_id": current_turn_id,
+                                "stats": turn_stats_payload,
                             }
-                    except Exception as e:
-                        logger.warning(f"自主循环步进同步异常: {e}")
-
-            step_idx += 1
-
-            # 若已到达自适应最大步数上限（最高动态扩展至 40 步），给出收尾完成信号
-            if step_idx >= current_max_steps:
-                if active_loop_obj:
-                    try:
-                        completed_loop = await TaskLoopRepository.complete_loop(
-                            loop_id=active_loop_obj.id,
-                            summary=f"已达当前执行步数上限 ({step_idx} 步)，已输出阶段性成果",
-                        )
-                        if completed_loop:
-                            yield {
-                                "type": "loop_completed",
-                                "loop_id": completed_loop.id,
-                                "iteration": completed_loop.current_iteration,
-                                "max_iterations": completed_loop.max_iterations,
-                                "status": "completed",
-                                "scratchpad_md": completed_loop.scratchpad_md,
-                            }
-                            active_loop_obj = None
                     except Exception:
                         pass
-                if has_workspace_mutations and ws_id:
+                    stream_completed_normally = True
+                    yield {
+                        "type": "done",
+                        "full_content": accumulated_visible_text.strip() or f"已完成深度推演与自主闭环执行（共执行 {step_idx} 步）。若需进一步处理请继续告知。",
+                        "account": final_account,
+                    }
+
+            if was_cancelled:
+                cancel_cli_processes(conv_id)
+                shell_executor.cancel_session_processes(conv_id)
+                partial_clean = (
+                    ToolProtocolAdapter.parse_xml_tool_calls(step_raw_text)[0].strip()
+                    if step_raw_text
+                    else ""
+                )
+                stopped_notice = (
+                    f"{partial_clean}\n\n（已手动停止生成）"
+                    if partial_clean
+                    else "（已手动停止生成）"
+                )
+                if not active_incognito and conv_id:
                     try:
-                        from ..repository.artifact_repository import ArtifactRepository
-                        await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
-                    except Exception as sync_err:
-                        logger.debug(f"[AgentRuntime] 达到步数上限时物理资产同步跳过: {sync_err}")
-                try:
-                    turn_stats_payload = (
-                        None
-                        if active_incognito
-                        else await TokenUsageRepository.get_turn_summary(conv_id, current_turn_id)
-                    )
-                    if turn_stats_payload is None and in_memory_step_metrics:
-                        turn_stats_payload = _build_turn_summary_from_rows(
-                            current_turn_id, in_memory_step_metrics, 0
+                        await MessageRepository.save_message(
+                            conversation_id=conv_id,
+                            role="model",
+                            content=stopped_notice,
+                            executed_by_account=final_account,
+                            token_count=len(stopped_notice) // 3,
+                            turn_id=current_turn_id,
                         )
-                    if turn_stats_payload:
+                        await ConversationRepository.touch(conv_id)
+                    except Exception as save_err:
+                        logger.warning(f"[AgentRuntime] 保存手动停止消息失败: {save_err}")
+                if active_loop_obj and active_loop_obj.loop_status in (
+                    "planning",
+                    "executing",
+                    "verifying",
+                    "reflecting",
+                ):
+                    try:
+                        await TaskLoopRepository.update_loop_status(
+                            loop_id=active_loop_obj.id,
+                            status="paused",
+                        )
                         yield {
-                            "type": "token_stats",
-                            "conversation_id": conv_id,
-                            "turn_id": current_turn_id,
-                            "stats": turn_stats_payload,
+                            "type": "loop_step",
+                            "loop_id": active_loop_obj.id,
+                            "iteration": active_loop_obj.current_iteration,
+                            "max_iterations": active_loop_obj.max_iterations,
+                            "status": "paused",
+                            "pending_approval_call": None,
+                            "scratchpad_md": active_loop_obj.scratchpad_md,
                         }
+                        active_loop_obj = None
+                    except Exception as pause_err:
+                        logger.warning(f"[AgentRuntime] 手动停止收敛 Loop 为 paused 失败: {pause_err}")
+                yield {"type": "cancelled", "content": "已手动停止生成"}
+
+        except GeneratorExit:
+            # 客户端断开导致 async generator aclose() 时：仅执行同步清理与 shield 落库，严禁 yield
+            cancel_event.set()
+            cancel_cli_processes(conv_id)
+            shell_executor.cancel_session_processes(conv_id)
+            if active_loop_obj and active_loop_obj.loop_status in (
+                "planning",
+                "executing",
+                "verifying",
+                "reflecting",
+            ):
+                try:
+                    await asyncio.shield(
+                        TaskLoopRepository.update_loop_status(
+                            loop_id=active_loop_obj.id,
+                            status="paused",
+                        )
+                    )
+                except BaseException:
+                    pass
+            return
+
+        except asyncio.CancelledError:
+            cancel_event.set()
+            cancel_cli_processes(conv_id)
+            shell_executor.cancel_session_processes(conv_id)
+            if active_loop_obj and active_loop_obj.loop_status in (
+                "planning",
+                "executing",
+                "verifying",
+                "reflecting",
+            ):
+                try:
+                    await asyncio.shield(
+                        TaskLoopRepository.update_loop_status(
+                            loop_id=active_loop_obj.id,
+                            status="paused",
+                        )
+                    )
+                except BaseException:
+                    pass
+            raise
+
+        except Exception as unexpected_err:
+            logger.error(f"[AgentRuntime] chat_stream 发生未捕获异常: {unexpected_err}", exc_info=True)
+            cancel_cli_processes(conv_id)
+            shell_executor.cancel_session_processes(conv_id)
+            err_text = f"⚠️ 执行发生未预期异常: {unexpected_err}"
+            if not active_incognito and conv_id:
+                try:
+                    await MessageRepository.save_message(
+                        conversation_id=conv_id,
+                        role="model",
+                        content=err_text,
+                        executed_by_account=final_account,
+                        token_count=len(err_text) // 3,
+                        turn_id=current_turn_id,
+                    )
+                    await ConversationRepository.touch(conv_id)
                 except Exception:
                     pass
-                yield {
-                    "type": "done",
-                    "full_content": accumulated_visible_text.strip() or f"已完成深度推演与自主闭环执行（共执行 {step_idx} 步）。若需进一步处理请继续告知。",
-                    "account": final_account,
-                }
+            if active_loop_obj:
+                try:
+                    await TaskLoopRepository.update_loop_status(
+                        loop_id=active_loop_obj.id,
+                        status="failed",
+                    )
+                    yield {
+                        "type": "loop_failed",
+                        "loop_id": active_loop_obj.id,
+                        "iteration": active_loop_obj.current_iteration,
+                        "max_iterations": active_loop_obj.max_iterations,
+                        "status": "failed",
+                        "error": str(unexpected_err),
+                    }
+                    active_loop_obj = None
+                except Exception:
+                    pass
+            yield {"type": "error", "content": err_text}
 
-        # 7. 回合后异步记忆提炼与自然衰减维护（长程上下文分块坍缩已由 LocalContextCompressor 守护前缀复用，避免后台频繁改写摘要）
-        if active_scene != "oneshot" and not active_incognito:
+        finally:
+            current_entry = self._active_streams.get(conv_id)
+            if current_entry and current_entry.get("token") == run_token:
+                self._active_streams.pop(conv_id, None)
+
+        # 7. 回合后异步记忆提炼与自然衰减维护（仅正常完成时触发；长程上下文分块坍缩已由 LocalContextCompressor 守护前缀复用）
+        if stream_completed_normally and active_scene != "oneshot" and not active_incognito:
             asyncio.create_task(self._post_turn_memory_maintenance(user_message))
             window_limit = 24 if active_scene == "chat" else 20
             asyncio.create_task(

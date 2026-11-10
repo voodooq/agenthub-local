@@ -24,6 +24,7 @@ const REMARK_PLUGINS = [remarkGfm];
 
 interface MarkdownMessageRuntimeContextValue {
   isStreaming: boolean;
+  isMuted: boolean;
   inquiryKey: string;
   isInquirySubmitted: boolean;
   isExecutionContext: boolean;
@@ -49,6 +50,13 @@ interface MarkdownMessageRuntimeContextValue {
 
 const MarkdownMessageRuntimeContext =
   createContext<MarkdownMessageRuntimeContextValue | null>(null);
+
+// 标识当前 code 节点是否位于 <pre> 围栏代码块中，精确区分无语言标识符的代码块与行内 `code`
+const InsidePreContext = createContext(false);
+
+function PreRenderer({ children }: any) {
+  return <InsidePreContext.Provider value={true}>{children}</InsidePreContext.Provider>;
+}
 
 function markdownUrlTransform(url: string): string {
   if (
@@ -125,20 +133,23 @@ function InquiryCardSlot({ rawContent }: { rawContent: string }) {
 
 function CodeRenderer({ inline, className, children, ...props }: any) {
   const ctx = useContext(MarkdownMessageRuntimeContext);
+  const isInsidePre = useContext(InsidePreContext);
   const match = /language-(\w+)/.exec(className || '');
   const language = match ? match[1] : '';
   const rawChildrenText = String(children ?? '');
   const codeString = rawChildrenText.replace(/\n$/, '');
+  const isMuted = Boolean(ctx?.isMuted);
 
-  if (!inline && language.toLowerCase() === 'interactive_inquiry') {
+  if ((isInsidePre || !inline) && language.toLowerCase() === 'interactive_inquiry') {
     return <InquiryCardSlot rawContent={codeString} />;
   }
 
-  if (!inline && language) {
+  if (isInsidePre || (!inline && Boolean(language)) || rawChildrenText.includes('\n')) {
     return (
       <CodeBlock
         code={codeString}
         language={language}
+        subtle={isMuted}
         onSendToCanvas={(c: string, l: string) => ctx?.onOpenCanvas(c, l)}
         onSaveToWorkspace={ctx?.onSaveToWorkspace}
       />
@@ -147,6 +158,7 @@ function CodeRenderer({ inline, className, children, ...props }: any) {
 
   // 仅对单行行内代码做本地文件路径直开识别（严格避开多行代码块）
   if (
+    !isInsidePre &&
     inline !== false &&
     !language &&
     !rawChildrenText.includes('\n') &&
@@ -165,7 +177,11 @@ function CodeRenderer({ inline, className, children, ...props }: any) {
 
   return (
     <code
-      className="bg-surface-200 border border-border px-1.5 py-0.5 rounded font-mono text-[12px] text-amber-600 dark:text-amber-300 break-anywhere"
+      className={
+        isMuted
+          ? 'bg-surface-200/60 border border-border/50 px-1 py-0.5 rounded font-mono text-[11px] text-muted-foreground/85 break-anywhere'
+          : 'bg-surface-200 border border-border px-1.5 py-0.5 rounded font-mono text-[12px] text-amber-600 dark:text-amber-300 break-anywhere'
+      }
       {...props}
     >
       {children}
@@ -203,12 +219,15 @@ function LinkRenderer({ href, children, ...props }: any) {
     );
   }
   const isAnchorOnly = hrefStr.startsWith('#');
+  const linkClass = ctx?.isMuted
+    ? 'text-muted-foreground/85 underline underline-offset-2 hover:text-foreground transition-colors'
+    : 'text-emerald-600 dark:text-emerald-400 underline underline-offset-2 hover:text-emerald-500 transition-colors';
   return (
     <a
       href={hrefStr}
       target={isAnchorOnly ? undefined : '_blank'}
       rel={isAnchorOnly ? undefined : 'noopener noreferrer'}
-      className="text-emerald-600 dark:text-emerald-400 underline underline-offset-2 hover:text-emerald-500 transition-colors"
+      className={linkClass}
       {...props}
     >
       {children}
@@ -241,6 +260,7 @@ function ImageRenderer({ src, alt, ...props }: any) {
 
 // 模块级恒定映射：保证 ReactMarkdown 永远收到相同引用，绝不因外层重绘导致子组件卸载重建
 const STABLE_MARKDOWN_COMPONENTS: Components = {
+  pre: PreRenderer,
   code: CodeRenderer,
   a: LinkRenderer,
   img: ImageRenderer,
@@ -249,6 +269,7 @@ const STABLE_MARKDOWN_COMPONENTS: Components = {
 interface AssistantMarkdownMessageProps {
   content: string;
   isStreaming: boolean;
+  muted?: boolean;
   inquiryKey: string;
   isInquirySubmitted: boolean;
   isExecutionContext: boolean;
@@ -275,6 +296,7 @@ interface AssistantMarkdownMessageProps {
 function AssistantMarkdownMessageInner({
   content,
   isStreaming,
+  muted = false,
   inquiryKey,
   isInquirySubmitted,
   isExecutionContext,
@@ -298,6 +320,7 @@ function AssistantMarkdownMessageInner({
   const contextValue = useMemo<MarkdownMessageRuntimeContextValue>(
     () => ({
       isStreaming,
+      isMuted: muted,
       inquiryKey,
       isInquirySubmitted,
       isExecutionContext,
@@ -312,6 +335,7 @@ function AssistantMarkdownMessageInner({
     }),
     [
       isStreaming,
+      muted,
       inquiryKey,
       isInquirySubmitted,
       isExecutionContext,
@@ -328,7 +352,13 @@ function AssistantMarkdownMessageInner({
 
   return (
     <MarkdownMessageRuntimeContext.Provider value={contextValue}>
-      <div className="prose dark:prose-invert max-w-none text-foreground break-anywhere">
+      <div
+        className={
+          muted
+            ? 'max-w-none break-anywhere text-[12px] leading-[1.58] text-muted-foreground/75 dark:text-muted-foreground/70 [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5 [&_strong]:font-medium [&_strong]:text-muted-foreground/85 [&_h1]:text-[13px] [&_h1]:font-medium [&_h2]:text-[12.5px] [&_h2]:font-medium [&_h3]:text-[12px] [&_h3]:font-medium [&_blockquote]:border-l-2 [&_blockquote]:border-border/55 [&_blockquote]:pl-2.5 [&_blockquote]:text-muted-foreground/65'
+            : 'prose dark:prose-invert max-w-none text-foreground break-anywhere'
+        }
+      >
         {content ? (
           <ReactMarkdown
             remarkPlugins={REMARK_PLUGINS}
@@ -338,8 +368,8 @@ function AssistantMarkdownMessageInner({
             {renderedMarkdown}
           </ReactMarkdown>
         ) : (
-          <div className="flex items-center space-x-2 text-muted-foreground text-xs py-1">
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-ping shrink-0" />
+          <div className="flex items-center space-x-2 text-muted-foreground/70 text-[11px] py-0.5">
+            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/70 animate-pulse shrink-0" />
             <span>正在调度本地执行与安全分析...</span>
           </div>
         )}

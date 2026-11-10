@@ -4,6 +4,7 @@ Google Gemini 统一客户端 (Gemini Client)
 1. 官方通道：对接 Google Generative Language API (generativelanguage.googleapis.com)
 2. 网页免额度通道：对接 Gemini Web Bridge Sidecar 独立容器 (gemini-web-bridge:8000)
 """
+import asyncio
 import json
 import re
 import time
@@ -32,6 +33,13 @@ class GeminiClient:
     _DETECTED_UA: str | None = None
     _PROJECT_CACHE: dict[str, str] = {}
     _FALLBACK_CACHE: dict[str, Any] = {"token": "", "expires_at": 0.0, "legacy_tokens": set()}
+
+    @classmethod
+    async def resolve_cloudcode_ua(cls) -> str:
+        """异步非阻塞解析 Antigravity User-Agent，防止 subprocess 探测卡住事件循环。"""
+        if cls._DETECTED_UA:
+            return cls._DETECTED_UA
+        return await asyncio.to_thread(cls.get_cloudcode_ua)
 
     @classmethod
     def get_cloudcode_ua(cls) -> str:
@@ -145,12 +153,13 @@ class GeminiClient:
         if cache_key in cls._PROJECT_CACHE:
             return cls._PROJECT_CACHE[cache_key]
         try:
+            ua_val = await cls.resolve_cloudcode_ua()
             resp = await client.post(
                 f"{cls.CLOUDCODE_BASE_URL}:loadCodeAssist",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Content-Type": "application/json",
-                    "User-Agent": cls.get_cloudcode_ua(),
+                    "User-Agent": ua_val,
                 },
                 json={
                     "metadata": {
@@ -393,12 +402,13 @@ class GeminiClient:
                 elif cc_model_id not in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
                     candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-flash-lite"])
 
+                ua_val = await cls.resolve_cloudcode_ua()
                 for idx, target_cc_model in enumerate(candidate_models):
                     cc_url = f"{cls.CLOUDCODE_BASE_URL}:streamGenerateContent?alt=sse"
                     cc_headers = {
                         "Authorization": f"Bearer {active_token}",
                         "Content-Type": "application/json",
-                        "User-Agent": cls.get_cloudcode_ua(),
+                        "User-Agent": ua_val,
                     }
                     cc_payload = {
                         "model": target_cc_model,
@@ -692,12 +702,13 @@ class GeminiClient:
                     if active_token[:32] in cls._FALLBACK_CACHE["legacy_tokens"]:
                         active_token = await cls._get_fallback_oauth_token(client) or active_token
                     project_id = await cls._resolve_cloudcode_project(active_token, client)
+                    ua_val = await cls.resolve_cloudcode_ua()
                     for idx, target_m in enumerate(candidate_models):
                         cc_url = f"{cls.CLOUDCODE_BASE_URL}:generateContent"
                         cc_headers = {
                             "Authorization": f"Bearer {active_token}",
                             "Content-Type": "application/json",
-                            "User-Agent": cls.get_cloudcode_ua(),
+                            "User-Agent": ua_val,
                         }
                         cc_payload = {
                             "model": target_m,

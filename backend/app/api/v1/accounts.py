@@ -8,6 +8,7 @@ from ...schema.account_schema import (
     AntigravityDetectResponse,
 )
 from ...repository.account_repository import AccountRepository
+from ...repository.token_usage_repository import TokenUsageRepository
 from ...service.quota_monitor import quota_monitor
 from ...service.antigravity_service import antigravity_service
 from ...service.audit_service import audit_service
@@ -104,6 +105,16 @@ async def get_dashboard_stats():
 
     total_nodes = len(accounts) + sum(1 for cp in custom_provs if cp.get("provider_type") != "google_oauth" and cp.get("is_enabled"))
 
+    # NOTE: 同步合并 token_usage_logs 中多协议自定义算力节点的真实调用次数与 Token 消耗
+    known_account_names = {a.name for a in accounts if getattr(a, "name", None)}
+    pool_usage = await TokenUsageRepository.get_pool_usage_summary(
+        known_account_names=known_account_names
+    )
+    providers_usage = TokenUsageRepository.map_providers_usage(custom_provs, pool_usage)
+
+    total_today_used += int(pool_usage["extra_today_calls"])
+    total_tokens_all += int(pool_usage["extra_total_tokens"])
+
     return {
         "accounts": items,
         "summary": {
@@ -112,8 +123,12 @@ async def get_dashboard_stats():
             "cooldown_accounts": cooldown_count,
             "total_today_used": total_today_used,
             "total_tokens_all": total_tokens_all,
+            "today_tokens_all": int(pool_usage["logs_today_tokens"]),
+            "total_cached_tokens_all": int(pool_usage["logs_total_cached_tokens"]),
+            "today_cached_tokens_all": int(pool_usage["logs_today_cached_tokens"]),
             "custom_active_count": custom_active_count
-        }
+        },
+        "providers_usage": providers_usage,
     }
 
 

@@ -62,6 +62,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import AsyncGenerator, Any
@@ -74,6 +75,48 @@ from ..core.runtime_paths import get_silent_subprocess_kwargs
 PROCESS_TIMEOUT_SECONDS = 180
 # 单次会话最多允许的 chunk 块数上限（防止恶意无限流）
 MAX_CHUNKS_PER_SESSION = 5000
+# 活跃 CLI 子进程注册表：conversation_id -> set[proc]
+_ACTIVE_CLI_PROCESSES: dict[str, set[Any]] = {}
+
+
+def _kill_process_tree(proc: Any) -> None:
+    """安全跨平台强杀 CLI 子进程及其派生子进程树（兼容测试 Mock 对象不误杀系统 PID）"""
+    if proc is None:
+        return
+    if getattr(proc, "returncode", None) is not None:
+        return
+
+    pid = getattr(proc, "pid", None)
+    is_real_proc = isinstance(proc, _CompatSubprocess) or type(proc).__module__.startswith("asyncio.")
+    if sys.platform == "win32" and is_real_proc and isinstance(pid, int) and pid > 0:
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=3,
+                **get_silent_subprocess_kwargs(),
+            )
+        except Exception:
+            pass
+
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+
+def cancel_cli_processes(conversation_id: str) -> int:
+    """强制终止指定会话关联的所有活跃 CLI 子进程树，并返回已触发终止的进程数"""
+    if not conversation_id:
+        return 0
+    procs = list(_ACTIVE_CLI_PROCESSES.get(conversation_id, ()))
+    killed = 0
+    for proc in procs:
+        if getattr(proc, "returncode", None) is None:
+            _kill_process_tree(proc)
+            killed += 1
+    return killed
 
 from ..core.proxy_helper import get_system_proxy_env
 
@@ -241,7 +284,7 @@ async def test_cli_model_availability(
                 timeout=timeout_seconds,
             )
         except asyncio.TimeoutError:
-            proc.kill()
+            _kill_process_tree(proc)
             return {
                 "available": False,
                 "model_flag": model_flag,
@@ -305,6 +348,8 @@ async def run_cli_stream(
     approval_mode: str = "default",
     work_dir: str | None = None,
     system_prompt: str | None = None,
+    conversation_id: str | None = None,
+    cancel_event: asyncio.Event | None = None,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """
     以子进程方式调用 Antigravity / Gemini CLI，逐行解析 stream-json 事件并 yield。
@@ -375,36 +420,66 @@ async def run_cli_stream(
         proc = _CompatSubprocess(cmd, env, cwd)
 
     logger.info(f"{cli_type.upper()} CLI 子进程已启动 PID={proc.pid}")
+    if conversation_id:
+        _ACTIVE_CLI_PROCESSES.setdefault(conversation_id, set()).add(proc)
     chunk_count = 0
 
     try:
         async def _read_lines() -> AsyncGenerator[str | dict, None]:
-            """从 stdout 逐行读取 NDJSON，超时时 yield timeout 事件"""
+            """从 stdout 逐行读取 NDJSON，支持主动取消与超时保护"""
             assert proc.stdout is not None
             while True:
-                try:
-                    line = await asyncio.wait_for(
-                        proc.stdout.readline(),
-                        timeout=PROCESS_TIMEOUT_SECONDS
-                    )
-                except asyncio.TimeoutError:
-                    yield {"type": "timeout", "message": "子进程响应超时，已终止"}
-                    proc.kill()
+                if cancel_event and cancel_event.is_set():
+                    _kill_process_tree(proc)
+                    yield {"type": "cancelled", "message": "已中断执行"}
                     return
+
+                read_task = asyncio.create_task(proc.stdout.readline())
+                cancel_task = asyncio.create_task(cancel_event.wait()) if cancel_event else None
+                wait_tasks = {read_task, cancel_task} if cancel_task else {read_task}
+                try:
+                    done, pending = await asyncio.wait(
+                        wait_tasks,
+                        timeout=PROCESS_TIMEOUT_SECONDS,
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for t in pending:
+                        t.cancel()
+                    if pending:
+                        await asyncio.gather(*pending, return_exceptions=True)
+
+                    if not done:
+                        _kill_process_tree(proc)
+                        yield {"type": "timeout", "message": "子进程响应超时，已终止"}
+                        return
+
+                    if cancel_task and cancel_task in done and cancel_event and cancel_event.is_set():
+                        _kill_process_tree(proc)
+                        yield {"type": "cancelled", "message": "已中断执行"}
+                        return
+
+                    line = read_task.result()
+                except asyncio.CancelledError:
+                    read_task.cancel()
+                    if cancel_task:
+                        cancel_task.cancel()
+                    _kill_process_tree(proc)
+                    raise
+
                 if not line:
                     break
                 yield line.decode("utf-8", errors="replace").strip()
 
         async for raw in _read_lines():
             if isinstance(raw, dict):
-                # timeout 事件直接透传并退出
+                # timeout / cancelled 事件直接透传并退出
                 yield raw
                 return
             if not raw:
                 continue
             if chunk_count >= MAX_CHUNKS_PER_SESSION:
                 logger.warning("单次会话 chunk 数量超限，终止子进程")
-                proc.kill()
+                _kill_process_tree(proc)
                 yield {"type": "error", "message": "响应块数量超过安全上限，请求已终止"}
                 return
             try:
@@ -530,12 +605,22 @@ async def run_cli_stream(
                 yield {"type": "content", "text": "已成功执行指令并完成系统级上下文分析。"}
             yield {"type": "done", "usage": {}, "exit_code": 0}
 
+    except asyncio.CancelledError:
+        _kill_process_tree(proc)
+        raise
     except Exception as e:
         logger.error(f"agent_runner 异常: {e}", exc_info=True)
         yield {"type": "error", "message": str(e)}
     finally:
-        # 确保子进程资源被回收
-        if proc.returncode is None:
-            proc.kill()
-            await proc.wait()
+        if conversation_id and conversation_id in _ACTIVE_CLI_PROCESSES:
+            _ACTIVE_CLI_PROCESSES[conversation_id].discard(proc)
+            if not _ACTIVE_CLI_PROCESSES[conversation_id]:
+                _ACTIVE_CLI_PROCESSES.pop(conversation_id, None)
+        # 确保子进程资源及派生进程树被彻底回收
+        if getattr(proc, "returncode", None) is None:
+            _kill_process_tree(proc)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except Exception:
+                pass
         logger.info(f"CLI 子进程 PID={proc.pid} 已回收")

@@ -145,10 +145,10 @@ class TaskLoopRepository:
         include_completed: bool = True,
     ) -> TaskLoopResponse | None:
         """
-        获取当前工作区中正在运行、等待审批或最新已交付的任务循环
+        获取当前工作区中正在运行、等待审批、已暂停或最新已交付的任务循环
         """
         status_filter = (
-            "('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval', 'completed', 'failed')"
+            "('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval', 'paused', 'completed', 'failed')"
             if include_completed
             else "('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval')"
         )
@@ -313,6 +313,28 @@ class TaskLoopRepository:
         return True
 
     @staticmethod
+    async def reconcile_orphaned_loops_on_startup() -> int:
+        """
+        启动时自愈：将上一运行周期遗留处于活跃执行态的孤儿任务循环统一归敛为 paused，
+        避免重启后前端 LoopHUD 永久停留在执行中动画或阻断新交互。
+        """
+        now = datetime.now().isoformat()
+        async with db_manager.get_connection() as conn:
+            cursor = await conn.execute(
+                """
+                UPDATE task_loop_runs
+                SET loop_status = 'paused', updated_at = ?
+                WHERE loop_status IN ('planning', 'executing', 'verifying', 'reflecting');
+                """,
+                (now,),
+            )
+            await conn.commit()
+            updated = int(cursor.rowcount or 0)
+        if updated > 0:
+            logger.info(f"[TaskLoop] 启动自愈：已将 {updated} 条遗留活跃状态任务收敛为 paused")
+        return updated
+
+    @staticmethod
     async def update_loop_status(
         loop_id: str,
         status: str,
@@ -326,7 +348,8 @@ class TaskLoopRepository:
         """
         now = datetime.now().isoformat()
         fields = ["loop_status = ?", "updated_at = ?"]
-        values = [status, now]
+        # 显式标注允许 str | int，避免 Pyright 将 values 收窄推断为 list[str]
+        values: list[str | int] = [status, now]
 
         if scratchpad_md is not None:
             fields.append("scratchpad_md = ?")

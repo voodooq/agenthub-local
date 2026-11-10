@@ -50,6 +50,17 @@ interface AccountItem {
   is_estimated?: boolean;
 }
 
+interface ProviderUsageMetrics {
+  today_calls: number;
+  today_tokens: number;
+  today_cached_tokens: number;
+  total_calls: number;
+  total_tokens: number;
+  total_cached_tokens: number;
+  total_eval_tokens?: number;
+  total_completion_tokens?: number;
+}
+
 interface DashboardStats {
   accounts: AccountItem[];
   summary: {
@@ -58,8 +69,12 @@ interface DashboardStats {
     cooldown_accounts: number;
     total_today_used: number;
     total_tokens_all: number;
+    today_tokens_all?: number;
+    total_cached_tokens_all?: number;
+    today_cached_tokens_all?: number;
     is_estimated?: boolean;
   };
+  providers_usage?: Record<string, ProviderUsageMetrics>;
 }
 
 interface AccountModalProps {
@@ -547,6 +562,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
         setProvMaxContextTokens(0);
         setProbeResult(null);
         fetchProviders();
+        fetchAccounts(true);
         onRefresh?.();
       }
     } catch (err: any) {
@@ -575,6 +591,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
         }),
       });
       fetchProviders();
+      fetchAccounts(true);
       onRefresh?.();
     } catch (e) { }
   };
@@ -585,6 +602,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
       const res = await apiFetch(`/api/v1/providers/${id}`, { method: 'DELETE' });
       if (res.ok) {
         fetchProviders();
+        fetchAccounts(true);
         onRefresh?.();
       }
     } catch (e) { }
@@ -1048,7 +1066,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
             <Cpu className="w-4 h-4" />
             <span>账号池、多源 API 与额度监控</span>
             <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-emerald-500/20 text-emerald-300">
-              {(data?.summary?.total_accounts || 0) + providers.length}
+              {(data?.accounts?.length || 0) + providers.filter((p) => p.provider_type !== 'google_oauth').length}
             </span>
           </button>
 
@@ -1145,9 +1163,26 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                     <div className="text-2xl font-bold text-emerald-400 mt-1">
                       {data.summary.total_today_used} <span className="text-xs font-normal text-slate-400">次</span>
                     </div>
-                    <div className="text-[11px] text-slate-400 mt-1">
-                      总消耗: <strong className="text-slate-200">{(data.summary.total_tokens_all || 0).toLocaleString()}</strong> Token
+                    <div className="text-[11px] text-slate-400 mt-1 flex items-center justify-between gap-2 flex-wrap">
+                      <span>
+                        总消耗: <strong className="text-slate-200">{(data.summary.total_tokens_all || 0).toLocaleString()}</strong> Token
+                      </span>
+                      {(data.summary.total_cached_tokens_all || 0) > 0 && (
+                        <span
+                          className="text-[10px] text-amber-300/90 font-mono"
+                          title="已在全局多源节点中累计复用的 KV Cache Tokens（已含在上下文请求总量中）"
+                        >
+                          含缓存 {(data.summary.total_cached_tokens_all || 0).toLocaleString()}
+                        </span>
+                      )}
                     </div>
+                    {typeof data.summary.today_tokens_all === 'number' &&
+                      data.summary.today_tokens_all > 0 &&
+                      data.summary.today_tokens_all !== (data.summary.total_tokens_all || 0) && (
+                        <div className="text-[10px] text-slate-500 mt-0.5 font-mono">
+                          今日消耗: {data.summary.today_tokens_all.toLocaleString()} Token
+                        </div>
+                      )}
                   </div>
                 </div>
               )}
@@ -1417,6 +1452,43 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           </button>
                         </div>
                       </div>
+
+                      {(() => {
+                        const provUsage = data?.providers_usage?.[p.id];
+                        const todayCalls = provUsage?.today_calls ?? 0;
+                        const todayTokens = provUsage?.today_tokens ?? 0;
+                        const totalCalls = provUsage?.total_calls ?? 0;
+                        const totalTokens = provUsage?.total_tokens ?? 0;
+                        const cachedTokens = provUsage?.total_cached_tokens ?? 0;
+                        return (
+                          <div className="pt-2 border-t border-border/40 flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+                            <div className="flex items-center flex-wrap gap-3">
+                              <span>
+                                今日调用: <strong className="text-slate-200 font-mono">{todayCalls}</strong> 次
+                                {todayTokens > 0 && (
+                                  <span className="ml-1 text-slate-500 font-mono">
+                                    ({todayTokens.toLocaleString()} Token)
+                                  </span>
+                                )}
+                              </span>
+                              <span className="text-slate-600">·</span>
+                              <span>
+                                累计调用: <strong className="text-slate-200 font-mono">{totalCalls}</strong> 次
+                              </span>
+                            </div>
+                            <div className="flex items-center flex-wrap gap-3 font-mono">
+                              <span>
+                                总消耗: <strong className="text-emerald-300">{totalTokens.toLocaleString()}</strong> Token
+                              </span>
+                              {cachedTokens > 0 && (
+                                <span className="text-amber-300/90">
+                                  缓存复用: {cachedTokens.toLocaleString()}
+                                </span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })()}
 
                       {provTestResult && provTestResult.id === p.id && (
                         <div

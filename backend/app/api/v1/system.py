@@ -21,8 +21,8 @@ router = APIRouter(prefix="/system", tags=["System & Hardware"])
 
 @router.get("/snapshot")
 async def get_system_snapshot() -> dict[str, Any]:
-    """获取当前宿主机硬件与 Top 进程瞬时快照"""
-    return hardware_probe.collect_snapshot()
+    """获取当前宿主机硬件与 Top 进程瞬时快照（卸载至线程池防止阻塞事件循环）。"""
+    return await asyncio.to_thread(hardware_probe.collect_snapshot)
 
 
 @router.get("/stream")
@@ -33,7 +33,7 @@ async def stream_hardware_telemetry(interval: float = Query(2.0, ge=1.0, le=10.0
     """
     async def event_generator():
         while True:
-            snapshot = hardware_probe.collect_snapshot()
+            snapshot = await asyncio.to_thread(hardware_probe.collect_snapshot)
             yield f"data: {json.dumps(snapshot, ensure_ascii=False)}\n\n"
             await asyncio.sleep(interval)
 

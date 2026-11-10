@@ -294,6 +294,17 @@ class LongTermMemoryManager:
     _debounce_tasks: dict[str, asyncio.Task] = {}
 
     @classmethod
+    def cancel_extraction(cls, conv_id: str) -> bool:
+        """取消指定会话尚未执行或挂起中的 180s 长期记忆防抖定时任务，防止与新一轮高优先级推理争抢算力"""
+        if not conv_id:
+            return False
+        task = cls._debounce_tasks.pop(conv_id, None)
+        if task and not task.done():
+            task.cancel()
+            return True
+        return False
+
+    @classmethod
     def schedule_extraction(cls, conv_id: str, delay_seconds: int = 180) -> None:
         """
         挂载 180 秒闲置防抖提炼定时任务：
@@ -306,6 +317,7 @@ class LongTermMemoryManager:
             cls._debounce_tasks[conv_id].cancel()
 
         async def _debounce_worker():
+            current = asyncio.current_task()
             try:
                 await asyncio.sleep(delay_seconds)
                 logger.info(f"会话 {conv_id} 已闲置 {delay_seconds}s，开始后台异步提炼长期记忆画像...")
@@ -315,7 +327,9 @@ class LongTermMemoryManager:
             except Exception as e:
                 logger.warning(f"会话 {conv_id} 异步记忆提炼异常: {e}")
             finally:
-                cls._debounce_tasks.pop(conv_id, None)
+                # 仅当注册表仍指向当前任务时再移除，避免新挂载的任务被误清除
+                if cls._debounce_tasks.get(conv_id) is current:
+                    cls._debounce_tasks.pop(conv_id, None)
 
         task = asyncio.create_task(_debounce_worker())
         cls._debounce_tasks[conv_id] = task
@@ -389,19 +403,34 @@ class LongTermMemoryManager:
 ]
 若无可提炼的长期事实，请直接输出 []。"""
 
-        try:
-            full_response = ""
-            async for chunk in engine_pool.execute_stream_with_failover(
+        async def _consume_extract() -> tuple[str, bool]:
+            collected = ""
+            async for evt in engine_pool.execute_stream_with_failover(
                 conversation_id=conv_id,
                 user_prompt=prompt,
-                model_name="gemini-2.5-flash",
+                model_name="",
                 thinking_level="low",
                 system_override="你是一个专门提取用户画像的极简信息抽取引擎，必须仅输出 JSON 数组格式。",
                 temperature=0.2,
+                pre_built_history=[],
                 task_role="light",
             ):
-                if chunk.get("type") == "chunk":
-                    full_response += chunk.get("content", "")
+                etype = evt.get("type")
+                if etype == "chunk":
+                    collected += evt.get("content", "")
+                elif etype == "done":
+                    collected = evt.get("full_content", collected)
+                    return collected, True
+                elif etype == "error":
+                    logger.info(f"会话 {conv_id} 长期记忆提炼跳过: {evt.get('content', '')}")
+                    return "", False
+            return collected, bool(collected.strip())
+
+        try:
+            full_response, stream_ok = await asyncio.wait_for(_consume_extract(), timeout=25.0)
+            if not stream_ok:
+                # 通道不可用或中途异常时严禁错误推进水位线，留待后续恢复重试
+                return 0
 
             # 提取 JSON 数组
             json_match = re.search(r"\[\s*\{.*\}\s*\]", full_response, re.DOTALL)

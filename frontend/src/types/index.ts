@@ -201,6 +201,8 @@ export interface Message {
   role: 'user' | 'model' | 'system' | 'tool';
   content: string;
   thinking?: string;
+  is_placeholder_thinking?: boolean;
+  is_process_step?: boolean;
   model_name?: string;
   executed_by_account?: string | null;
   token_count?: number;

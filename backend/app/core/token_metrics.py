@@ -212,10 +212,10 @@ class TokenMetricsCollector:
             if eval_tokens == 0 and cached_tokens == 0:
                 eval_tokens = prompt_tokens
 
-        # 统一计算生成吞吐速率 TPS（若引擎未自带 predicted_per_second）
+        # 统一计算生成吞吐速率 TPS（若引擎未自带 predicted_per_second；对极短工具调用防 HTTP 突刺分母过小）
         if tps <= 0.0 and completion_tokens > 0:
             gen_anchor = self._first_byte_ts if self._first_byte_ts is not None else self._start_ts
-            gen_duration = max(0.05, end_ts - gen_anchor)
+            gen_duration = max(0.25 if completion_tokens >= 12 else 0.5, end_ts - gen_anchor)
             tps = completion_tokens / gen_duration
 
         self._finalized = StreamMetricsResult(
@@ -247,28 +247,33 @@ class TokenMetricsCollector:
         incognito: bool = False,
         aborted: bool = False,
     ) -> StreamMetricsResult:
-        """收尾指标并在非无痕模式下持久化写入 `token_usage_logs`"""
+        """收尾指标并在非无痕模式下持久化写入 `token_usage_logs`（入库失败不阻断主生成结果）"""
         res = self.finalize(aborted=aborted)
         if not incognito and conversation_id:
-            await TokenUsageRepository.record_usage(
-                conversation_id=conversation_id,
-                turn_id=res.turn_id,
-                step_index=res.step_index,
-                agent_role=res.agent_role,
-                provider_id=res.provider_id,
-                provider_name=res.provider_name,
-                provider_type=res.provider_type,
-                model_name=res.model_name,
-                prompt_tokens=res.prompt_tokens,
-                cached_tokens=res.cached_tokens,
-                eval_tokens=res.eval_tokens,
-                completion_tokens=res.completion_tokens,
-                saved_tokens=res.saved_tokens,
-                context_limit=res.context_limit,
-                ttft_ms=res.ttft_ms,
-                prefill_ms=res.prefill_ms,
-                tps=res.tps,
-                is_estimated=res.is_estimated,
-            )
+            try:
+                await TokenUsageRepository.record_usage(
+                    conversation_id=conversation_id,
+                    turn_id=res.turn_id,
+                    step_index=res.step_index,
+                    agent_role=res.agent_role,
+                    provider_id=res.provider_id,
+                    provider_name=res.provider_name,
+                    provider_type=res.provider_type,
+                    model_name=res.model_name,
+                    prompt_tokens=res.prompt_tokens,
+                    cached_tokens=res.cached_tokens,
+                    eval_tokens=res.eval_tokens,
+                    completion_tokens=res.completion_tokens,
+                    saved_tokens=res.saved_tokens,
+                    context_limit=res.context_limit,
+                    ttft_ms=res.ttft_ms,
+                    prefill_ms=res.prefill_ms,
+                    tps=res.tps,
+                    is_estimated=res.is_estimated,
+                )
+            except Exception as e:
+                from .logging_config import logger
+
+                logger.debug(f"[TokenMetrics] 忽略非致命指标持久化异常: {e}")
         return res
 

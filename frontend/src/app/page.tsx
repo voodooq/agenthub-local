@@ -5,6 +5,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   Send,
+  Square,
   PanelRight,
   RefreshCw,
   Plus,
@@ -25,6 +26,8 @@ import {
   PackageOpen,
   Maximize2,
   Minimize2,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
@@ -61,6 +64,7 @@ import { TokenStatsModal } from '@/components/TokenStatsModal';
 import { GeneratedFileChip } from '@/components/GeneratedFileChip';
 import { buildActiveSystemOverride } from '@/utils/personalityHelper';
 import { generateScenarioThinking } from '@/utils/scenarioThinking';
+import { sanitizeAssistantContent } from '@/utils/toolTagSanitizer';
 import {
   Conversation,
   Message,
@@ -123,6 +127,16 @@ export default function WorkbenchPage() {
   >([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const isStreamingRef = useRef(false);
+  type StreamAbortReason = 'none' | 'user' | 'switch' | 'connect_timeout' | 'idle_timeout';
+  interface ActiveStreamMeta {
+    controller: AbortController;
+    convId: string | null;
+    reason: StreamAbortReason;
+  }
+  const activeStreamMetaRef = useRef<ActiveStreamMeta | null>(null);
+  const lastStreamErrorNoticeRef = useRef<{ convId: string; message: string } | null>(null);
+  const lastStatusPillSigRef = useRef<string>('');
+  const lastActiveLoopSigRef = useRef<string>('');
   const [statusPill, setStatusPill] = useState<StatusPillData | null>(null);
 
   // 当前选中模型及可用模型列表
@@ -159,13 +173,37 @@ export default function WorkbenchPage() {
     },
     []
   );
+  const stopActiveStream = useCallback(
+    async (reason: 'user' | 'switch' = 'user') => {
+      const meta = activeStreamMetaRef.current;
+      if (!meta && !isStreamingRef.current) return;
+      if (meta) {
+        meta.reason = reason;
+        meta.controller.abort();
+      }
+      const targetConvId = meta?.convId || activeConvIdRef.current;
+      if (targetConvId) {
+        try {
+          await apiFetch('/api/v1/chat/stop', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ conversation_id: targetConvId }),
+          });
+        } catch {
+          // 忽略停止接口的瞬时网络波动，前端已先中止读取连接
+        }
+      }
+      if (reason === 'user') {
+        showFloatingToast('已发起停止生成请求', 'warning', 2500);
+      }
+    },
+    [showFloatingToast]
+  );
   const [workMode, setWorkMode] = useState<WorkMode>('dev');
   const [isHudOpen, setIsHudOpen] = useState(false);
   const [isActionDrawerOpen, setIsActionDrawerOpen] = useState(false);
   const [pendingActionCount, setPendingActionCount] = useState(0);
   const [workspacePath, setWorkspacePath] = useState<string>('AgentHub Workspace');
-  const [cpuPercent, setCpuPercent] = useState(18);
-  const [memPercent, setMemPercent] = useState(42);
 
   // 附件、上传限制提示与拖拽状态
   interface AttachmentItem {
@@ -200,6 +238,11 @@ export default function WorkbenchPage() {
   const [sceneMode, setSceneMode] = useState<SceneMode>('agent');
   const [incognito, setIncognito] = useState<boolean>(false);
   const [workingMemory, setWorkingMemory] = useState<Record<string, any>>({});
+  // 控制超长 ReAct 过程步骤文字折叠/展开的局部状态映射
+  const [expandedProcessMsgKeys, setExpandedProcessMsgKeys] = useState<Record<string, boolean>>({});
+  const toggleProcessMsgExpanded = useCallback((msgKey: string) => {
+    setExpandedProcessMsgKeys((prev) => ({ ...prev, [msgKey]: !prev[msgKey] }));
+  }, []);
 
   // v1.1.2 执行策略与交互对齐状态
   const [executionStrategy, setExecutionStrategy] = useState<ExecutionStrategy>('direct');
@@ -320,20 +363,45 @@ export default function WorkbenchPage() {
     type: 'html' | 'mermaid' | 'code' | 'image';
   }>({ isOpen: false, title: '', content: '', type: 'code' });
 
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
+  const scrollForceRef = useRef<boolean>(false);
+  const shouldForceScrollOnLoadRef = useRef<boolean>(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingJumpTargetRef = useRef<{ convId: string; messageId?: number } | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<number | null>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const scrollToBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  };
+  const scrollToBottom = useCallback((force = false) => {
+    scrollForceRef.current = scrollForceRef.current || force;
+    if (scrollRafRef.current !== null) return;
+    scrollRafRef.current = requestAnimationFrame(() => {
+      const shouldForce = scrollForceRef.current;
+      scrollForceRef.current = false;
+      scrollRafRef.current = null;
+      const container = messagesContainerRef.current;
+      if (container) {
+        const distanceFromBottom =
+          container.scrollHeight - container.scrollTop - container.clientHeight;
+        if (!shouldForce && distanceFromBottom > 160) {
+          return;
+        }
+        container.scrollTop = container.scrollHeight;
+        return;
+      }
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    });
+  }, []);
 
   useEffect(() => {
     return () => {
       if (highlightTimerRef.current) {
         clearTimeout(highlightTimerRef.current);
+      }
+      if (scrollRafRef.current !== null) {
+        cancelAnimationFrame(scrollRafRef.current);
+        scrollRafRef.current = null;
       }
     };
   }, []);
@@ -371,8 +439,10 @@ export default function WorkbenchPage() {
         pendingJumpTargetRef.current = null;
       }
     }
-    scrollToBottom();
-  }, [messages]);
+    const shouldForce = shouldForceScrollOnLoadRef.current;
+    shouldForceScrollOnLoadRef.current = false;
+    scrollToBottom(shouldForce);
+  }, [messages, scrollToBottom]);
 
   // 实时捕获当前会话中等待用户确认授权的工具调用（无论页面滚到哪里，始终支持底部直达授权）
   const pendingApprovalEvent = React.useMemo(() => {
@@ -417,30 +487,19 @@ export default function WorkbenchPage() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  useEffect(() => {
-    const fetchQuickMetrics = async () => {
-      try {
-        const res = await apiFetch('/api/v1/system/snapshot');
-        if (res.ok) {
-          const json = await res.json();
-          setCpuPercent(json?.cpu?.usage_percent || 18);
-          setMemPercent(json?.memory?.percent || 42);
-        }
-      } catch (e) { }
-    };
-    fetchQuickMetrics();
-    const timer = setInterval(fetchQuickMetrics, 5000);
-    return () => clearInterval(timer);
-  }, []);
-
   const fetchActiveLoop = useCallback(async () => {
     if (!activeWorkspaceId) return;
     try {
       const res = await apiFetch(`/api/v1/loop/workspace/${activeWorkspaceId}/active`);
       if (res.ok) {
         const data = await res.json();
-        setActiveLoop(data);
-      } else {
+        const sig = JSON.stringify(data);
+        if (sig !== lastActiveLoopSigRef.current) {
+          lastActiveLoopSigRef.current = sig;
+          setActiveLoop(data);
+        }
+      } else if (lastActiveLoopSigRef.current !== 'null') {
+        lastActiveLoopSigRef.current = 'null';
         setActiveLoop(null);
       }
     } catch (e) { }
@@ -448,8 +507,20 @@ export default function WorkbenchPage() {
 
   useEffect(() => {
     fetchActiveLoop();
-    const timer = setInterval(fetchActiveLoop, 4000);
-    return () => clearInterval(timer);
+    const timer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void fetchActiveLoop();
+    }, 4000);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchActiveLoop();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, [fetchActiveLoop]);
 
 
@@ -527,7 +598,11 @@ export default function WorkbenchPage() {
       const res = await apiFetch('/api/v1/accounts/status-pill');
       if (res.ok) {
         const data = await res.json();
-        setStatusPill(data);
+        const sig = JSON.stringify(data);
+        if (sig !== lastStatusPillSigRef.current) {
+          lastStatusPillSigRef.current = sig;
+          setStatusPill(data);
+        }
       }
     } catch (e) {
       console.warn('获取算力状态失败:', e);
@@ -539,8 +614,20 @@ export default function WorkbenchPage() {
     fetchStatusPill();
     fetchActiveModels();
     prefetchExtensionSkills();
-    const pillTimer = setInterval(fetchStatusPill, 3000);
-    return () => clearInterval(pillTimer);
+    const pillTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
+      void fetchStatusPill();
+    }, 3000);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        void fetchStatusPill();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      clearInterval(pillTimer);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
   }, []);
 
   const syncSkillCatalog = useCallback(async (wsId?: string) => {
@@ -722,24 +809,34 @@ export default function WorkbenchPage() {
                 ];
               }
             }
+          } else if (m.role === 'user') {
+            merged.push(m);
           } else {
-            // 自动清洗历史残存的 [tool_call] 原始标签、孤立的 ```xml / xml 行与内部落盘标记
-            const strippedContent = (m.content || '')
-              .replace(/[<\[]tool_call(?:\s+name=["']?[^"'\]>]+["']?)?\s*[>\]][\s\S]*?[<\[]\/tool_call[>\]]/gi, '')
-              .replace(/<\/?tool_call\b[^>]*>/gi, '')
-              .replace(/\[\/?tool_call\b[^\]]*\]/gi, '')
-              .replace(/\[调用工具:\s*[^\]]+\]/gi, '')
-              .replace(/```(?:xml|json|tool_call)?\s*```/gi, '')
-              .replace(/^\s*```xml\s*$/gim, '')
-              .replace(/^\s*xml\s*$/gim, '')
-              .trim();
+            // 统一清洗历史残存的 DSML / XML 工具协议、孤立围栏及正文内嵌 <think> 片段
+            const sanitized = sanitizeAssistantContent(m.content || '', { isStreaming: false });
+            let strippedContent = sanitized.cleanContent;
+            const extractedThinking = sanitized.thinkingParts.join('\n\n').trim();
+            const resolvedThinking = m.thinking || extractedThinking || undefined;
+
+            if (!strippedContent && sanitized.hadToolMarkup) {
+              strippedContent =
+                sanitized.strippedToolNames.length > 0
+                  ? `（已自动折叠历史工具调用协议：${sanitized.strippedToolNames.join('、')}）`
+                  : '（已自动折叠历史内部工具调用协议片段）';
+            }
+
             const cleanContent =
-              m.role !== 'user' &&
-              (strippedContent.toLowerCase().includes('interactive_inquiry') ||
-                strippedContent.includes('"inquiry_id"'))
+              strippedContent.toLowerCase().includes('interactive_inquiry') ||
+              strippedContent.includes('"inquiry_id"')
                 ? normalizeInteractiveInquiryMarkdown(strippedContent)
                 : strippedContent;
-            merged.push({ ...m, content: cleanContent });
+            const hasToolCallMeta = Boolean(m.tool_calls_json && m.tool_calls_json !== '[]');
+            merged.push({
+              ...m,
+              content: cleanContent,
+              thinking: resolvedThinking,
+              is_process_step: Boolean(hasToolCallMeta || sanitized.hadToolMarkup),
+            });
           }
         }
         // 保活当前会话最新一轮已激活的确定性事实视图引用，防止流结束重载消息时微提示闪灭
@@ -764,6 +861,20 @@ export default function WorkbenchPage() {
             }
           }
         }
+        // 若流式请求在写库前中断（HTTP 异常/超时/手动停止），保活故障或停止提示不被空记录刷没
+        const pendingErrNotice = lastStreamErrorNoticeRef.current;
+        if (
+          pendingErrNotice &&
+          pendingErrNotice.convId === cid &&
+          (merged.length === 0 || merged[merged.length - 1].role === 'user')
+        ) {
+          merged.push({
+            id: Date.now(),
+            conversation_id: cid,
+            role: 'model',
+            content: pendingErrNotice.message,
+          });
+        }
         setMessages(merged);
       }
     } catch (e) {
@@ -783,6 +894,7 @@ export default function WorkbenchPage() {
       return;
     }
 
+    shouldForceScrollOnLoadRef.current = true;
     fetchMessagesAndState();
   }, [activeConvId, fetchMessagesAndState]);
 
@@ -819,10 +931,13 @@ export default function WorkbenchPage() {
           }
         }
       } else {
+        void stopActiveStream('switch');
+        lastStreamErrorNoticeRef.current = null;
+        activeConvIdRef.current = result.conversation_id;
         setActiveConvId(result.conversation_id);
       }
     },
-    [activeWorkspaceId, activeConvId, fetchMessagesAndState, messages]
+    [activeWorkspaceId, activeConvId, fetchMessagesAndState, messages, stopActiveStream]
   );
 
   const handleSwitchSceneMode = async (nextMode: SceneMode) => {
@@ -1057,6 +1172,15 @@ export default function WorkbenchPage() {
 
     setIsStreaming(true);
     isStreamingRef.current = true;
+    const controller = new AbortController();
+    const streamMeta: ActiveStreamMeta = {
+      controller,
+      convId: activeConvId,
+      reason: 'none',
+    };
+    const getAbortReason = (): StreamAbortReason => streamMeta.reason;
+    activeStreamMetaRef.current = streamMeta;
+    lastStreamErrorNoticeRef.current = null;
 
     const tempUserMsg: Message = {
       id: Date.now(),
@@ -1071,10 +1195,12 @@ export default function WorkbenchPage() {
       role: 'model',
       content: '',
       thinking: generateScenarioThinking(rawPrompt),
+      is_placeholder_thinking: true,
       executed_by_account: statusPill?.active_account_name,
     };
 
     setMessages((prev) => [...prev, tempUserMsg, tempAssistantMsg]);
+    scrollToBottom(true);
 
     const hasPriorUnlockInView = messages.some(
       (m) =>
@@ -1124,7 +1250,36 @@ export default function WorkbenchPage() {
       }
     }
 
+    let connectTimerId: ReturnType<typeof setTimeout> | null = null;
+    let idleTimerId: ReturnType<typeof setTimeout> | null = null;
+    let hasReceivedFirstChunk = false;
+
+    const clearWatchdogs = () => {
+      if (connectTimerId) {
+        clearTimeout(connectTimerId);
+        connectTimerId = null;
+      }
+      if (idleTimerId) {
+        clearTimeout(idleTimerId);
+        idleTimerId = null;
+      }
+    };
+
+    const resetIdleWatchdog = () => {
+      if (idleTimerId) clearTimeout(idleTimerId);
+      idleTimerId = setTimeout(() => {
+        if (getAbortReason() === 'none') {
+          streamMeta.reason = 'idle_timeout';
+          controller.abort();
+        }
+      }, 90000);
+    };
+
     try {
+      if (controller.signal.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+
       // 读取用户配置的多轮对话记忆上下文轮数
       let memoryRounds = 10;
       try {
@@ -1132,16 +1287,29 @@ export default function WorkbenchPage() {
         if (savedRounds !== null) memoryRounds = parseInt(savedRounds, 10);
       } catch (e) { }
 
+      const systemOverride = await buildActiveSystemOverride();
+      if (controller.signal.aborted) {
+        throw new DOMException('Aborted', 'AbortError');
+      }
+
+      connectTimerId = setTimeout(() => {
+        if (!hasReceivedFirstChunk && getAbortReason() === 'none') {
+          streamMeta.reason = 'connect_timeout';
+          controller.abort();
+        }
+      }, 45000);
+
       const response = await apiFetch('/api/v1/chat/stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
         body: JSON.stringify({
           conversation_id: activeConvId,
           workspace_id: activeWorkspaceId,
           message: promptToSend,
           model_name: currentModel || availableModels[0]?.id || '',
           thinking_level: thinkingLevel,
-          system_override: await buildActiveSystemOverride(),
+          system_override: systemOverride,
           context_rounds: memoryRounds,
           scene_mode: sceneMode,
           incognito: incognito,
@@ -1163,26 +1331,34 @@ export default function WorkbenchPage() {
         }),
       });
 
+      if (!response.ok) {
+        let errDetail = `服务端返回错误 (HTTP ${response.status})`;
+        try {
+          const rawErr = await response.text();
+          if (rawErr) {
+            try {
+              const errJson = JSON.parse(rawErr);
+              errDetail = String(errJson?.detail || errJson?.message || rawErr);
+            } catch {
+              errDetail = rawErr;
+            }
+          }
+        } catch { }
+        throw new Error(errDetail);
+      }
+
       if (!response.body) throw new Error('ReadableStream 不可用');
 
       const reader = response.body.getReader();
       const decoder = new TextDecoder('utf-8');
       let partialText = '';
+      let partialThinking = '';
+      let currentStreamStepIndex = 0;
       let isRelayed = false;
       let executorAccount = statusPill?.active_account_name || 'AgentHub';
 
       const stripXmlToolTags = (txt: string) =>
-        txt
-          .replace(/[<\[]tool_call(?:\s+name=["']?[^"'\]>]+["']?)?\s*[>\]][\s\S]*?[<\[]\/tool_call[>\]]/gi, '')
-          .replace(/<(?:execute_local_command|write_local_file|read_local_file|web_fetch|ui_action|update_working_memory|load_skill_detail)\b[^>]*?(?:\/>|>[\s\S]*?<\/(?:execute_local_command|write_local_file|read_local_file|web_fetch|ui_action|update_working_memory|load_skill_detail)>)/gi, '')
-          .replace(/<(?:execute_local_command|write_local_file|read_local_file|web_fetch|ui_action|update_working_memory|load_skill_detail)\b[^>]*$/gi, '')
-          .replace(/<\/?tool_call\b[^>]*>/gi, '')
-          .replace(/\[\/?tool_call\b[^\]]*\]/gi, '')
-          .replace(/\[调用工具:\s*[^\]]+\]/gi, '')
-          .replace(/```(?:xml|json|tool_call)?\s*```/gi, '')
-          .replace(/^\s*```xml\s*$/gim, '')
-          .replace(/^\s*xml\s*$/gim, '')
-          .trim();
+        sanitizeAssistantContent(txt, { isStreaming: true }).cleanContent;
 
       let sseBuffer = '';
 
@@ -1196,10 +1372,53 @@ export default function WorkbenchPage() {
           const parsed = JSON.parse(rawData);
           if (parsed.type === 'conv_init') {
             // 关键：收到会话初始化事件，立即绑定 conversation_id，防止后续生成重复会话并保证继承上下文记忆
-            if (parsed.conversation_id) {
+            if (parsed.conversation_id && getAbortReason() !== 'switch') {
               effectiveConvId = parsed.conversation_id;
+              streamMeta.convId = parsed.conversation_id;
+              activeConvIdRef.current = parsed.conversation_id;
               setActiveConvId(parsed.conversation_id);
               fetchConversations();
+            }
+          } else if (parsed.type === 'start') {
+            if (parsed.account) executorAccount = parsed.account;
+            if (typeof parsed.step_index === 'number' && parsed.step_index > currentStreamStepIndex) {
+              // ReAct 进入新的一步：冻结上一个过程步骤气泡并实时开辟当前新步骤气泡，消除结束重载跳变
+              currentStreamStepIndex = parsed.step_index;
+              partialText = '';
+              partialThinking = '';
+              setMessages((prev) => {
+                const updated = [...prev];
+                const prevLast = updated[updated.length - 1];
+                if (prevLast && prevLast.role === 'model' && prevLast.is_placeholder_thinking) {
+                  updated[updated.length - 1] = {
+                    ...prevLast,
+                    thinking: undefined,
+                    is_placeholder_thinking: false,
+                  };
+                }
+                updated.push({
+                  id: Date.now() + currentStreamStepIndex * 100 + Math.floor(Math.random() * 99),
+                  conversation_id: effectiveConvId || activeConvId || '',
+                  role: 'model',
+                  content: '',
+                  executed_by_account: executorAccount,
+                  model_name: parsed.model,
+                });
+                return updated;
+              });
+            } else {
+              setMessages((prev) => {
+                const updated = [...prev];
+                const last = updated[updated.length - 1];
+                if (last && last.role === 'model') {
+                  updated[updated.length - 1] = {
+                    ...last,
+                    executed_by_account: executorAccount,
+                    model_name: parsed.model || last.model_name,
+                  };
+                }
+                return updated;
+              });
             }
           } else if (parsed.type === 'fact_refs') {
             const incomingFacts = (parsed.facts || []) as MemoryFactItem[];
@@ -1210,7 +1429,7 @@ export default function WorkbenchPage() {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
-                last.fact_refs = incomingFacts;
+                updated[updated.length - 1] = { ...last, fact_refs: incomingFacts };
               }
               return updated;
             });
@@ -1219,7 +1438,7 @@ export default function WorkbenchPage() {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
-                last.memory_refs = parsed.memories || [];
+                updated[updated.length - 1] = { ...last, memory_refs: parsed.memories || [] };
               }
               return updated;
             });
@@ -1331,25 +1550,55 @@ export default function WorkbenchPage() {
                 } else {
                   existingEvents.push(nextItem);
                 }
-                last.tool_events = existingEvents;
-                last.content = stripXmlToolTags(partialText);
+                updated[updated.length - 1] = {
+                  ...last,
+                  tool_events: existingEvents,
+                  is_process_step: true,
+                  content: stripXmlToolTags(partialText),
+                };
               }
               return updated;
             });
-            // 收到需要审批时立即自动平滑滚动到底部聚焦卡片
+            // 收到需要审批时立即自动滚动到底部聚焦卡片
             if (parsed.type === 'require_approval') {
-              setTimeout(scrollToBottom, 50);
+              setTimeout(() => scrollToBottom(true), 50);
             }
-          } else if (parsed.type === 'chunk') {
-            partialText += parsed.content;
+          } else if (parsed.type === 'thinking_chunk') {
+            partialThinking += parsed.content || '';
             executorAccount = parsed.account || executorAccount;
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
-                last.content = stripXmlToolTags(partialText);
-                last.executed_by_account = executorAccount;
-                last.is_relayed = isRelayed;
+                updated[updated.length - 1] = {
+                  ...last,
+                  thinking: partialThinking,
+                  is_placeholder_thinking: false,
+                  executed_by_account: executorAccount,
+                  is_relayed: isRelayed,
+                };
+              }
+              return updated;
+            });
+          } else if (parsed.type === 'chunk') {
+            partialText += parsed.content;
+            executorAccount = parsed.account || executorAccount;
+            const sanitized = sanitizeAssistantContent(partialText, { isStreaming: true });
+            const inlineThinking = sanitized.thinkingParts.join('\n\n').trim();
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                const resolvedThinking = partialThinking || inlineThinking || last.thinking;
+                updated[updated.length - 1] = {
+                  ...last,
+                  content: sanitized.cleanContent,
+                  thinking: resolvedThinking,
+                  is_placeholder_thinking: Boolean(!partialThinking && !inlineThinking && last.is_placeholder_thinking),
+                  is_process_step: Boolean(last.is_process_step || sanitized.hadToolMarkup),
+                  executed_by_account: executorAccount,
+                  is_relayed: isRelayed,
+                };
               }
               return updated;
             });
@@ -1363,13 +1612,16 @@ export default function WorkbenchPage() {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
-                last.downgrade_info = {
-                  original_model: origModel,
-                  current_model: targetModel,
-                  reason: parsed.reason,
-                  message: downgradeMsg,
+                updated[updated.length - 1] = {
+                  ...last,
+                  downgrade_info: {
+                    original_model: origModel,
+                    current_model: targetModel,
+                    reason: parsed.reason,
+                    message: downgradeMsg,
+                  },
+                  model_name: targetModel,
                 };
-                last.model_name = targetModel;
               }
               return updated;
             });
@@ -1384,21 +1636,31 @@ export default function WorkbenchPage() {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
-                last.step_extend_info = {
-                  step: parsed.step,
-                  max_steps: parsed.max_steps,
-                  message: extMsg,
+                updated[updated.length - 1] = {
+                  ...last,
+                  step_extend_info: {
+                    step: parsed.step,
+                    max_steps: parsed.max_steps,
+                    message: extMsg,
+                  },
                 };
               }
               return updated;
             });
           } else if (parsed.type === 'stream_reset') {
             partialText = '';
+            partialThinking = '';
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
-                last.content = '';
+                updated[updated.length - 1] = {
+                  ...last,
+                  content: '',
+                  thinking: undefined,
+                  is_placeholder_thinking: false,
+                  is_process_step: false,
+                };
               }
               return updated;
             });
@@ -1410,18 +1672,21 @@ export default function WorkbenchPage() {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
-                last.token_stats = turnStats;
+                updated[updated.length - 1] = { ...last, token_stats: turnStats };
               }
               return updated;
             });
           } else if (parsed.type === 'done') {
-            if (parsed.full_content) {
-              partialText = parsed.full_content;
-            }
+            const doneRawText =
+              typeof parsed.final_step_content === 'string'
+                ? parsed.final_step_content
+                : (parsed.full_content || partialText);
+            partialText = doneRawText;
             if (parsed.model) {
               setCurrentModel(parsed.model);
             }
-            const strippedDoneText = stripXmlToolTags(partialText);
+            const sanitizedDone = sanitizeAssistantContent(doneRawText, { isStreaming: false });
+            const strippedDoneText = sanitizedDone.cleanContent;
             const finalDoneText =
               strippedDoneText.toLowerCase().includes('interactive_inquiry') ||
               strippedDoneText.includes('"inquiry_id"')
@@ -1431,10 +1696,15 @@ export default function WorkbenchPage() {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
-                last.content = finalDoneText;
-                if (parsed.model) {
-                  last.model_name = parsed.model;
-                }
+                const inlineDoneThinking = sanitizedDone.thinkingParts.join('\n\n').trim();
+                const finalThinking = partialThinking || inlineDoneThinking || (last.is_placeholder_thinking ? undefined : last.thinking);
+                updated[updated.length - 1] = {
+                  ...last,
+                  content: finalDoneText,
+                  thinking: finalThinking,
+                  is_placeholder_thinking: false,
+                  model_name: parsed.model || last.model_name,
+                };
               }
               return updated;
             });
@@ -1445,12 +1715,43 @@ export default function WorkbenchPage() {
             isRelayed = true;
             executorAccount = parsed.account;
           } else if (parsed.type === 'error') {
-            partialText += '\n\n' + parsed.content;
+            const errTxt = String(parsed.content || '模型或算力通道返回错误，请检查配置');
+            const errNotice = `⚠️ ${errTxt}`;
+            if (effectiveConvId) {
+              lastStreamErrorNoticeRef.current = { convId: effectiveConvId, message: errNotice };
+            }
+            partialText = partialText ? `${partialText}\n\n${errNotice}` : errNotice;
             setMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
-                last.content = partialText;
+                updated[updated.length - 1] = {
+                  ...last,
+                  content: partialText,
+                  thinking: last.is_placeholder_thinking ? undefined : last.thinking,
+                  is_placeholder_thinking: false,
+                };
+              }
+              return updated;
+            });
+            showFloatingToast(errTxt, 'error', 4800);
+          } else if (parsed.type === 'cancelled') {
+            const cancelTxt = String(parsed.content || '已手动停止生成');
+            const cancelNotice = `（${cancelTxt}）`;
+            if (effectiveConvId) {
+              lastStreamErrorNoticeRef.current = { convId: effectiveConvId, message: cancelNotice };
+            }
+            partialText = partialText ? `${partialText}\n\n${cancelNotice}` : cancelNotice;
+            setMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                updated[updated.length - 1] = {
+                  ...last,
+                  content: partialText,
+                  thinking: last.is_placeholder_thinking ? undefined : last.thinking,
+                  is_placeholder_thinking: false,
+                };
               }
               return updated;
             });
@@ -1462,7 +1763,15 @@ export default function WorkbenchPage() {
 
       while (true) {
         const { value, done } = await reader.read();
+        if (!hasReceivedFirstChunk) {
+          hasReceivedFirstChunk = true;
+          if (connectTimerId) {
+            clearTimeout(connectTimerId);
+            connectTimerId = null;
+          }
+        }
         if (done) break;
+        resetIdleWatchdog();
 
         const chunk = decoder.decode(value, { stream: true });
         sseBuffer += chunk;
@@ -1480,20 +1789,73 @@ export default function WorkbenchPage() {
         handleSseLine(sseBuffer);
       }
 
+      clearWatchdogs();
       fetchConversations();
       fetchStatusPill();
     } catch (err) {
-      console.error(err);
-    } finally {
-      setIsStreaming(false);
-      isStreamingRef.current = false;
-      // 关键闭环：流式结束后立即精准同步一次后端最新全量消息（包括多步工具卡片与最终回复）
-      // 彻底根治新会话首轮问答因 activeConvId 转换未触发拉取而需要手动切换会话的体验问题
-      if (effectiveConvId) {
-        await fetchMessagesAndState(effectiveConvId);
+      clearWatchdogs();
+      const reason = getAbortReason();
+      if (reason === 'switch') {
+        return;
       }
-      await fetchActiveLoop();
-      setTimeout(scrollToBottom, 60);
+
+      let notice = '';
+      if (reason === 'user') {
+        notice = '（已手动停止生成）';
+      } else if (reason === 'connect_timeout') {
+        notice = '⚠️ 连接超时（45秒内未收到后端首包响应），已自动终止等待。请检查算力池节点或网络连接后重试。';
+        showFloatingToast('连接超时（45秒无响应），已自动终止', 'error', 4800);
+      } else if (reason === 'idle_timeout') {
+        notice = '⚠️ 响应超时（超过90秒未收到上游增量数据），已自动断开连接。您可以重试或切换模型节点。';
+        showFloatingToast('响应空闲超时（90秒），已自动断开', 'error', 4800);
+      } else {
+        const rawErrMsg = err instanceof Error ? err.message : String(err || '未知网络错误');
+        notice = `⚠️ 请求异常中断：${rawErrMsg}`;
+        showFloatingToast(rawErrMsg, 'error', 4800);
+        console.error(err);
+      }
+
+      const targetConvId = effectiveConvId || activeConvIdRef.current;
+      if (targetConvId && notice) {
+        lastStreamErrorNoticeRef.current = { convId: targetConvId, message: notice };
+      }
+      setMessages((prev) => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last && last.role === 'model') {
+          const existingContent = (last.content || '').trim();
+          const nextContent = existingContent
+            ? existingContent.includes(notice)
+              ? existingContent
+              : `${existingContent}\n\n${notice}`
+            : notice;
+          updated[updated.length - 1] = {
+            ...last,
+            content: nextContent,
+            thinking: last.is_placeholder_thinking ? undefined : last.thinking,
+            is_placeholder_thinking: false,
+          };
+        }
+        return updated;
+      });
+    } finally {
+      clearWatchdogs();
+      const wasSwitchedAway =
+        getAbortReason() === 'switch' ||
+        Boolean(effectiveConvId && activeConvIdRef.current && activeConvIdRef.current !== effectiveConvId);
+      if (activeStreamMetaRef.current === streamMeta) {
+        activeStreamMetaRef.current = null;
+        setIsStreaming(false);
+        isStreamingRef.current = false;
+      }
+      // 仅当未切换至其它会话时才同步后端消息、Loop 与滚动条，彻底杜绝异步并发串话冲刷
+      if (!wasSwitchedAway) {
+        if (effectiveConvId) {
+          await fetchMessagesAndState(effectiveConvId);
+        }
+        await fetchActiveLoop();
+        setTimeout(() => scrollToBottom(true), 60);
+      }
     }
   };
 
@@ -1975,7 +2337,10 @@ export default function WorkbenchPage() {
         activeNavHub={activeNavHub}
         onSelectNavHub={(hub) => setActiveNavHub(hub)}
         onSelectWorkspace={(wsId) => {
+          void stopActiveStream('switch');
           lastStreamFactRefsRef.current = null;
+          lastStreamErrorNoticeRef.current = null;
+          activeConvIdRef.current = null;
           setActiveWorkspaceId(wsId);
           setActiveConvId(null);
           setMessages([]);
@@ -1989,16 +2354,31 @@ export default function WorkbenchPage() {
           });
           fetchConversations(activeWorkspaceId);
         }}
-        onSelectConv={(id) => setActiveConvId(id)}
+        onSelectConv={(id) => {
+          if (id !== activeConvId) {
+            void stopActiveStream('switch');
+            lastStreamErrorNoticeRef.current = null;
+          }
+          activeConvIdRef.current = id;
+          setActiveConvId(id);
+        }}
         onNewChat={() => {
+          void stopActiveStream('switch');
           lastStreamFactRefsRef.current = null;
+          lastStreamErrorNoticeRef.current = null;
+          activeConvIdRef.current = null;
           setActiveConvId(null);
           setMessages([]);
         }}
         onDeleteConv={async (id) => {
+          if (activeConvId === id || activeStreamMetaRef.current?.convId === id) {
+            await stopActiveStream('switch');
+          }
           await apiFetch('/api/v1/conversations/' + id, { method: 'DELETE' });
           fetchConversations();
           if (activeConvId === id) {
+            lastStreamErrorNoticeRef.current = null;
+            activeConvIdRef.current = null;
             setActiveConvId(null);
             setMessages([]);
           }
@@ -2184,40 +2564,81 @@ export default function WorkbenchPage() {
             )}
 
             {/* 聊天气泡列表 / 欢迎卡片 */}
-            <div className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-6 space-y-6">
+            <div
+              ref={messagesContainerRef}
+              className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-6 space-y-6"
+            >
               {messages.length === 0 ? (
                 <PromptStarterCards onSelectPrompt={(text) => handleSendMessage(text)} />
               ) : (
                 messages.map((msg, index) => {
                   const isUser = msg.role === 'user';
+                  const isCurrentStreamingMsg = isStreaming && index === messages.length - 1;
+                  const isInteractiveCard = !isUser && hasInteractiveInquiryBlock(msg.content || '');
+                  const isProcessStep =
+                    !isUser &&
+                    !isInteractiveCard &&
+                    Boolean(
+                      (msg.tool_events && msg.tool_events.length > 0) ||
+                      (msg.tool_calls_json && msg.tool_calls_json !== '[]') ||
+                      msg.is_process_step
+                    );
+                  const msgKey = String(msg.id ?? `idx_${index}`);
+                  const rawBody = msg.content || '';
+                  const isLongProcessText =
+                    isProcessStep && (rawBody.length > 360 || rawBody.split('\n').length > 6);
+                  const isProcessExpanded = Boolean(expandedProcessMsgKeys[msgKey]) || isCurrentStreamingMsg;
                   const isSearchHighlighted = Boolean(msg.id && highlightedMessageId === msg.id);
                   return (
                     <div
                       key={msg.id || index}
                       id={msg.id ? `chat-msg-${msg.id}` : undefined}
-                      className={`flex flex-col space-y-2.5 group transition-all duration-500 ${isUser ? 'items-end' : 'items-start'} ${
+                      className={`flex flex-col group transition-all duration-500 ${
+                        isProcessStep ? 'space-y-1.5' : 'space-y-2.5'
+                      } ${isUser ? 'items-end' : 'items-start'} ${
                         isSearchHighlighted
                           ? 'ring-2 ring-emerald-500/70 bg-emerald-500/5 rounded-2xl p-2 -m-2'
                           : ''
                       }`}
                     >
                       {/* 发言角色标志 */}
-                      <div className="flex items-center space-x-2 px-1 text-xs text-muted-foreground">
+                      <div
+                        className={`flex items-center space-x-2 px-1 ${
+                          isProcessStep ? 'text-[11px] text-muted-foreground/70' : 'text-xs text-muted-foreground'
+                        }`}
+                      >
                         {isUser ? (
                           <span className="font-semibold text-foreground">您</span>
                         ) : (
-                          <div className="flex items-center space-x-2">
-                            <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
+                          <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
+                            <Sparkles
+                              className={
+                                isProcessStep
+                                  ? 'w-3 h-3 text-muted-foreground/60'
+                                  : 'w-3.5 h-3.5 text-emerald-500'
+                              }
+                            />
                             {(() => {
                               const rawModel = msg.downgrade_info?.current_model || msg.model_name || currentModel || '';
                               const isGemini = rawModel.toLowerCase().includes('gemini');
                               const modelDisplayName = isGemini ? `Gemini (${rawModel})` : (rawModel || 'AI Assistant');
                               return (
-                                <span className="font-bold text-foreground">
+                                <span
+                                  className={
+                                    isProcessStep
+                                      ? 'font-medium text-muted-foreground/75'
+                                      : 'font-bold text-foreground'
+                                  }
+                                >
                                   {modelDisplayName}
                                 </span>
                               );
                             })()}
+                            {isProcessStep && (
+                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-200/55 border border-border/45 text-muted-foreground/65">
+                                过程思考
+                              </span>
+                            )}
                             {msg.downgrade_info && (
                               <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 font-medium flex items-center space-x-1">
                                 <AlertTriangle className="w-2.5 h-2.5 text-amber-500" />
@@ -2225,7 +2646,13 @@ export default function WorkbenchPage() {
                               </span>
                             )}
                             {msg.executed_by_account && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-surface-200 border border-border font-mono">
+                              <span
+                                className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
+                                  isProcessStep
+                                    ? 'bg-surface-200/45 border border-border/45 text-muted-foreground/60'
+                                    : 'bg-surface-200 border border-border'
+                                }`}
+                              >
                                 调度: {msg.executed_by_account}
                               </span>
                             )}
@@ -2259,7 +2686,7 @@ export default function WorkbenchPage() {
 
                       {/* 思考过程展开收起卡片 */}
                       {!isUser && msg.thinking && (
-                        <ThinkingBlock content={msg.thinking} isStreaming={isStreaming && index === messages.length - 1} />
+                        <ThinkingBlock content={msg.thinking} isStreaming={isCurrentStreamingMsg} />
                       )}
 
                       {/* 确定性事实视图与长期记忆引用溯源微提示 */}
@@ -2295,13 +2722,16 @@ export default function WorkbenchPage() {
                         </div>
                       )}
 
-                      {/* 消息正文主体：大字体、高清晰度、长 Token 强制自然折行（过滤纯工具执行时的无内容空白卡片） */}
-                      {(isUser || msg.content || (isStreaming && index === messages.length - 1 && (!msg.tool_events || msg.tool_events.length === 0))) && (
+                      {/* 消息正文主体：正式交付回复保留高清晰卡片，中间过程步骤降权为柔和左竖线旁白块 */}
+                      {(isUser || msg.content || (isCurrentStreamingMsg && (!msg.tool_events || msg.tool_events.length === 0))) && (
                         <div
-                          className={`max-w-[88%] md:max-w-[82%] rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] break-anywhere shadow-sm ${isUser
-                              ? 'bg-emerald-100 dark:bg-emerald-950/70 text-emerald-950 dark:text-emerald-100 border border-emerald-300/60 dark:border-emerald-500/30 rounded-tr-none shadow-emerald-500/5'
-                              : 'bg-surface-card text-foreground rounded-tl-none border border-border/80'
-                            }`}
+                          className={`max-w-[88%] md:max-w-[82%] break-anywhere ${
+                            isUser
+                              ? 'rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] shadow-sm bg-emerald-100 dark:bg-emerald-950/70 text-emerald-950 dark:text-emerald-100 border border-emerald-300/60 dark:border-emerald-500/30 rounded-tr-none shadow-emerald-500/5'
+                              : isProcessStep
+                                ? 'ml-0.5 pl-3.5 pr-3 py-2 border-l-2 border-border/65 bg-surface-200/20 dark:bg-surface-200/10 rounded-r-xl text-[12px] leading-[1.58] text-muted-foreground/75'
+                                : 'rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] shadow-sm bg-surface-card text-foreground rounded-tl-none border border-border/80'
+                          }`}
                         >
                           {isUser ? (
                             (() => {
@@ -2408,8 +2838,6 @@ export default function WorkbenchPage() {
                             })()
                           ) : (
                             (() => {
-                              const isCurrentStreamingMsg =
-                                isStreaming && msg.id === messages[messages.length - 1]?.id;
                               const msgInquiryKey = resolveMessageInquiryKey(
                                 msg.content || '',
                                 msg.id,
@@ -2421,10 +2849,11 @@ export default function WorkbenchPage() {
                                 msgInquiryKey,
                                 submittedInquiryKeys
                               );
-                              return (
+                              const mdNode = (
                                 <AssistantMarkdownMessage
                                   content={msg.content || ''}
                                   isStreaming={isCurrentStreamingMsg}
+                                  muted={isProcessStep}
                                   inquiryKey={msgInquiryKey}
                                   isInquirySubmitted={isMsgInquiryLocked}
                                   isExecutionContext={sceneMode === 'agent'}
@@ -2438,16 +2867,54 @@ export default function WorkbenchPage() {
                                   onPreviewGeneratedFile={stablePreviewGeneratedFile}
                                 />
                               );
+
+                              if (!isLongProcessText) {
+                                return mdNode;
+                              }
+
+                              return (
+                                <div className="space-y-1.5">
+                                  <div
+                                    className={
+                                      isProcessExpanded
+                                        ? 'max-h-[420px] overflow-y-auto pr-1'
+                                        : 'max-h-36 overflow-hidden relative'
+                                    }
+                                  >
+                                    {mdNode}
+                                    {!isProcessExpanded && (
+                                      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-[var(--bg-main)]/85 to-transparent" />
+                                    )}
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleProcessMsgExpanded(msgKey)}
+                                    className="inline-flex items-center space-x-1 text-[11px] text-muted-foreground/75 hover:text-foreground transition-colors"
+                                  >
+                                    {isProcessExpanded ? (
+                                      <ChevronDown className="w-3 h-3" />
+                                    ) : (
+                                      <ChevronRight className="w-3 h-3" />
+                                    )}
+                                    <span>
+                                      {isProcessExpanded
+                                        ? '收起过程内容'
+                                        : `展开完整过程内容 (${rawBody.length} 字)`}
+                                    </span>
+                                  </button>
+                                </div>
+                              );
                             })()
                           )}
                         </div>
                       )}
 
-                      {/* 生成文件快捷直达栏（点击默认程序直接打开 / 预览 / 所在目录定位；等待交互确认卡消息不提前显示交付栏） */}
+                      {/* 生成文件快捷直达栏（点击默认程序直接打开 / 预览 / 所在目录定位；过程步骤与待确认卡不重复显示交付栏） */}
                       {!isUser &&
+                        !isProcessStep &&
                         msg.content &&
-                        !(isStreaming && msg.id === messages[messages.length - 1]?.id) &&
-                        !hasInteractiveInquiryBlock(msg.content) &&
+                        !isCurrentStreamingMsg &&
+                        !isInteractiveCard &&
                         (() => {
                           const deliverablePaths = extractGeneratedFilePaths(msg.content);
                           if (deliverablePaths.length === 0) return null;
@@ -2487,24 +2954,26 @@ export default function WorkbenchPage() {
                         />
                       )}
 
-                      {/* AI 消息交互底栏 */}
+                      {/* AI 消息交互底栏：过程步骤默认半隐弱化，悬停时显露，保持主线阅读清爽 */}
                       {!isUser && msg.content && (
-                        <MessageActions
-                          content={msg.content}
-                          onModifyTone={handleModifyTone}
-                          onRegenerate={() => {
-                            const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
-                            if (lastUserMsg) {
-                              const { cleanContent, parsedAttachments } = parseMessageAttachments(lastUserMsg.content);
-                              handleSendMessage(
-                                cleanContent || (parsedAttachments.length > 0 ? '请结合附带的文件或图片内容进行分析解答。' : ''),
-                                undefined,
-                                undefined,
-                                parsedAttachments.length > 0 ? parsedAttachments : undefined
-                              );
-                            }
-                          }}
-                        />
+                        <div className={isProcessStep ? 'opacity-25 group-hover:opacity-90 transition-opacity origin-left scale-95' : ''}>
+                          <MessageActions
+                            content={msg.content}
+                            onModifyTone={handleModifyTone}
+                            onRegenerate={() => {
+                              const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
+                              if (lastUserMsg) {
+                                const { cleanContent, parsedAttachments } = parseMessageAttachments(lastUserMsg.content);
+                                handleSendMessage(
+                                  cleanContent || (parsedAttachments.length > 0 ? '请结合附带的文件或图片内容进行分析解答。' : ''),
+                                  undefined,
+                                  undefined,
+                                  parsedAttachments.length > 0 ? parsedAttachments : undefined
+                                );
+                              }
+                            }}
+                          />
+                        </div>
                       )}
                     </div>
                   );
@@ -2945,16 +3414,28 @@ export default function WorkbenchPage() {
                         onOpenAccountModal={() => setIsAccountOpen(true)}
                       />
 
-                      {/* 发送按钮 */}
-                      <button
-                        type="button"
-                        onClick={() => handleSendMessage()}
-                        disabled={isStreaming || isUploadingAttachment || (!inputPrompt.trim() && attachments.length === 0)}
-                        className="p-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm shadow-emerald-600/20"
-                        title="发送提问"
-                      >
-                        {isStreaming ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
-                      </button>
+                      {/* 发送 / 停止生成切换按钮 */}
+                      {isStreaming ? (
+                        <button
+                          type="button"
+                          onClick={() => void stopActiveStream('user')}
+                          className="px-2.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white transition-all shadow-sm shadow-rose-600/25 flex items-center space-x-1.5"
+                          title="立即停止当前生成与终端执行"
+                        >
+                          <Square className="w-3.5 h-3.5 fill-current" />
+                          <span className="text-xs font-semibold hidden sm:inline">停止</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleSendMessage()}
+                          disabled={isUploadingAttachment || (!inputPrompt.trim() && attachments.length === 0)}
+                          className="p-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm shadow-emerald-600/20"
+                          title="发送提问"
+                        >
+                          <Send className="w-4 h-4" />
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>

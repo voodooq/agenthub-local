@@ -237,7 +237,7 @@ class SessionSummaryManager:
             async for evt in engine_pool.execute_stream_with_failover(
                 conversation_id=conversation_id,
                 user_prompt=prompt,
-                model_name="gemini-2.5-flash",
+                model_name="",
                 thinking_level="low",
                 system_override="你是高密度会话记忆压缩器，只返回严格合法的 JSON。",
                 temperature=0.2,

@@ -14,6 +14,180 @@ import uuid
 from typing import Any
 
 
+class ThinkStreamSplitter:
+    """
+    流式思考链隔离状态机：
+    1. 跨分片无痕分离正文中的 <think>...</think> / <thinking> / <thought> 标签内容；
+    2. 自动识别 Markdown 三反引号围栏代码块，防止代码示例中的字面量 <think> 被误拆。
+    """
+
+    _OPEN_RE = re.compile(r"<\s*(?:think|thinking|thought)(?:\s+[^>]*)?>", re.IGNORECASE)
+    _CLOSE_RE = re.compile(r"</\s*(?:think|thinking|thought)\s*>", re.IGNORECASE)
+    _CODE_FENCE_SPLIT_RE = re.compile(
+        r"(```[^\r\n]*\r?\n[\s\S]*?\r?\n```|~~~[^\r\n]*\r?\n[\s\S]*?\r?\n~~~)",
+        re.MULTILINE,
+    )
+    _FULL_THINK_BLOCK_RE = re.compile(
+        r"<\s*(?:think|thinking|thought)(?:\s+[^>]*)?>[\s\S]*?(?:</\s*(?:think|thinking|thought)\s*>|$)",
+        re.IGNORECASE,
+    )
+
+    def __init__(self) -> None:
+        self._buf: str = ""
+        self._in_think: bool = False
+        self._in_fence: bool = False
+        self._emitted_content: bool = False
+
+    def reset(self) -> None:
+        """流重连清空时同步重置思考状态机。"""
+        self._buf = ""
+        self._in_think = False
+        self._in_fence = False
+        self._emitted_content = False
+
+    def _safe_hold_index_outside_fence(self, text: str) -> int:
+        """计算围栏外可安全吐出的前驱边界，避免半截标签 <thi 或反引号被误切片。"""
+        hold_idx = len(text)
+        last_lt = text.rfind("<")
+        if last_lt != -1 and ">" not in text[last_lt:] and len(text) - last_lt <= 24:
+            hold_idx = min(hold_idx, last_lt)
+
+        trailing_ticks = 0
+        idx = len(text) - 1
+        while idx >= 0 and text[idx] == "`" and trailing_ticks < 3:
+            trailing_ticks += 1
+            idx -= 1
+        if 0 < trailing_ticks < 3:
+            hold_idx = min(hold_idx, len(text) - trailing_ticks)
+
+        return max(0, hold_idx)
+
+    def feed(self, chunk: str) -> list[tuple[str, str]]:
+        """喂入原始流片，返回合并后的 [('thinking' | 'content', text), ...] 列表。"""
+        if not chunk:
+            return []
+        self._buf += chunk
+        raw_events: list[tuple[str, str]] = []
+
+        while self._buf:
+            if self._in_think:
+                close_m = self._CLOSE_RE.search(self._buf)
+                if close_m:
+                    think_part = self._buf[: close_m.start()]
+                    if think_part:
+                        raw_events.append(("thinking", think_part))
+                    self._buf = self._buf[close_m.end() :]
+                    self._in_think = False
+                    continue
+
+                last_lt = self._buf.rfind("<")
+                if last_lt != -1 and ">" not in self._buf[last_lt:] and len(self._buf) - last_lt <= 24:
+                    emit_part = self._buf[:last_lt]
+                    if emit_part:
+                        raw_events.append(("thinking", emit_part))
+                    self._buf = self._buf[last_lt:]
+                else:
+                    raw_events.append(("thinking", self._buf))
+                    self._buf = ""
+                break
+
+            if self._in_fence:
+                fence_idx = self._buf.find("```")
+                if fence_idx != -1:
+                    emit_end = fence_idx + 3
+                    raw_events.append(("content", self._buf[:emit_end]))
+                    self._emitted_content = True
+                    self._buf = self._buf[emit_end:]
+                    self._in_fence = False
+                    continue
+
+                trailing_ticks = 0
+                idx = len(self._buf) - 1
+                while idx >= 0 and self._buf[idx] == "`" and trailing_ticks < 3:
+                    trailing_ticks += 1
+                    idx -= 1
+                hold_idx = len(self._buf) - trailing_ticks if 0 < trailing_ticks < 3 else len(self._buf)
+                if hold_idx > 0:
+                    raw_events.append(("content", self._buf[:hold_idx]))
+                    self._emitted_content = True
+                    self._buf = self._buf[hold_idx:]
+                break
+
+            fence_idx = self._buf.find("```")
+            open_m = self._OPEN_RE.search(self._buf)
+
+            if fence_idx != -1 and (open_m is None or fence_idx < open_m.start()):
+                emit_end = fence_idx + 3
+                raw_events.append(("content", self._buf[:emit_end]))
+                self._emitted_content = True
+                self._buf = self._buf[emit_end:]
+                self._in_fence = True
+                continue
+
+            if open_m:
+                before = self._buf[: open_m.start()]
+                if before and (self._emitted_content or before.strip()):
+                    raw_events.append(("content", before))
+                    self._emitted_content = True
+                self._buf = self._buf[open_m.end() :]
+                self._in_think = True
+                continue
+
+            hold_idx = self._safe_hold_index_outside_fence(self._buf)
+            if hold_idx > 0:
+                emit_part = self._buf[:hold_idx]
+                if emit_part and (self._emitted_content or emit_part.strip()):
+                    raw_events.append(("content", emit_part))
+                    self._emitted_content = True
+                    self._buf = self._buf[hold_idx:]
+                elif not self._emitted_content and len(emit_part) > 16:
+                    raw_events.append(("content", emit_part))
+                    self._emitted_content = True
+                    self._buf = self._buf[hold_idx:]
+            break
+
+        merged: list[tuple[str, str]] = []
+        for kind, txt in raw_events:
+            if not txt:
+                continue
+            if merged and merged[-1][0] == kind:
+                merged[-1] = (kind, merged[-1][1] + txt)
+            else:
+                merged.append((kind, txt))
+        return merged
+
+    def flush(self) -> list[tuple[str, str]]:
+        """流结束时冲刷缓冲尾部残留文本并重置状态。"""
+        if not self._buf:
+            self._in_think = False
+            self._in_fence = False
+            return []
+        kind = "thinking" if self._in_think else "content"
+        rem = self._buf
+        self.reset()
+        return [(kind, rem)] if rem else []
+
+    @classmethod
+    def strip_thinking_for_tools(cls, raw_text: str) -> str:
+        """从模型输出中剔除非代码块内的思考段，防止内心推演里的标签示例触发真实工具执行。"""
+        if not raw_text or "<" not in raw_text:
+            return raw_text
+        if not cls._OPEN_RE.search(raw_text) and "</" not in raw_text:
+            return raw_text
+        parts = cls._CODE_FENCE_SPLIT_RE.split(raw_text)
+        out: list[str] = []
+        for idx, seg in enumerate(parts):
+            if not seg:
+                continue
+            if idx % 2 == 1:
+                out.append(seg)
+            else:
+                cleaned_seg = cls._FULL_THINK_BLOCK_RE.sub("", seg)
+                cleaned_seg = cls._CLOSE_RE.sub("", cleaned_seg)
+                out.append(cleaned_seg)
+        return "".join(out)
+
+
 class ToolProtocolAdapter:
     """混合工具协议转换与解析器"""
 
@@ -21,6 +195,28 @@ class ToolProtocolAdapter:
     _XML_TOOL_PATTERN = re.compile(
         r"[<\[]tool_call\s+name=[\"']?([^\"'\]>]+)[\"']?\s*[>\]](.*?)[<\[]/tool_call[>\]]",
         re.DOTALL | re.IGNORECASE,
+    )
+    # DeepSeek DSML 工具调用正则（兼容单/双全角竖线 ｜ 与半角 | 及其间可选空格，如 <｜｜DSML｜｜ invoke ...>）
+    _DSML_INVOKE_PATTERN = re.compile(
+        r"<\s*(?:[\uFF5C|][\uFF5C|\s]*DSML[\uFF5C|\s]*)invoke\b([^>]*)>([\s\S]*?)</\s*(?:[\uFF5C|][\uFF5C|\s]*DSML[\uFF5C|\s]*)invoke\s*>",
+        re.IGNORECASE,
+    )
+    _DSML_PARAM_PATTERN = re.compile(
+        r"<\s*(?:[\uFF5C|][\uFF5C|\s]*DSML[\uFF5C|\s]*)parameter\b([^>]*)>([\s\S]*?)</\s*(?:[\uFF5C|][\uFF5C|\s]*DSML[\uFF5C|\s]*)parameter\s*>",
+        re.IGNORECASE,
+    )
+    _DSML_EMPTY_CALLS_PATTERN = re.compile(
+        r"<\s*(?:[\uFF5C|][\uFF5C|\s]*DSML[\uFF5C|\s]*)(?:function_)?calls\b[^>]*>\s*</\s*(?:[\uFF5C|][\uFF5C|\s]*DSML[\uFF5C|\s]*)(?:function_)?calls\s*>",
+        re.IGNORECASE,
+    )
+    _DSML_UNCLOSED_TAIL_PATTERN = re.compile(
+        r"<\s*(?:[\uFF5C|][\uFF5C|\s]*DSML[\uFF5C|\s]*)(?:(?:function_)?calls|invoke|parameter)\b"
+        r"(?![\s\S]*?</\s*[\uFF5C|][\uFF5C|\s]*DSML\b)[\s\S]*$",
+        re.IGNORECASE,
+    )
+    _DSML_ORPHAN_TAG_PATTERN = re.compile(
+        r"</?\s*[\uFF5C|][\uFF5C|\s]*DSML[\uFF5C|\s]*[^>]*>",
+        re.IGNORECASE,
     )
 
     @staticmethod
@@ -502,6 +698,7 @@ class ToolProtocolAdapter:
         """
         从模型输出文本中解析所有工具调用。
         支持：
+        0. DeepSeek 原生 DSML 协议：<｜｜DSML｜｜ calls><｜｜DSML｜｜ invoke name="...">...</｜｜DSML｜｜ invoke></｜｜DSML｜｜ calls>
         1. 标准/方括号工具标签：<tool_call name="...">...</tool_call> 或 [tool_call name="..."]...[/tool_call]
         2. 直接工具名标签（如 <execute_local_command command="..."/> 或 <write_local_file ...>...</write_local_file>）
         """
@@ -509,7 +706,68 @@ class ToolProtocolAdapter:
             return raw_text, []
 
         tool_calls: list[dict[str, Any]] = []
-        clean_text = raw_text
+        # 先剥离非围栏内的 <think>/<thinking>/<thought> 思考段落，严禁推演过程中的代码示例触发真实工具调用
+        clean_text = ThinkStreamSplitter.strip_thinking_for_tools(raw_text)
+
+        # ── 模式 0: DeepSeek DSML 混合竖线结构化工具协议 ──
+        if "DSML" in clean_text or "dsml" in clean_text.lower():
+            def _dsml_invoke_replacer(inv_match: re.Match) -> str:
+                inv_attr_str = inv_match.group(1) or ""
+                inv_body = inv_match.group(2) or ""
+                inv_attrs = cls._parse_tag_attributes(inv_attr_str)
+                fn_name = str(inv_attrs.get("name") or "").strip()
+                if not fn_name:
+                    return ""
+
+                parsed_args: dict[str, Any] = {}
+                matched_param = False
+                for p_match in cls._DSML_PARAM_PATTERN.finditer(inv_body):
+                    matched_param = True
+                    p_attrs = cls._parse_tag_attributes(p_match.group(1) or "")
+                    p_name = str(p_attrs.get("name") or "").strip()
+                    if not p_name:
+                        continue
+                    raw_val = p_match.group(2) or ""
+                    # 仅裁剪紧邻标签边界的单次换行，完整保留代码缩进与多行命令行语义
+                    if raw_val.startswith("\r\n"):
+                        raw_val = raw_val[2:]
+                    elif raw_val.startswith("\n"):
+                        raw_val = raw_val[1:]
+                    if raw_val.endswith("\r\n"):
+                        raw_val = raw_val[:-2]
+                    elif raw_val.endswith("\n"):
+                        raw_val = raw_val[:-1]
+
+                    if p_attrs.get("string") is False:
+                        stripped_val = raw_val.strip()
+                        try:
+                            parsed_args[p_name] = json.loads(stripped_val)
+                        except Exception:
+                            parsed_args[p_name] = stripped_val
+                    else:
+                        # string="true" 或缺省：原样透传多行源码与命令行文本
+                        parsed_args[p_name] = raw_val
+
+                if not matched_param:
+                    fallback_body = inv_body.strip()
+                    if fallback_body:
+                        parsed_args = cls._parse_tool_arguments(fn_name, fallback_body)
+
+                call_id = f"call_{uuid.uuid4().hex[:10]}"
+                tool_calls.append({
+                    "id": call_id,
+                    "function": {
+                        "name": fn_name,
+                        "arguments": json.dumps(parsed_args, ensure_ascii=False),
+                    },
+                })
+                return ""
+
+            clean_text = cls._DSML_INVOKE_PATTERN.sub(_dsml_invoke_replacer, clean_text)
+            clean_text = cls._DSML_EMPTY_CALLS_PATTERN.sub("", clean_text)
+            # 安全拦截：未闭合的 DSML 尾块严禁触发执行，并直接剥离防止内部参数源码泄露到正文
+            clean_text = cls._DSML_UNCLOSED_TAIL_PATTERN.sub("", clean_text)
+            clean_text = cls._DSML_ORPHAN_TAG_PATTERN.sub("", clean_text)
 
         # ── 模式 1: 通用工具包装标签 (<tool_call> / [tool_call]) ──
         if "<tool_call" in clean_text or "[tool_call" in clean_text:
@@ -711,9 +969,18 @@ class ToolProtocolAdapter:
                 except Exception:
                     pass
 
-        # 彻底清洗残余的各种模型畸形标记（如 </slot>, <slot>, </tool_code>, ```xml 空围栏及孤立的 ```xml / xml 行等）
+        # 彻底清洗残余的各种模型畸形标记（如 </slot>, </tool_call>, </｜｜DSML｜｜ calls>, ```xml 空围栏及孤立行等）
         clean_text = re.sub(r"</?slot\b[^>]*>", "", clean_text, flags=re.IGNORECASE)
+        clean_text = cls._DSML_UNCLOSED_TAIL_PATTERN.sub("", clean_text)
+        clean_text = cls._DSML_ORPHAN_TAG_PATTERN.sub("", clean_text)
+        clean_text = re.sub(r"</?\s*(?:[\uFF5C|]+\s*DSML\b|\s*DSML\s*[\uFF5C|]+)[^>]*>", "", clean_text, flags=re.IGNORECASE)
         clean_text = re.sub(r"</?tool_code\b[^>]*>", "", clean_text, flags=re.IGNORECASE)
+        clean_text = re.sub(
+            r"[<\[]tool_call\b(?![\s\S]*?[<\[]/tool_call[>\]])[\s\S]*$",
+            "",
+            clean_text,
+            flags=re.IGNORECASE,
+        )
         clean_text = re.sub(r"</?tool_call\b[^>]*>", "", clean_text, flags=re.IGNORECASE)
         clean_text = re.sub(r"\[/?tool_call\b[^\]]*\]", "", clean_text, flags=re.IGNORECASE)
         clean_text = re.sub(r"```(?:xml|json|tool_call)?\s*```", "", clean_text, flags=re.IGNORECASE)

@@ -2,6 +2,7 @@
 AgentHub 本地硬件协同技能与待审批提案管理器 (Hardware Skills & Proposal Queue)
 遵循人类确认锁原则 (Human-in-the-Loop)：高危动作必须生成待审批提案，由用户在界面点击确认后执行
 """
+import asyncio
 import os
 import uuid
 import time
@@ -75,8 +76,8 @@ class ProposalManager:
         if prop["status"] != "pending":
             raise HTTPException(status_code=400, detail=f"提案当前处于 {prop['status']} 状态，无法重复执行")
 
-        # 1. 记录执行前硬件快照
-        before_snap = hardware_probe.collect_snapshot()
+        # 1. 记录执行前硬件快照（绕过缓存现采以便准确对比）
+        before_snap = await asyncio.to_thread(hardware_probe.collect_snapshot, False)
         my_pid = os.getpid()
 
         execution_logs: list[str] = []
@@ -120,11 +121,11 @@ class ProposalManager:
                         except Exception as err:
                             execution_logs.append(f"清理路径 {path} 异常: {err}")
 
-            # 2. 等待系统回收内存与句柄
-            time.sleep(0.5)
+            # 2. 非阻塞等待系统回收内存与句柄
+            await asyncio.sleep(0.5)
 
             # 3. 记录执行后硬件快照并生成复盘对比
-            after_snap = hardware_probe.collect_snapshot()
+            after_snap = await asyncio.to_thread(hardware_probe.collect_snapshot, False)
             mem_before = before_snap["memory"]["percent"]
             mem_after = after_snap["memory"]["percent"]
             used_before = before_snap["memory"]["used_gb"]

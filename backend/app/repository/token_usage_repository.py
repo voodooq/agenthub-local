@@ -5,6 +5,8 @@ Token 与 KV Cache / 耗时指标仓储层 (Token Usage Repository)
 2. 高效聚合单轮或整会话的 `TurnTokenMetrics` 映射（消除前端消息列表恢复时的 N+1 查询）；
 3. 为 `/stats` 会话趋势看板提供汇总 KPI、角色分账、通道分布及逐轮诊断数据。
 """
+from datetime import datetime, timezone
+import sqlite3
 from typing import Any
 from .db import db_manager
 
@@ -98,7 +100,7 @@ def _build_turn_summary_from_rows(
         "context_tokens": context_tokens,
         "context_limit": context_limit,
         "context_usage_pct": min(100.0, max(0.0, context_usage_pct)) if context_limit > 0 else 0.0,
-        "cached_tokens": total_cached if len(ordered_metric) > 1 else int(last_step.get("cached_tokens") or 0),
+        "cached_tokens": int(last_step.get("cached_tokens") or 0),
         "cache_hit_pct": min(100.0, max(0.0, cache_hit_pct)),
         "eval_tokens": total_eval,
         "completion_tokens": total_completion,
@@ -383,4 +385,164 @@ class TokenUsageRepository:
             "by_provider": list(provider_map.values()),
             "turns": turns,
         }
+
+    @staticmethod
+    async def get_pool_usage_summary(
+        known_account_names: set[str] | None = None,
+    ) -> dict[str, Any]:
+        """跨全量会话汇总多源算力池真实 LLM 调用次数、Token 消耗及缓存复用（兼容 accounts 去重）
+
+        Args:
+            known_account_names: 当前 `accounts` 表中已存在的传统账号名称集合，用于防止与 `accounts` 统计重复记账。
+
+        Returns:
+            dict[str, Any]: 包含 `extra_*`（仅存在多协议通道的增量统计）、`logs_*`（全库日志总览）以及分通道映射。
+        """
+        empty_summary: dict[str, Any] = {
+            "extra_today_calls": 0,
+            "extra_today_tokens": 0,
+            "extra_today_cached_tokens": 0,
+            "extra_total_calls": 0,
+            "extra_total_tokens": 0,
+            "extra_total_cached_tokens": 0,
+            "logs_today_calls": 0,
+            "logs_today_tokens": 0,
+            "logs_today_cached_tokens": 0,
+            "logs_total_calls": 0,
+            "logs_total_tokens": 0,
+            "logs_total_cached_tokens": 0,
+            "by_provider_id": {},
+            "by_provider_name": {},
+        }
+
+        # NOTE: SQLite CURRENT_TIMESTAMP 存储为 UTC 字符串；需将本地零点换算成 UTC 再做自然日下界比对
+        local_midnight = datetime.now().astimezone().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        today_start_utc = local_midnight.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        known_names = {str(n) for n in (known_account_names or set()) if str(n)}
+
+        try:
+            async with db_manager.get_connection() as conn:
+                async with conn.execute(
+                    """
+                    SELECT
+                        COALESCE(provider_id, '') AS provider_id,
+                        COALESCE(provider_name, '') AS provider_name,
+                        COALESCE(provider_type, '') AS provider_type,
+                        COUNT(*) AS total_calls,
+                        SUM(CASE WHEN replace(created_at, 'T', ' ') >= ? THEN 1 ELSE 0 END) AS today_calls,
+                        SUM(COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)) AS total_tokens,
+                        SUM(
+                            CASE
+                                WHEN replace(created_at, 'T', ' ') >= ?
+                                THEN COALESCE(prompt_tokens, 0) + COALESCE(completion_tokens, 0)
+                                ELSE 0
+                            END
+                        ) AS today_tokens,
+                        SUM(COALESCE(cached_tokens, 0)) AS total_cached_tokens,
+                        SUM(
+                            CASE
+                                WHEN replace(created_at, 'T', ' ') >= ?
+                                THEN COALESCE(cached_tokens, 0)
+                                ELSE 0
+                            END
+                        ) AS today_cached_tokens,
+                        SUM(COALESCE(eval_tokens, 0)) AS total_eval_tokens,
+                        SUM(COALESCE(completion_tokens, 0)) AS total_completion_tokens
+                    FROM token_usage_logs
+                    WHERE COALESCE(provider_type, '') != 'local_rule'
+                    GROUP BY COALESCE(provider_id, ''), COALESCE(provider_name, ''), COALESCE(provider_type, '')
+                    """,
+                    (today_start_utc, today_start_utc, today_start_utc),
+                ) as cursor:
+                    rows = [dict(r) for r in await cursor.fetchall()]
+        except (sqlite3.Error, OSError):
+            return empty_summary
+
+        by_provider_id: dict[str, dict[str, int]] = {}
+        by_provider_name: dict[str, dict[str, int]] = {}
+
+        def _merge_bucket(target: dict[str, dict[str, int]], key: str, vals: dict[str, int]) -> None:
+            bucket = target.setdefault(
+                key,
+                {
+                    "today_calls": 0,
+                    "today_tokens": 0,
+                    "today_cached_tokens": 0,
+                    "total_calls": 0,
+                    "total_tokens": 0,
+                    "total_cached_tokens": 0,
+                    "total_eval_tokens": 0,
+                    "total_completion_tokens": 0,
+                },
+            )
+            for metric_key, metric_val in vals.items():
+                bucket[metric_key] += metric_val
+
+        for row in rows:
+            pid = str(row.get("provider_id") or "")
+            pname = str(row.get("provider_name") or "")
+            metrics = {
+                "today_calls": int(row.get("today_calls") or 0),
+                "today_tokens": int(row.get("today_tokens") or 0),
+                "today_cached_tokens": int(row.get("today_cached_tokens") or 0),
+                "total_calls": int(row.get("total_calls") or 0),
+                "total_tokens": int(row.get("total_tokens") or 0),
+                "total_cached_tokens": int(row.get("total_cached_tokens") or 0),
+                "total_eval_tokens": int(row.get("total_eval_tokens") or 0),
+                "total_completion_tokens": int(row.get("total_completion_tokens") or 0),
+            }
+
+            empty_summary["logs_today_calls"] += metrics["today_calls"]
+            empty_summary["logs_today_tokens"] += metrics["today_tokens"]
+            empty_summary["logs_today_cached_tokens"] += metrics["today_cached_tokens"]
+            empty_summary["logs_total_calls"] += metrics["total_calls"]
+            empty_summary["logs_total_tokens"] += metrics["total_tokens"]
+            empty_summary["logs_total_cached_tokens"] += metrics["total_cached_tokens"]
+
+            # 通道 1 / 通道 2 会同步调用 AccountRepository.record_usage 更新 accounts 表，需避免重复计账
+            is_account_channel = (
+                pid.startswith("account_")
+                or pid.startswith("cli_")
+                or (bool(pname) and pname in known_names)
+            )
+            if not is_account_channel:
+                empty_summary["extra_today_calls"] += metrics["today_calls"]
+                empty_summary["extra_today_tokens"] += metrics["today_tokens"]
+                empty_summary["extra_today_cached_tokens"] += metrics["today_cached_tokens"]
+                empty_summary["extra_total_calls"] += metrics["total_calls"]
+                empty_summary["extra_total_tokens"] += metrics["total_tokens"]
+                empty_summary["extra_total_cached_tokens"] += metrics["total_cached_tokens"]
+
+            if pid:
+                _merge_bucket(by_provider_id, pid, metrics)
+            elif pname:
+                _merge_bucket(by_provider_name, pname, metrics)
+
+        empty_summary["by_provider_id"] = by_provider_id
+        empty_summary["by_provider_name"] = by_provider_name
+        return empty_summary
+
+    @staticmethod
+    def map_providers_usage(
+        custom_providers: list[dict[str, Any]],
+        pool_usage: dict[str, Any],
+    ) -> dict[str, dict[str, int]]:
+        """将全局聚合结果映射为以通道 ID 为键的用量明细字典（按 ID 优先，缺失 ID 的旧日志按名称兜底）"""
+        by_pid = pool_usage.get("by_provider_id") or {}
+        by_pname = pool_usage.get("by_provider_name") or {}
+        mapped: dict[str, dict[str, int]] = {}
+        for prov in custom_providers:
+            pid = str(prov.get("id") or "")
+            pname = str(prov.get("name") or "")
+            if not pid:
+                continue
+            if pid in by_pid:
+                mapped[pid] = dict(by_pid[pid])
+            elif pname and pname in by_pname:
+                mapped[pid] = dict(by_pname[pname])
+        return mapped
+
+
 

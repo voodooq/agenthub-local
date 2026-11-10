@@ -4,7 +4,7 @@
 import json
 import uuid
 from pathlib import Path
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException
+from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse
 from ...schema.chat_schema import ChatStreamRequest, ToolApprovalRequest, StopChatRequest
 from ...agent.runtime import agent_runtime
@@ -135,31 +135,43 @@ async def get_uploaded_attachment(filename: str):
 
 
 @router.post("/stream")
-async def chat_stream(req: ChatStreamRequest):
+async def chat_stream(req: ChatStreamRequest, request: Request):
     """
     发起 SSE 流式对话端点（由微内核 AgentRuntime 驱动：支持三层记忆、ReAct 工具闭环与多账号 429 自动故障转移）
     """
     async def event_generator():
-        async for event in agent_runtime.chat_stream(
-            conversation_id=req.conversation_id,
-            user_message=req.message,
-            model_name=req.model_name,
-            thinking_level=req.thinking_level,
-            system_override=req.system_override,
-            temperature=req.temperature,
-            context_rounds=req.context_rounds,
-            attachments=req.attachments,
-            scene_mode=req.scene_mode,
-            incognito=req.incognito,
-            workspace_id=req.workspace_id,
-            execution_strategy=req.execution_strategy,
-            clarify_mode=req.clarify_mode,
-            approved_plan_steps=req.approved_plan_steps,
-            confirmed_facts=req.confirmed_facts,
-            inquiry_confirmed=req.inquiry_confirmed,
-            inquiry_action=req.inquiry_action,
-        ):
-            yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        completed = False
+        active_conv_id = req.conversation_id
+        try:
+            async for event in agent_runtime.chat_stream(
+                conversation_id=req.conversation_id,
+                user_message=req.message,
+                model_name=req.model_name,
+                thinking_level=req.thinking_level,
+                system_override=req.system_override,
+                temperature=req.temperature,
+                context_rounds=req.context_rounds,
+                attachments=req.attachments,
+                scene_mode=req.scene_mode,
+                incognito=req.incognito,
+                workspace_id=req.workspace_id,
+                execution_strategy=req.execution_strategy,
+                clarify_mode=req.clarify_mode,
+                approved_plan_steps=req.approved_plan_steps,
+                confirmed_facts=req.confirmed_facts,
+                inquiry_confirmed=req.inquiry_confirmed,
+                inquiry_action=req.inquiry_action,
+                is_disconnected=request.is_disconnected,
+            ):
+                if event.get("type") == "conv_init" and event.get("conversation_id"):
+                    active_conv_id = str(event["conversation_id"])
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+            completed = True
+        finally:
+            # 客户端非正常断连或生成器提前关闭时，触发后端执行流与遗留子进程兜底清理
+            if not completed and active_conv_id:
+                agent_runtime.cancel_session_stream(active_conv_id)
+                shell_executor.cancel_session_processes(active_conv_id)
 
     return StreamingResponse(
         event_generator(),
@@ -189,11 +201,13 @@ async def resolve_tool_approval(req: ToolApprovalRequest):
 @router.post("/stop")
 async def stop_chat_execution(req: StopChatRequest):
     """
-    强制中断指定会话正在执行的本地命令子进程树。
+    强制中断指定会话正在进行的流式生成、CLI 子进程及本地命令子进程树。
     """
+    stream_cancelled = agent_runtime.cancel_session_stream(req.conversation_id)
     killed_count = shell_executor.cancel_session_processes(req.conversation_id)
     return {
         "status": "ok",
         "conversation_id": req.conversation_id,
+        "stream_cancelled": stream_cancelled,
         "killed_processes": killed_count,
     }

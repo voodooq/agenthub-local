@@ -6,6 +6,7 @@ NOTE: Google 未提供机读的真实剩余额度接口，
 """
 from fastapi import APIRouter
 from ...repository.account_repository import AccountRepository
+from ...repository.token_usage_repository import TokenUsageRepository
 from ...service.quota_monitor import quota_monitor
 
 router = APIRouter(prefix="/quota", tags=["Quota"])
@@ -57,8 +58,15 @@ async def get_quota_stats():
     custom_cooling = sum(1 for cp in custom_provs if cp.get("provider_type") != "google_oauth" and cp.get("is_enabled") and cp.get("is_cooling_down"))
     total_nodes = len(accounts) + sum(1 for cp in custom_provs if cp.get("provider_type") != "google_oauth" and cp.get("is_enabled"))
 
-    total_used = sum(a.today_used for a in accounts)
-    total_tokens = sum(a.total_tokens for a in accounts)
+    # NOTE: 将仅记录在 token_usage_logs 中的多协议通道（DeepSeek/Ollama/llama-server/PKCE 等）增量用量并入算力池汇总
+    known_account_names = {a.name for a in accounts if getattr(a, "name", None)}
+    pool_usage = await TokenUsageRepository.get_pool_usage_summary(
+        known_account_names=known_account_names
+    )
+    providers_usage = TokenUsageRepository.map_providers_usage(custom_provs, pool_usage)
+
+    total_used = sum(a.today_used for a in accounts) + int(pool_usage["extra_today_calls"])
+    total_tokens = sum(a.total_tokens for a in accounts) + int(pool_usage["extra_total_tokens"])
     active_cnt = sum(1 for a in accounts if a.status == "active") + custom_active
     cooldown_cnt = sum(1 for a in accounts if a.status == "cooldown") + custom_cooling
 
@@ -70,8 +78,12 @@ async def get_quota_stats():
             "cooldown_accounts": cooldown_cnt,
             "total_today_used": total_used,
             "total_tokens_all": total_tokens,
+            "today_tokens_all": int(pool_usage["logs_today_tokens"]),
+            "total_cached_tokens_all": int(pool_usage["logs_total_cached_tokens"]),
+            "today_cached_tokens_all": int(pool_usage["logs_today_cached_tokens"]),
             "is_estimated": True,
-        }
+        },
+        "providers_usage": providers_usage,
     }
 
 

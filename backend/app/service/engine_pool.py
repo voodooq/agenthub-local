@@ -2,6 +2,7 @@
 智能多账号引擎池调度器（支持标准 Google OAuth 个人通道 + Antigravity CLI 双引擎）
 实现：429/认证失效时多账号自动冷却切换，支持任何 Gmail 个人 OAuth 账号免开通直接使用。
 """
+import asyncio
 import os
 import time
 from datetime import datetime, timezone, timedelta
@@ -12,6 +13,7 @@ from ..core.config import settings
 from ..core.logging_config import logger
 from ..core.token_metrics import TokenMetricsCollector
 from ..agent.context_compressor import estimate_messages_tokens, estimate_tokens
+from ..agent.tool_protocol import ThinkStreamSplitter
 from ..repository.account_repository import AccountRepository
 from ..repository.message_repository import MessageRepository
 from .quota_monitor import quota_monitor
@@ -48,11 +50,29 @@ class EnginePoolService:
                 if ptype == "google_pool":
                     continue
                 prov_models = prov.get("models") or []
-                if model_name in prov_models or ptype == "google_oauth" or int(prov.get("priority", 10)) < 1:
+                is_auto_primary = (model_name in ("", "default")) and bool(prov_models)
+                if (
+                    model_name in prov_models
+                    or ptype == "google_oauth"
+                    or int(prov.get("priority", 10)) < 1
+                    or is_auto_primary
+                ):
                     return prov
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _is_cli_account(account: Any) -> bool:
+        """判断账号是否必须经本地 Antigravity/Gemini CLI 子进程执行（非标准 REST 凭据）"""
+        auth_type = str(getattr(account, "auth_type", "") or "").strip()
+        return auth_type not in ("oauth_google_one", "oauth_personal", "api_key")
+
+    @staticmethod
+    def _is_google_model_name(model_name: str | None) -> bool:
+        """判断模型标识是否属于 Google/Gemini 原生生态（用于阻止自定义模型报错后误跌入 CLI）"""
+        ml = (model_name or "").strip().lower()
+        return (not ml) or ml == "default" or ("gemini" in ml) or ml.startswith("google")
 
     @classmethod
     async def execute_stream_with_failover(
@@ -75,6 +95,7 @@ class EnginePoolService:
         agent_role: str | None = None,
         tail_injection: str = "",
         incognito: bool = False,
+        cancel_event: asyncio.Event | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         带零感知热故障转移、三区尾注动态注入与全通道真实 Token/KV Cache 采集的流式生成执行器。
@@ -272,24 +293,66 @@ class EnginePoolService:
             full_cli_prompt = f"[系统指令]: {system_instruction}\n\n{full_cli_prompt}"
 
         # ──────────────────── 优先检查多协议算力池 (Google OAuth / OpenAI兼容 / DeepSeek / Ollama / Anthropic / Gemini API) ────────────────────
+        attempted_custom_errors: list[str] = []
+        exact_custom_match = False
         try:
             from ..core.provider_adapter import provider_adapter
             from ..core.oauth_google import google_oauth_manager
+
             custom_providers = await provider_adapter.get_enabled_providers_for_role(task_role)
             if not custom_providers and task_role == "light":
                 # 若未单独配置后台轻量模型，优雅降级调度 primary 节点中后备节点
                 custom_providers = await provider_adapter.get_enabled_providers_for_role("primary")
                 custom_providers.reverse()
+
+            schedulable_custom = [
+                p for p in (custom_providers or []) if p.get("provider_type") != "google_pool"
+            ]
+            exact_custom_match = bool(model_name) and any(
+                model_name in (p.get("models") or []) for p in schedulable_custom
+            )
             prev_failed_prov_name = None
-            for prov in custom_providers:
+
+            for prov in schedulable_custom:
+                if cancel_event and cancel_event.is_set():
+                    yield {"type": "cancelled", "content": "已中止生成"}
+                    return
                 ptype = prov.get("provider_type")
-                if ptype == "google_pool":
-                    continue
                 prov_models = prov.get("models") or []
-                # 当模型名显式匹配该供应商的模型列表，或该供应商为 google_oauth / 优先级高于默认池(priority < 1)时优先路由
-                if model_name in prov_models or ptype == "google_oauth" or int(prov.get("priority", 10)) < 1:
+                is_light_fallback = (
+                    task_role == "light"
+                    and (not model_name or not exact_custom_match)
+                    and bool(prov_models)
+                )
+                is_auto_primary = (
+                    task_role == "primary"
+                    and (model_name in ("", "default"))
+                    and bool(prov_models)
+                )
+
+                # 当模型名显式匹配、或为后台轻量通配/空占位回退/OAuth/高优通道时，优先路由多协议供应商
+                if (
+                    model_name in prov_models
+                    or ptype == "google_oauth"
+                    or int(prov.get("priority", 10)) < 1
+                    or is_light_fallback
+                    or is_auto_primary
+                ):
                     prov_name = prov.get("name", ptype)
-                    target_m = model_name if (model_name in prov_models or ptype == "google_oauth") else (prov_models[0] if prov_models else model_name)
+                    if model_name and (model_name in prov_models or ptype == "google_oauth"):
+                        target_m = model_name
+                    elif task_role == "light":
+                        target_m = provider_adapter.pick_light_model(
+                            prov_models,
+                            fallback=("gemini-2.5-flash" if ptype in ("google_oauth", "gemini_api") else ""),
+                        )
+                    else:
+                        target_m = prov_models[0] if prov_models else (
+                            model_name or ("gemini-2.5-pro" if ptype in ("google_oauth", "gemini_api") else "")
+                        )
+
+                    if not target_m:
+                        continue
                     if prev_failed_prov_name:
                         yield {
                             "type": "relay",
@@ -329,8 +392,16 @@ class EnginePoolService:
                         estimated_prompt_tokens=est_prompt_tokens,
                     )
                     full_custom_text = ""
+                    full_thinking_text = ""
+                    think_splitter = ThinkStreamSplitter() if task_role == "primary" else None
                     stream_completed = False
                     should_persist_on_abort = False
+
+                    def _split_custom_segments(raw_piece: str) -> list[tuple[str, str]]:
+                        if think_splitter is None:
+                            return [("content", raw_piece)] if raw_piece else []
+                        return think_splitter.feed(raw_piece)
+
                     try:
                         if ptype == "google_oauth":
                             valid_token = await google_oauth_manager.ensure_valid_access_token(prov)
@@ -359,11 +430,18 @@ class EnginePoolService:
                                 on_usage=lambda u: collector.record_raw_usage(usage=u),
                                 on_first_byte=collector.mark_first_byte,
                             ):
+                                if cancel_event and cancel_event.is_set():
+                                    break
                                 while custom_downgrades:
                                     yield custom_downgrades.pop(0)
-                                full_custom_text += ch
-                                collector.mark_chunk(ch)
-                                yield {"type": "chunk", "content": ch, "account": prov_name}
+                                for seg_kind, seg_text in _split_custom_segments(ch):
+                                    collector.mark_chunk(seg_text)
+                                    if seg_kind == "thinking":
+                                        full_thinking_text += seg_text
+                                        yield {"type": "thinking_chunk", "content": seg_text, "account": prov_name}
+                                    else:
+                                        full_custom_text += seg_text
+                                        yield {"type": "chunk", "content": seg_text, "account": prov_name}
 
                             while custom_downgrades:
                                 yield custom_downgrades.pop(0)
@@ -383,10 +461,18 @@ class EnginePoolService:
                                 system_instruction=system_instruction,
                                 temperature=temperature,
                                 on_usage=lambda u, t: collector.record_raw_usage(usage=u, timings=t),
+                                emit_thinking_tags=(task_role == "primary"),
                             ):
-                                full_custom_text += ch
-                                collector.mark_chunk(ch)
-                                yield {"type": "chunk", "content": ch, "account": prov_name}
+                                if cancel_event and cancel_event.is_set():
+                                    break
+                                for seg_kind, seg_text in _split_custom_segments(ch):
+                                    collector.mark_chunk(seg_text)
+                                    if seg_kind == "thinking":
+                                        full_thinking_text += seg_text
+                                        yield {"type": "thinking_chunk", "content": seg_text, "account": prov_name}
+                                    else:
+                                        full_custom_text += seg_text
+                                        yield {"type": "chunk", "content": seg_text, "account": prov_name}
                         elif ptype == "anthropic":
                             should_persist_on_abort = True
                             async for ch in provider_adapter.stream_anthropic(
@@ -397,10 +483,18 @@ class EnginePoolService:
                                 system_instruction=system_instruction,
                                 temperature=temperature,
                                 on_usage=lambda u, t: collector.record_raw_usage(usage=u, timings=t),
+                                emit_thinking_tags=(task_role == "primary"),
                             ):
-                                full_custom_text += ch
-                                collector.mark_chunk(ch)
-                                yield {"type": "chunk", "content": ch, "account": prov_name}
+                                if cancel_event and cancel_event.is_set():
+                                    break
+                                for seg_kind, seg_text in _split_custom_segments(ch):
+                                    collector.mark_chunk(seg_text)
+                                    if seg_kind == "thinking":
+                                        full_thinking_text += seg_text
+                                        yield {"type": "thinking_chunk", "content": seg_text, "account": prov_name}
+                                    else:
+                                        full_custom_text += seg_text
+                                        yield {"type": "chunk", "content": seg_text, "account": prov_name}
                         elif ptype == "gemini_api" and prov.get("api_key"):
                             should_persist_on_abort = True
                             async for ch in GeminiClient.stream_generate_content(
@@ -414,11 +508,33 @@ class EnginePoolService:
                                 on_usage=lambda u: collector.record_raw_usage(usage=u),
                                 on_first_byte=collector.mark_first_byte,
                             ):
-                                full_custom_text += ch
-                                collector.mark_chunk(ch)
-                                yield {"type": "chunk", "content": ch, "account": prov_name}
+                                if cancel_event and cancel_event.is_set():
+                                    break
+                                for seg_kind, seg_text in _split_custom_segments(ch):
+                                    collector.mark_chunk(seg_text)
+                                    if seg_kind == "thinking":
+                                        full_thinking_text += seg_text
+                                        yield {"type": "thinking_chunk", "content": seg_text, "account": prov_name}
+                                    else:
+                                        full_custom_text += seg_text
+                                        yield {"type": "chunk", "content": seg_text, "account": prov_name}
 
-                        if full_custom_text:
+                        if think_splitter is not None:
+                            for seg_kind, seg_text in think_splitter.flush():
+                                collector.mark_chunk(seg_text)
+                                if seg_kind == "thinking":
+                                    full_thinking_text += seg_text
+                                    yield {"type": "thinking_chunk", "content": seg_text, "account": prov_name}
+                                else:
+                                    full_custom_text += seg_text
+                                    yield {"type": "chunk", "content": seg_text, "account": prov_name}
+
+                        if cancel_event and cancel_event.is_set():
+                            should_persist_on_abort = bool(full_custom_text or full_thinking_text)
+                            yield {"type": "cancelled", "content": "已中止生成"}
+                            return
+
+                        if full_custom_text or full_thinking_text:
                             stream_completed = True
                             step_res = await collector.persist(
                                 conversation_id=conversation_id,
@@ -431,6 +547,7 @@ class EnginePoolService:
                             yield {
                                 "type": "done",
                                 "full_content": full_custom_text,
+                                "thinking": full_thinking_text,
                                 "account": prov_name,
                                 "usage": {
                                     "promptTokenCount": step_res.prompt_tokens,
@@ -440,17 +557,59 @@ class EnginePoolService:
                                 },
                             }
                             return
+
+                        stream_completed = True
+                        empty_msg = f"[{prov_name}] 模型 [{target_m}] 返回空响应"
+                        attempted_custom_errors.append(empty_msg)
+                        prev_failed_prov_name = prov_name
+                        logger.warning(f"自定义算力通道 {empty_msg}，继续尝试下一节点")
                     except GeminiAPIException as g_err:
                         should_persist_on_abort = False
+                        attempted_custom_errors.append(f"[{prov_name}] {g_err}")
                         if g_err.status_code in (429, 503):
                             await provider_adapter.mark_provider_cooldown(prov["id"], cooldown_seconds=60)
-                            prev_failed_prov_name = prov_name
+                        prev_failed_prov_name = prov_name
+                        if cancel_event and cancel_event.is_set():
+                            should_persist_on_abort = bool(full_custom_text or full_thinking_text)
+                            yield {"type": "cancelled", "content": "已中止生成"}
+                            return
+
+                        if full_custom_text or full_thinking_text:
+                            collector.reset_stream_buffer()
+                            if think_splitter is not None:
+                                think_splitter.reset()
+                            full_custom_text = ""
+                            full_thinking_text = ""
+                            yield {
+                                "type": "stream_reset",
+                                "reason": "mid_flight_retry",
+                                "message": "检测到流式传输异常，正在切换下一节点无缝重连...",
+                            }
                         logger.warning(f"算力通道 [{prov_name}] 触发限流或异常 ({g_err})，<50ms 无缝接力至下一节点")
                     except Exception as custom_err:
                         should_persist_on_abort = False
-                        if "429" in str(custom_err):
+                        err_text = str(custom_err)
+                        attempted_custom_errors.append(f"[{prov_name}] {err_text}")
+                        # 仅明确命中 HTTP 429 或限流语义才冷却；400/422 参数错误禁止触发冷却以免误判全池耗尽
+                        if "(429)" in err_text or "rate limit" in err_text.lower() or "too many requests" in err_text.lower():
                             await provider_adapter.mark_provider_cooldown(prov["id"], cooldown_seconds=60)
-                            prev_failed_prov_name = prov_name
+                        prev_failed_prov_name = prov_name
+                        if cancel_event and cancel_event.is_set():
+                            should_persist_on_abort = bool(full_custom_text or full_thinking_text)
+                            yield {"type": "cancelled", "content": "已中止生成"}
+                            return
+
+                        if full_custom_text or full_thinking_text:
+                            collector.reset_stream_buffer()
+                            if think_splitter is not None:
+                                think_splitter.reset()
+                            full_custom_text = ""
+                            full_thinking_text = ""
+                            yield {
+                                "type": "stream_reset",
+                                "reason": "mid_flight_retry",
+                                "message": "检测到通道断流，正在尝试无缝切换至下一节点...",
+                            }
                         logger.warning(f"自定义算力通道 [{prov_name}] 异常 ({custom_err})，自动故障转移至下一节点")
                     finally:
                         # 用户中途点“停止生成”(GeneratorExit / CancelledError) 时强制保底写入 is_estimated=True 记录
@@ -464,18 +623,119 @@ class EnginePoolService:
                             except Exception:
                                 pass
         except Exception as e:
-            logger.debug(f"检查多协议供应商跳过: {e}")
+            logger.warning(f"检查多协议供应商异常跳过: {e}")
 
+        # 若多协议供应商已显式尝试并报错，严格阻止跨生态跌入 Google CLI 子进程或被无关模型误导覆盖真实错误
+        if attempted_custom_errors:
+            should_abort_before_google = (
+                task_role == "light"
+                or exact_custom_match
+                or (bool(model_name) and not cls._is_google_model_name(model_name))
+            )
+            if not should_abort_before_google:
+                # 若只是未指定通用模型名（或 Gemini 系列），仅当池内存在活跃 Google REST 账号时才允许继续接力；纯 CLI/空池直接透传真实报错
+                try:
+                    all_accs = await AccountRepository.get_all()
+                    now_str_check = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    has_rest_google = any(
+                        not cls._is_cli_account(a)
+                        and (
+                            a.status == "active"
+                            or (a.status == "cooldown" and str(a.cooldown_until or "") <= now_str_check)
+                        )
+                        for a in all_accs
+                    )
+                    if not has_rest_google:
+                        should_abort_before_google = True
+                except Exception:
+                    should_abort_before_google = True
+
+            if should_abort_before_google:
+                err_summary = attempted_custom_errors[-1]
+                if task_role == "light":
+                    logger.info(f"后台轻量多协议通道不可用，已安全跳过 (不唤醒 CLI): {err_summary}")
+                else:
+                    logger.error(f"多协议算力通道调用失败: {'; '.join(attempted_custom_errors)}")
+                yield {
+                    "type": "error",
+                    "content": f"【AgentHub】算力通道调用失败：{err_summary}",
+                }
+                return
+
+        google_model_name = model_name or ("gemini-2.5-flash" if task_role == "light" else "gemini-2.5-pro")
         relayed_count = 0
         last_failed_account = None
 
         while retries_left > 0:
+            if cancel_event and cancel_event.is_set():
+                yield {"type": "cancelled", "content": "已中止生成"}
+                return
+
             account = await AccountRepository.get_active_candidate()
+            # NOTE: 后台轻量旁路 (light) 严禁拉起重量级 CLI 子进程；若首选为 CLI 账号，优先改用可用 Google REST 账号，无则优雅跳过
+            if task_role == "light" and account is not None and cls._is_cli_account(account):
+                rest_fallback = None
+                try:
+                    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                    for cand in await AccountRepository.get_all():
+                        if cls._is_cli_account(cand):
+                            continue
+                        if cand.status == "active" or (
+                            cand.status == "cooldown" and str(cand.cooldown_until or "") <= now_utc
+                        ):
+                            rest_fallback = cand
+                            break
+                except Exception:
+                    rest_fallback = None
+                account = rest_fallback
+
             if not account:
+                if attempted_custom_errors:
+                    err_summary = attempted_custom_errors[-1]
+                    if task_role == "light":
+                        logger.info(f"多协议通道不可用且无可用轻量兜底，已跳过: {err_summary}")
+                    else:
+                        logger.error(
+                            f"多协议算力通道调用失败且无可用 Google 兜底账号: {'; '.join(attempted_custom_errors)}"
+                        )
+                    yield {
+                        "type": "error",
+                        "content": f"【AgentHub】算力通道调用失败：{err_summary}",
+                    }
+                    return
+
+                total_google_accounts: int | None = None
+                try:
+                    all_google = await AccountRepository.get_all()
+                    total_google_accounts = len(all_google)
+                except Exception:
+                    all_google = []
+                    total_google_accounts = None
+
+                if task_role == "light":
+                    logger.info(
+                        f"后台轻量推理跳过：当前无可用的非 CLI 快速通道 (model={model_name or 'auto'}, google_accounts={total_google_accounts})"
+                    )
+                    yield {
+                        "type": "error",
+                        "content": "【AgentHub】当前无可用的后台轻量快速通道，已静默跳过。",
+                    }
+                    return
+
+                if total_google_accounts == 0:
+                    logger.error(
+                        f"算力调度失败：未找到模型 [{model_name or 'auto'}] 对应的已启用通道，且当前未配置任何 Google 账号。"
+                    )
+                    yield {
+                        "type": "error",
+                        "content": f"【AgentHub】未找到模型 [{model_name or 'auto'}] 对应的已启用算力通道，请前往「账号与算力池」检查通道或模型配置。",
+                    }
+                    return
+
                 logger.error("算力池告警：所有账号均处于 Cooldown 或已用尽配额！")
                 yield {
                     "type": "error",
-                    "content": "【AgentHub】当前所有账号均处于冷却或配额用尽状态，请稍候再试或添加新账号。"
+                    "content": "【AgentHub】当前所有账号均处于冷却或配额用尽状态，请稍候再试或添加新账号。",
                 }
                 return
 
@@ -495,7 +755,7 @@ class EnginePoolService:
                 await audit_service.log(
                     event_type="account_switch",
                     actor="engine_pool",
-                    detail={"reason": "429_or_auth_failover", "model": model_name, "from": last_failed_account, "to": account.name},
+                    detail={"reason": "429_or_auth_failover", "model": google_model_name, "from": last_failed_account, "to": account.name},
                     account_name=account.name,
                     approved=True
                 )
@@ -509,21 +769,28 @@ class EnginePoolService:
                 await audit_service.log(
                     event_type="chat_dispatch",
                     actor="user",
-                    detail={"model": model_name, "thinking_level": thinking_level, "auth_type": account.auth_type},
+                    detail={"model": google_model_name, "thinking_level": thinking_level, "auth_type": account.auth_type},
                     account_name=account.name,
                     approved=True
                 )
                 yield {
                     "type": "start",
                     "account": account.name,
-                    "model": model_name
+                    "model": google_model_name
                 }
 
             tracker.record_request_start()
             full_response_text = ""
+            full_thinking_text = ""
+            legacy_splitter = ThinkStreamSplitter() if task_role == "primary" else None
             encountered_rate_limit = False
             encountered_auth_error = False
             start_time = time.time()
+
+            def _split_legacy_segments(raw_piece: str) -> list[tuple[str, str]]:
+                if legacy_splitter is None:
+                    return [("content", raw_piece)] if raw_piece else []
+                return legacy_splitter.feed(raw_piece)
 
             # ──────────────────── 通道 1: 标准 Google 官方 REST 通道 (API Key / OAuth) ────────────────────
             if account.auth_type in ("oauth_google_one", "oauth_personal", "api_key"):
@@ -544,7 +811,7 @@ class EnginePoolService:
                     step_index=step_index,
                     agent_role=effective_agent_role,
                     provider_info=legacy_prov_meta,
-                    model_name=model_name,
+                    model_name=google_model_name,
                     estimated_prompt_tokens=est_prompt_tokens,
                 )
                 stream_completed = False
@@ -559,7 +826,7 @@ class EnginePoolService:
                         active_auth_type = "api_key"
                     
                     downgrade_events: list[dict[str, Any]] = []
-                    actual_model = model_name
+                    actual_model = google_model_name
 
                     def on_model_downgrade(from_m: str, to_m: str, reason: str):
                         nonlocal actual_model
@@ -577,7 +844,7 @@ class EnginePoolService:
                     should_persist_on_abort = True
                     async for chunk in GeminiClient.stream_generate_content(
                         api_key=valid_token,
-                        model_name=model_name,
+                        model_name=google_model_name,
                         contents=contents,
                         system_instruction=system_instruction,
                         thinking_level=thinking_level,
@@ -587,11 +854,34 @@ class EnginePoolService:
                         on_usage=lambda u: collector.record_raw_usage(usage=u),
                         on_first_byte=collector.mark_first_byte,
                     ):
+                        if cancel_event and cancel_event.is_set():
+                            break
                         while downgrade_events:
                             yield downgrade_events.pop(0)
-                        full_response_text += chunk
-                        collector.mark_chunk(chunk)
-                        yield {"type": "chunk", "content": chunk, "account": account.name, "model": actual_model}
+                        for seg_kind, seg_text in _split_legacy_segments(chunk):
+                            collector.mark_chunk(seg_text)
+                            if seg_kind == "thinking":
+                                full_thinking_text += seg_text
+                                yield {"type": "thinking_chunk", "content": seg_text, "account": account.name, "model": actual_model}
+                            else:
+                                full_response_text += seg_text
+                                yield {"type": "chunk", "content": seg_text, "account": account.name, "model": actual_model}
+
+                    # 若流读取被主动中止，跳过收尾 flush 与 done，确保走中止持久化语义
+                    if cancel_event and cancel_event.is_set():
+                        should_persist_on_abort = bool(full_response_text or full_thinking_text)
+                        yield {"type": "cancelled", "content": "已中止生成"}
+                        return
+
+                    if legacy_splitter is not None:
+                        for seg_kind, seg_text in legacy_splitter.flush():
+                            collector.mark_chunk(seg_text)
+                            if seg_kind == "thinking":
+                                full_thinking_text += seg_text
+                                yield {"type": "thinking_chunk", "content": seg_text, "account": account.name, "model": actual_model}
+                            else:
+                                full_response_text += seg_text
+                                yield {"type": "chunk", "content": seg_text, "account": account.name, "model": actual_model}
 
                     while downgrade_events:
                         yield downgrade_events.pop(0)
@@ -610,6 +900,7 @@ class EnginePoolService:
                     yield {
                         "type": "done",
                         "full_content": full_response_text,
+                        "thinking": full_thinking_text,
                         "account": account.name,
                         "model": actual_model,
                         "usage": {
@@ -626,14 +917,17 @@ class EnginePoolService:
                     logger.warning(f"OAuth 账号 [{account.name}] 响应异常 [{g_err.status_code}]: {g_err.message}")
                     if g_err.status_code in (429, 503, 502):
                         encountered_rate_limit = True
-                        if full_response_text:
+                        if full_response_text or full_thinking_text:
                             collector.reset_stream_buffer()
+                            if legacy_splitter is not None:
+                                legacy_splitter.reset()
                             yield {
                                 "type": "stream_reset",
                                 "reason": "mid_flight_retry",
                                 "message": "检测到上游网络流式断连 (EOF)，正在自动清空残缺气泡并无缝重试...",
                             }
                             full_response_text = ""
+                            full_thinking_text = ""
                     elif g_err.status_code in (401, 403):
                         encountered_auth_error = True
                     else:
@@ -643,14 +937,17 @@ class EnginePoolService:
                     should_persist_on_abort = False
                     logger.error(f"OAuth 账号 [{account.name}] 生成异常: {e}")
                     encountered_rate_limit = True
-                    if full_response_text:
+                    if full_response_text or full_thinking_text:
                         collector.reset_stream_buffer()
+                        if legacy_splitter is not None:
+                            legacy_splitter.reset()
                         yield {
                             "type": "stream_reset",
                             "reason": "mid_flight_retry",
                             "message": "检测到网络断流，正在无缝重试...",
                         }
                         full_response_text = ""
+                        full_thinking_text = ""
                 finally:
                     if not stream_completed and should_persist_on_abort:
                         try:
@@ -663,7 +960,7 @@ class EnginePoolService:
                             pass
 
             # ──────────────────── 通道 2: Antigravity / Gemini CLI 引擎 ────────────────────
-            elif account.cli_home_dir:
+            elif account.cli_home_dir and task_role != "light":
                 cli_prov_meta = {
                     "id": f"cli_{account.id or account.name}",
                     "name": account.name,
@@ -674,7 +971,7 @@ class EnginePoolService:
                     step_index=step_index,
                     agent_role=effective_agent_role,
                     provider_info=cli_prov_meta,
-                    model_name=model_name,
+                    model_name=google_model_name,
                     estimated_prompt_tokens=estimate_tokens(full_cli_prompt),
                 )
                 cli_completed = False
@@ -682,18 +979,29 @@ class EnginePoolService:
                     async for event in run_cli_stream(
                         cli_home_dir=account.cli_home_dir,
                         prompt=full_cli_prompt,
-                        model=model_name if model_name != "default" else None,
+                        model=google_model_name if google_model_name != "default" else None,
                         thinking_level=thinking_level,
                         work_dir=work_dir,
                         approval_mode="auto_edit",
+                        conversation_id=conversation_id,
+                        cancel_event=cancel_event,
                     ):
                         etype = event.get("type")
 
+                        if etype == "cancelled":
+                            yield {"type": "cancelled", "content": event.get("message", "已中断执行")}
+                            return
+
                         if etype == "content":
                             text = event.get("text", "")
-                            full_response_text += text
-                            cli_collector.mark_chunk(text)
-                            yield {"type": "chunk", "content": text, "account": account.name}
+                            for seg_kind, seg_text in _split_legacy_segments(text):
+                                cli_collector.mark_chunk(seg_text)
+                                if seg_kind == "thinking":
+                                    full_thinking_text += seg_text
+                                    yield {"type": "thinking_chunk", "content": seg_text, "account": account.name}
+                                else:
+                                    full_response_text += seg_text
+                                    yield {"type": "chunk", "content": seg_text, "account": account.name}
 
                         elif etype == "tool_request":
                             yield {
@@ -729,6 +1037,15 @@ class EnginePoolService:
                             return
 
                         elif etype == "done":
+                            if legacy_splitter is not None:
+                                for seg_kind, seg_text in legacy_splitter.flush():
+                                    cli_collector.mark_chunk(seg_text)
+                                    if seg_kind == "thinking":
+                                        full_thinking_text += seg_text
+                                        yield {"type": "thinking_chunk", "content": seg_text, "account": account.name}
+                                    else:
+                                        full_response_text += seg_text
+                                        yield {"type": "chunk", "content": seg_text, "account": account.name}
                             cli_completed = True
                             usage = event.get("usage", {})
                             if isinstance(usage, dict) and usage:
@@ -750,6 +1067,7 @@ class EnginePoolService:
                             yield {
                                 "type": "done",
                                 "full_content": full_response_text,
+                                "thinking": full_thinking_text,
                                 "account": account.name,
                                 "usage": usage,
                             }

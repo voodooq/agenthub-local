@@ -2,8 +2,13 @@
 跨平台硬件探针服务 (Cross-Platform Hardware Probe)
 支持 Windows、macOS (Apple Silicon) 与 Linux 异构环境的硬件指标采集与 Top 进程分类
 """
+import asyncio
+import copy
+import importlib
 import platform
 import subprocess
+import threading
+import time
 import psutil
 from typing import Any
 from ..core.logging_config import logger
@@ -12,13 +17,38 @@ from ..core.logging_config import logger
 class CrossPlatformHardwareProbe:
     """硬件监控指标采集器"""
 
+    _SNAPSHOT_CACHE_TTL: float = 2.0
+
     def __init__(self) -> None:
         self.os_type: str = platform.system()
+        self._snapshot_lock = threading.Lock()
+        self._snapshot_cache_ts: float = 0.0
+        self._snapshot_cache_data: dict[str, Any] | None = None
+        # 避免每次采集重复调用 nvmlInit()，仅在进程内幂等初始化一次
+        self._nvml_init_lock = threading.Lock()
+        self._nvml_init_attempted: bool = False
+        self._nvml_module: Any = None
         # 预热非阻塞 CPU 采样
         try:
             psutil.cpu_percent(interval=None)
         except Exception:
             pass
+
+    def _ensure_nvml(self) -> Any:
+        """进程级幂等初始化 pynvml，避免高频率反复初始化驱动句柄导致卡顿。"""
+        if self._nvml_init_attempted:
+            return self._nvml_module
+        with self._nvml_init_lock:
+            if not self._nvml_init_attempted:
+                self._nvml_init_attempted = True
+                try:
+                    # pynvml 为可选 GPU 探测依赖（未列入核心依赖），按模块名动态加载以在未安装时优雅降级并避免静态导入告警
+                    pynvml = importlib.import_module("pynvml")
+                    pynvml.nvmlInit()
+                    self._nvml_module = pynvml
+                except Exception:
+                    self._nvml_module = None
+        return self._nvml_module
 
     def get_gpu_metrics(self) -> dict[str, Any]:
         """
@@ -30,25 +60,25 @@ class CrossPlatformHardwareProbe:
         """
         # 1. 尝试探测 NVIDIA GPU
         try:
-            import pynvml
-            pynvml.nvmlInit()
-            device_count = pynvml.nvmlDeviceGetCount()
-            if device_count > 0:
-                handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-                raw_name = pynvml.nvmlDeviceGetName(handle)
-                name = raw_name.decode("utf-8") if isinstance(raw_name, bytes) else str(raw_name)
-                mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
-                util = pynvml.nvmlDeviceGetUtilizationRates(handle)
-                temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
-                return {
-                    "detected": True,
-                    "vendor": "NVIDIA",
-                    "name": name,
-                    "load_percent": util.gpu,
-                    "vram_used_mb": round(mem.used / (1024**2), 1),
-                    "vram_total_mb": round(mem.total / (1024**2), 1),
-                    "temperature_c": temp,
-                }
+            pynvml = self._ensure_nvml()
+            if pynvml is not None:
+                device_count = pynvml.nvmlDeviceGetCount()
+                if device_count > 0:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+                    raw_name = pynvml.nvmlDeviceGetName(handle)
+                    name = raw_name.decode("utf-8") if isinstance(raw_name, bytes) else str(raw_name)
+                    mem = pynvml.nvmlDeviceGetMemoryInfo(handle)
+                    util = pynvml.nvmlDeviceGetUtilizationRates(handle)
+                    temp = pynvml.nvmlDeviceGetTemperature(handle, pynvml.NVML_TEMPERATURE_GPU)
+                    return {
+                        "detected": True,
+                        "vendor": "NVIDIA",
+                        "name": name,
+                        "load_percent": util.gpu,
+                        "vram_used_mb": round(mem.used / (1024**2), 1),
+                        "vram_total_mb": round(mem.total / (1024**2), 1),
+                        "temperature_c": temp,
+                    }
         except Exception:
             pass
 
@@ -150,31 +180,59 @@ class CrossPlatformHardwareProbe:
         procs.sort(key=lambda x: (x["memory_mb"], x["cpu_percent"]), reverse=True)
         return procs[:limit]
 
-    def collect_snapshot(self) -> dict[str, Any]:
-        """采集一份完整的宿主机系统与硬件运行快照"""
-        vm = psutil.virtual_memory()
-        swap = psutil.swap_memory()
-        freq = psutil.cpu_freq()
+    def collect_snapshot(self, use_cache: bool = True) -> dict[str, Any]:
+        """采集一份完整的宿主机系统与硬件运行快照（内置短 TTL 缓存防止并发阻塞）。
 
-        return {
-            "os": self.os_type,
-            "cpu": {
-                "usage_percent": round(psutil.cpu_percent(interval=None), 1),
-                "cores_physical": psutil.cpu_count(logical=False) or 1,
-                "cores_logical": psutil.cpu_count(logical=True) or 1,
-                "frequency_mhz": round(freq.current, 0) if freq else 0,
-            },
-            "memory": {
-                "total_gb": round(vm.total / (1024**3), 2),
-                "used_gb": round(vm.used / (1024**3), 2),
-                "available_gb": round(vm.available / (1024**3), 2),
-                "percent": vm.percent,
-                "swap_percent": swap.percent,
-            },
-            "disk": self.get_disk_metrics(),
-            "gpu": self.get_gpu_metrics(),
-            "top_processes": self.get_categorized_processes(limit=15),
-        }
+        Args:
+            use_cache: 是否允许命中 2 秒内进程缓存；变更前后精细对比场景可传 False 强制现采。
+        """
+        now = time.monotonic()
+        if (
+            use_cache
+            and self._snapshot_cache_data is not None
+            and (now - self._snapshot_cache_ts) < self._SNAPSHOT_CACHE_TTL
+        ):
+            return copy.deepcopy(self._snapshot_cache_data)
+
+        with self._snapshot_lock:
+            now_locked = time.monotonic()
+            if (
+                use_cache
+                and self._snapshot_cache_data is not None
+                and (now_locked - self._snapshot_cache_ts) < self._SNAPSHOT_CACHE_TTL
+            ):
+                return copy.deepcopy(self._snapshot_cache_data)
+
+            vm = psutil.virtual_memory()
+            swap = psutil.swap_memory()
+            freq = psutil.cpu_freq()
+
+            snap = {
+                "os": self.os_type,
+                "cpu": {
+                    "usage_percent": round(psutil.cpu_percent(interval=None), 1),
+                    "cores_physical": psutil.cpu_count(logical=False) or 1,
+                    "cores_logical": psutil.cpu_count(logical=True) or 1,
+                    "frequency_mhz": round(freq.current, 0) if freq else 0,
+                },
+                "memory": {
+                    "total_gb": round(vm.total / (1024**3), 2),
+                    "used_gb": round(vm.used / (1024**3), 2),
+                    "available_gb": round(vm.available / (1024**3), 2),
+                    "percent": vm.percent,
+                    "swap_percent": swap.percent,
+                },
+                "disk": self.get_disk_metrics(),
+                "gpu": self.get_gpu_metrics(),
+                "top_processes": self.get_categorized_processes(limit=15),
+            }
+            self._snapshot_cache_data = snap
+            self._snapshot_cache_ts = time.monotonic()
+            return copy.deepcopy(snap)
+
+    async def collect_snapshot_async(self, use_cache: bool = True) -> dict[str, Any]:
+        """在独立工作线程执行硬件快照采集，避免冻结 FastAPI 主事件循环。"""
+        return await asyncio.to_thread(self.collect_snapshot, use_cache)
 
 
 hardware_probe = CrossPlatformHardwareProbe()

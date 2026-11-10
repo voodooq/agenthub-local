@@ -141,14 +141,25 @@ async def lifespan(app: FastAPI):
     logger.info(f"[安全] 本机访问令牌 (X-Access-Token): {settings.access_token}")
 
     # 监听桌面父进程 PID（如果传入）
+    parent_watch_task: asyncio.Task | None = None
     parent_pid_str = os.environ.get("DESKTOP_PARENT_PID") or os.environ.get("TAURI_PARENT_PID")
     if parent_pid_str and parent_pid_str.isdigit():
         parent_pid = int(parent_pid_str)
         if parent_pid > 0:
             logger.info(f"已成功绑定桌面父进程 PID: {parent_pid}")
-            asyncio.create_task(watch_parent_process(parent_pid))
+            parent_watch_task = asyncio.create_task(watch_parent_process(parent_pid))
 
     await db_manager.init_db()
+
+    # 将上次异常退出遗留的活跃 Loop 统一收敛为 paused，防止启动后前端无限卡在执行中状态
+    try:
+        from app.repository.loop_run_repository import TaskLoopRepository
+
+        orphaned_count = await TaskLoopRepository.reconcile_orphaned_loops_on_startup()
+        if orphaned_count:
+            logger.info(f"[TaskLoop] 启动自愈：已将 {orphaned_count} 个遗留活跃 Loop 收敛为 paused 状态")
+    except Exception as loop_reconcile_err:
+        logger.warning(f"[TaskLoop] 启动收敛遗留 Loop 状态失败: {loop_reconcile_err}")
 
     # 启动长期记忆 30 天自然指数衰减每日守护任务
     async def _daily_decay_task():
@@ -158,19 +169,32 @@ async def lifespan(app: FastAPI):
                 res = await long_term_memory.apply_time_decay()
                 if res.get("decayed") or res.get("deleted"):
                     logger.info(f"[记忆生命周期] 30 天未命中衰减扫描完成: 衰减 {res['decayed']} 条，清理 {res['deleted']} 条")
+            except asyncio.CancelledError:
+                raise
             except Exception as e:
                 logger.debug(f"长期记忆衰减任务执行异常: {e}")
             await asyncio.sleep(86400)
 
-    asyncio.create_task(_daily_decay_task())
+    decay_task = asyncio.create_task(_daily_decay_task())
 
-    yield
-    logger.info("应用正在优雅关机，正在清理常驻 MCP 进程池...")
     try:
-        from app.extensions.mcp_manager import mcp_manager
-        mcp_manager.shutdown_all()
-    except Exception as e:
-        logger.debug(f"关闭 MCP 进程池异常: {e}")
+        yield
+    finally:
+        logger.info("应用正在优雅关机，正在清理后台任务与常驻 MCP 进程池...")
+        for bg_task in (decay_task, parent_watch_task):
+            if bg_task and not bg_task.done():
+                bg_task.cancel()
+                try:
+                    await bg_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+        try:
+            from app.extensions.mcp_manager import mcp_manager
+            mcp_manager.shutdown_all()
+        except Exception as e:
+            logger.debug(f"关闭 MCP 进程池异常: {e}")
 
 
 app = FastAPI(

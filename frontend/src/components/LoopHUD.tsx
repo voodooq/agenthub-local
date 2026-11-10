@@ -235,7 +235,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
             </button>
           )}
 
-          {['completed', 'failed'].includes(loop.loop_status) && (
+          {['completed', 'failed', 'paused'].includes(loop.loop_status) && (
             <button
               onClick={() => handleControl('archive')}
               disabled={loadingAction !== null}

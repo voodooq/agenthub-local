@@ -28,12 +28,56 @@ from ..repository.tool_ref_repository import MAX_SLICE_CHARS, MAX_SLICE_LINES, T
 # 匹配中日韩统一表意文字及日韩假名/谚文，用于高精度双语 Token 估算
 _CJK_CHAR_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
-# 旁路工具输出脱水触发字符阈值（约 ~350-500 tokens）
-SCRUB_CHAR_THRESHOLD = 1000
+# 默认命令/批处理输出旁路脱水字符阈值（无渠道上下文时的保守基线）
+SCRUB_CHAR_THRESHOLD = 1500
+
+# 按语义分层划分工具类别：
+# 1. EXPLICIT_COMMAND_TOOLS：终端命令 / 脚本运行 / MCP 工具（极易产出数千行安装/构建/全盘扫描刷屏日志，适合积极脱水）
+_COMMAND_NOISE_TOOLS = {"execute_local_command", "run_shell", "run_skill_tool"}
+# 2. ACTIVE_READ_TOOLS：模型主动点名要查看正文内容的读取工具（只要通道窗口装得下就应一步给全，避免逼模型反复 read_tool_ref 翻页浪费 Token）
+_ACTIVE_READ_TOOLS = {"read_local_file", "read_file", "web_fetch", "search_memory_history", "search_skill_knowledge"}
+# 3. EXEMPT_SCRUB_TOOLS：技能规程指令与切片回查自身（豁免常规脱水，仅防极端数十 KB 异常）
+_EXEMPT_SCRUB_TOOLS = {"load_skill_detail", "read_tool_ref", "update_working_memory", "save_long_term_memory"}
 
 # 无痕会话专用进程内临时引用缓存（仅存内存，上限 32 条，绝不落盘或写库）
 _INCOGNITO_TOOL_REFS: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _MAX_INCOGNITO_REFS = 32
+
+
+def resolve_scrub_char_threshold(
+    tool_name: str,
+    primary_provider_info: dict[str, Any] | None = None,
+    model_name: str = "",
+) -> int:
+    """根据“工具语义分类 + 当前推理通道真实上下文窗口”动态计算旁路脱水字符阈值。
+
+    核心原则：必须在优先保证 1~2 步高效完成任务的前提下实现无损压缩，
+    严禁在大窗口（如 DeepSeek 65.5K / Gemini 1M / Claude 200K）下过度截断仅有几千字符的文件读取或 Skill SOP，
+    否则会迫使模型连续发起多轮 `read_tool_ref` 回查翻页，造成严重的时间与 Token 双重浪费。
+    """
+    tname = (tool_name or "").strip().lower()
+    if tname in _EXEMPT_SCRUB_TOOLS:
+        return 24_000
+
+    max_ctx = infer_context_limit(primary_provider_info, model_name=model_name) if primary_provider_info else 8192
+    local_mode = is_local_provider(primary_provider_info) if primary_provider_info else True
+
+    if tname in _ACTIVE_READ_TOOLS:
+        if primary_provider_info is None:
+            # 未传入通道元信息时沿用 4,000 字符兼容阈（超大日志仍会正常落盘 Ref）
+            return 4_000
+        if local_mode or max_ctx <= 16_384:
+            return 4_500
+        if max_ctx <= 32_768:
+            return 10_000
+        return 20_000
+
+    # 命令执行、脚本工具与 MCP 外部工具：容易刷屏无用日志，阈值更紧凑但仍保障普通报错清晰可读
+    if primary_provider_info is None:
+        return SCRUB_CHAR_THRESHOLD
+    if local_mode or max_ctx <= 16_384:
+        return 1_800
+    return 4_500
 
 
 def estimate_tokens(text: str | None) -> int:
@@ -229,38 +273,45 @@ def read_ephemeral_tool_ref(
     }
 
 
-def _deterministic_scrub(tool_name: str, raw_output: str, max_chars: int = 200) -> str:
-    """确定性高密度规则脱水提取器（零推理开销，当无轻模型或单槽位防互锁时秒级兜底）"""
-    lines = [ln.strip() for ln in raw_output.splitlines() if ln.strip()]
-    if not lines:
+def _deterministic_scrub(tool_name: str, raw_output: str, max_chars: int = 460) -> str:
+    """确定性高密度规则脱水提取器（跳过无意义分隔线，优先提取报错、标题、表头与实质性首尾摘要）"""
+    raw_lines = [ln.strip() for ln in raw_output.splitlines() if ln.strip()]
+    if not raw_lines:
         return "工具执行完成（输出为空白）。"
 
-    # 优先捕捉错误堆栈、退出码、关键统计指标或文件路径行
+    # 过滤纯符号分隔行（如 YAML frontmatter 的 `---`、`===`、`***` 等，防止出现 `首行: ---`）
+    meaningful_lines = [
+        ln for ln in raw_lines if not re.fullmatch(r"[-=*_~`#|\s]{2,}", ln)
+    ] or raw_lines
+
+    # 1. 优先捕捉错误堆栈、退出码、结构化文档头、Sheet 名或 Markdown 表头/标题
     priority_patterns = re.compile(
-        r"(error|exception|traceback|failed|fatal|warning|exit_code|passed|failed|total|inserted|updated|created|deleted|saved|http\s+\d{3}|status[:=]\s*\d+)",
+        r"(error|exception|traceback|failed|fatal|warning|exit_code|passed|total|inserted|updated|created|deleted|saved|http\s+\d{3}|status[:=]\s*\d+|sheet|工作表|【结构化|^#{1,3}\s+|^\|[^|]+\||^(?:name|description|title)\s*:)",
         re.IGNORECASE,
     )
     key_lines: list[str] = []
-    for ln in lines:
+    for ln in meaningful_lines:
         if priority_patterns.search(ln):
             compact = re.sub(r"\s+", " ", ln)
             if compact not in key_lines:
-                key_lines.append(compact[:90])
-        if len(key_lines) >= 3:
+                key_lines.append(compact[:110])
+        if len(key_lines) >= 4:
             break
 
-    head_line = re.sub(r"\s+", " ", lines[0])[:80]
-    tail_line = re.sub(r"\s+", " ", lines[-1])[:80]
+    head_preview = [re.sub(r"\s+", " ", ln)[:95] for ln in meaningful_lines[:2]]
+    tail_line = re.sub(r"\s+", " ", meaningful_lines[-1])[:95]
 
     parts: list[str] = []
     if key_lines:
-        parts.append("关键信息: " + " ; ".join(key_lines))
-    else:
-        parts.append(f"首行: {head_line}")
-        if tail_line != head_line:
-            parts.append(f"末行: {tail_line}")
+        parts.append("关键摘要: " + " ; ".join(key_lines))
+    for hp in head_preview:
+        if hp and not any(hp in p for p in parts):
+            parts.append(hp)
+            break
+    if tail_line and not any(tail_line in p for p in parts):
+        parts.append(f"末行: {tail_line}")
 
-    summary = f"[{tool_name} 共 {len(lines)} 行] " + " | ".join(parts)
+    summary = f"[{tool_name} 共 {len(raw_lines)} 行] " + " | ".join(parts)
     if len(summary) > max_chars:
         summary = summary[: max_chars - 3] + "..."
     return summary
@@ -521,7 +572,11 @@ class LocalContextCompressor:
         3. 输出固定格式精简摘要块（Write-Once，一次写入 `messages.content` 后在热区永不二次改写）。
         """
         raw = raw_output or ""
-        if len(raw) <= SCRUB_CHAR_THRESHOLD:
+        threshold = resolve_scrub_char_threshold(
+            tool_name=tool_name,
+            primary_provider_info=primary_provider_info,
+        )
+        if len(raw) <= threshold:
             return {
                 "was_scrubbed": False,
                 "content": raw,
@@ -545,7 +600,7 @@ class LocalContextCompressor:
             from ..service.engine_pool import engine_pool
             from ..core.provider_adapter import ProviderAdapter
 
-            light_candidates = await ProviderAdapter.get_active_providers(role_filter="light")
+            light_candidates = await ProviderAdapter.get_enabled_providers_for_role("light")
             # 筛选非 cooldown 的可用轻节点
             selected_light = light_candidates[0] if light_candidates else None
 
@@ -568,8 +623,17 @@ class LocalContextCompressor:
                 import asyncio
                 import json as _json
 
-                models_list = _json.loads(selected_light.get("models_json") or "[]")
-                light_model = models_list[0] if models_list else "gemini-2.5-flash"
+                models_list = selected_light.get("models") or _json.loads(selected_light.get("models_json") or "[]")
+                default_fallback = (
+                    "gemini-2.5-flash"
+                    if selected_light.get("provider_type") in ("google_oauth", "gemini_api", "google_pool")
+                    else ""
+                )
+                light_model = ProviderAdapter.pick_light_model(models_list, fallback=default_fallback)
+                if not light_model:
+                    can_use_llm = False
+
+            if can_use_llm and selected_light:
 
                 # 截取头尾高价值窗口喂给清洗器（最大 12,000 字符，避免把数 MB 日志全量送进小模型）
                 if len(raw) > 12000:
@@ -600,6 +664,7 @@ class LocalContextCompressor:
                         temperature=0.1,
                         pre_built_history=[],
                         task_role="light",
+                        incognito=incognito,
                     ):
                         etype = evt.get("type")
                         if etype == "chunk":
@@ -622,13 +687,14 @@ class LocalContextCompressor:
             logger.debug(f"[ContextScrubber] 轻模型旁路清洗超时或跳过，回退确定性提取器: {e}")
 
         if not scrubbed_summary:
-            scrubbed_summary = _deterministic_scrub(tool_name, raw, max_chars=200)
+            scrubbed_summary = _deterministic_scrub(tool_name, raw, max_chars=460)
 
         # 持久化或内存注册原文引用
         compact_message = (
-            f"[工具执行已脱水 | Ref: {ref_id} | 原始长度: {len(raw):,} 字符 ({total_lines} 行)]\n"
-            f"核心结论: {scrubbed_summary}\n"
-            f'(注: 若需核对原始日志或代码行细节，可调用 `read_tool_ref(ref_id="{ref_id}", start_line=1, end_line=120, keyword="...")` 按需回查)'
+            f"[工具输出已截流脱水 | Ref: {ref_id} | 原始长度: {len(raw):,} 字符 ({total_lines} 行)]\n"
+            f"核心摘要: {scrubbed_summary}\n"
+            f'(提示: 若仅需查找少量局部细节，可调 `read_tool_ref(ref_id="{ref_id}", keyword="...")` 精准检索；'
+            f"若需处理/分析超大数据文件，请直接用 Python 脚本读取原物理文件处理，严禁从第 1 行起反复调用 `read_tool_ref` 分页通读！)"
         )
         scrubbed_tokens = estimate_tokens(compact_message)
         saved_tokens = max(0, raw_tokens - scrubbed_tokens)

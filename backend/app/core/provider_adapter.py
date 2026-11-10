@@ -23,6 +23,10 @@ from ..service.gemini_client import GeminiClient
 
 # 进程级缓存：不支持 stream_options.include_usage 的第三方兼容节点 URL 集合
 _STREAM_OPTIONS_UNSUPPORTED_HOSTS: set[str] = set()
+# 进程级缓存：仅允许 temperature=1 的第三方兼容节点与模型集合 {(endpoint, model_lower)}
+_TEMPERATURE_FIXED_ONE_MODELS: set[tuple[str, str]] = set()
+# 进程级缓存：完全不接受 temperature 参数的第三方兼容节点与模型集合 {(endpoint, model_lower)}
+_TEMPERATURE_UNSUPPORTED_MODELS: set[tuple[str, str]] = set()
 # 进程级缓存：本地服务 /props 槽位与 n_ctx 探测结果 {host: (ts, info_dict)}，TTL 60 秒
 _LOCAL_SLOTS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 _LOCAL_SLOTS_TTL_SECS = 60.0
@@ -122,6 +126,93 @@ class ProviderAdapter:
                         d["models"] = []
                     items.append(d)
                 return items
+
+    @classmethod
+    async def get_active_providers(cls, role_filter: str = "primary") -> list[dict[str, Any]]:
+        """兼容别名方法：按角色获取已启用且未处于冷却期的多协议供应商列表"""
+        return await cls.get_enabled_providers_for_role(role=role_filter)
+
+    @staticmethod
+    def pick_light_model(models: list[str] | None, fallback: str = "") -> str:
+        """从通道可用模型列表中智能挑选最偏轻量/低成本的模型名，列表为空时再回退 fallback"""
+        clean_models = [str(m).strip() for m in (models or []) if str(m).strip()]
+        if not clean_models:
+            return fallback
+
+        # 优先选择含明确轻量特征且不含重型推理关键词的模型（如 deepseek-flash / gemini-flash / gpt-4o-mini / 7b / 8b）
+        light_keywords = ("flash", "lite", "mini", "haiku", "nano", "fast", "chat", "8b", "7b", "4b", "3b", "1.5b")
+        heavy_keywords = ("reasoner", "thinking", "r1", "pro", "opus", "ultra")
+        for m in clean_models:
+            ml = m.lower()
+            if any(k in ml for k in light_keywords) and not any(hk in ml for hk in heavy_keywords):
+                return m
+
+        # 其次选择不含重型推理关键词的模型，避免后台摘要任务落到高延迟思考模型
+        for m in clean_models:
+            ml = m.lower()
+            if not any(hk in ml for hk in heavy_keywords):
+                return m
+
+        return clean_models[0]
+
+    @classmethod
+    async def has_any_available_engine(cls, task_role: str = "primary") -> bool:
+        """探测系统当前是否存在任意可用算力通道（区分主推理 primary 与后台轻量 light 隔离判定）"""
+        now_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        is_light = task_role == "light"
+        try:
+            async with db_manager.get_connection() as conn:
+                if is_light:
+                    provider_sql = """
+                    SELECT COUNT(1) AS cnt FROM llm_providers
+                    WHERE is_enabled = 1
+                      AND provider_type != 'google_pool'
+                      AND (cooldown_until IS NULL OR cooldown_until <= ?)
+                      AND (
+                        provider_type IN ('ollama', 'llama_server')
+                        OR base_url LIKE '%127.0.0.1%'
+                        OR base_url LIKE '%localhost%'
+                        OR COALESCE(api_key_encrypted, '') != ''
+                        OR COALESCE(refresh_token_encrypted, '') != ''
+                      )
+                    """
+                else:
+                    provider_sql = """
+                    SELECT COUNT(1) AS cnt FROM llm_providers
+                    WHERE is_enabled = 1
+                      AND (cooldown_until IS NULL OR cooldown_until <= ?)
+                      AND (
+                        provider_type IN ('ollama', 'llama_server', 'google_pool')
+                        OR base_url LIKE '%127.0.0.1%'
+                        OR base_url LIKE '%localhost%'
+                        OR COALESCE(api_key_encrypted, '') != ''
+                        OR COALESCE(refresh_token_encrypted, '') != ''
+                      )
+                    """
+                async with conn.execute(provider_sql, (now_utc_str,)) as cur:
+                    row = await cur.fetchone()
+                    if row and int(row["cnt"]) > 0:
+                        return True
+
+                if is_light:
+                    # 后台轻量任务绝不唤醒重型 CLI 子进程，仅认可真实具备 Google REST 凭据的活跃账号
+                    account_sql = """
+                    SELECT COUNT(1) AS cnt FROM accounts
+                    WHERE (status = 'active' OR (status = 'cooldown' AND cooldown_until <= ?))
+                      AND auth_type IN ('oauth_google_one', 'oauth_personal', 'api_key')
+                      AND COALESCE(credentials, '') != ''
+                    """
+                else:
+                    account_sql = """
+                    SELECT COUNT(1) AS cnt FROM accounts
+                    WHERE status = 'active'
+                       OR (status = 'cooldown' AND cooldown_until <= ?)
+                    """
+                async with conn.execute(account_sql, (now_utc_str,)) as cur:
+                    row2 = await cur.fetchone()
+                    return bool(row2 and int(row2["cnt"]) > 0)
+        except Exception:
+            return False
 
     @classmethod
     async def mark_provider_cooldown(cls, provider_id: str, cooldown_seconds: int = 60) -> str:
@@ -472,6 +563,7 @@ class ProviderAdapter:
         system_instruction: str | None = None,
         temperature: float = 0.7,
         on_usage: Callable[[dict[str, Any] | None, dict[str, Any] | None], None] | None = None,
+        emit_thinking_tags: bool = False,
     ) -> AsyncGenerator[str, None]:
         """
         调用标准 OpenAI 兼容接口 (/v1/chat/completions) 流式生成：
@@ -498,33 +590,68 @@ class ProviderAdapter:
             headers["Authorization"] = f"Bearer {api_key}"
 
         include_usage = endpoint not in _STREAM_OPTIONS_UNSUPPORTED_HOSTS
+        model_cache_key = (endpoint, (model_name or "").strip().lower())
         payload: dict[str, Any] = {
             "model": model_name,
             "messages": oai_messages,
-            "temperature": temperature,
             "stream": True,
         }
+        # NOTE: 部分推理模型（如 kimi-k2.5 / o1 / o3）在后台旁路(0.1/0.2)或主推理(0.7)下会拒收非 1 温度或直接拒收该字段
+        if model_cache_key in _TEMPERATURE_FIXED_ONE_MODELS:
+            payload["temperature"] = 1
+        elif model_cache_key not in _TEMPERATURE_UNSUPPORTED_MODELS:
+            payload["temperature"] = temperature
+
         if include_usage:
             payload["stream_options"] = {"include_usage": True}
 
         async with httpx.AsyncClient(timeout=90.0) as client:
-            for attempt in range(2):
+            for attempt in range(3):
                 async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
                     if resp.status_code != 200:
                         err_body = (await resp.aread()).decode("utf-8", errors="replace")[:300]
-                        # 若第三方兼容中转拒收 stream_options，则自动记忆剔除该字段并当场重连重试
-                        if (
-                            attempt == 0
-                            and "stream_options" in payload
-                            and resp.status_code in (400, 422)
-                            and any(k in err_body.lower() for k in ("stream_options", "extra inputs", "unrecognized", "unknown field"))
-                        ):
-                            _STREAM_OPTIONS_UNSUPPORTED_HOSTS.add(endpoint)
-                            payload.pop("stream_options", None)
-                            logger.info(f"[ProviderAdapter] 节点 {endpoint} 不支持 stream_options，已自动降级移除并透明重试")
-                            continue
+                        err_lower = err_body.lower()
+                        if attempt < 2 and resp.status_code in (400, 422):
+                            # 1. 若第三方兼容中转拒收 stream_options，则自动记忆剔除该字段并透明重连重试
+                            if (
+                                "stream_options" in payload
+                                and (
+                                    "stream_options" in err_lower
+                                    or (
+                                        "temperature" not in err_lower
+                                        and any(k in err_lower for k in ("extra inputs", "unrecognized", "unknown field"))
+                                    )
+                                )
+                            ):
+                                _STREAM_OPTIONS_UNSUPPORTED_HOSTS.add(endpoint)
+                                payload.pop("stream_options", None)
+                                logger.info(f"[ProviderAdapter] 节点 {endpoint} 不支持 stream_options，已自动降级移除并透明重试")
+                                continue
+
+                            # 2. 若目标模型强制锁定 temperature=1（如 KIMI kimi-k2.5）或拒收 temperature 参数，自适应修正并重连
+                            if "temperature" in payload and "temperature" in err_lower:
+                                if (
+                                    any(k in err_lower for k in ("only 1", "must be 1", "set to 1", "equal to 1"))
+                                    and payload.get("temperature") != 1
+                                ):
+                                    _TEMPERATURE_FIXED_ONE_MODELS.add(model_cache_key)
+                                    payload["temperature"] = 1
+                                    logger.info(
+                                        f"[ProviderAdapter] 模型 {model_name}@{endpoint} 要求 temperature=1，已自动修正参数并透明重试"
+                                    )
+                                    continue
+
+                                _TEMPERATURE_FIXED_ONE_MODELS.discard(model_cache_key)
+                                _TEMPERATURE_UNSUPPORTED_MODELS.add(model_cache_key)
+                                payload.pop("temperature", None)
+                                logger.info(
+                                    f"[ProviderAdapter] 模型 {model_name}@{endpoint} 拒收 temperature 参数，已自动移除并透明重试"
+                                )
+                                continue
+
                         raise RuntimeError(f"OpenAI 兼容接口报错 ({resp.status_code}): {err_body}")
 
+                    in_reasoning_block = False
                     async for line in resp.aiter_lines():
                         line_str = line.strip()
                         if not line_str or not line_str.startswith("data:"):
@@ -534,21 +661,40 @@ class ProviderAdapter:
                             break
                         try:
                             chunk_json = json.loads(data_part)
-                            chunk_usage = chunk_json.get("usage")
-                            chunk_timings = chunk_json.get("timings")
-                            if (chunk_usage or chunk_timings) and on_usage:
-                                try:
-                                    on_usage(chunk_usage, chunk_timings)
-                                except Exception:
-                                    pass
-                            choices = chunk_json.get("choices") or []
-                            if choices:
-                                delta = choices[0].get("delta") or {}
-                                content_piece = delta.get("content") or ""
-                                if content_piece:
-                                    yield content_piece
                         except Exception:
                             continue
+
+                        chunk_usage = chunk_json.get("usage")
+                        chunk_timings = chunk_json.get("timings")
+                        if (chunk_usage or chunk_timings) and on_usage:
+                            try:
+                                on_usage(chunk_usage, chunk_timings)
+                            except Exception:
+                                pass
+                        choices = chunk_json.get("choices") or []
+                        if choices:
+                            delta = choices[0].get("delta") or {}
+                            reasoning_piece = (
+                                delta.get("reasoning_content") or delta.get("reasoning") or ""
+                                if emit_thinking_tags
+                                else ""
+                            )
+                            content_piece = delta.get("content") or ""
+
+                            if reasoning_piece:
+                                if not in_reasoning_block:
+                                    yield "<think>"
+                                    in_reasoning_block = True
+                                yield reasoning_piece
+
+                            if content_piece:
+                                if in_reasoning_block:
+                                    yield "</think>"
+                                    in_reasoning_block = False
+                                yield content_piece
+
+                    if in_reasoning_block:
+                        yield "</think>"
                     return
 
     @classmethod
@@ -561,6 +707,7 @@ class ProviderAdapter:
         system_instruction: str | None = None,
         temperature: float = 0.7,
         on_usage: Callable[[dict[str, Any] | None, dict[str, Any] | None], None] | None = None,
+        emit_thinking_tags: bool = False,
     ) -> AsyncGenerator[str, None]:
         """调用 Anthropic Claude (/v1/messages) 流式接口"""
         effective_base = (base_url or "https://api.anthropic.com/v1").rstrip("/")
@@ -598,6 +745,7 @@ class ProviderAdapter:
                     err_body = (await resp.aread()).decode("utf-8", errors="replace")[:300]
                     raise RuntimeError(f"Anthropic 接口报错 ({resp.status_code}): {err_body}")
 
+                in_thinking_block = False
                 async for line in resp.aiter_lines():
                     line_str = line.strip()
                     if not line_str.startswith("data:"):
@@ -605,27 +753,45 @@ class ProviderAdapter:
                     data_part = line_str[5:].strip()
                     try:
                         ev = json.loads(data_part)
-                        ev_type = ev.get("type")
-                        if ev_type == "message_start" and on_usage:
-                            msg_usage = (ev.get("message") or {}).get("usage")
-                            if isinstance(msg_usage, dict):
-                                try:
-                                    on_usage(msg_usage, None)
-                                except Exception:
-                                    pass
-                        elif ev_type == "message_delta" and on_usage:
-                            delta_usage = ev.get("usage")
-                            if isinstance(delta_usage, dict):
-                                try:
-                                    on_usage(delta_usage, None)
-                                except Exception:
-                                    pass
-                        elif ev_type == "content_block_delta":
-                            text_piece = (ev.get("delta") or {}).get("text") or ""
-                            if text_piece:
-                                yield text_piece
                     except Exception:
                         continue
+
+                    ev_type = ev.get("type")
+                    if ev_type == "message_start" and on_usage:
+                        msg_usage = (ev.get("message") or {}).get("usage")
+                        if isinstance(msg_usage, dict):
+                            try:
+                                on_usage(msg_usage, None)
+                            except Exception:
+                                pass
+                    elif ev_type == "message_delta" and on_usage:
+                        delta_usage = ev.get("usage")
+                        if isinstance(delta_usage, dict):
+                            try:
+                                on_usage(delta_usage, None)
+                            except Exception:
+                                pass
+                    elif ev_type == "content_block_delta":
+                        delta_obj = ev.get("delta") or {}
+                        thinking_piece = (
+                            delta_obj.get("thinking") or ""
+                            if emit_thinking_tags and delta_obj.get("type") == "thinking_delta"
+                            else ""
+                        )
+                        text_piece = delta_obj.get("text") or ""
+                        if thinking_piece:
+                            if not in_thinking_block:
+                                yield "<think>"
+                                in_thinking_block = True
+                            yield thinking_piece
+                        if text_piece:
+                            if in_thinking_block:
+                                yield "</think>"
+                                in_thinking_block = False
+                            yield text_piece
+
+                if in_thinking_block:
+                    yield "</think>"
 
     @classmethod
     async def generate_light_background_text(cls, prompt: str, system_prompt: str = "") -> str | None:
@@ -637,7 +803,7 @@ class ProviderAdapter:
         for prov in providers:
             ptype = prov.get("provider_type")
             models = prov.get("models") or []
-            target_model = models[0] if models else "gpt-4o-mini"
+            target_model = cls.pick_light_model(models, fallback="gpt-4o-mini")
 
             try:
                 if ptype in ("openai_compat", "ollama", "llama_server") and (

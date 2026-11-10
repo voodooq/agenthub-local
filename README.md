@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.2.1-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.2.2-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,8 @@
 
 ## 🧭 版本演进总览
 
-### ✨ v1.2.0（最新 v1.2.1）— 本地上下文压缩、KV Cache 守护、双模性能水表与多 Skill 协同
+### ✨ v1.2.0（最新 v1.2.2）— 本地上下文压缩、KV Cache 守护、双模性能水表与多源算力稳定化
+- **多源算力稳定化与抗卡死治理（v1.2.2）**：严格隔离后台轻量旁路与 CLI/算力池异常告警，新增 KIMI 等模型 `temperature=1` 参数自适应与 400 非限流隔离；补全前端 SSE「停止生成」按钮、首包/空闲看门狗、宿主机探针主循环异步解耦与启动孤儿 Loop 自愈；同步落地算力池今日总消耗汇总、多源通道精准计数、DSML 工具标签防泄漏及思考过程样式弱化。
 - **三区上下文压缩与 KV Cache 前缀守护**：划分 Zone 1（绝对不动前缀）+ Zone 2（只增不改热区 + 分块坍缩）+ Zone 3（跨轮零残留尾注），结合 SQLite FTS5 冷历史双路召回与工具长输出旁路脱水（`>1,000` 字符转 `Ref` + `read_tool_ref` 按行切片回查），最大化本地与云端 KV Cache 命中率。
 - **`llama-server` 深度适配与全链路 Token 水表**：原生接入 `llama.cpp`（`/health`、`/props` 单槽位显存探测、`/tokenize` 与 `timings`），在每条回复底部渲染单行实时水表（上下文水位、KV Cache 命中率、脱水节省、TTFT/TPS），支持 `/stats` 查看全会话分角色消耗看板；未配置 Google 账号时自动隐藏未绑定 Gemini 模型，仅显示用户自有算力通道模型。
 - **已有 Skill 迭代升级 & 多 Skill 协同编排**：基于已有 Skill 再次执行优化提炼时，支持直接迭代升级原 `SKILL.md` SOP 与语义化版本号；支持单条消息内通过 `/` 串联多个不同 Skill 协同完成任务。
@@ -148,10 +149,10 @@ flowchart TD
 
 | 客户端版本 | 适用系统 | 包名称 | 运行方式 |
 | :--- | :--- | :--- | :--- |
-| **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.2.1-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
-| **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-v1.2.1-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
-| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.2.1-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
-| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.2.1-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
+| **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.2.2-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
+| **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-v1.2.2-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
+| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.2.2-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
+| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.2.2-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
 | **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
 
 ---
@@ -171,7 +172,7 @@ sequenceDiagram
     participant Port as package-portable (ubuntu)
     participant Rel as GitHub Releases 页面
 
-    Dev->>GH: git tag v1.2.1 && git push origin v1.2.1
+    Dev->>GH: git tag v1.2.2 && git push origin v1.2.2
     GH->>FE: 安装 Node 22 并导出静态前端 out/
     FE->>Port: 分发 out/ -> 生成 portable.zip & portable.tar.gz
     FE->>Win: 分发 out/ -> PyInstaller --onefile 生成 *-windows-x64.exe
@@ -184,9 +185,9 @@ sequenceDiagram
 ### 如何发布新版本：
 只需在 `version.json` 更新版本号并运行 `python sync_version.py`（或直接运行 `python sync_version.py <version>`），随后在本地执行以下命令：
 ```bash
-git tag -a v1.2.1 -m "Release v1.2.1"
+git tag -a v1.2.2 -m "Release v1.2.2"
 git push origin master
-git push origin v1.2.1
+git push origin v1.2.2
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 4 类干净的发行资产，几分钟内即可在 Releases 页面看到生成的下载文件！
 

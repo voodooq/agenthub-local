@@ -504,16 +504,10 @@ class ExperienceDistiller:
 
     @staticmethod
     async def _has_active_llm_account() -> bool:
-        """快速探测当前是否存在可用的活跃大模型账号（无账号库秒级降级）"""
-        try:
-            async with db_manager.get_connection() as conn:
-                async with conn.execute(
-                    "SELECT COUNT(1) AS cnt FROM accounts WHERE status = 'active'"
-                ) as cur:
-                    row = await cur.fetchone()
-                    return bool(row and int(row["cnt"]) > 0)
-        except Exception:
-            return False
+        """快速探测当前是否存在可用于后台轻量经验提炼的算力引擎（严格排除重型 CLI）"""
+        from ..core.provider_adapter import provider_adapter
+
+        return await provider_adapter.has_any_available_engine(task_role="light")
 
     async def _try_llm_distill(
         self,
@@ -569,7 +563,7 @@ class ExperienceDistiller:
             async for evt in engine_pool.execute_stream_with_failover(
                 conversation_id=trace.conversation_id,
                 user_prompt=prompt,
-                model_name="gemini-2.5-flash",
+                model_name="",
                 thinking_level="low",
                 system_override="你是高密度工程经验提炼器，只返回合法 JSON。",
                 temperature=0.2,
