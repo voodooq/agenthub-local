@@ -95,6 +95,16 @@ def package() -> tuple[Path, Path]:
             ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".git*"),
         )
 
+    # 3.5 复制应用图标与静态视觉资产 assets/
+    src_assets = BASE_DIR / "assets"
+    if src_assets.is_dir():
+        print("  -> 拷贝桌面应用图标资产 assets/ ...")
+        shutil.copytree(
+            src_assets,
+            stage_dir / "assets",
+            ignore=shutil.ignore_patterns(".DS_Store", "Thumbs.db"),
+        )
+
     # 4. 拷贝启动脚本与配置文件
     file_list = [
         "version.json",

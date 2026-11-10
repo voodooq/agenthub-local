@@ -31,6 +31,7 @@ interface CommandItem {
   insertText: string;
   icon: React.ComponentType<{ className?: string }>;
   badge?: string;
+  version?: string;
   docBody?: string;
   hasDoc?: boolean;
   skillId?: string;
@@ -168,6 +169,7 @@ function mapExtensionSkillsToCommands(skills: ExtensionSkillItem[]): CommandItem
       insertText: `${label} `,
       icon: isMcp ? Server : sk.is_builtin ? Puzzle : BookOpen,
       badge: badgeText,
+      version: sk.version ? String(sk.version) : undefined,
       docBody: docText ? String(docText) : undefined,
       hasDoc: Boolean(docText || sk.has_content || skillId),
       skillId,
@@ -181,21 +183,54 @@ function mapExtensionSkillsToCommands(skills: ExtensionSkillItem[]): CommandItem
 
 interface CommandAutocompleteProps {
   input: string;
-  onSelect: (insertText: string) => void;
+  cursorPosition?: number;
+  onSelect: (insertText: string, replaceRange?: { start: number; end: number }) => void;
   onClose: () => void;
 }
 
-export function CommandAutocomplete({ input, onSelect, onClose }: CommandAutocompleteProps) {
+export function CommandAutocomplete({
+  input,
+  cursorPosition,
+  onSelect,
+  onClose,
+}: CommandAutocompleteProps) {
   const [dynamicItems, setDynamicItems] = useState<CommandItem[]>([]);
   const [previewItemId, setPreviewItemId] = useState<string | null>(null);
   const [detailCache, setDetailCache] = useState<Record<string, string>>({});
   const [loadingDocId, setLoadingDocId] = useState<string | null>(null);
 
-  // 检查最后一个词是否以 @ 或 / 开头
-  const words = input.split(/\s+/);
-  const lastWord = words[words.length - 1] || '';
-  const isTriggered = lastWord.startsWith('@') || lastWord.startsWith('/');
-  const isSlashTriggered = lastWord.startsWith('/');
+  // 基于光标所在位置的当前分隔词判定触发状态，支持单条消息串联输入多个 /skill
+  const activeTokenInfo = useMemo(() => {
+    const pos =
+      typeof cursorPosition === 'number'
+        ? Math.max(0, Math.min(cursorPosition, input.length))
+        : input.length;
+    const isLeftDelimiter = (ch: string) => /\s|[([{"'（【]/.test(ch);
+    const isRightDelimiter = (ch: string) => /\s|[)\]}"'）】]/.test(ch);
+
+    let start = pos;
+    while (start > 0 && !isLeftDelimiter(input[start - 1])) {
+      start -= 1;
+    }
+    let end = pos;
+    while (end < input.length && !isRightDelimiter(input[end])) {
+      end += 1;
+    }
+    const token = input.slice(start, end);
+    // 排除多斜杠路径（例如 ./src/app 或 /etc/hosts），仅识别命令形式 /command 或 @context
+    const isTriggered =
+      (token.startsWith('@') || token.startsWith('/')) &&
+      (token.startsWith('@') || !token.slice(1).includes('/'));
+    return {
+      token,
+      start,
+      end,
+      isTriggered,
+      isSlashTriggered: isTriggered && token.startsWith('/'),
+    };
+  }, [input, cursorPosition]);
+
+  const { token: lastWord, start: tokenStart, end: tokenEnd, isTriggered, isSlashTriggered } = activeTokenInfo;
 
   // 仅在首次触发 '/' 时同步读取缓存秒显并后台刷新一次，不再随敲字重复请求全量扫描接口
   useEffect(() => {
@@ -313,7 +348,7 @@ export function CommandAutocomplete({ input, onSelect, onClose }: CommandAutocom
             return (
               <div
                 key={item.id}
-                onClick={() => onSelect(item.insertText)}
+                onClick={() => onSelect(item.insertText, { start: tokenStart, end: tokenEnd })}
                 className={`flex items-center justify-between p-2 rounded-xl cursor-pointer transition-colors group ${
                   isPreviewing
                     ? 'bg-emerald-500/10 border border-emerald-500/30'
@@ -335,6 +370,11 @@ export function CommandAutocomplete({ input, onSelect, onClose }: CommandAutocom
                       <span className="font-mono text-xs font-semibold text-foreground group-hover:text-emerald-500">
                         {item.label}
                       </span>
+                      {item.version && (
+                        <span className="text-[9px] font-mono px-1.5 py-0.2 rounded bg-surface-200 text-muted-foreground border border-border/70">
+                          v{item.version}
+                        </span>
+                      )}
                       {item.badge && (
                         <span
                           className={`text-[9px] px-1.5 py-0.2 rounded font-medium ${
@@ -383,6 +423,11 @@ export function CommandAutocomplete({ input, onSelect, onClose }: CommandAutocom
             <div className="flex items-center justify-between pb-2 mb-2 border-b border-border/60 shrink-0">
               <div className="flex items-center space-x-2 min-w-0">
                 <span className="font-mono text-xs font-bold text-emerald-500">{activePreviewItem.label}</span>
+                {activePreviewItem.version && (
+                  <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-surface-200 text-muted-foreground border border-border/70 shrink-0">
+                    v{activePreviewItem.version}
+                  </span>
+                )}
                 {activePreviewItem.skillId && (
                   <span className="text-[10px] font-mono text-muted-foreground truncate">
                     ({activePreviewItem.skillId})
@@ -392,7 +437,7 @@ export function CommandAutocomplete({ input, onSelect, onClose }: CommandAutocom
               <div className="flex items-center space-x-1.5 shrink-0">
                 <button
                   type="button"
-                  onClick={() => onSelect(activePreviewItem.insertText)}
+                  onClick={() => onSelect(activePreviewItem.insertText, { start: tokenStart, end: tokenEnd })}
                   className="px-2 py-1 rounded-lg bg-emerald-500 hover:bg-emerald-600 text-white text-[10px] font-semibold flex items-center space-x-1 transition-colors"
                 >
                   <span>填入指令</span>

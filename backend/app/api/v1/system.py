@@ -7,8 +7,11 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+import webbrowser
 from fastapi import APIRouter, Body, Query, HTTPException
 from fastapi.responses import StreamingResponse
+from pydantic import BaseModel, Field
 from ...probe.collector import hardware_probe
 from ...service.hardware_skills import hardware_skills, proposal_manager
 from ...core.config import settings
@@ -121,3 +124,24 @@ async def open_logs_folder() -> dict[str, str]:
     if sys.platform == "win32":
         subprocess.Popen(["explorer.exe", str(log_dir.resolve())])
     return {"status": "ok", "path": str(log_dir.resolve())}
+
+
+class OpenExternalUrlRequest(BaseModel):
+    """请求通过系统默认浏览器安全打开外部网址"""
+
+    url: str = Field(..., min_length=8, max_length=2048, description="仅支持 http:// 或 https:// 协议链接")
+
+
+@router.post("/open-url")
+async def open_external_url(req: OpenExternalUrlRequest) -> dict[str, Any]:
+    """校验安全协议并在宿主机默认浏览器打开外部 URL（供桌面端 WebView2 外链跳转使用）"""
+    clean_url = (req.url or "").strip()
+    if any(ch in clean_url for ch in ("\r", "\n", "\t", " ")):
+        raise HTTPException(status_code=400, detail="URL 格式包含非法空白字符")
+
+    parsed = urlparse(clean_url)
+    if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+        raise HTTPException(status_code=400, detail="安全校验拦截：仅允许打开 http:// 或 https:// 网址")
+
+    opened = await asyncio.to_thread(webbrowser.open, clean_url, 2)
+    return {"status": "ok", "opened": bool(opened), "url": clean_url}

@@ -4,6 +4,37 @@ import { ResolvedLocale } from '@/context/LanguageContext';
  * 全量多语种词条映射库（按字符长度自动降序排序预处理，先长句后短词，确保 100% 翻译覆盖且不被短词破坏）
  */
 export const PHRASE_DICTIONARY: Record<string, { 'zh-TW': string; en: string; ja: string }> = {
+  // ──────────── v1.2.0 技能迭代版本升级、多 Skill 协同、半屏输入与折叠步骤 ────────────
+  '输入消息或指令...（支持多次 / 联合协同多个技能，Ctrl+V 粘贴图片，Enter 发送）': { 'zh-TW': '輸入訊息或指令...（支援多次 / 聯合協同多個技能，Ctrl+V 貼上圖片，Enter 發送）', en: 'Type a message or command... (use multiple /skills to chain, Ctrl+V to paste images, Enter to send)', ja: 'メッセージや指示を入力... (複数 /スキル連携、Ctrl+V画像貼付、Enter送信)' },
+  '扩展至半屏高度查看与编辑长文本': { 'zh-TW': '擴展至半螢幕高度檢視與編輯長文本', en: 'Expand input to half-screen height for long text', ja: '長文表示・編集のため半画面に拡大' },
+  '在系统默认浏览器中打开 GitHub 开源仓库': { 'zh-TW': '在系統預設瀏覽器中開啟 GitHub 開源倉庫', en: 'Open GitHub open-source repository in default browser', ja: '既定のブラウザーで GitHub リポジトリを開く' },
+  '调用默认浏览器打开开源项目地址': { 'zh-TW': '呼叫預設瀏覽器開啟開源專案位址', en: 'Open project URL in default browser', ja: '既定のブラウザーで開く' },
+  '正在生成版本差异与更新草案...': { 'zh-TW': '正在生成版本差異與更新草案...', en: 'Generating version diff and update draft...', ja: 'バージョン差分と更新案を生成中...' },
+  '确认创建 Skill v1.0.0': { 'zh-TW': '確認建立 Skill v1.0.0', en: 'Create Skill v1.0.0', ja: 'Skill v1.0.0 を作成' },
+  '新建四元组 Skill · v1.0.0': { 'zh-TW': '新建四元組 Skill · v1.0.0', en: 'New Quadruple Skill · v1.0.0', ja: '新規スキル · v1.0.0' },
+  '开源仓库与项目主页': { 'zh-TW': '開源倉庫與專案主頁', en: 'Open-Source Repository & Homepage', ja: 'オープンソースリポジトリ' },
+  '迭代更新已有 Skill': { 'zh-TW': '迭代更新已有 Skill', en: 'Upgrade Existing Skill', ja: '既存スキルを更新' },
+  '另存新建独立 Skill': { 'zh-TW': '另存新建獨立 Skill', en: 'Save as New Skill', ja: '新規スキルとして保存' },
+  '多 Skill 联合编排': { 'zh-TW': '多 Skill 聯合編排', en: 'Multi-Skill Orchestration', ja: 'マルチスキル連携' },
+  '复制开源仓库地址': { 'zh-TW': '複製開源倉庫位址', en: 'Copy repository URL', ja: 'リポジトリ URL をコピー' },
+  '确认迭代升级至': { 'zh-TW': '確認迭代升級至', en: 'Confirm Upgrade to', ja: 'アップデート確定：' },
+  '收起执行步骤': { 'zh-TW': '收起執行步驟', en: 'Collapse Steps', ja: 'ステップを折りたたむ' },
+  '执行步骤详情': { 'zh-TW': '執行步驟詳情', en: 'Execution Steps Details', ja: '実行ステップ詳細' },
+  '打开开源地址': { 'zh-TW': '開啟開源位址', en: 'Open Repository', ja: 'リポジトリを開く' },
+  '联合协同技能:': { 'zh-TW': '聯合協同技能:', en: 'Chained Skills:', ja: '連携スキル:' },
+  '已激活技能:': { 'zh-TW': '已啟用技能:', en: 'Active Skill:', ja: '有効なスキル:' },
+  '暂无可选 Skill': { 'zh-TW': '暫無可選 Skill', en: 'No Skill available', ja: '利用可能なスキルなし' },
+  '收起输入框': { 'zh-TW': '收起輸入框', en: 'Collapse Input', ja: '入力欄を縮小' },
+  '新 Skill ID:': { 'zh-TW': '新 Skill ID:', en: 'New Skill ID:', ja: '新規スキル ID:' },
+  '迭代升级 →': { 'zh-TW': '迭代升級 →', en: 'Upgrade →', ja: '更新 →' },
+  '当前版本:': { 'zh-TW': '目前版本:', en: 'Current Version:', ja: '現在のバージョン:' },
+  '升级目标:': { 'zh-TW': '升級目標:', en: 'Target Skill:', ja: '更新対象:' },
+  '执行步骤': { 'zh-TW': '執行步驟', en: 'Execution Steps', ja: '実行ステップ' },
+  '收起步骤': { 'zh-TW': '收起步驟', en: 'Collapse', ja: '折りたたむ' },
+  '展开步骤': { 'zh-TW': '展開步驟', en: 'Expand Steps', ja: 'ステップを展開' },
+  '复制地址': { 'zh-TW': '複製位址', en: 'Copy URL', ja: 'コピー' },
+  '打开中...': { 'zh-TW': '開啟中...', en: 'Opening...', ja: '開いています...' },
+
   // ──────────── v1.1.12 交互确认分步向导、历史锁定态与统一执行 ────────────
   '已确认前置项汇总（全部核对完毕后点击右下角统一执行）': { 'zh-TW': '已確認前置項彙整（全部核對完畢後點擊右下角統一執行）', en: 'Confirmed Items Summary (verify all before clicking execute)', ja: '確認済み項目一覧（すべて確認後、右下の実行ボタンで一括開始）' },
   '✓ 已完成交互确认，当前卡片处于只读归档状态': { 'zh-TW': '✓ 已完成互動確認，目前卡片處於唯讀封存狀態', en: '✓ Interactive confirmation completed (read-only archive)', ja: '✓ 確認完了済み（このカードは読み取り専用アーカイブです）' },

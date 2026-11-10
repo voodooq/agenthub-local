@@ -79,6 +79,7 @@ def _extract_frontmatter_fields(fm_text: str, default_name: str) -> dict[str, st
         "name": default_name,
         "command": f"/{default_name}",
         "description": "",
+        "version": "1.0.0",
     }
     for line in fm_text.splitlines():
         stripped = line.strip()
@@ -87,8 +88,12 @@ def _extract_frontmatter_fields(fm_text: str, default_name: str) -> dict[str, st
         k, v = stripped.split(":", 1)
         k = k.strip().lower()
         v = v.strip().strip("'\"")
-        if k in ("name", "command", "description", "version") and v:
-            parsed[k] = v
+        if k in ("name", "command", "description", "version", "updated_at") and v:
+            if k == "version":
+                from ..extensions.skill_loader import normalize_version_str
+                parsed[k] = normalize_version_str(v)
+            else:
+                parsed[k] = v
     return parsed
 
 
@@ -188,9 +193,10 @@ class SkillService:
             "folder_path": folder_path,
             "has_sop": bool(parsed.get("has_sop", True)),
             "has_playbook": has_playbook,
+            "version": parsed.get("version") or "1.0.0",
         }
-        if parsed.get("version"):
-            record["version"] = parsed["version"]
+        if parsed.get("updated_at"):
+            record["updated_at"] = parsed["updated_at"]
         if include_content:
             sop_text = parsed.get("sop_content", "")
             if has_playbook:
@@ -457,6 +463,8 @@ class SkillService:
         command: str,
         description: str,
         sop_content: str,
+        version: str = "1.0.0",
+        updated_at: str | None = None,
     ) -> dict[str, Any]:
         """
         在当前工作区物理路径下持久化保存一个 L2 专属 Skill
@@ -477,10 +485,16 @@ class SkillService:
         if not cmd.startswith("/"):
             cmd = f"/{cmd}"
 
+        from ..extensions.skill_loader import normalize_version_str
+        norm_ver = normalize_version_str(version)
+        upd_line = f"updated_at: {updated_at.strip()}\n" if updated_at and updated_at.strip() else ""
+
         file_body = (
             f"---\n"
             f"name: {clean_name}\n"
             f"command: {cmd}\n"
+            f"version: {norm_ver}\n"
+            f"{upd_line}"
             f"description: {description.strip()}\n"
             f"---\n\n"
             f"{sop_content.strip()}\n"
@@ -492,6 +506,7 @@ class SkillService:
         return {
             "name": clean_name,
             "command": cmd,
+            "version": norm_ver,
             "description": description.strip(),
             "scope": "workspace",
             "file_path": str(skill_file),

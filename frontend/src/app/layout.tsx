@@ -6,6 +6,11 @@ import { LanguageProvider } from '@/context/LanguageContext';
 export const metadata: Metadata = {
   title: 'AgentHub Local | 本地全场景多源算力与智能体工作台',
   description: '本地优先（Local-First）极客级多源大模型算力调度、Skill 容器与自主智能体工作台。',
+  icons: {
+    icon: '/icon.png',
+    shortcut: '/favicon.ico',
+    apple: '/icon.png',
+  },
 };
 
 export default function RootLayout({

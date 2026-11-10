@@ -353,18 +353,42 @@ class ContextBuilder:
             except Exception as e:
                 logger.debug(f"[ContextBuilder] 扫描工作区专属技能跳过: {e}")
 
-        # 若用户输入了 /command 或 /skill-name，自动预加载对应 Skill 的完整四元组规程（含 tools/、knowledge/、schema.json 与避坑经验摘要）
-        matched_skill = await asyncio.to_thread(skill_loader.resolve_slash_command, user_query, current_cwd)
-        if matched_skill:
+        # 若用户输入了一个或多个 /command 或 /skill-name，自动预加载全部对应 Skill 的四元组规程并启用联合协同编排
+        matched_skills = await asyncio.to_thread(skill_loader.resolve_slash_commands, user_query, current_cwd)
+        matched_skill = matched_skills[0] if matched_skills else None
+        if len(matched_skills) == 1:
             full_skill_md = await asyncio.to_thread(
                 skill_loader.get_full_skill_markdown,
-                matched_skill["id"],
+                matched_skills[0]["id"],
                 current_cwd,
             )
             system_parts.append(
-                f"### 🎯 已由斜杠指令 `{matched_skill['command']}` 直接激活的四元组技能规程 (`{matched_skill['id']}`)：\n"
+                f"### 🎯 已由斜杠指令 `{matched_skills[0]['command']}` 直接激活的四元组技能规程 (`{matched_skills[0]['id']}`)：\n"
                 f"请严格遵循以下技能规程处理用户请求：\n{full_skill_md}"
             )
+        elif len(matched_skills) >= 2:
+            combo_sections: list[str] = [
+                "### 🤝 【多 Skill 联合协同编排模式已激活】",
+                f"用户本轮共指定协同调用 **{len(matched_skills)} 个** 专业技能联合完成同一项任务，请按协同链路通盘统筹、逐个落实：",
+            ]
+            for idx, m_sk in enumerate(matched_skills, 1):
+                full_skill_md = await asyncio.to_thread(
+                    skill_loader.get_full_skill_markdown,
+                    m_sk["id"],
+                    current_cwd,
+                )
+                sk_ver = m_sk.get("version") or "1.0.0"
+                combo_sections.append(
+                    f"#### 🔗 协同技能 #{idx}: `{m_sk['command']}` (`{m_sk['id']}` · `v{sk_ver}`)\n"
+                    f"{full_skill_md}"
+                )
+            combo_sections.append(
+                "#### 📋 多 Skill 联合协作规范：\n"
+                "1. **依赖串联与数据流衔接**：先理清各技能上下游关系，将上游 Skill 的真实输出或产物文件路径作为下游 Skill 的输入，严禁跳过或编造数据；\n"
+                "2. **按需跨 Skill 调度**：涉及专属脚本或领域知识时，分别指定对应 `skill_name` 调用 `run_skill_tool` 与 `search_skill_knowledge`；\n"
+                "3. **合并交付与契约兼容**：若多个技能均携带 `schema.json` 或输出要求，需合并满足所有契约并在末尾完整汇总交付结果。"
+            )
+            system_parts.append("\n\n".join(combo_sections))
 
         # 4.5 主动挂载当前工作区沙盒内的真实附件清单（防止路径猜测或盲目造假）
         effective_ws_root = current_cwd
@@ -483,6 +507,7 @@ class ContextBuilder:
             "referenced_memories": referenced_memories,
             "active_facts": active_facts,
             "matched_skill_id": matched_skill["id"] if matched_skill else None,
+            "matched_skill_ids": [s["id"] for s in matched_skills],
             "scene_mode": scene_mode,
             "working_memory": working_memory,
             "current_cwd": current_cwd,

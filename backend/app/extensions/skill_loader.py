@@ -35,6 +35,38 @@ from ..core.runtime_paths import (
 )
 from ..repository.db import db_manager
 
+# 安全识别输入框中独立 `/command` 指令的正则：严格排除路径 (/usr/bin, ./a/b) 与 URL (https://.../api)
+_SLASH_COMMAND_TOKEN_RE = re.compile(
+    r"(?:^|(?<=[\s(\[{（【，,；;：:、]))/([a-zA-Z0-9][a-zA-Z0-9_-]{0,63})"
+    r"(?=$|[\s)\]}.，,；;：:！？!?、\"'”’])"
+)
+
+
+def normalize_version_str(raw: str | None) -> str:
+    """将版本号规范化为 X.Y.Z 语义化版本字符串。"""
+    text = (raw or "").strip().lstrip("vV")
+    if not text:
+        return "1.0.0"
+    m = re.match(r"^(\d+)(?:\.(\d+))?(?:\.(\d+))?$", text)
+    if not m:
+        return "1.0.0"
+    major = int(m.group(1))
+    minor = int(m.group(2) or 0)
+    patch = int(m.group(3) or 0)
+    return f"{major}.{minor}.{patch}"
+
+
+def bump_semver(raw: str | None, level: str = "minor") -> str:
+    """按语义化版本规则递增 Skill 版本号（默认升级 minor，如 1.0.0 -> 1.1.0）。"""
+    norm = normalize_version_str(raw)
+    major, minor, patch = (int(p) for p in norm.split("."))
+    lv = (level or "minor").strip().lower()
+    if lv == "major":
+        return f"{major + 1}.0.0"
+    if lv == "patch":
+        return f"{major}.{minor}.{patch + 1}"
+    return f"{major}.{minor + 1}.0"
+
 
 class SkillLoader:
     """本地 Skill 四元组容器扫描、FTS5 领域知识同步、随包算子执行与热插拔加载器"""
@@ -178,6 +210,8 @@ class SkillLoader:
         tier = "community"
         mcp_server = ""
         description = ""
+        version = "1.0.0"
+        updated_at = ""
         body = md_text.strip()
 
         match = re.match(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?(.*)", md_text, re.DOTALL)
@@ -205,6 +239,10 @@ class SkillLoader:
                     elif k == "mcp_server" and v:
                         mcp_server = v.strip()
                         skill_type = "mcp"
+                    elif k == "version" and v:
+                        version = normalize_version_str(v)
+                    elif k == "updated_at" and v:
+                        updated_at = v
                     elif k == "description" and v:
                         description = v
 
@@ -218,6 +256,8 @@ class SkillLoader:
             "type": skill_type,
             "tier": tier,
             "mcp_server": mcp_server,
+            "version": version,
+            "updated_at": updated_at,
             "description": description,
             "body": body,
         }
@@ -316,10 +356,13 @@ class SkillLoader:
 
             meta = self._parse_frontmatter(raw_text, safe_dir_name)
             mcp_line = f"mcp_server: {meta['mcp_server']}\n" if meta["mcp_server"] else ""
+            updated_line = f"updated_at: {meta['updated_at']}\n" if meta.get("updated_at") else ""
             normalized_md = (
                 f"---\n"
                 f"name: {meta['name']}\n"
                 f"command: {meta['command']}\n"
+                f"version: {meta.get('version') or '1.0.0'}\n"
+                f"{updated_line}"
                 f"type: {meta['type']}\n"
                 f"{mcp_line}"
                 f"description: {meta['description']}\n"
@@ -558,6 +601,8 @@ class SkillLoader:
                 "id": item.name,
                 "name": meta["name"],
                 "command": meta["command"],
+                "version": meta.get("version") or "1.0.0",
+                "updated_at": meta.get("updated_at") or "",
                 "meta_type": meta["type"],
                 "meta_tier": meta["tier"],
                 "meta_mcp_server": meta["mcp_server"],
@@ -608,6 +653,8 @@ class SkillLoader:
             "id": cached_base["id"],
             "name": cached_base["name"],
             "command": cached_base["command"],
+            "version": cached_base.get("version") or "1.0.0",
+            "updated_at": cached_base.get("updated_at") or "",
             "type": skill_type,
             "tier": "commercial" if cached_base["default_tier"] == "commercial" else cached_base["meta_tier"],
             "mcp_server": mcp_srv,
@@ -642,6 +689,7 @@ class SkillLoader:
             "id": safe_id,
             "name": safe_id,
             "command": f"/{safe_id}",
+            "version": "1.0.0",
             "type": "mcp",
             "tier": "community",
             "mcp_server": srv_name,
@@ -1089,20 +1137,25 @@ class SkillLoader:
 
         return True, ""
 
-    def resolve_slash_command(
+    def resolve_slash_commands(
         self,
         user_query: str,
         workspace_root: str | None = None,
-    ) -> dict[str, Any] | None:
+    ) -> list[dict[str, Any]]:
         """
-        根据用户输入的 `/xxx` 前缀匹配对应的 Skill（L2 工作区私有技能高优覆盖 L1 全局技能）或 MCP 说明。
+        安全提取用户输入中的所有合法 `/command` 指令并按出现顺序去重返回匹配的 Skill 列表。
+        L2 工作区私有技能优先覆盖 L1 全局技能；自动排除路径 (/usr/bin, ./a/b) 与 URL (https://.../api)。
         """
         q = (user_query or "").strip()
-        if not q.startswith("/"):
-            return None
-        first_token = q.split()[0].lower()
-        bare_token = first_token.lstrip("/")
+        if not q or "/" not in q:
+            return []
 
+        raw_tokens = [m.group(1) for m in _SLASH_COMMAND_TOKEN_RE.finditer(q)]
+        if not raw_tokens:
+            return []
+
+        # 预建 L2 工作区映射表（同一轮仅扫描一次目录）与 L1 全局映射表
+        ws_entries: list[dict[str, Any]] = []
         if workspace_root:
             ws_path = Path(workspace_root).resolve()
             for ws_root in (ws_path / "skills", ws_path / ".agenthub" / "skills"):
@@ -1117,31 +1170,65 @@ class SkillLoader:
                             continue
                         raw = md_file.read_text(encoding="utf-8", errors="replace")[:4096]
                         meta = self._parse_frontmatter(raw, item.name)
-                        if (
-                            meta["command"].lower() == first_token
-                            or item.name.lower() == bare_token
-                            or meta["name"].lower() == bare_token
-                        ):
-                            return {
-                                "id": item.name,
-                                "name": meta["name"],
-                                "command": meta["command"],
-                                "type": meta["type"] or "skill",
-                                "description": meta["description"],
-                                "path": str(md_file.resolve()),
-                                "scope": "workspace",
-                            }
+                        ws_entries.append({
+                            "id": item.name,
+                            "name": meta["name"],
+                            "command": meta["command"],
+                            "version": meta.get("version") or "1.0.0",
+                            "type": meta["type"] or "skill",
+                            "description": meta["description"],
+                            "path": str(md_file.resolve()),
+                            "scope": "workspace",
+                        })
                 except OSError:
                     continue
 
-        for sk in self.list_skills(include_content=False):
-            if (
-                sk["command"].lower() == first_token
-                or sk["id"].lower() == bare_token
-                or sk["name"].lower() == bare_token
-            ):
-                return sk
-        return None
+        global_skills = self.list_skills(include_content=False)
+
+        matched: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for tok in raw_tokens:
+            bare_token = tok.lower()
+            slash_token = f"/{bare_token}"
+            hit: dict[str, Any] | None = None
+
+            for sk in ws_entries:
+                if (
+                    sk["command"].lower() == slash_token
+                    or sk["id"].lower() == bare_token
+                    or sk["name"].lower() == bare_token
+                ):
+                    hit = dict(sk)
+                    break
+
+            if hit is None:
+                for sk in global_skills:
+                    if (
+                        sk["command"].lower() == slash_token
+                        or sk["id"].lower() == bare_token
+                        or sk["name"].lower() == bare_token
+                    ):
+                        hit = dict(sk)
+                        break
+
+            if hit is not None:
+                dedup_key = hit["id"].lower()
+                if dedup_key not in seen_ids:
+                    seen_ids.add(dedup_key)
+                    matched.append(hit)
+
+        return matched
+
+    def resolve_slash_command(
+        self,
+        user_query: str,
+        workspace_root: str | None = None,
+    ) -> dict[str, Any] | None:
+        """
+        根据用户输入匹配首个 `/xxx` 对应的 Skill（L2 工作区私有技能高优覆盖 L1 全局技能）或 MCP 说明。
+        """
+        matches = self.resolve_slash_commands(user_query, workspace_root=workspace_root)
+        return matches[0] if matches else None
 
     def save_skill(
         self,
@@ -1150,6 +1237,8 @@ class SkillLoader:
         content: str,
         skill_id: str | None = None,
         command: str | None = None,
+        version: str | None = None,
+        updated_at: str | None = None,
     ) -> dict[str, Any]:
         """创建或更新自定义本地 Skill (写入 skills/<id>/SKILL.md 并强制规范化)"""
         safe_id = self._sanitize_skill_id(skill_id or name)
@@ -1161,14 +1250,20 @@ class SkillLoader:
         cmd_str = (command or f"/{safe_id}").strip()
         if not cmd_str.startswith("/"):
             cmd_str = f"/{cmd_str}"
+        ver_str = normalize_version_str(version) if version else ""
+        upd_str = (updated_at or "").strip()
 
         if clean_body.startswith("---"):
             full_md = clean_body + "\n"
         else:
+            ver_line = f"version: {ver_str or '1.0.0'}\n"
+            upd_line = f"updated_at: {upd_str}\n" if upd_str else ""
             full_md = (
                 f"---\n"
                 f"name: {safe_id}\n"
                 f"command: {cmd_str}\n"
+                f"{ver_line}"
+                f"{upd_line}"
                 f"type: skill\n"
                 f"description: {description.strip() or '自定义专业技能规程'}\n"
                 f"---\n\n"
@@ -1182,6 +1277,8 @@ class SkillLoader:
             "id": safe_id,
             "name": meta["name"],
             "command": meta["command"],
+            "version": meta.get("version") or "1.0.0",
+            "updated_at": meta.get("updated_at") or "",
             "type": meta["type"],
             "description": meta["description"],
             "path": str(normalized_path.resolve()),
@@ -1316,7 +1413,8 @@ class SkillLoader:
                 if s.get("has_schema"):
                     extras.append("📋含Schema契约")
                 extra_str = f" ({'/'.join(extras)})" if extras else ""
-                lines.append(f"- {tag} `{s['name']}` (快捷命令 `{s['command']}`){extra_str}: {s['description']}")
+                ver_tag = f" v{s.get('version', '1.0.0')}"
+                lines.append(f"- {tag} `{s['name']}`{ver_tag} (快捷命令 `{s['command']}`){extra_str}: {s['description']}")
         else:
             lines.append("（当前暂无本地技能包）")
 
@@ -1357,8 +1455,11 @@ class SkillLoader:
         target_md = skill_dir / "SKILL.md"
         try:
             raw_md = target_md.read_text(encoding="utf-8", errors="replace")
+            meta = self._parse_frontmatter(raw_md, skill_dir.name)
             four_tuple = self._inspect_four_tuple(skill_dir)
-            addon_sections: list[str] = []
+            addon_sections: list[str] = [
+                f"> 🏷️ Skill 标识: `{skill_dir.name}` · 指令 `{meta['command']}` · 版本 `v{meta.get('version') or '1.0.0'}`"
+            ]
 
             if scope == "workspace":
                 addon_sections.append(

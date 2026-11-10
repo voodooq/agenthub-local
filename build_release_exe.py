@@ -34,6 +34,7 @@ from sync_version import load_version_config, sync_all_manifests
 BASE_DIR = Path(__file__).resolve().parent
 FRONTEND_DIR = BASE_DIR / "frontend"
 FRONTEND_OUT = FRONTEND_DIR / "out"
+ASSETS_DIR = BASE_DIR / "assets"
 DIST_DIR = BASE_DIR / "dist"
 BUILD_DIR = BASE_DIR / "build"
 APP_NAME = "AgentHub"
@@ -198,9 +199,18 @@ def build_executable(mode: str, release_version: str) -> Path:
 
     if clean_skills_dir is not None:
         pyinstaller_cmd.extend(["--add-data", f"{clean_skills_dir}{sep}skills"])
+    if ASSETS_DIR.is_dir():
+        pyinstaller_cmd.extend(["--add-data", f"{ASSETS_DIR}{sep}assets"])
     mcp_cfg = BASE_DIR / "mcp_servers.json"
     if mcp_cfg.is_file():
         pyinstaller_cmd.extend(["--add-data", f"{mcp_cfg}{sep}."])
+
+    win_icon = ASSETS_DIR / "app_icon.ico"
+    mac_icon = ASSETS_DIR / "app_icon.icns"
+    if sys.platform == "win32" and win_icon.is_file():
+        pyinstaller_cmd.extend(["--icon", str(win_icon)])
+    elif sys.platform == "darwin" and mac_icon.is_file():
+        pyinstaller_cmd.extend(["--icon", str(mac_icon)])
 
     if sys.platform == "darwin":
         pyinstaller_cmd.extend(["--osx-bundle-identifier", "com.agenthub.desktop"])
@@ -242,6 +252,7 @@ def build_executable(mode: str, release_version: str) -> Path:
         "backend.app.api.v1.experiences",
         "backend.app.api.v1.memories",
         "backend.app.api.v1.skills",
+        "backend.app.api.v1.system",
         "backend.app.api.v1.loop",
         "backend.app.agent.runtime",
         "backend.app.agent.context_builder",

@@ -20,11 +20,16 @@ import {
   Sun,
   Moon,
   Laptop,
+  ExternalLink,
+  Copy,
+  GitBranch,
 } from 'lucide-react';
 import { apiFetch } from '@/utils/apiClient';
 import { ModelOption } from './ModelSelector';
 import { useTheme, ThemeMode } from '@/context/ThemeContext';
 import { useAppVersion } from '@/config/version';
+
+const OPEN_SOURCE_REPO_URL = 'https://github.com/voodooq/agenthub-local';
 
 export interface PersonaPreset {
   id: string;
@@ -84,6 +89,36 @@ export function SettingsModal({
   const [contextRounds, setContextRounds] = useState<number>(10);
   const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
   const [isCleaning, setIsCleaning] = useState(false);
+  const [copiedRepoUrl, setCopiedRepoUrl] = useState(false);
+  const [openingRepoUrl, setOpeningRepoUrl] = useState(false);
+
+  const handleOpenRepoUrl = async () => {
+    setOpeningRepoUrl(true);
+    try {
+      const res = await apiFetch('/api/v1/system/open-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: OPEN_SOURCE_REPO_URL }),
+      });
+      if (!res.ok) {
+        window.open(OPEN_SOURCE_REPO_URL, '_blank', 'noopener,noreferrer');
+      }
+    } catch {
+      window.open(OPEN_SOURCE_REPO_URL, '_blank', 'noopener,noreferrer');
+    } finally {
+      setOpeningRepoUrl(false);
+    }
+  };
+
+  const handleCopyRepoUrl = async () => {
+    try {
+      await navigator.clipboard.writeText(OPEN_SOURCE_REPO_URL);
+      setCopiedRepoUrl(true);
+      setTimeout(() => setCopiedRepoUrl(false), 2000);
+    } catch {
+      // 忽略剪贴板权限异常
+    }
+  };
 
   useEffect(() => {
     if (!isOpen) return;
@@ -829,21 +864,77 @@ export function SettingsModal({
           {/* ==================== TAB 4: 关于系统与本地引擎 ==================== */}
           {activeTab === 'about' && (
             <div className="space-y-5">
-              <div className="p-5 rounded-2xl bg-surface-100 border border-border flex items-center justify-between">
+              <div className="p-5 rounded-2xl bg-surface-100 border border-border flex items-center justify-between gap-3">
                 <div className="flex items-center space-x-3.5">
-                  <div className="w-10 h-10 rounded-2xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-600 dark:text-emerald-400 font-bold font-mono text-sm">
-                    AH
-                  </div>
+                  <img
+                    src="/icon.png"
+                    alt="AgentHub Local"
+                    className="w-12 h-12 rounded-xl object-contain shrink-0 shadow-sm"
+                  />
                   <div>
-                    <h3 className="text-sm font-bold text-foreground flex items-center space-x-2">
+                    <h3 className="text-sm font-bold text-foreground flex items-center flex-wrap gap-2">
                       <span>AgentHub Local</span>
-                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-mono">
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-mono border border-emerald-500/25">
                         {appVersionLabel}
                       </span>
                     </h3>
                     <p className="text-xs text-muted-foreground mt-0.5">
                       本地优先（Local-First）极客级 AI 智能工作流与 Agent 终端沙箱
                     </p>
+                  </div>
+                </div>
+              </div>
+
+              {/* 开源仓库与版本信息 */}
+              <div className="p-4 rounded-2xl bg-surface-100 border border-border space-y-3">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-bold text-foreground flex items-center space-x-1.5">
+                    <GitBranch className="w-3.5 h-3.5 text-emerald-500" />
+                    <span>开源仓库与项目主页</span>
+                  </span>
+                  <span className="text-[11px] font-mono text-emerald-600 dark:text-emerald-400">
+                    当前版本: {appVersionLabel}
+                  </span>
+                </div>
+
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 px-3 py-2.5 rounded-xl bg-surface-200/70 border border-border/80">
+                  <a
+                    href={OPEN_SOURCE_REPO_URL}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      void handleOpenRepoUrl();
+                    }}
+                    className="text-xs font-mono text-emerald-600 dark:text-emerald-400 hover:underline truncate cursor-pointer"
+                    title="在系统默认浏览器中打开 GitHub 开源仓库"
+                  >
+                    {OPEN_SOURCE_REPO_URL}
+                  </a>
+                  <div className="flex items-center space-x-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={handleCopyRepoUrl}
+                      className="px-2.5 py-1 rounded-lg bg-surface-100 hover:bg-surface-50 border border-border text-[11px] text-foreground transition-colors flex items-center space-x-1"
+                      title="复制开源仓库地址"
+                    >
+                      {copiedRepoUrl ? (
+                        <Check className="w-3 h-3 text-emerald-500" />
+                      ) : (
+                        <Copy className="w-3 h-3" />
+                      )}
+                      <span>{copiedRepoUrl ? '已复制' : '复制地址'}</span>
+                    </button>
+                    <button
+                      type="button"
+                      disabled={openingRepoUrl}
+                      onClick={handleOpenRepoUrl}
+                      className="px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium transition-colors flex items-center space-x-1 shadow-sm disabled:opacity-50"
+                      title="调用默认浏览器打开开源项目地址"
+                    >
+                      <ExternalLink className="w-3 h-3" />
+                      <span>{openingRepoUrl ? '打开中...' : '打开开源地址'}</span>
+                    </button>
                   </div>
                 </div>
               </div>

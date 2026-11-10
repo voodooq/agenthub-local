@@ -319,6 +319,9 @@ export function SkillsView({ workspace }: SkillsViewProps) {
                             <h4 className="text-sm font-semibold text-foreground truncate group-hover:text-emerald-600 dark:group-hover:text-emerald-400 transition">
                               {sk.name}
                             </h4>
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface-200 text-muted-foreground border border-border/70 flex-shrink-0">
+                              v{sk.version || '1.0.0'}
+                            </span>
                             {sk.scope === 'workspace' ? (
                               <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 flex-shrink-0 font-medium">
                                 {sk.is_override ? t('工作区重写') : t('工作区专属')}

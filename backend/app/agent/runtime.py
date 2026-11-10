@@ -462,6 +462,20 @@ class AgentRuntime:
             has_prior_execution_unlock=has_prior_execution_unlock,
         )
 
+        pre_matched_ids: list[str] = []
+        try:
+            pre_matched = await asyncio.to_thread(
+                skill_loader.resolve_slash_commands,
+                user_message,
+                target_cwd,
+            )
+            for m_sk in pre_matched:
+                sid = str(m_sk.get("id") or "").strip()
+                if sid and sid not in pre_matched_ids:
+                    pre_matched_ids.append(sid)
+        except Exception as pre_err:
+            logger.debug(f"[AgentRuntime] 预解析用户输入 /skill 跳过: {pre_err}")
+
         # 2.5 非无痕且非单次模式下：追加 user_input 账本事件并执行对齐卡 confirmed_facts 0-Token 直通入库
         if not active_incognito and active_scene != "oneshot":
             try:
@@ -471,10 +485,12 @@ class AgentRuntime:
                     turn_id=current_turn_id,
                     event_type="user_input",
                     actor="user",
+                    skill_id=pre_matched_ids[0] if pre_matched_ids else None,
                     payload={
                         "message": (user_message or "")[:1200],
                         "scene_mode": active_scene,
                         "execution_strategy": execution_strategy,
+                        "active_skill_ids": pre_matched_ids,
                     },
                     incognito=False,
                 )
@@ -536,7 +552,7 @@ class AgentRuntime:
         consecutive_stalls = 0
         allow_step_extension = not is_planning_phase
         command_history: list[dict[str, Any]] = []
-        active_skill_ids: list[str] = []
+        active_skill_ids: list[str] = list(pre_matched_ids)
         recovered_error_count = 0
         total_tool_steps = 0
         circuit_breaker_triggered = False
@@ -624,9 +640,13 @@ class AgentRuntime:
 
             # 首步向前端推送命中的长期记忆溯源、活跃确定性事实视图与当前任务草稿纸
             if step_idx == 0:
-                matched_sk_id = str(ctx.get("matched_skill_id") or "").strip()
-                if matched_sk_id and matched_sk_id not in active_skill_ids:
-                    active_skill_ids.append(matched_sk_id)
+                matched_ids_from_ctx = ctx.get("matched_skill_ids") or []
+                if not matched_ids_from_ctx and ctx.get("matched_skill_id"):
+                    matched_ids_from_ctx = [ctx["matched_skill_id"]]
+                for m_id in matched_ids_from_ctx:
+                    clean_sk_id = str(m_id or "").strip()
+                    if clean_sk_id and clean_sk_id not in active_skill_ids:
+                        active_skill_ids.append(clean_sk_id)
                 if ctx.get("active_facts"):
                     yield {
                         "type": "fact_refs",
@@ -1692,7 +1712,10 @@ class AgentRuntime:
 
                 # 追加写入 Event Ledger（tool_executed / artifact_produced / tool_error_recovered）
                 if not active_incognito and active_scene != "oneshot":
-                    step_skill_id = str(args.get("skill_name") or "").strip().lstrip("/") or None
+                    step_skill_id = (
+                        str(args.get("skill_name") or "").strip().lstrip("/")
+                        or (active_skill_ids[0] if active_skill_ids else None)
+                    )
                     current_loop_id = tracked_loop_id or (active_loop_obj.id if active_loop_obj else None)
                     try:
                         await event_ledger.append_event(

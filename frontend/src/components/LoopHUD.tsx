@@ -1,7 +1,12 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { TaskLoopResponse, LoopStatus, ExperienceProposalItem } from '@/types';
+import {
+  TaskLoopResponse,
+  LoopStatus,
+  ExperienceProposalItem,
+  ExperienceProposalTargetSkillOption,
+} from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 import { useLanguage } from '@/context/LanguageContext';
 import { ExperienceProposalCard } from '@/components/ExperienceProposalCard';
@@ -17,9 +22,13 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [distillFeedback, setDistillFeedback] = useState<string | null>(null);
   const [distillProposal, setDistillProposal] = useState<ExperienceProposalItem | null>(null);
+  const [distillAvailableSkills, setDistillAvailableSkills] = useState<
+    ExperienceProposalTargetSkillOption[]
+  >([]);
 
   useEffect(() => {
     setDistillProposal(null);
+    setDistillAvailableSkills([]);
     setDistillFeedback(null);
     setIsExpanded(false);
   }, [loop?.id]);
@@ -75,7 +84,15 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
       }
       if (data.proposal) {
         setIsExpanded(false);
-        setDistillProposal(data.proposal as ExperienceProposalItem);
+        const prop = data.proposal as ExperienceProposalItem;
+        setDistillProposal(prop);
+        setDistillAvailableSkills(
+          Array.isArray(prop.available_skills)
+            ? prop.available_skills
+            : Array.isArray(data.available_skills)
+            ? data.available_skills
+            : []
+        );
         setDistillFeedback(null);
       }
     } catch (e) {
@@ -262,6 +279,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
           <ExperienceProposalCard
             key={distillProposal.id}
             proposal={distillProposal}
+            availableSkills={distillAvailableSkills}
             embeddedInLoop
             onClose={() => {
               setDistillProposal(null);
@@ -270,10 +288,10 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
             onResolved={(_proposalId, action, updated) => {
               setDistillProposal(null);
               if (action === 'applied') {
-                const skillTag = updated?.proposed_skill_name
-                  ? `/${updated.proposed_skill_name}`
-                  : 'Skill 知识库';
-                setDistillFeedback(`✨ 经验已确认落盘并热加载至 ${skillTag}`);
+                const skillIdOrName = updated?.target_skill_id || updated?.proposed_skill_name;
+                const skillTag = skillIdOrName ? `/${skillIdOrName}` : 'Skill 知识库';
+                const verTag = updated?.applied_version ? ` (v${updated.applied_version})` : '';
+                setDistillFeedback(`✨ 经验已确认落盘并热加载至 ${skillTag}${verTag}`);
               } else {
                 setDistillFeedback(null);
               }

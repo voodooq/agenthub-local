@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   Sparkles,
   Check,
@@ -11,8 +11,14 @@ import {
   Layers,
   Globe,
   FolderGit2,
+  RefreshCw,
+  ArrowUpRight,
+  Loader2,
 } from 'lucide-react';
-import { ExperienceProposalItem } from '@/types';
+import {
+  ExperienceProposalItem,
+  ExperienceProposalTargetSkillOption,
+} from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 import {
   invalidateExtensionSkills,
@@ -23,6 +29,8 @@ import {
 
 interface ExperienceProposalCardProps {
   proposal: ExperienceProposalItem;
+  /** 可选传入当前工作区及全局已有 Skill 候选清单（支持迭代更新版本） */
+  availableSkills?: ExperienceProposalTargetSkillOption[];
   /** 是否嵌入顶部 Loop 引擎下方原地展开区域 */
   embeddedInLoop?: boolean;
   /** 仅收起本地预览面板（不忽略或删除提案） */
@@ -43,38 +51,196 @@ const TRIGGER_REASON_LABELS: Record<string, string> = {
 
 export function ExperienceProposalCard({
   proposal,
+  availableSkills,
   embeddedInLoop = false,
   onClose,
   onResolved,
 }: ExperienceProposalCardProps) {
-  const isPatch = proposal.proposal_type === 'skill_patch';
-  const initialEditable = isPatch
-    ? proposal.payload?.markdown_entry || ''
-    : proposal.payload?.skill_md || '';
+  const initialMode: 'update_existing' | 'create_new' =
+    proposal.proposal_type === 'skill_patch' ? 'update_existing' : 'create_new';
 
+  const [fetchedSkills, setFetchedSkills] = useState<ExperienceProposalTargetSkillOption[]>([]);
+  const skillOptions = useMemo(() => {
+    const raw =
+      availableSkills && availableSkills.length > 0
+        ? availableSkills
+        : proposal.available_skills && proposal.available_skills.length > 0
+        ? proposal.available_skills
+        : fetchedSkills;
+    const candidateIds = new Set(
+      [
+        ...(proposal.payload?.candidate_skill_ids || []),
+        proposal.target_skill_id || '',
+        proposal.payload?.target_skill_id || '',
+      ]
+        .map((s) => String(s || '').trim())
+        .filter(Boolean)
+    );
+    return [...raw].sort((a, b) => {
+      const aHit = candidateIds.has(a.id) ? 0 : 1;
+      const bHit = candidateIds.has(b.id) ? 0 : 1;
+      if (aHit !== bHit) return aHit - bHit;
+      if (a.scope !== b.scope) return a.scope === 'workspace' ? -1 : 1;
+      return a.name.localeCompare(b.name);
+    });
+  }, [availableSkills, proposal.available_skills, fetchedSkills, proposal.payload, proposal.target_skill_id]);
+
+  // 若外层未携带可用 Skill 列表，则后台按需拉取一次作为兜底
+  useEffect(() => {
+    if (
+      (availableSkills && availableSkills.length > 0) ||
+      (proposal.available_skills && proposal.available_skills.length > 0)
+    ) {
+      return;
+    }
+    let cancelled = false;
+    apiFetch(
+      `/api/v1/experiences/proposals?workspace_id=${encodeURIComponent(proposal.workspace_id)}&limit=1`
+    )
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!cancelled && Array.isArray(data?.available_skills)) {
+          setFetchedSkills(data.available_skills);
+        }
+      })
+      .catch(() => {
+        // 忽略后台补齐失败
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [availableSkills, proposal.available_skills, proposal.workspace_id]);
+
+  const initialTargetSkillId =
+    proposal.target_skill_id ||
+    proposal.payload?.target_skill_id ||
+    skillOptions[0]?.id ||
+    '';
+
+  const initialEditable =
+    initialMode === 'update_existing'
+      ? proposal.payload?.skill_md || proposal.payload?.markdown_entry || ''
+      : proposal.payload?.new_skill_md || proposal.payload?.skill_md || '';
+
+  const [applyMode, setApplyMode] = useState<'update_existing' | 'create_new'>(initialMode);
+  const [selectedTargetSkillId, setSelectedTargetSkillId] = useState<string>(initialTargetSkillId);
   const [targetScope, setTargetScope] = useState<'workspace' | 'global'>(
     proposal.target_scope || 'workspace'
   );
   const [skillNameInput, setSkillNameInput] = useState<string>(
-    proposal.proposed_skill_name || proposal.payload?.skill_id || ''
+    proposal.payload?.new_skill_id ||
+      proposal.proposed_skill_name ||
+      proposal.payload?.skill_id ||
+      ''
   );
   const [editedContent, setEditedContent] = useState<string>(initialEditable);
+  const [currentDiff, setCurrentDiff] = useState<string>(proposal.diff_preview || '');
+  const [currentVersion, setCurrentVersion] = useState<string>(
+    proposal.payload?.current_version || (initialMode === 'update_existing' ? '1.0.0' : '0.0.0')
+  );
+  const [nextVersion, setNextVersion] = useState<string>(
+    proposal.payload?.next_version || (initialMode === 'update_existing' ? '1.1.0' : '1.0.0')
+  );
+  const [targetFileDisplay, setTargetFileDisplay] = useState<string>(
+    proposal.payload?.target_file ||
+      (initialMode === 'update_existing'
+        ? `skills/${initialTargetSkillId || 'skill'}/SKILL.md`
+        : `skills/${proposal.payload?.new_skill_id || proposal.proposed_skill_name || 'custom-skill'}/SKILL.md`)
+  );
   const [isEditing, setIsEditing] = useState(false);
+  const [isPreviewLoading, setIsPreviewLoading] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
+  // 当延迟拉取到已有 Skill 候选且当前处于 update_existing 但未选中目标时自动补齐第一项
+  useEffect(() => {
+    if (applyMode === 'update_existing' && !selectedTargetSkillId && skillOptions.length > 0) {
+      setSelectedTargetSkillId(skillOptions[0].id);
+    }
+  }, [applyMode, selectedTargetSkillId, skillOptions]);
+
   const reasonBadge =
     TRIGGER_REASON_LABELS[proposal.trigger_reason] || '✨ 实战经验提炼';
+
+  const requestPreview = async (
+    nextMode: 'update_existing' | 'create_new',
+    nextTargetId: string,
+    nextScope: 'workspace' | 'global'
+  ) => {
+    setIsPreviewLoading(true);
+    setErrorMsg(null);
+    try {
+      const res = await apiFetch(`/api/v1/experiences/proposals/${proposal.id}/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          apply_mode: nextMode,
+          target_skill_id: nextMode === 'update_existing' ? nextTargetId || undefined : undefined,
+          target_scope: nextScope,
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.detail || `HTTP ${res.status}`);
+      }
+      const p = data.preview;
+      if (p) {
+        if (typeof p.draft_content === 'string') setEditedContent(p.draft_content);
+        if (typeof p.diff_preview === 'string') setCurrentDiff(p.diff_preview);
+        if (typeof p.current_version === 'string') setCurrentVersion(p.current_version);
+        if (typeof p.next_version === 'string') setNextVersion(p.next_version);
+        if (typeof p.target_file === 'string') setTargetFileDisplay(p.target_file);
+        if (nextMode === 'update_existing' && typeof p.target_skill_id === 'string' && p.target_skill_id) {
+          setSelectedTargetSkillId(p.target_skill_id);
+        } else if (nextMode === 'create_new' && typeof p.target_skill_id === 'string' && p.target_skill_id && !skillNameInput) {
+          setSkillNameInput(p.target_skill_id);
+        }
+      }
+    } catch (e: any) {
+      setErrorMsg(e?.message || '预览方案变更失败');
+    } finally {
+      setIsPreviewLoading(false);
+    }
+  };
+
+  const handleModeChange = (mode: 'update_existing' | 'create_new') => {
+    if (mode === applyMode) return;
+    const fallbackTarget = selectedTargetSkillId || skillOptions[0]?.id || '';
+    if (mode === 'update_existing' && fallbackTarget && !selectedTargetSkillId) {
+      setSelectedTargetSkillId(fallbackTarget);
+    }
+    setApplyMode(mode);
+    void requestPreview(mode, fallbackTarget, targetScope);
+  };
+
+  const handleTargetSkillChange = (nextSkillId: string) => {
+    setSelectedTargetSkillId(nextSkillId);
+    void requestPreview('update_existing', nextSkillId, targetScope);
+  };
+
+  const handleScopeChange = (nextScope: 'workspace' | 'global') => {
+    if (nextScope === targetScope) return;
+    setTargetScope(nextScope);
+    void requestPreview(applyMode, selectedTargetSkillId, nextScope);
+  };
 
   const handleApply = async () => {
     setIsSubmitting(true);
     setErrorMsg(null);
     try {
       const bodyPayload: Record<string, any> = {
+        apply_mode: applyMode,
         target_scope: targetScope,
         edited_content: editedContent,
       };
-      if (!isPatch && skillNameInput.trim()) {
+      if (applyMode === 'update_existing') {
+        if (selectedTargetSkillId.trim()) {
+          bodyPayload.target_skill_id = selectedTargetSkillId.trim();
+        }
+        if (nextVersion.trim()) {
+          bodyPayload.next_version = nextVersion.trim();
+        }
+      } else if (skillNameInput.trim()) {
         bodyPayload.target_skill_name = skillNameInput.trim();
       }
       const res = await apiFetch(`/api/v1/experiences/proposals/${proposal.id}/apply`, {
@@ -120,7 +286,10 @@ export function ExperienceProposalCard({
     }
   };
 
-  const diffLines = (proposal.diff_preview || '').replace(/\r\n/g, '\n').split('\n');
+  const candidateIdSet = new Set(
+    (proposal.payload?.candidate_skill_ids || []).map((s) => String(s || '').trim())
+  );
+  const diffLines = currentDiff.replace(/\r\n/g, '\n').split('\n');
 
   return (
     <div
@@ -141,8 +310,17 @@ export function ExperienceProposalCard({
               <span className="text-xs font-bold text-foreground truncate">
                 {proposal.title}
               </span>
-              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-medium">
-                {isPatch ? `补丁 → ${proposal.target_skill_id}` : '新建四元组 Skill'}
+              <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border border-emerald-500/30 font-medium flex items-center space-x-1">
+                {applyMode === 'update_existing' ? (
+                  <>
+                    <span>迭代升级 → /{selectedTargetSkillId || proposal.target_skill_id || 'skill'}</span>
+                    <span className="font-mono font-bold">
+                      v{currentVersion} → v{nextVersion}
+                    </span>
+                  </>
+                ) : (
+                  <span>新建四元组 Skill · v1.0.0</span>
+                )}
               </span>
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/25">
                 {reasonBadge}
@@ -159,7 +337,7 @@ export function ExperienceProposalCard({
           <div className="flex items-center rounded-lg bg-surface-100 border border-border p-0.5 text-[11px]">
             <button
               type="button"
-              onClick={() => setTargetScope('workspace')}
+              onClick={() => handleScopeChange('workspace')}
               className={`px-2 py-0.5 rounded-md flex items-center space-x-1 transition-colors ${
                 targetScope === 'workspace'
                   ? 'bg-emerald-600 text-white font-medium'
@@ -172,7 +350,7 @@ export function ExperienceProposalCard({
             </button>
             <button
               type="button"
-              onClick={() => setTargetScope('global')}
+              onClick={() => handleScopeChange('global')}
               className={`px-2 py-0.5 rounded-md flex items-center space-x-1 transition-colors ${
                 targetScope === 'global'
                   ? 'bg-emerald-600 text-white font-medium'
@@ -241,34 +419,106 @@ export function ExperienceProposalCard({
         </div>
       </div>
 
-      {/* Diff 预览区或可编辑正文中枢 */}
-      <div className="px-4 py-3 space-y-2.5">
-        {!isPatch && (
-          <div className="flex items-center space-x-2 text-xs">
-            <GitBranch className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-            <span className="text-muted-foreground shrink-0">目标 Skill ID (kebab-case):</span>
-            <input
-              type="text"
-              value={skillNameInput}
-              onChange={(e) => setSkillNameInput(e.target.value)}
-              placeholder="例如: auto-excel-reconcile"
-              className="flex-1 max-w-xs px-2.5 py-1 rounded-lg border border-border bg-background text-xs font-mono text-foreground focus:outline-none focus:border-emerald-500"
-            />
+      {/* 演进模式选择、目标 Skill 选择器与版本跃迁控制栏 */}
+      <div className="px-4 pt-3 pb-2 space-y-2.5">
+        <div className="flex flex-wrap items-center justify-between gap-2 p-2.5 rounded-xl bg-surface-100/70 border border-border/70">
+          <div className="flex items-center rounded-lg bg-background border border-border p-0.5 text-[11px]">
+            <button
+              type="button"
+              disabled={isPreviewLoading || isSubmitting}
+              onClick={() => handleModeChange('update_existing')}
+              className={`px-2.5 py-1 rounded-md flex items-center space-x-1 transition-colors disabled:opacity-50 ${
+                applyMode === 'update_existing'
+                  ? 'bg-emerald-600 text-white font-semibold shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <RefreshCw className="w-3 h-3" />
+              <span>迭代更新已有 Skill</span>
+            </button>
+            <button
+              type="button"
+              disabled={isPreviewLoading || isSubmitting}
+              onClick={() => handleModeChange('create_new')}
+              className={`px-2.5 py-1 rounded-md flex items-center space-x-1 transition-colors disabled:opacity-50 ${
+                applyMode === 'create_new'
+                  ? 'bg-emerald-600 text-white font-semibold shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <Sparkles className="w-3 h-3" />
+              <span>另存新建独立 Skill</span>
+            </button>
           </div>
-        )}
 
-        {isEditing ? (
+          {applyMode === 'update_existing' ? (
+            <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[220px] justify-end">
+              <div className="flex items-center space-x-1.5 min-w-0 flex-1 max-w-sm">
+                <span className="text-[11px] text-muted-foreground shrink-0">升级目标:</span>
+                <select
+                  value={selectedTargetSkillId}
+                  disabled={isPreviewLoading || isSubmitting || skillOptions.length === 0}
+                  onChange={(e) => handleTargetSkillChange(e.target.value)}
+                  className="flex-1 min-w-0 px-2.5 py-1 rounded-lg border border-border bg-background text-xs font-mono text-foreground focus:outline-none focus:border-emerald-500"
+                >
+                  {skillOptions.length === 0 ? (
+                    <option value={selectedTargetSkillId || ''}>
+                      {selectedTargetSkillId ? `/${selectedTargetSkillId}` : '暂无可选 Skill'}
+                    </option>
+                  ) : (
+                    skillOptions.map((sk) => (
+                      <option key={`${sk.scope}:${sk.id}`} value={sk.id}>
+                        {candidateIdSet.has(sk.id) ? '★ ' : ''}
+                        {sk.command} ({sk.name}) · v{sk.version || '1.0.0'} [
+                        {sk.scope === 'workspace' ? '工作区' : '全局'}]
+                      </option>
+                    ))
+                  )}
+                </select>
+              </div>
+
+              <div className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-[11px] font-mono text-emerald-700 dark:text-emerald-300 shrink-0">
+                <span>v{currentVersion}</span>
+                <ArrowUpRight className="w-3 h-3" />
+                <span className="font-bold">v{nextVersion}</span>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center space-x-2 flex-1 min-w-[220px] justify-end text-xs">
+              <GitBranch className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+              <span className="text-muted-foreground shrink-0 text-[11px]">新 Skill ID:</span>
+              <input
+                type="text"
+                value={skillNameInput}
+                onChange={(e) => setSkillNameInput(e.target.value)}
+                placeholder="例如: auto-excel-reconcile"
+                className="flex-1 max-w-xs px-2.5 py-1 rounded-lg border border-border bg-background text-xs font-mono text-foreground focus:outline-none focus:border-emerald-500"
+              />
+              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-surface-200 border border-border text-muted-foreground shrink-0">
+                v1.0.0
+              </span>
+            </div>
+          )}
+        </div>
+
+        {/* Diff 预览区或可编辑正文中枢 */}
+        {isPreviewLoading ? (
+          <div className="rounded-xl border border-border bg-surface-100/70 p-6 flex items-center justify-center space-x-2 text-xs text-muted-foreground">
+            <Loader2 className="w-4 h-4 animate-spin text-emerald-500" />
+            <span>正在生成版本差异与更新草案...</span>
+          </div>
+        ) : isEditing ? (
           <div className="space-y-1">
             <div className="text-[11px] text-muted-foreground flex items-center space-x-1">
               <Layers className="w-3 h-3" />
               <span>
                 正在编辑即将写入{' '}
                 <code className="font-mono text-foreground">
-                  {isPatch
-                    ? `skills/${proposal.target_skill_id}/knowledge/experience_playbook.md`
-                    : `skills/${skillNameInput || proposal.proposed_skill_name}/SKILL.md`}
+                  {applyMode === 'update_existing'
+                    ? targetFileDisplay || `skills/${selectedTargetSkillId}/SKILL.md`
+                    : `skills/${skillNameInput || proposal.proposed_skill_name || 'custom-skill'}/SKILL.md`}
                 </code>{' '}
-                的内容：
+                的完整内容：
               </span>
             </div>
             <textarea
@@ -315,7 +565,7 @@ export function ExperienceProposalCard({
             <button
               type="button"
               onClick={handleDismiss}
-              disabled={isSubmitting}
+              disabled={isSubmitting || isPreviewLoading}
               className="px-3 py-1.5 rounded-xl border border-border bg-surface-100 hover:bg-rose-500/10 hover:text-rose-500 text-xs text-muted-foreground transition-colors flex items-center space-x-1 disabled:opacity-50"
             >
               <X className="w-3.5 h-3.5" />
@@ -324,16 +574,16 @@ export function ExperienceProposalCard({
             <button
               type="button"
               onClick={handleApply}
-              disabled={isSubmitting}
+              disabled={isSubmitting || isPreviewLoading}
               className="px-4 py-1.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm shadow-emerald-600/20 transition-all flex items-center space-x-1.5 disabled:opacity-50"
             >
               <Check className="w-3.5 h-3.5" />
               <span>
                 {isSubmitting
                   ? '落盘同步中...'
-                  : isPatch
-                  ? '确认合入经验库'
-                  : '确认创建 Skill'}
+                  : applyMode === 'update_existing'
+                  ? `确认迭代升级至 v${nextVersion}`
+                  : '确认创建 Skill v1.0.0'}
               </span>
             </button>
           </div>

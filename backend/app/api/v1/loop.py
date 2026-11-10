@@ -2,11 +2,14 @@
 任务自主循环 (Task Loop) 与三级审批接口路由
 """
 from fastapi import APIRouter, HTTPException
+import asyncio
 from ...agent.loop_runner import TaskLoopRunner
 from ...core.logging_config import logger
+from ...extensions.skill_loader import skill_loader
 from ...memory.ledger import event_ledger
 from ...repository.conversation_repository import ConversationRepository
 from ...repository.loop_run_repository import TaskLoopRepository
+from ...repository.message_repository import MessageRepository
 from ...repository.workspace_repository import WorkspaceRepository
 from ...schema.loop_schema import (
     TaskLoopApprovalAction,
@@ -14,7 +17,11 @@ from ...schema.loop_schema import (
     TaskLoopCreateRequest,
     TaskLoopResponse,
 )
-from ...skills.experience_distiller import ExecutionTrace, experience_distiller
+from ...skills.experience_distiller import (
+    ExecutionTrace,
+    experience_distiller,
+    skill_experience_service,
+)
 
 router = APIRouter(prefix="/loop", tags=["Task Loop & HITL Gate"])
 
@@ -175,9 +182,14 @@ async def distill_loop_to_skill(loop_id: str) -> dict:
 
     for evt in events:
         etype = evt.get("event_type")
+        evt_payload = evt.get("payload") if isinstance(evt.get("payload"), dict) else {}
         sid = str(evt.get("skill_id") or "").strip()
         if sid and sid not in active_skills:
             active_skills.append(sid)
+        for p_sid in (evt_payload.get("active_skill_ids") or []):
+            clean_p_sid = str(p_sid or "").strip()
+            if clean_p_sid and clean_p_sid not in active_skills:
+                active_skills.append(clean_p_sid)
         if etype == "tool_executed":
             tool_steps += 1
         elif etype == "tool_error_recovered":
@@ -185,9 +197,44 @@ async def distill_loop_to_skill(loop_id: str) -> dict:
         elif etype == "user_intervention":
             had_intervention = True
         elif etype == "artifact_produced":
-            p = str((evt.get("payload") or {}).get("file_path") or "").strip()
+            p = str(evt_payload.get("file_path") or "").strip()
             if p and p not in artifacts:
                 artifacts.append(p)
+
+    # 回溯 Loop 目标文案与同会话近期用户输入，确保多轮微调优化已有 Skill 时不会丢失关联目标
+    if loop_data.goal_prompt:
+        try:
+            goal_matched = await asyncio.to_thread(
+                skill_loader.resolve_slash_commands,
+                loop_data.goal_prompt,
+                ws_root,
+            )
+            for gm in goal_matched:
+                g_sid = str(gm.get("id") or "").strip()
+                if g_sid and g_sid not in active_skills:
+                    active_skills.append(g_sid)
+        except Exception:
+            pass
+
+    if not active_skills:
+        try:
+            recent_msgs = await MessageRepository.get_by_conversation(loop_data.conversation_id, limit=40)
+            for m in reversed(recent_msgs):
+                if getattr(m, "role", "") != "user":
+                    continue
+                msg_matched = await asyncio.to_thread(
+                    skill_loader.resolve_slash_commands,
+                    getattr(m, "content", "") or "",
+                    ws_root,
+                )
+                for mm in msg_matched:
+                    m_sid = str(mm.get("id") or "").strip()
+                    if m_sid and m_sid not in active_skills:
+                        active_skills.append(m_sid)
+                if active_skills:
+                    break
+        except Exception as msg_err:
+            logger.debug(f"回溯会话近期用户指令关联 Skill 跳过: {msg_err}")
 
     trace = ExecutionTrace(
         workspace_id=loop_data.workspace_id,
@@ -209,5 +256,9 @@ async def distill_loop_to_skill(loop_id: str) -> dict:
     proposal = await experience_distiller.distill_and_propose(trace, force=True)
     if not proposal:
         raise HTTPException(status_code=400, detail="未能从当前任务轨迹中生成有效经验提议")
+    proposal["available_skills"] = await asyncio.to_thread(
+        skill_experience_service.list_available_target_skills,
+        ws_root,
+    )
     return {"success": True, "proposal": proposal}
 

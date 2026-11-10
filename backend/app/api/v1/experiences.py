@@ -1,13 +1,32 @@
 """
 Skill 经验提炼提议与自进化审批接口 (Experience Evolution API)
 """
+import asyncio
 from typing import Literal
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from ...repository.workspace_repository import WorkspaceRepository
 from ...skills.experience_distiller import skill_experience_service
 
 router = APIRouter(prefix="/experiences", tags=["Experience Evolution"])
+
+
+class ExperienceProposalPreviewRequest(BaseModel):
+    """切换应用模式或更新目标 Skill 时实时重算 Diff 与草案正文请求体"""
+
+    apply_mode: Literal["update_existing", "create_new"] = Field(
+        "update_existing",
+        description="应用模式：迭代更新已有 Skill 或另存新建独立 Skill",
+    )
+    target_skill_id: str | None = Field(
+        None,
+        description="当 apply_mode=update_existing 时指定的目标 Skill ID",
+    )
+    target_scope: Literal["workspace", "global"] | None = Field(
+        None,
+        description="可选作用域：工作区私有 (workspace) 或全局底座 (global)",
+    )
 
 
 class ExperienceProposalApplyRequest(BaseModel):
@@ -18,7 +37,16 @@ class ExperienceProposalApplyRequest(BaseModel):
         None, description="可选覆盖目标作用域：工作区私有 (workspace) 或全局底座 (global)"
     )
     target_skill_name: str | None = Field(
-        None, description="可选重命名新建 Skill ID（仅 proposal_type=new_skill 生效）"
+        None, description="可选重命名新建 Skill ID（仅 create_new 生效）"
+    )
+    apply_mode: Literal["update_existing", "create_new"] | None = Field(
+        None, description="可选覆盖应用模式：迭代更新已有 Skill 或另存为新 Skill"
+    )
+    target_skill_id: str | None = Field(
+        None, description="迭代更新已有 Skill 时指定的目标 Skill ID"
+    )
+    next_version: str | None = Field(
+        None, description="可选指定更新后的语义化版本号（如 1.1.0）"
     )
 
 
@@ -37,7 +65,34 @@ async def list_experience_proposals(
         status=clean_status,
         limit=limit,
     )
-    return {"proposals": items, "total": len(items)}
+    ws_root = await WorkspaceRepository.get_root_path_by_id(workspace_id) if workspace_id else None
+    available_skills = await asyncio.to_thread(
+        skill_experience_service.list_available_target_skills,
+        ws_root,
+    )
+    return {"proposals": items, "total": len(items), "available_skills": available_skills}
+
+
+@router.post("/proposals/{proposal_id}/preview")
+async def preview_experience_proposal(
+    proposal_id: str,
+    req: ExperienceProposalPreviewRequest,
+) -> dict:
+    """当用户切换更新目标 Skill 或另存新建模式时，实时预览对应 Diff 与最新版本信息"""
+    try:
+        preview = await skill_experience_service.preview_proposal(
+            proposal_id,
+            apply_mode=req.apply_mode,
+            target_skill_id=req.target_skill_id,
+            target_scope=req.target_scope,
+        )
+        return {"success": True, "preview": preview}
+    except KeyError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"预览经验提议失败: {e}")
 
 
 @router.post("/proposals/{proposal_id}/apply")
@@ -46,7 +101,7 @@ async def apply_experience_proposal(
     req: ExperienceProposalApplyRequest | None = None,
 ) -> dict:
     """
-    经用户确认 Diff 后，将经验提议正式写入 Skill 目录（knowledge/experience_playbook.md 或新建四元组）
+    经用户确认 Diff 后，将经验提议正式写入 Skill 目录（迭代升级 SKILL.md 与版本号或新建四元组）
     并立即同步 SQLite FTS5 与刷新内存缓存。
     """
     body = req or ExperienceProposalApplyRequest()
@@ -56,6 +111,9 @@ async def apply_experience_proposal(
             edited_content=body.edited_content,
             target_scope=body.target_scope,
             target_skill_name=body.target_skill_name,
+            apply_mode=body.apply_mode,
+            target_skill_id=body.target_skill_id,
+            next_version=body.next_version,
         )
         return {"success": True, "proposal": updated}
     except KeyError as e:

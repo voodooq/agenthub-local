@@ -127,7 +127,11 @@ export function Sidebar({
         <div className="flex items-center justify-between">
           {!isCollapsed && (
             <span className="text-xs font-bold tracking-wider text-muted-foreground font-mono flex items-center space-x-1.5 pl-1">
-              <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
+              <img
+                src="/icon.png"
+                alt="AgentHub Logo"
+                className="w-5 h-5 rounded-md object-contain shrink-0"
+              />
               <span>AGENT-HUB</span>
               <span className="text-[10px] text-muted-foreground/70 font-normal">{appVersionTag}</span>
             </span>

@@ -181,9 +181,12 @@ export function SkillPickerModal({
                             onClose();
                           }}
                         >
-                          <div className="flex items-center space-x-2.5 min-w-0 pr-2">
+                          <div className="flex items-center space-x-2 min-w-0 pr-2">
                             <span className="font-mono text-xs font-semibold text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded border border-emerald-500/20 flex-shrink-0">
                               {displayCmd}
+                            </span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface-200 text-muted-foreground border border-border/70 flex-shrink-0">
+                              v{sk.version || '1.0.0'}
                             </span>
                             <span className="text-xs text-foreground truncate">{sk.description || sk.name}</span>
                             {sk.is_override && (
@@ -227,9 +230,12 @@ export function SkillPickerModal({
                             onClose();
                           }}
                         >
-                          <div className="flex items-center space-x-2.5 min-w-0 pr-2">
+                          <div className="flex items-center space-x-2 min-w-0 pr-2">
                             <span className="font-mono text-xs font-semibold text-blue-600 dark:text-blue-400 bg-blue-500/10 px-2 py-0.5 rounded border border-blue-500/20 flex-shrink-0">
                               {displayCmd}
+                            </span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface-200 text-muted-foreground border border-border/70 flex-shrink-0">
+                              v{sk.version || '1.0.0'}
                             </span>
                             <span className="text-xs text-foreground truncate">{sk.description || sk.name}</span>
                           </div>

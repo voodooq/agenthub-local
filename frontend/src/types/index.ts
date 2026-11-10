@@ -97,6 +97,15 @@ export interface ExperienceProposalTriple {
   solution: string;
 }
 
+export interface ExperienceProposalTargetSkillOption {
+  id: string;
+  name: string;
+  command: string;
+  version: string;
+  scope: 'workspace' | 'global' | string;
+  description?: string;
+}
+
 export interface ExperienceProposalPayload {
   target_file?: string;
   markdown_entry?: string;
@@ -106,6 +115,17 @@ export interface ExperienceProposalPayload {
   skill_md?: string;
   schema_json?: Record<string, any> | null;
   playbook_md?: string;
+  update_mode?: 'upgrade_skill_md' | 'playbook_only' | string;
+  target_skill_id?: string;
+  current_version?: string;
+  next_version?: string;
+  candidate_skill_ids?: string[];
+  new_skill_id?: string;
+  new_command?: string;
+  new_description?: string;
+  new_skill_md?: string;
+  new_schema_json?: Record<string, any> | null;
+  new_playbook_md?: string;
 }
 
 export interface ExperienceProposalItem {
@@ -128,6 +148,8 @@ export interface ExperienceProposalItem {
   resolved_at?: string | null;
   written_path?: string;
   skill_dir?: string;
+  applied_version?: string;
+  available_skills?: ExperienceProposalTargetSkillOption[];
 }
 
 export interface LongTermMemoryItem {
@@ -313,6 +335,8 @@ export interface ExtensionSkillItem {
   id: string;
   name: string;
   command: string;
+  version?: string;
+  updated_at?: string;
   type?: 'skill' | 'mcp' | 'suite' | string;
   tier?: string;
   mcp_server?: string;

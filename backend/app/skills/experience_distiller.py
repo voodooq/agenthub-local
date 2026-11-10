@@ -19,13 +19,13 @@ from typing import Any
 import uuid
 
 from ..core.logging_config import logger
-from ..extensions.skill_loader import skill_loader
+from ..extensions.skill_loader import bump_semver, normalize_version_str, skill_loader
 from ..memory.fact_manager import fact_manager
 from ..memory.ledger import event_ledger
 from ..memory.policy_guard import MemoryPolicyGuard
 from ..repository.db import db_manager
 from ..repository.workspace_repository import WorkspaceRepository
-from .skill_service import invalidate_skill_file_cache
+from .skill_service import SkillService, invalidate_skill_file_cache
 
 
 @dataclass
@@ -283,6 +283,7 @@ class ExperienceDistiller:
         root_cause: str,
         solution: str,
         do_steps: list[str],
+        version_transition: str = "",
     ) -> str:
         """构造标准化的 experience_playbook.md 追加条目 Markdown"""
         now_date = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -293,8 +294,9 @@ class ExperienceDistiller:
             "complex_unskilled_workflow": "复杂链路总结",
         }.get(trigger_reason, trigger_reason)
 
+        ver_prefix = f"[{version_transition}] " if version_transition else ""
         lines = [
-            f"## [{now_date}] {title.strip()} ({reason_label})",
+            f"## [{now_date}] {ver_prefix}{title.strip()} ({reason_label})",
             f"- **触发场景与异常现象**: {problem.strip()}",
             f"- **根因定位**: {root_cause.strip()}",
             f"- **最佳实践与规避方案**: {solution.strip()}",
@@ -304,6 +306,99 @@ class ExperienceDistiller:
             for idx, step in enumerate(do_steps[:6], 1):
                 lines.append(f"  {idx}. {step}")
         return _normalize_newlines("\n".join(lines).strip())
+
+    @staticmethod
+    def build_upgraded_skill_md(
+        *,
+        skill_id: str,
+        workspace_root: str | None,
+        title: str,
+        goal: str,
+        problem: str,
+        root_cause: str,
+        solution: str,
+        do_steps: list[str],
+        llm_upgraded_body: str = "",
+        next_version_override: str | None = None,
+    ) -> tuple[str, str, str, str, str]:
+        """
+        基于已有 Skill 的 SKILL.md 融合本次优化经验与 SOP，生成递增版本号后的新版 SKILL.md。
+        返回: (old_skill_md, new_skill_md, current_version, next_version, command)
+        """
+        clean_id = skill_loader._sanitize_skill_id(skill_id)
+        existing_dir, _ = skill_loader.resolve_skill_dir_with_scope(
+            skill_id,
+            workspace_root=workspace_root,
+        )
+        old_skill_md = ""
+        if existing_dir and (existing_dir / "SKILL.md").is_file():
+            try:
+                old_skill_md = _normalize_newlines(
+                    (existing_dir / "SKILL.md").read_text(encoding="utf-8", errors="replace")
+                )
+            except OSError:
+                old_skill_md = ""
+
+        if old_skill_md.strip():
+            meta = skill_loader._parse_frontmatter(old_skill_md, existing_dir.name if existing_dir else clean_id)
+        else:
+            meta = {
+                "name": clean_id,
+                "command": f"/{clean_id}",
+                "version": "1.0.0",
+                "type": "skill",
+                "mcp_server": "",
+                "description": f"{clean_id} 自动化专业技能包",
+                "body": f"# {clean_id} 操作规程",
+            }
+
+        current_version = normalize_version_str(meta.get("version"))
+        next_version = (
+            normalize_version_str(next_version_override)
+            if next_version_override
+            else bump_semver(current_version, level="minor")
+        )
+        now_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        clean_llm_body = _normalize_newlines(llm_upgraded_body or "").strip()
+        if clean_llm_body.startswith("---"):
+            clean_llm_body = re.sub(r"^---\s*\n.*?\n---\s*\n?", "", clean_llm_body, count=1, flags=re.DOTALL).strip()
+
+        if len(clean_llm_body) >= 30:
+            new_body = clean_llm_body
+        else:
+            old_body = _normalize_newlines(meta.get("body") or f"# {meta['name']}").strip()
+            iter_lines = [
+                f"## 迭代优化规程 (v{next_version} · {now_day})",
+                f"- **本次迭代主题**: {title or goal[:80] or '规程优化升级'}",
+                f"- **针对场景与问题**: {problem.strip()}",
+                f"- **根因诊断结论**: {root_cause.strip()}",
+                f"- **升级方案与规范**: {solution.strip()}",
+            ]
+            if do_steps:
+                iter_lines.append("- **标准执行与校验动作**:")
+                for idx, st in enumerate(do_steps[:6], 1):
+                    iter_lines.append(f"  {idx}. {st}")
+            iter_block = "\n".join(iter_lines).strip()
+            new_body = f"{old_body}\n\n{iter_block}" if old_body else iter_block
+
+        desc_clean, _ = MemoryPolicyGuard.sanitize_text(meta.get("description") or f"{meta['name']} 专业技能")
+        body_clean, _ = MemoryPolicyGuard.sanitize_text(new_body)
+        mcp_line = f"mcp_server: {meta['mcp_server']}\n" if meta.get("mcp_server") else ""
+
+        new_skill_md = _normalize_newlines(
+            f"---\n"
+            f"name: {meta['name']}\n"
+            f"command: {meta['command']}\n"
+            f"version: {next_version}\n"
+            f"updated_at: {now_day}\n"
+            f"type: {meta.get('type') or 'skill'}\n"
+            f"{mcp_line}"
+            f"description: {desc_clean}\n"
+            f"---\n\n"
+            f"{body_clean.strip()}\n"
+        )
+        return old_skill_md, new_skill_md, current_version, next_version, meta["command"]
 
     @staticmethod
     def _build_new_skill_files(
@@ -345,10 +440,13 @@ class ExperienceDistiller:
             step_lines.append("1. 检查当前工作区上下文与已激活参数契约，定位目标输入与输出目录。")
             step_lines.append("2. 按任务目标执行必要工具验证并校验产物完整性。")
 
+        now_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         skill_md_parts = [
             "---",
             f"name: {skill_id}",
             f"command: {cmd_clean}",
+            "version: 1.0.0",
+            f"updated_at: {now_day}",
             "type: skill",
             f"description: {description}",
             "---",
@@ -425,6 +523,7 @@ class ExperienceDistiller:
         active_facts: list[dict[str, Any]],
         proposal_type: str,
         trigger_reason: str,
+        existing_skill_md: str = "",
     ) -> dict[str, Any] | None:
         """尝试调用轻量模型提炼结构化三元组；若无账号/超时/输出非法则返回 None"""
         if not await self._has_active_llm_account():
@@ -437,6 +536,7 @@ class ExperienceDistiller:
             "trigger_reason": trigger_reason,
             "proposal_type": proposal_type,
             "target_skill_ids": trace.active_skill_ids,
+            "existing_skill_md_snippet": existing_skill_md[:2400] if existing_skill_md else "",
             "recoveries": extracted["recoveries"][:4],
             "interventions": extracted["interventions"][:4],
             "effective_steps": [
@@ -459,6 +559,7 @@ class ExperienceDistiller:
             '"solution": "可复用的标准解决或避坑方案", '
             '"proposed_skill_id": "若为new_skill，建议kebab-case英文ID（如invoice-checker）", '
             '"skill_description": "若为new_skill，一句话功能说明", '
+            '"upgraded_sop_body": "若为skill_patch且有existing_skill_md_snippet，可输出保留原核心并融入本次新增要求/步骤的升级版Markdown正文(不含---Frontmatter)", '
             '"steps": ["提炼后的最短有效步骤1", "步骤2"]}\n\n'
             f"执行轨迹数据：\n{json.dumps(safe_ctx, ensure_ascii=False)}"
         )
@@ -590,6 +691,20 @@ class ExperienceDistiller:
         target_scope = "workspace" if (ws_root and Path(ws_root).is_dir()) else "global"
 
         # 2. 轻量模型提纯（可选），失败时自动降级确定性启发式结构化组装
+        existing_skill_md_for_llm = ""
+        if proposal_type == "skill_patch" and target_skill_id:
+            try:
+                sk_dir_llm, _ = skill_loader.resolve_skill_dir_with_scope(
+                    target_skill_id,
+                    workspace_root=ws_root,
+                )
+                if sk_dir_llm and (sk_dir_llm / "SKILL.md").is_file():
+                    existing_skill_md_for_llm = (sk_dir_llm / "SKILL.md").read_text(
+                        encoding="utf-8", errors="replace"
+                    )[:2400]
+            except OSError:
+                existing_skill_md_for_llm = ""
+
         llm_data = None
         if use_llm:
             llm_data = await self._try_llm_distill(
@@ -598,6 +713,7 @@ class ExperienceDistiller:
                 active_facts=active_facts,
                 proposal_type=proposal_type,
                 trigger_reason=reason,
+                existing_skill_md=existing_skill_md_for_llm,
             )
 
         fallback_goal = scratchpad_text.splitlines()[0] if scratchpad_text else ""
@@ -619,6 +735,7 @@ class ExperienceDistiller:
             steps_list = [str(st).strip() for st in raw_steps if str(st).strip()]
             llm_skill_id = str(llm_data.get("proposed_skill_id") or "").strip()
             llm_desc = str(llm_data.get("skill_description") or "").strip()
+            llm_upgraded_body = str(llm_data.get("upgraded_sop_body") or "").strip()
         else:
             title = ""
             summary = ""
@@ -628,6 +745,7 @@ class ExperienceDistiller:
             steps_list = []
             llm_skill_id = ""
             llm_desc = ""
+            llm_upgraded_body = ""
 
         # 确定性启发式补全缺省字段
         if not problem:
@@ -670,7 +788,7 @@ class ExperienceDistiller:
         if not summary:
             summary = (
                 f"基于 {len(recoveries)} 次自愈修复与 {len(effective_tools)} 步有效工具轨迹凝练，"
-                f"经确认后将{'增补至 experience_playbook.md' if proposal_type == 'skill_patch' else '创建标准化四元组 Skill'}。"
+                f"经确认后将{'迭代升级 Skill 版本并同步更新 experience_playbook.md' if proposal_type == 'skill_patch' else '创建标准化四元组 Skill'}。"
             )
 
         # 全量隐私网关过滤，绝不允许敏感凭据/绝对私钥落入提议或 Skill
@@ -699,8 +817,54 @@ class ExperienceDistiller:
                 self._processed_loop_ids.add(trace.loop_id)
             return None
 
+        raw_slug = llm_skill_id or clean_goal[:36]
+        alt_skill_name = _normalize_kebab_id(
+            raw_slug,
+            fallback=f"workflow-{uuid.uuid4().hex[:6]}",
+        )
+        if alt_skill_name.startswith("workflow-") and len(clean_goal) > 0:
+            ascii_tokens = re.findall(r"[a-zA-Z0-9]{2,}", clean_goal)
+            if ascii_tokens:
+                alt_skill_name = _normalize_kebab_id("-".join(ascii_tokens[:3]))
+        alt_command = f"/{alt_skill_name}"
+        alt_desc = MemoryPolicyGuard.sanitize_text(
+            llm_desc or f"自动沉淀技能：{clean_goal[:70]}"
+        )[0]
+        alt_skill_md, alt_schema_json, alt_playbook_md = self._build_new_skill_files(
+            skill_id=alt_skill_name,
+            command=alt_command,
+            description=alt_desc,
+            goal=clean_goal[:140],
+            triple=triple,
+            effective_tools=effective_tools,
+            active_facts=active_facts,
+            artifacts=artifacts,
+            trigger_reason=reason,
+        )
+        alt_skill_md, _ = MemoryPolicyGuard.sanitize_text(alt_skill_md)
+        alt_playbook_md, _ = MemoryPolicyGuard.sanitize_text(alt_playbook_md)
+
+        distill_context = {
+            "title": title,
+            "goal": clean_goal[:140],
+            "triple": triple,
+            "steps": steps_list,
+            "trigger_reason": reason,
+        }
+
         if proposal_type == "skill_patch" and target_skill_id:
             proposed_skill_name = target_skill_id
+            old_skill_md, upgraded_skill_md, current_ver, next_ver, target_cmd = self.build_upgraded_skill_md(
+                skill_id=target_skill_id,
+                workspace_root=ws_root,
+                title=title,
+                goal=clean_goal[:140],
+                problem=problem,
+                root_cause=root_cause,
+                solution=solution,
+                do_steps=steps_list,
+                llm_upgraded_body=llm_upgraded_body,
+            )
             markdown_entry = self._build_skill_patch_entry(
                 title=title,
                 trigger_reason=reason,
@@ -708,79 +872,58 @@ class ExperienceDistiller:
                 root_cause=root_cause,
                 solution=solution,
                 do_steps=steps_list,
+                version_transition=f"v{current_ver} → v{next_ver}",
             )
             markdown_entry, _ = MemoryPolicyGuard.sanitize_text(markdown_entry)
-
-            # 读取目标 Skill 既有 playbook 原文以便生成真实 Unified Diff
-            existing_skill_dir, _ = skill_loader.resolve_skill_dir_with_scope(
-                target_skill_id,
-                workspace_root=ws_root,
-            )
-            old_pb = ""
-            if existing_skill_dir:
-                pb_file = existing_skill_dir / "knowledge" / "experience_playbook.md"
-                if pb_file.is_file():
-                    try:
-                        old_pb = _normalize_newlines(pb_file.read_text(encoding="utf-8", errors="replace"))
-                    except OSError:
-                        old_pb = ""
-
-            header_prefix = "# 实战避坑守则与演进经验台账 (Experience Playbook)\n\n"
-            new_pb = (
-                (old_pb.rstrip() + "\n\n" + markdown_entry + "\n")
-                if old_pb.strip()
-                else (header_prefix + markdown_entry + "\n")
-            )
             diff_preview = _build_unified_diff(
-                old_pb,
-                new_pb,
-                f"skills/{target_skill_id}/knowledge/experience_playbook.md",
+                old_skill_md,
+                upgraded_skill_md,
+                f"skills/{target_skill_id}/SKILL.md",
             )
             payload_obj: dict[str, Any] = {
-                "target_file": "knowledge/experience_playbook.md",
+                "update_mode": "upgrade_skill_md",
+                "target_file": "SKILL.md",
+                "target_skill_id": target_skill_id,
+                "command": target_cmd,
+                "current_version": current_ver,
+                "next_version": next_ver,
+                "skill_md": upgraded_skill_md,
                 "markdown_entry": markdown_entry,
+                "candidate_skill_ids": combined_skills,
+                "new_skill_id": alt_skill_name,
+                "new_command": alt_command,
+                "new_description": alt_desc,
+                "new_skill_md": alt_skill_md,
+                "new_schema_json": alt_schema_json,
+                "new_playbook_md": alt_playbook_md,
+                "distill_context": distill_context,
             }
         else:
-            raw_slug = llm_skill_id or clean_goal[:36]
-            proposed_skill_name = _normalize_kebab_id(
-                raw_slug,
-                fallback=f"workflow-{uuid.uuid4().hex[:6]}",
-            )
-            # 若仅有中文字符导致归一化回退或过短，用稳定的可读前缀
-            if proposed_skill_name.startswith("workflow-") and len(clean_goal) > 0:
-                ascii_tokens = re.findall(r"[a-zA-Z0-9]{2,}", clean_goal)
-                if ascii_tokens:
-                    proposed_skill_name = _normalize_kebab_id("-".join(ascii_tokens[:3]))
-
-            command_str = f"/{proposed_skill_name}"
-            desc_str = MemoryPolicyGuard.sanitize_text(
-                llm_desc or f"自动沉淀技能：{clean_goal[:70]}"
-            )[0]
-            skill_md, schema_json, playbook_md = self._build_new_skill_files(
-                skill_id=proposed_skill_name,
-                command=command_str,
-                description=desc_str,
-                goal=clean_goal[:140],
-                triple=triple,
-                effective_tools=effective_tools,
-                active_facts=active_facts,
-                artifacts=artifacts,
-                trigger_reason=reason,
-            )
-            skill_md, _ = MemoryPolicyGuard.sanitize_text(skill_md)
-            playbook_md, _ = MemoryPolicyGuard.sanitize_text(playbook_md)
+            proposed_skill_name = alt_skill_name
             diff_preview = _build_unified_diff(
                 "",
-                skill_md,
+                alt_skill_md,
                 f"skills/{proposed_skill_name}/SKILL.md",
             )
             payload_obj = {
+                "update_mode": "create_new",
                 "skill_id": proposed_skill_name,
-                "command": command_str,
-                "description": desc_str,
-                "skill_md": skill_md,
-                "schema_json": schema_json,
-                "playbook_md": playbook_md,
+                "command": alt_command,
+                "version": "1.0.0",
+                "current_version": "0.0.0",
+                "next_version": "1.0.0",
+                "description": alt_desc,
+                "skill_md": alt_skill_md,
+                "schema_json": alt_schema_json,
+                "playbook_md": alt_playbook_md,
+                "candidate_skill_ids": combined_skills,
+                "new_skill_id": proposed_skill_name,
+                "new_command": alt_command,
+                "new_description": alt_desc,
+                "new_skill_md": alt_skill_md,
+                "new_schema_json": alt_schema_json,
+                "new_playbook_md": alt_playbook_md,
+                "distill_context": distill_context,
             }
 
         proposal_id = f"exp_{uuid.uuid4().hex[:12]}"
@@ -845,6 +988,139 @@ class ExperienceDistiller:
 
 class SkillExperienceService:
     """经验提议审批、Skill 写盘与 FTS5 热加载服务"""
+
+    @staticmethod
+    def list_available_target_skills(workspace_root: str | None = None) -> list[dict[str, Any]]:
+        """合并返回当前可作为迭代更新目标的所有 Skill 简要清单（L2 工作区优先）"""
+        merged: dict[str, dict[str, Any]] = {}
+        for sk in skill_loader.list_skills(include_content=False):
+            sk_id = str(sk.get("id") or sk.get("name") or "").strip()
+            if not sk_id or sk.get("type") == "mcp":
+                continue
+            merged[sk_id] = {
+                "id": sk_id,
+                "name": str(sk.get("name") or sk_id),
+                "command": str(sk.get("command") or f"/{sk_id}"),
+                "version": normalize_version_str(sk.get("version")),
+                "scope": "global",
+                "description": str(sk.get("description") or ""),
+            }
+
+        if workspace_root:
+            ws_path = Path(workspace_root)
+            for ws_root in (ws_path / "skills", ws_path / ".agenthub" / "skills"):
+                if not ws_root.is_dir():
+                    continue
+                try:
+                    for item in sorted(ws_root.iterdir(), key=lambda p: p.name):
+                        if not item.is_dir() or item.name.startswith("."):
+                            continue
+                        md_file = item / "SKILL.md"
+                        if not md_file.is_file():
+                            continue
+                        raw = md_file.read_text(encoding="utf-8", errors="replace")[:4096]
+                        meta = skill_loader._parse_frontmatter(raw, item.name)
+                        merged[item.name] = {
+                            "id": item.name,
+                            "name": meta["name"],
+                            "command": meta["command"],
+                            "version": normalize_version_str(meta.get("version")),
+                            "scope": "workspace",
+                            "description": meta["description"],
+                        }
+                except OSError:
+                    continue
+
+        return sorted(
+            merged.values(),
+            key=lambda x: (0 if x["scope"] == "workspace" else 1, x["name"]),
+        )
+
+    @classmethod
+    async def preview_proposal(
+        cls,
+        proposal_id: str,
+        *,
+        apply_mode: str = "update_existing",
+        target_skill_id: str | None = None,
+        target_scope: str | None = None,
+    ) -> dict[str, Any]:
+        """当用户切换更新目标 Skill 或切换另存为新建模式时，实时重算精确的 Diff 与草案正文"""
+        proposal = await cls.get_proposal(proposal_id)
+        if not proposal:
+            raise KeyError(f"未找到经验提议: {proposal_id}")
+
+        ws_id = proposal["workspace_id"]
+        ws_root = await WorkspaceRepository.get_root_path_by_id(ws_id)
+        payload = proposal.get("payload") if isinstance(proposal.get("payload"), dict) else {}
+        triple = proposal.get("experience_triple") if isinstance(proposal.get("experience_triple"), dict) else {}
+        distill_ctx = payload.get("distill_context") if isinstance(payload.get("distill_context"), dict) else {}
+
+        eff_scope = (target_scope or proposal.get("target_scope") or "workspace").strip().lower()
+        effective_ws_root = ws_root if eff_scope == "workspace" else None
+
+        if apply_mode == "create_new":
+            new_id = str(payload.get("new_skill_id") or payload.get("skill_id") or proposal.get("proposed_skill_name") or "custom-skill").strip()
+            new_cmd = str(payload.get("new_command") or payload.get("command") or f"/{new_id}")
+            new_md = str(payload.get("new_skill_md") or payload.get("skill_md") or "").strip()
+            if not new_md:
+                new_md, _, _ = ExperienceDistiller._build_new_skill_files(
+                    skill_id=new_id,
+                    command=new_cmd,
+                    description=str(payload.get("new_description") or proposal.get("summary") or new_id),
+                    goal=str(distill_ctx.get("goal") or proposal.get("title") or ""),
+                    triple=triple,
+                    effective_tools=[],
+                    active_facts=[],
+                    artifacts=[],
+                    trigger_reason=proposal.get("trigger_reason") or "manual_distill",
+                )
+            diff_preview = _build_unified_diff("", new_md, f"skills/{new_id}/SKILL.md")
+            return {
+                "apply_mode": "create_new",
+                "target_skill_id": new_id,
+                "command": new_cmd,
+                "current_version": "0.0.0",
+                "next_version": "1.0.0",
+                "target_file": f"skills/{new_id}/SKILL.md",
+                "diff_preview": diff_preview,
+                "draft_content": new_md,
+            }
+
+        eff_target_id = str(
+            target_skill_id
+            or proposal.get("target_skill_id")
+            or payload.get("target_skill_id")
+            or proposal.get("proposed_skill_name")
+            or ""
+        ).strip()
+        if not eff_target_id:
+            avail = cls.list_available_target_skills(effective_ws_root)
+            if not avail:
+                raise ValueError("当前没有可供更新的已有 Skill，请选择另存新建")
+            eff_target_id = avail[0]["id"]
+
+        old_md, new_md, cur_ver, nxt_ver, cmd = ExperienceDistiller.build_upgraded_skill_md(
+            skill_id=eff_target_id,
+            workspace_root=effective_ws_root,
+            title=str(distill_ctx.get("title") or proposal.get("title") or ""),
+            goal=str(distill_ctx.get("goal") or ""),
+            problem=str(triple.get("problem") or ""),
+            root_cause=str(triple.get("root_cause") or ""),
+            solution=str(triple.get("solution") or ""),
+            do_steps=[str(s) for s in (distill_ctx.get("steps") or []) if str(s).strip()],
+        )
+        diff_preview = _build_unified_diff(old_md, new_md, f"skills/{eff_target_id}/SKILL.md")
+        return {
+            "apply_mode": "update_existing",
+            "target_skill_id": eff_target_id,
+            "command": cmd,
+            "current_version": cur_ver,
+            "next_version": nxt_ver,
+            "target_file": f"skills/{eff_target_id}/SKILL.md",
+            "diff_preview": diff_preview,
+            "draft_content": new_md,
+        }
 
     @staticmethod
     async def list_proposals(
@@ -926,9 +1202,13 @@ class SkillExperienceService:
         edited_content: str | None = None,
         target_scope: str | None = None,
         target_skill_name: str | None = None,
+        apply_mode: str | None = None,
+        target_skill_id: str | None = None,
+        next_version: str | None = None,
     ) -> dict[str, Any]:
         """
-        人工确认审批后正式落盘经验补丁或新建四元组 Skill，并立即同步 FTS5 与刷新缓存。
+        人工确认审批后正式落盘迭代升级已有 Skill（版本号递增 + SKILL.md 更新 + playbook 同步）
+        或新建独立四元组 Skill，并立即同步 FTS5 与刷新缓存。
         """
         proposal = await cls.get_proposal(proposal_id)
         if not proposal:
@@ -944,11 +1224,27 @@ class SkillExperienceService:
         final_scope = "workspace" if (requested_scope == "workspace" and has_valid_ws_dir) else "global"
 
         payload = proposal.get("payload") if isinstance(proposal.get("payload"), dict) else {}
-        proposal_type = proposal["proposal_type"]
+        triple = proposal.get("experience_triple") if isinstance(proposal.get("experience_triple"), dict) else {}
+        distill_ctx = payload.get("distill_context") if isinstance(payload.get("distill_context"), dict) else {}
 
-        if proposal_type == "skill_patch":
-            raw_skill_id = proposal.get("target_skill_id") or proposal.get("proposed_skill_name") or "general-skill"
+        eff_mode = (apply_mode or "").strip().lower()
+        if eff_mode not in ("update_existing", "create_new"):
+            eff_mode = "update_existing" if proposal["proposal_type"] == "skill_patch" else "create_new"
+
+        final_proposal_type = "skill_patch" if eff_mode == "update_existing" else "new_skill"
+        final_target_skill_id: str | None = proposal.get("target_skill_id")
+        final_version = "1.0.0"
+
+        if eff_mode == "update_existing":
+            raw_skill_id = (
+                target_skill_id
+                or proposal.get("target_skill_id")
+                or payload.get("target_skill_id")
+                or proposal.get("proposed_skill_name")
+                or "general-skill"
+            )
             safe_skill_id = os.path.basename(str(raw_skill_id).strip()) or "general-skill"
+            final_target_skill_id = safe_skill_id
 
             if final_scope == "workspace" and ws_root:
                 resolved_existing, existing_scope = skill_loader.resolve_skill_dir_with_scope(
@@ -965,28 +1261,108 @@ class SkillExperienceService:
                 target_dir = l1_existing if l1_existing else (skill_loader.skills_dir / safe_skill_id)
                 cls._ensure_workspace_skill_override(safe_skill_id, target_dir)
 
-            entry_text = edited_content if (edited_content is not None and edited_content.strip()) else str(payload.get("markdown_entry") or "")
-            entry_text, _ = MemoryPolicyGuard.sanitize_text(_normalize_newlines(entry_text).strip())
-            if not entry_text:
-                raise ValueError("经验补丁内容不能为空")
+            # 判定前端传来的 edited_content 是完整 SKILL.md 正文，还是单独传给 playbook 的修订片段（兼容旧接口契约）
+            raw_edited = _normalize_newlines(edited_content).strip() if (edited_content is not None and edited_content.strip()) else ""
+            is_full_skill_md_edit = bool(
+                raw_edited
+                and (raw_edited.startswith("---") or re.search(r"^#\s+", raw_edited, re.MULTILINE))
+            )
+            same_as_initial_target = safe_skill_id == (payload.get("target_skill_id") or proposal.get("target_skill_id"))
 
-            kb_dir = target_dir / "knowledge"
-            kb_dir.mkdir(parents=True, exist_ok=True)
-            pb_file = kb_dir / "experience_playbook.md"
-            old_pb = _normalize_newlines(pb_file.read_text(encoding="utf-8", errors="replace")) if pb_file.is_file() else ""
-            if old_pb.strip():
-                final_pb = old_pb.rstrip() + "\n\n" + entry_text + "\n"
+            if is_full_skill_md_edit:
+                sanitized_skill_md, _ = MemoryPolicyGuard.sanitize_text(raw_edited)
+                if not sanitized_skill_md.startswith("---"):
+                    _, generated_md, _, nxt_v, _ = ExperienceDistiller.build_upgraded_skill_md(
+                        skill_id=safe_skill_id,
+                        workspace_root=ws_root if final_scope == "workspace" else None,
+                        title=str(distill_ctx.get("title") or proposal.get("title") or ""),
+                        goal=str(distill_ctx.get("goal") or ""),
+                        problem=str(triple.get("problem") or ""),
+                        root_cause=str(triple.get("root_cause") or ""),
+                        solution=str(triple.get("solution") or ""),
+                        do_steps=[str(s) for s in (distill_ctx.get("steps") or []) if str(s).strip()],
+                        llm_upgraded_body=sanitized_skill_md,
+                        next_version_override=next_version,
+                    )
+                    sanitized_skill_md = generated_md
+                    final_version = nxt_v
+                else:
+                    meta_edited = skill_loader._parse_frontmatter(sanitized_skill_md, safe_skill_id)
+                    existing_meta_ver = "1.0.0"
+                    if (target_dir / "SKILL.md").is_file():
+                        cur_raw = (target_dir / "SKILL.md").read_text(encoding="utf-8", errors="replace")
+                        existing_meta_ver = skill_loader._parse_frontmatter(cur_raw, safe_skill_id).get("version") or "1.0.0"
+                    desired_ver = normalize_version_str(next_version) if next_version else meta_edited.get("version") or "1.0.0"
+                    if desired_ver == normalize_version_str(existing_meta_ver):
+                        desired_ver = bump_semver(existing_meta_ver, "minor")
+                    final_version = desired_ver
+                    now_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                    mcp_line = f"mcp_server: {meta_edited['mcp_server']}\n" if meta_edited.get("mcp_server") else ""
+                    sanitized_skill_md = (
+                        f"---\n"
+                        f"name: {meta_edited['name']}\n"
+                        f"command: {meta_edited['command']}\n"
+                        f"version: {desired_ver}\n"
+                        f"updated_at: {now_day}\n"
+                        f"type: {meta_edited.get('type') or 'skill'}\n"
+                        f"{mcp_line}"
+                        f"description: {meta_edited['description']}\n"
+                        f"---\n\n"
+                        f"{meta_edited['body']}\n"
+                    )
+                pb_entry = str(payload.get("markdown_entry") or "").strip()
             else:
-                final_pb = (
-                    "# 实战避坑守则与演进经验台账 (Experience Playbook)\n\n"
-                    + entry_text
-                    + "\n"
-                )
-            pb_file.write_text(final_pb, encoding="utf-8")
-            written_path = str(pb_file.resolve())
+                # raw_edited 为空（未手动改框）或为传统 markdown_entry 片段
+                if same_as_initial_target and str(payload.get("skill_md") or "").strip() and not next_version:
+                    sanitized_skill_md = _normalize_newlines(str(payload.get("skill_md")))
+                    final_version = normalize_version_str(payload.get("next_version") or "1.1.0")
+                else:
+                    _, generated_md, _, nxt_v, _ = ExperienceDistiller.build_upgraded_skill_md(
+                        skill_id=safe_skill_id,
+                        workspace_root=ws_root if final_scope == "workspace" else None,
+                        title=str(distill_ctx.get("title") or proposal.get("title") or ""),
+                        goal=str(distill_ctx.get("goal") or ""),
+                        problem=str(triple.get("problem") or ""),
+                        root_cause=str(triple.get("root_cause") or ""),
+                        solution=str(triple.get("solution") or ""),
+                        do_steps=[str(s) for s in (distill_ctx.get("steps") or []) if str(s).strip()],
+                        next_version_override=next_version,
+                    )
+                    sanitized_skill_md = generated_md
+                    final_version = nxt_v
+                pb_entry = raw_edited or str(payload.get("markdown_entry") or "").strip()
+
+            skill_md_file = target_dir / "SKILL.md"
+            skill_md_file.write_text(sanitized_skill_md.strip() + "\n", encoding="utf-8")
+            skill_loader.normalize_skill_file(skill_md_file)
+
+            pb_entry_clean, _ = MemoryPolicyGuard.sanitize_text(_normalize_newlines(pb_entry).strip())
+            if pb_entry_clean:
+                kb_dir = target_dir / "knowledge"
+                kb_dir.mkdir(parents=True, exist_ok=True)
+                pb_file = kb_dir / "experience_playbook.md"
+                old_pb = _normalize_newlines(pb_file.read_text(encoding="utf-8", errors="replace")) if pb_file.is_file() else ""
+                if old_pb.strip():
+                    final_pb = old_pb.rstrip() + "\n\n" + pb_entry_clean + "\n"
+                else:
+                    final_pb = (
+                        "# 实战避坑守则与演进经验台账 (Experience Playbook)\n\n"
+                        + pb_entry_clean
+                        + "\n"
+                    )
+                pb_file.write_text(final_pb, encoding="utf-8")
+            written_path = str(skill_md_file.resolve())
         else:
-            raw_new_id = target_skill_name or payload.get("skill_id") or proposal.get("proposed_skill_name") or "auto-skill"
+            raw_new_id = (
+                target_skill_name
+                or payload.get("new_skill_id")
+                or payload.get("skill_id")
+                or proposal.get("proposed_skill_name")
+                or "auto-skill"
+            )
             safe_skill_id = _normalize_kebab_id(raw_new_id, fallback=f"skill-{uuid.uuid4().hex[:6]}")
+            final_target_skill_id = None
+            final_version = "1.0.0"
 
             if final_scope == "workspace" and ws_root:
                 target_dir = Path(ws_root).resolve() / "skills" / safe_skill_id
@@ -994,24 +1370,27 @@ class SkillExperienceService:
                 target_dir = skill_loader.skills_dir / safe_skill_id
 
             target_dir.mkdir(parents=True, exist_ok=True)
-            skill_md_raw = edited_content if (edited_content is not None and edited_content.strip()) else str(payload.get("skill_md") or "")
+            skill_md_raw = (
+                edited_content
+                if (edited_content is not None and edited_content.strip())
+                else str(payload.get("new_skill_md") or payload.get("skill_md") or "")
+            )
             skill_md_clean, _ = MemoryPolicyGuard.sanitize_text(_normalize_newlines(skill_md_raw).strip())
             if not skill_md_clean:
                 raise ValueError("新建 Skill 的 SKILL.md 内容不能为空")
 
             skill_md_file = target_dir / "SKILL.md"
             skill_md_file.write_text(skill_md_clean + "\n", encoding="utf-8")
-            # 规范化 Frontmatter 保证命令与目录名一致
             skill_loader.normalize_skill_file(skill_md_file)
 
-            schema_obj = payload.get("schema_json")
+            schema_obj = payload.get("new_schema_json") or payload.get("schema_json")
             if isinstance(schema_obj, dict) and schema_obj:
                 (target_dir / "schema.json").write_text(
                     json.dumps(schema_obj, ensure_ascii=False, indent=2) + "\n",
                     encoding="utf-8",
                 )
 
-            playbook_md = str(payload.get("playbook_md") or "").strip()
+            playbook_md = str(payload.get("new_playbook_md") or payload.get("playbook_md") or "").strip()
             if playbook_md:
                 pb_clean, _ = MemoryPolicyGuard.sanitize_text(_normalize_newlines(playbook_md))
                 kb_dir = target_dir / "knowledge"
@@ -1036,12 +1415,14 @@ class SkillExperienceService:
                 """
                 UPDATE experience_proposals
                 SET status = 'applied',
+                    proposal_type = ?,
+                    target_skill_id = ?,
                     target_scope = ?,
                     proposed_skill_name = ?,
                     resolved_at = ?
                 WHERE id = ?
                 """,
-                (final_scope, target_dir.name, now_ts, proposal_id),
+                (final_proposal_type, final_target_skill_id, final_scope, target_dir.name, now_ts, proposal_id),
             )
             await conn.commit()
             async with conn.execute(
@@ -1053,8 +1434,10 @@ class SkillExperienceService:
         updated_dict = _serialize_proposal_row(updated_row)
         updated_dict["written_path"] = written_path
         updated_dict["skill_dir"] = str(target_dir.resolve())
+        updated_dict["applied_version"] = final_version
         logger.info(
-            f"[SkillExperienceService] 经验提议 {proposal_id} 已合入落盘: {written_path} (scope={final_scope})"
+            f"[SkillExperienceService] 经验提议 {proposal_id} 已合入落盘: {written_path} "
+            f"(mode={eff_mode}, version=v{final_version}, scope={final_scope})"
         )
         return updated_dict
 

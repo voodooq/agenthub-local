@@ -111,6 +111,9 @@ export function SopDrawer({ skill, workspaceId, onClose, onSkillDeleted }: SopDr
           <div className="min-w-0">
             <h3 className="text-sm font-semibold text-foreground flex items-center space-x-2 truncate">
               <span className="truncate">{skill.name}</span>
+              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface-200 text-muted-foreground border border-border/70 flex-shrink-0">
+                v{skill.version || '1.0.0'}
+              </span>
               {skill.scope === 'workspace' && (
                 <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 flex-shrink-0">
                   {skill.is_override ? t('工作区重写') : t('工作区专属')}

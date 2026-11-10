@@ -23,6 +23,8 @@ import {
   FileSpreadsheet,
   Info,
   PackageOpen,
+  Maximize2,
+  Minimize2,
 } from 'lucide-react';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
@@ -85,7 +87,12 @@ import {
   normalizeInteractiveInquiryMarkdown,
   resolveMessageInquiryKey,
 } from '@/utils/inquiryWorkflow';
-import { prefetchExtensionSkills, prefetchWorkspaceSkills } from '@/utils/skillCache';
+import {
+  fetchExtensionSkills,
+  fetchWorkspaceSkills,
+  prefetchExtensionSkills,
+  prefetchWorkspaceSkills,
+} from '@/utils/skillCache';
 import {
   AttachmentCategory,
   FILE_INPUT_ACCEPT,
@@ -106,6 +113,11 @@ export default function WorkbenchPage() {
   const [isSkillPickerOpen, setIsSkillPickerOpen] = useState(false);
   const [selectedSopSkill, setSelectedSopSkill] = useState<SkillItem | null>(null);
   const [inputPrompt, setInputPrompt] = useState('');
+  const [isInputExpanded, setIsInputExpanded] = useState(false);
+  const [inputCursorPos, setInputCursorPos] = useState<number>(0);
+  const [skillCatalog, setSkillCatalog] = useState<
+    Array<{ id: string; name: string; command: string; version: string }>
+  >([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const isStreamingRef = useRef(false);
   const [statusPill, setStatusPill] = useState<StatusPillData | null>(null);
@@ -522,9 +534,129 @@ export default function WorkbenchPage() {
     return () => clearInterval(pillTimer);
   }, []);
 
+  const syncSkillCatalog = useCallback(async (wsId?: string) => {
+    try {
+      const [wsSkills, extSkills] = await Promise.all([
+        fetchWorkspaceSkills(wsId).catch(() => []),
+        fetchExtensionSkills().catch(() => []),
+      ]);
+      const mergedMap = new Map<
+        string,
+        { id: string; name: string; command: string; version: string }
+      >();
+      for (const sk of wsSkills) {
+        const rawCmd = (sk.command || `/${sk.name}`).trim();
+        const cmd = rawCmd.startsWith('/') ? rawCmd : `/${rawCmd}`;
+        mergedMap.set(cmd.toLowerCase(), {
+          id: sk.id || sk.name,
+          name: sk.name,
+          command: cmd,
+          version: sk.version || '1.0.0',
+        });
+      }
+      for (const ex of extSkills) {
+        const rawCmd = (ex.command || `/${ex.id || ex.name}`).trim();
+        const cmd = rawCmd.startsWith('/') ? rawCmd : `/${rawCmd}`;
+        if (!mergedMap.has(cmd.toLowerCase())) {
+          mergedMap.set(cmd.toLowerCase(), {
+            id: ex.id || ex.name,
+            name: ex.name,
+            command: cmd,
+            version: ex.version || '1.0.0',
+          });
+        }
+      }
+      setSkillCatalog(Array.from(mergedMap.values()));
+    } catch {
+      // 静默忽略技能目录预取波动
+    }
+  }, []);
+
   useEffect(() => {
     prefetchWorkspaceSkills(activeWorkspaceId);
-  }, [activeWorkspaceId]);
+    void syncSkillCatalog(activeWorkspaceId);
+  }, [activeWorkspaceId, syncSkillCatalog]);
+
+  // 自动适配常态输入框高度（展开态由半屏样式接管高度）
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    if (isInputExpanded) {
+      el.style.height = '';
+      return;
+    }
+    el.style.height = 'auto';
+    const nextHeight = Math.min(Math.max(el.scrollHeight, 44), 160);
+    el.style.height = `${nextHeight}px`;
+  }, [inputPrompt, isInputExpanded]);
+
+  // 实时提取当前消息中串联调用的所有 Skill 协同链（去重且保留输入顺序）
+  const mountedChainSkills = React.useMemo(() => {
+    if (!inputPrompt || skillCatalog.length === 0) return [];
+    const byCmd = new Map<string, (typeof skillCatalog)[number]>();
+    const byId = new Map<string, (typeof skillCatalog)[number]>();
+    for (const item of skillCatalog) {
+      byCmd.set(item.command.toLowerCase(), item);
+      byId.set(`/${item.id.toLowerCase()}`, item);
+    }
+    const regex =
+      /(?:^|[\s([{"'（【])(\/[a-zA-Z0-9_\u4e00-\u9fa5][a-zA-Z0-9_.\-\u4e00-\u9fa5]*)/g;
+    const result: Array<(typeof skillCatalog)[number]> = [];
+    const seen = new Set<string>();
+    let match: RegExpExecArray | null;
+    while ((match = regex.exec(inputPrompt)) !== null) {
+      const token = match[1];
+      const key = token.toLowerCase();
+      const found = byCmd.get(key) || byId.get(key);
+      if (found && !seen.has(found.command.toLowerCase())) {
+        seen.add(found.command.toLowerCase());
+        result.push(found);
+      }
+    }
+    return result;
+  }, [inputPrompt, skillCatalog]);
+
+  const handleInsertCommandAtCursor = useCallback(
+    (insertText: string, replaceRange?: { start: number; end: number }) => {
+      const textarea = textareaRef.current;
+      const fallbackPos = textarea?.selectionStart ?? inputCursorPos ?? inputPrompt.length;
+      let start = replaceRange ? replaceRange.start : fallbackPos;
+      let end = replaceRange ? replaceRange.end : fallbackPos;
+
+      // 若未指定替换范围且光标紧邻孤立 '/'（例如通过底部「/ 技能」弹窗插入），替换该 '/' 避免重复
+      if (!replaceRange && start > 0 && inputPrompt[start - 1] === '/' && (start === 1 || /\s/.test(inputPrompt[start - 2]))) {
+        start -= 1;
+      }
+
+      const needLeadingSpace =
+        start > 0 && !/\s|[([{"'（【]/.test(inputPrompt[start - 1]) && !insertText.startsWith(' ');
+      const payloadText = `${needLeadingSpace ? ' ' : ''}${insertText}`;
+      const nextValue = `${inputPrompt.slice(0, start)}${payloadText}${inputPrompt.slice(end)}`;
+      const nextCursor = start + payloadText.length;
+
+      setInputPrompt(nextValue);
+      setInputCursorPos(nextCursor);
+      requestAnimationFrame(() => {
+        if (textareaRef.current) {
+          textareaRef.current.focus();
+          textareaRef.current.setSelectionRange(nextCursor, nextCursor);
+        }
+      });
+    },
+    [inputPrompt, inputCursorPos]
+  );
+
+  const handleRemoveSkillToken = useCallback((cmd: string) => {
+    const escaped = cmd.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const removeRe = new RegExp(`(^|[\\s([{"'（【])${escaped}(?=\\s|$|[)\\]}"'）】])`, 'gi');
+    setInputPrompt((prev) =>
+      prev
+        .replace(removeRe, (_m, prefix: string) => prefix)
+        .replace(/[ \t]{2,}/g, ' ')
+        .replace(/^\s+/, '')
+    );
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }, []);
 
   useEffect(() => {
     fetchConversations(activeWorkspaceId);
@@ -810,6 +942,8 @@ export default function WorkbenchPage() {
     let effectiveConvId = activeConvId;
     if (!customPrompt) {
       setInputPrompt('');
+      setIsInputExpanded(false);
+      setInputCursorPos(0);
     }
     setAttachmentRejectionNotices([]);
     // 新一轮提问开始前重置本轮临时 fact_refs 缓存
@@ -2333,10 +2467,8 @@ export default function WorkbenchPage() {
               <div className="max-w-4xl mx-auto space-y-2 relative">
                 <CommandAutocomplete
                   input={inputPrompt}
-                  onSelect={(text) => {
-                    setInputPrompt(text);
-                    textareaRef.current?.focus();
-                  }}
+                  cursorPosition={inputCursorPos}
+                  onSelect={(text, range) => handleInsertCommandAtCursor(text, range)}
                   onClose={() => { }}
                 />
 
@@ -2493,59 +2625,134 @@ export default function WorkbenchPage() {
 
                 {/* 核心输入大胶囊 */}
                 <div className="rounded-2xl border border-border/80 bg-surface-card p-2 focus-within:border-accent focus-within:shadow-md transition-all shadow-sm">
-                  <textarea
-                    ref={textareaRef}
-                    value={inputPrompt}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setInputPrompt(val);
-                      if (val === '/') {
-                        setIsSkillPickerOpen(true);
-                      }
-                    }}
-                    onPaste={handlePaste}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Tab') {
-                        // 检测输入框中是否存在 {{参数名:默认值}} 形式的填空占位符
-                        const text = inputPrompt;
-                        const matches: { start: number; end: number; placeholder: string }[] = [];
-                        const regex = /\{\{([^}]+)\}\}/g;
-                        let m: RegExpExecArray | null;
-                        while ((m = regex.exec(text)) !== null) {
-                          matches.push({ start: m.index, end: m.index + m[0].length, placeholder: m[1] });
-                        }
+                  {/* 多 Skill 联合协同胶囊条 */}
+                  {mountedChainSkills.length > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5 px-3 pt-1 pb-1.5 border-b border-border/50 mb-1 text-[11px]">
+                      <span className="text-muted-foreground font-medium shrink-0">
+                        {mountedChainSkills.length > 1 ? '联合协同技能:' : '已激活技能:'}
+                      </span>
+                      {mountedChainSkills.map((sk, idx) => (
+                        <React.Fragment key={sk.command}>
+                          {idx > 0 && <span className="text-muted-foreground/60">→</span>}
+                          <span className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full bg-emerald-500/12 border border-emerald-500/30 text-emerald-700 dark:text-emerald-300 font-mono">
+                            <span>{sk.command}</span>
+                            <span className="text-[10px] opacity-75">v{sk.version}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveSkillToken(sk.command)}
+                              className="hover:text-rose-500 transition-colors ml-0.5"
+                              title={`移除 ${sk.command}`}
+                            >
+                              <X className="w-2.5 h-2.5" />
+                            </button>
+                          </span>
+                        </React.Fragment>
+                      ))}
+                      {mountedChainSkills.length > 1 && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 border border-indigo-500/25">
+                          多 Skill 联合编排 ({mountedChainSkills.length})
+                        </span>
+                      )}
+                    </div>
+                  )}
 
-                        if (matches.length > 0) {
-                          e.preventDefault();
-                          const textarea = textareaRef.current;
-                          if (textarea) {
-                            const currentPos = e.shiftKey ? textarea.selectionStart : textarea.selectionEnd;
-                            let targetMatch: typeof matches[0];
-                            if (e.shiftKey) {
-                              const prevMatches = matches.filter((item) => item.end < currentPos);
-                              targetMatch = prevMatches.length > 0 ? prevMatches[prevMatches.length - 1] : matches[matches.length - 1];
-                            } else {
-                              const nextMatches = matches.filter((item) => item.start >= currentPos);
-                              targetMatch = nextMatches.length > 0 ? nextMatches[0] : matches[0];
-                            }
-                            if (targetMatch) {
-                              textarea.focus();
-                              textarea.setSelectionRange(targetMatch.start, targetMatch.end);
-                            }
+                  <div className="relative flex items-start">
+                    <textarea
+                      ref={textareaRef}
+                      value={inputPrompt}
+                      onChange={(e) => {
+                        const val = e.target.value;
+                        const cursor = e.target.selectionStart ?? val.length;
+                        setInputPrompt(val);
+                        setInputCursorPos(cursor);
+                        if (val === '/') {
+                          setIsSkillPickerOpen(true);
+                        }
+                      }}
+                      onClick={(e) => {
+                        setInputCursorPos(e.currentTarget.selectionStart ?? 0);
+                      }}
+                      onKeyUp={(e) => {
+                        setInputCursorPos(e.currentTarget.selectionStart ?? 0);
+                      }}
+                      onSelect={(e) => {
+                        setInputCursorPos(e.currentTarget.selectionStart ?? 0);
+                      }}
+                      onPaste={handlePaste}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Tab') {
+                          // 检测输入框中是否存在 {{参数名:默认值}} 形式的填空占位符
+                          const text = inputPrompt;
+                          const matches: { start: number; end: number; placeholder: string }[] = [];
+                          const regex = /\{\{([^}]+)\}\}/g;
+                          let m: RegExpExecArray | null;
+                          while ((m = regex.exec(text)) !== null) {
+                            matches.push({ start: m.index, end: m.index + m[0].length, placeholder: m[1] });
                           }
-                          return;
-                        }
-                      }
 
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        handleSendMessage();
+                          if (matches.length > 0) {
+                            e.preventDefault();
+                            const textarea = textareaRef.current;
+                            if (textarea) {
+                              const currentPos = e.shiftKey ? textarea.selectionStart : textarea.selectionEnd;
+                              let targetMatch: typeof matches[0];
+                              if (e.shiftKey) {
+                                const prevMatches = matches.filter((item) => item.end < currentPos);
+                                targetMatch = prevMatches.length > 0 ? prevMatches[prevMatches.length - 1] : matches[matches.length - 1];
+                              } else {
+                                const nextMatches = matches.filter((item) => item.start >= currentPos);
+                                targetMatch = nextMatches.length > 0 ? nextMatches[0] : matches[0];
+                              }
+                              if (targetMatch) {
+                                textarea.focus();
+                                textarea.setSelectionRange(targetMatch.start, targetMatch.end);
+                              }
+                            }
+                            return;
+                          }
+                        }
+
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault();
+                          handleSendMessage();
+                        }
+                      }}
+                      rows={isInputExpanded ? 12 : 1}
+                      placeholder="输入消息或指令...（支持多次 / 联合协同多个技能，Ctrl+V 粘贴图片，Enter 发送）"
+                      className={`w-full bg-transparent border-none outline-none text-[14px] text-foreground placeholder-muted-foreground pl-3 pr-10 py-1.5 resize-none leading-relaxed break-anywhere ${
+                        isInputExpanded
+                          ? 'h-[46vh] min-h-[260px] max-h-[520px] overflow-y-auto'
+                          : 'min-h-[44px] max-h-[160px] overflow-y-auto'
+                      }`}
+                    />
+
+                    {/* 半屏展开 / 收起长文本编辑框切换按钮 */}
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setIsInputExpanded((prev) => !prev);
+                        requestAnimationFrame(() => textareaRef.current?.focus());
+                      }}
+                      title={
+                        isInputExpanded
+                          ? '收起输入框'
+                          : '扩展至半屏高度查看与编辑长文本'
                       }
-                    }}
-                    rows={1}
-                    placeholder="输入消息或指令...（支持拖拽放置文件、Ctrl+V 粘贴图片，Enter 发送，/ 唤起技能）"
-                    className="w-full bg-transparent border-none outline-none text-[14px] text-foreground placeholder-muted-foreground px-3 py-1.5 resize-none leading-relaxed break-anywhere"
-                  />
+                      className={`absolute right-1.5 top-1.5 p-1.5 rounded-lg transition-colors ${
+                        isInputExpanded
+                          ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30'
+                          : inputPrompt.length > 60 || inputPrompt.includes('\n')
+                          ? 'bg-surface-200/80 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/15'
+                          : 'text-muted-foreground/70 hover:text-foreground hover:bg-surface-200/80'
+                      }`}
+                    >
+                      {isInputExpanded ? (
+                        <Minimize2 className="w-3.5 h-3.5" />
+                      ) : (
+                        <Maximize2 className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  </div>
 
                   <div className="flex items-center justify-between pt-1 px-1 select-none">
                     <div className="flex items-center space-x-1.5">
@@ -2650,6 +2857,13 @@ export default function WorkbenchPage() {
                       >
                         <span>/ 技能</span>
                       </button>
+
+                      {/* 字数提示微标（半屏展开或输入内容后展示） */}
+                      {(isInputExpanded || inputPrompt.length > 0) && (
+                        <span className="text-[10px] font-mono text-muted-foreground/80 px-1.5">
+                          {inputPrompt.length} 字
+                        </span>
+                      )}
                     </div>
 
                     <div className="flex items-center space-x-2">
@@ -2768,7 +2982,10 @@ export default function WorkbenchPage() {
         onProvidersChanged={() => fetchActiveModels()}
         workspaceId={activeWorkspaceId}
         initialTab={memoryHubInitialTab}
-        onSkillsUpdated={() => prefetchWorkspaceSkills(activeWorkspaceId)}
+        onSkillsUpdated={() => {
+          prefetchWorkspaceSkills(activeWorkspaceId);
+          void syncSkillCatalog(activeWorkspaceId);
+        }}
       />
 
       {/* 快捷技能呼出面板与 SOP 明文规程抽屉 */}
@@ -2776,10 +2993,7 @@ export default function WorkbenchPage() {
         workspaceId={activeWorkspaceId}
         isOpen={isSkillPickerOpen}
         onClose={handleCloseSkillPicker}
-        onSelectSkill={(cmd) => {
-          setInputPrompt(cmd);
-          textareaRef.current?.focus();
-        }}
+        onSelectSkill={(cmd) => handleInsertCommandAtCursor(cmd)}
         onViewSop={(sk) => setSelectedSopSkill(sk)}
       />
       <SopDrawer
