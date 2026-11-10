@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.2.3-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.2.4-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,13 @@
 
 ## 🧭 版本演进总览
 
-### ✨ v1.2.0（最新 v1.2.3）— 本地上下文压缩、KV Cache 守护、双模性能水表与多源算力稳定化
+### ✨ v1.2.0（最新 v1.2.4）— 本地上下文压缩、KV Cache 守护、双模性能水表与多源算力稳定化
+- **Token 消耗与执行效率深度精调（v1.2.4）**：
+  - **工具变体协议与空壳清洗**：100% 兼容属性式、紧凑前缀式与子标签嵌套式非标协议，清洗空白 `<tool_call>` 块，消除无效 40k 全文纠偏重发；支持任务标记完成时安全收尾。
+  - **网络加速与模型级熔断锁**：降级备选链剔除 404 死模型，新增模型级 180s 熔断冷却锁（429 或连续 503 直跳 2.5-flash，TTFT 降至 1.5s 内）；Kimi/Moonshot 通道参数自适应；地区网络受限 300s 隔离。
+  - **闲置记忆提炼去重锁**：180s 闲置提炼增加轮次水位锁与异常推进兜底，无新对话轮次零 Token 消耗、零空转，消除重复拉起 `agy.exe`。
+  - **云端 36k 软上限坍缩与两级漏斗脱水**：激活云端大窗口 36,000 Tokens 经济软上限与 8 轮热区坍缩；Scrubber 阈值下探至 600 字符，$\le 3500$ 字符或无报错 100% 走纯 Python 规则提取（0 Token 开销、<1ms 延迟），超长报错采样限长 1500 字符以内，彻底扭转清洗倒挂；实现同路径多次写入历史自动折叠。
+  - **ReAct 步数收敛与技能降载**：Zone 1 注入单步多工具并发、原地修改文件严禁副本与 Python 一次性诊断铁律；任务完成自动提炼关闭大模型调用，仅记轻量提议。
 - **对话澄清自动升舱与真实落盘闭环（v1.2.3）**：在对话模式（chat）下启用需求澄清后，当用户在交互卡片中点击批准计划或立即执行时，前后端自适应联动升舱为 Agent 任务执行态，解开只读红线与工具安全限制，真实调用 `write_local_file` 与终端工具完成物理落盘并拉起 LOOP 自主领航舱。
 - **过程思考与执行步骤流水线体验升级（v1.2.3）**：重构工具卡片与执行步骤可视化，单步工具彻底取消嵌套折叠直显关键文件路径与命令输出；深度思考卡片采用高质感弱化排版与流式微光状态，去除同轮次重复的模型头标识，呈现连贯丝滑的执行流水线。
 - **多源算力稳定化与抗卡死治理（v1.2.2）**：严格隔离后台轻量旁路与 CLI/算力池异常告警，新增 KIMI 等模型 `temperature=1` 参数自适应与 400 非限流隔离；补全前端 SSE「停止生成」按钮、首包/空闲看门狗、宿主机探针主循环异步解耦与启动孤儿 Loop 自愈；同步落地算力池今日总消耗汇总、多源通道精准计数、DSML 工具标签防泄漏及思考过程样式弱化。

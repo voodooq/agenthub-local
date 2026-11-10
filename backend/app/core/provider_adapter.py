@@ -596,7 +596,7 @@ class ProviderAdapter:
             "messages": oai_messages,
             "stream": True,
         }
-        # NOTE: 部分推理模型（如 kimi-k2.5 / o1 / o3）在后台旁路(0.1/0.2)或主推理(0.7)下会拒收非 1 温度或直接拒收该字段
+        # NOTE: 部分推理模型（如 kimi / o1 / o3）在后台旁路(0.1/0.2)或主推理(0.7)下会拒收非 1 温度或直接拒收该字段
         if model_cache_key in _TEMPERATURE_FIXED_ONE_MODELS:
             payload["temperature"] = 1
         elif model_cache_key not in _TEMPERATURE_UNSUPPORTED_MODELS:

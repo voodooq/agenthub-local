@@ -566,8 +566,12 @@ class EnginePoolService:
                     except GeminiAPIException as g_err:
                         should_persist_on_abort = False
                         attempted_custom_errors.append(f"[{prov_name}] {g_err}")
+                        g_msg_lower = (g_err.message or "").lower()
                         if g_err.status_code in (429, 503):
                             await provider_adapter.mark_provider_cooldown(prov["id"], cooldown_seconds=60)
+                        elif "location is not supported" in g_msg_lower or "user location" in g_msg_lower:
+                            await provider_adapter.mark_provider_cooldown(prov["id"], cooldown_seconds=300)
+                            logger.warning(f"通道 [{prov_name}] 所在区域受限 (400 Location Error)，已设置 300s 隔离冷却")
                         prev_failed_prov_name = prov_name
                         if cancel_event and cancel_event.is_set():
                             should_persist_on_abort = bool(full_custom_text or full_thinking_text)
@@ -593,6 +597,9 @@ class EnginePoolService:
                         # 仅明确命中 HTTP 429 或限流语义才冷却；400/422 参数错误禁止触发冷却以免误判全池耗尽
                         if "(429)" in err_text or "rate limit" in err_text.lower() or "too many requests" in err_text.lower():
                             await provider_adapter.mark_provider_cooldown(prov["id"], cooldown_seconds=60)
+                        elif "location is not supported" in err_text.lower() or "user location" in err_text.lower():
+                            await provider_adapter.mark_provider_cooldown(prov["id"], cooldown_seconds=300)
+                            logger.warning(f"通道 [{prov_name}] 所在区域受限，已设置 300s 隔离冷却")
                         prev_failed_prov_name = prov_name
                         if cancel_event and cancel_event.is_set():
                             should_persist_on_abort = bool(full_custom_text or full_thinking_text)
@@ -785,6 +792,7 @@ class EnginePoolService:
             legacy_splitter = ThinkStreamSplitter() if task_role == "primary" else None
             encountered_rate_limit = False
             encountered_auth_error = False
+            encountered_location_error = False
             start_time = time.time()
 
             def _split_legacy_segments(raw_piece: str) -> list[tuple[str, str]]:
@@ -930,6 +938,8 @@ class EnginePoolService:
                             full_thinking_text = ""
                     elif g_err.status_code in (401, 403):
                         encountered_auth_error = True
+                    elif "user location is not supported" in (g_err.message or "").lower() or "location is not supported" in (g_err.message or "").lower():
+                        encountered_location_error = True
                     else:
                         yield {"type": "error", "content": f"Google API 报错: {g_err.message}"}
                         return
@@ -1087,17 +1097,18 @@ class EnginePoolService:
                 retries_left -= 1
                 continue
 
-            # 处理限流/认证失效：冷却当前账号，尝试切换到下一个
-            if encountered_rate_limit or encountered_auth_error:
-                cooldown_secs = 300 if encountered_auth_error else settings.default_cooldown_seconds
+            # 处理限流/认证失效/地区网络受限：冷却当前账号，尝试切换到下一个
+            if encountered_rate_limit or encountered_auth_error or encountered_location_error:
+                cooldown_secs = 300 if (encountered_auth_error or encountered_location_error) else settings.default_cooldown_seconds
                 cooldown_until = (
                     datetime.now(timezone.utc) + timedelta(seconds=cooldown_secs)
                 ).strftime("%Y-%m-%d %H:%M:%S")
                 await AccountRepository.mark_cooldown(account.name, cooldown_until)
+                reason_str = "location_unsupported" if encountered_location_error else ("auth_error" if encountered_auth_error else "rate_limited")
                 await audit_service.log(
                     event_type="account_cooldown",
                     actor="system",
-                    detail={"reason": "auth_error" if encountered_auth_error else "rate_limited", "cooldown_seconds": cooldown_secs},
+                    detail={"reason": reason_str, "cooldown_seconds": cooldown_secs},
                     account_name=account.name,
                     approved=False
                 )

@@ -937,25 +937,30 @@ class AgentRuntime:
 
                 # ── 关键反停滞与伪调用拦截（Anti-Stall & Steer）带精准白名单 ──
                 raw_stripped = (step_raw_text or "").strip()
+                # 先剥离空壳/无效的 <tool_call> 残余，防止误判伪工具调用
+                stripped_without_empty = ToolProtocolAdapter.strip_empty_tool_calls(raw_stripped).strip()
 
                 # 白名单判据：模型礼貌向用户发起确认提问（如询问是否允许删除），或完成了正常完整总结
                 is_user_confirmation_request = bool(re.search(
                     r"(?:是否允许|请问是否|请确认|需要您确认|是否继续|是否需要|是否删除|请选择|如需继续|？|\?)",
-                    raw_stripped
+                    stripped_without_empty
                 ))
                 has_explicit_pseudo_tags = bool(re.search(
                     r"(?:\[调用工具|\[tool_call|<tool_call|<function=|</tool_code>|```xml\s*<tool_call|<\s*/?\s*[\uFF5C|][\uFF5C|\s]*DSML\b)",
-                    raw_stripped,
+                    stripped_without_empty,
                     re.IGNORECASE
                 ))
-                is_bare_json_command = bool(re.search(r'\{\s*"command"\s*:', raw_stripped))
+                is_bare_json_command = bool(re.search(r'\{\s*"command"\s*:', stripped_without_empty))
 
-                # 仅当命中机器伪标签，或上步报错且模型输出极简敷衍且非提问时，才触发强制推偏
+                # 仅当命中真实机器伪标签，或上步报错且模型输出极简敷衍且非提问时，才触发强制推偏
                 is_abnormal_stall = (
                     has_explicit_pseudo_tags
                     or is_bare_json_command
-                    or (last_step_error_info is not None and len(raw_stripped) < 60 and not is_user_confirmation_request)
+                    or (last_step_error_info is not None and len(stripped_without_empty) < 60 and not is_user_confirmation_request)
                 )
+                # 若剔除空标签后文本有效且无伪标签，直接放行，严禁触发重发
+                if not tool_calls and not has_explicit_pseudo_tags and len(stripped_without_empty) >= 15:
+                    is_abnormal_stall = False
 
                 # 情况 A：模型未发起真实工具调用
                 if not tool_calls or active_scene != "agent":
@@ -1136,6 +1141,7 @@ class AgentRuntime:
                 )
 
                 # 逐个执行本步拦截到的工具调用
+                task_marked_completed = False
                 for tc in tool_calls:
                     if await _check_cancelled():
                         was_cancelled = True
@@ -1300,6 +1306,7 @@ class AgentRuntime:
                             current_wm = {}
                             tool_output = "任务标记为已完成，工作记忆草稿纸已归档并清空。"
                             compressed = "[已清空归档任务工作草稿纸]"
+                            task_marked_completed = True
                         else:
                             if args.get("goal"):
                                 current_wm["goal"] = str(args["goal"])
@@ -2139,6 +2146,61 @@ class AgentRuntime:
 
                 if was_cancelled or await _check_cancelled():
                     was_cancelled = True
+                    break
+
+                # 显式完成收尾：若模型已通过 update_working_memory 归档且无残留报错，直接安全收尾，节省冗余整轮调用
+                if task_marked_completed and not last_step_error_info:
+                    logger.info(f"[AgentRuntime] 模型通过 update_working_memory 显式标记任务完成，安全终止本轮 ReAct 循环")
+                    if active_loop_obj:
+                        try:
+                            completed_loop = await TaskLoopRepository.complete_loop(
+                                loop_id=active_loop_obj.id,
+                                summary="任务标记为已完成，工作记忆已归档",
+                            )
+                            if completed_loop:
+                                yield {
+                                    "type": "loop_completed",
+                                    "loop_id": completed_loop.id,
+                                    "iteration": completed_loop.current_iteration,
+                                    "max_iterations": completed_loop.max_iterations,
+                                    "status": "completed",
+                                    "scratchpad_md": completed_loop.scratchpad_md,
+                                }
+                                active_loop_obj = None
+                        except Exception:
+                            pass
+                    if has_workspace_mutations and ws_id:
+                        try:
+                            from ..repository.artifact_repository import ArtifactRepository
+                            await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
+                        except Exception as sync_err:
+                            logger.debug(f"[AgentRuntime] 任务标记完成时物理资产同步跳过: {sync_err}")
+                    try:
+                        turn_stats_payload = (
+                            None
+                            if active_incognito
+                            else await TokenUsageRepository.get_turn_summary(conv_id, current_turn_id)
+                        )
+                        if turn_stats_payload is None and in_memory_step_metrics:
+                            turn_stats_payload = _build_turn_summary_from_rows(
+                                current_turn_id, in_memory_step_metrics, 0
+                            )
+                        if turn_stats_payload:
+                            yield {
+                                "type": "token_stats",
+                                "conversation_id": conv_id,
+                                "turn_id": current_turn_id,
+                                "stats": turn_stats_payload,
+                            }
+                    except Exception:
+                        pass
+                    stream_completed_normally = True
+                    yield {
+                        "type": "done",
+                        "full_content": accumulated_visible_text.strip() or "任务已顺利完成，工作记忆草稿纸已归档。",
+                        "account": final_account,
+                        "model": effective_model_name,
+                    }
                     break
 
                 step_idx += 1

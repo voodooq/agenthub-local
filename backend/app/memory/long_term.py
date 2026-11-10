@@ -320,6 +320,14 @@ class LongTermMemoryManager:
             current = asyncio.current_task()
             try:
                 await asyncio.sleep(delay_seconds)
+                from ..repository.message_repository import MessageRepository
+                from ..repository.conversation_repository import ConversationRepository
+                current_max_turn = await MessageRepository.get_max_turn_id(conv_id)
+                last_turn = await ConversationRepository.get_last_extracted_turn_id(conv_id)
+                if current_max_turn <= last_turn:
+                    # 自上次提炼以来没有任何新对话轮次，零 Token 消耗直接退出
+                    return
+
                 logger.info(f"会话 {conv_id} 已闲置 {delay_seconds}s，开始后台异步提炼长期记忆画像...")
                 await cls.extract_from_conversation(conv_id)
             except asyncio.CancelledError:
@@ -429,7 +437,8 @@ class LongTermMemoryManager:
         try:
             full_response, stream_ok = await asyncio.wait_for(_consume_extract(), timeout=25.0)
             if not stream_ok:
-                # 通道不可用或中途异常时严禁错误推进水位线，留待后续恢复重试
+                # 通道不可用或中途异常时推进水位线，防止通道冷却期间每分钟无限空转重试
+                await ConversationRepository.update_last_extracted_turn_id(conv_id, max_turn)
                 return 0
 
             # 提取 JSON 数组
@@ -442,6 +451,10 @@ class LongTermMemoryManager:
             return len(rows)
         except Exception as e:
             logger.warning(f"长期记忆提炼执行失败: {e}")
+            try:
+                await ConversationRepository.update_last_extracted_turn_id(conv_id, max_turn)
+            except Exception:
+                pass
             return 0
 
 

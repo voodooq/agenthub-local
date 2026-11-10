@@ -196,6 +196,26 @@ class ToolProtocolAdapter:
         r"[<\[]tool_call\s+name=[\"']?([^\"'\]>]+)[\"']?\s*[>\]](.*?)[<\[]/tool_call[>\]]",
         re.DOTALL | re.IGNORECASE,
     )
+    # 清洗无意义的空 tool_call 块（含仅有 ```json {} ``` 或空白），防止触发伪工具调用重发
+    _EMPTY_TOOL_CALL_RE = re.compile(
+        r"[<\[]tool_call(?:\s+name=[\"']?[^\"'\]>]*[\"']?)?\s*[>\]]?\s*(?:```(?:json|python)?\s*(?:\{\s*\}|#[^\n]*)?\s*```|\{\s*\})?\s*[<\[]/tool_call[>\]]",
+        re.DOTALL | re.IGNORECASE,
+    )
+    # 模式 1D: 兼容紧凑属性式声明 <tool_call name="func_name"[:\s]*({.*})</tool_call> 或无闭合变体
+    _ATTR_JSON_TOOL_RE = re.compile(
+        r'[<\[]tool_call\s+name=["\']([a-zA-Z0-9_]+)["\']\s*[:>]?\s*(\{[\s\S]*?\})\s*(?:[<\[]/tool_call[>\]]|(?=[<\[]tool_call)|$)',
+        re.IGNORECASE,
+    )
+    # 模式 1E: 兼容紧凑前缀式 <tool_call>\s*([a-zA-Z0-9_]+)\s*(\{.*?\})\s*</tool_call>
+    _INLINE_FUNC_JSON_RE = re.compile(
+        r'[<\[]tool_call[>\]]?\s*([a-zA-Z0-9_]+)\s*(\{[\s\S]*?\})\s*[<\[]/tool_call[>\]]',
+        re.IGNORECASE,
+    )
+    # 模式 1F: 兼容子标签包裹式 <tool_call>\s*<([a-zA-Z0-9_]+)>(.*?)</\1>\s*</tool_call>
+    _SUBTAG_TOOL_RE = re.compile(
+        r'[<\[]tool_call[>\]]?\s*<([a-zA-Z0-9_]+)>([\s\S]*?)</\1>\s*[<\[]/tool_call[>\]]',
+        re.IGNORECASE,
+    )
     # DeepSeek DSML 工具调用正则（兼容单/双全角竖线 ｜ 与半角 | 及其间可选空格，如 <｜｜DSML｜｜ invoke ...>）
     _DSML_INVOKE_PATTERN = re.compile(
         r"<\s*(?:[\uFF5C|][\uFF5C|\s]*DSML[\uFF5C|\s]*)invoke\b([^>]*)>([\s\S]*?)</\s*(?:[\uFF5C|][\uFF5C|\s]*DSML[\uFF5C|\s]*)invoke\s*>",
@@ -708,6 +728,8 @@ class ToolProtocolAdapter:
         tool_calls: list[dict[str, Any]] = []
         # 先剥离非围栏内的 <think>/<thinking>/<thought> 思考段落，严禁推演过程中的代码示例触发真实工具调用
         clean_text = ThinkStreamSplitter.strip_thinking_for_tools(raw_text)
+        # 先清理无意义的空 tool_call 块，防止触发 runtime 伪工具调用重发
+        clean_text = cls._EMPTY_TOOL_CALL_RE.sub("", clean_text)
 
         # ── 模式 0: DeepSeek DSML 混合竖线结构化工具协议 ──
         if "DSML" in clean_text or "dsml" in clean_text.lower():
@@ -787,6 +809,57 @@ class ToolProtocolAdapter:
                 return ""
 
             clean_text = cls._XML_TOOL_PATTERN.sub(_replacer, clean_text)
+
+            # 模式 1D: 兼容紧凑属性式声明 <tool_call name="func_name"[:\s]*({.*})</tool_call>
+            for m in cls._ATTR_JSON_TOOL_RE.finditer(clean_text):
+                fn_name = m.group(1).strip()
+                raw_json = m.group(2).strip()
+                parsed_args = cls._parse_tool_arguments(fn_name, raw_json)
+                call_id = f"call_{uuid.uuid4().hex[:10]}"
+                tool_calls.append({
+                    "id": call_id,
+                    "function": {
+                        "name": fn_name,
+                        "arguments": json.dumps(parsed_args, ensure_ascii=False),
+                    },
+                })
+            clean_text = cls._ATTR_JSON_TOOL_RE.sub("", clean_text)
+
+            # 模式 1E: 兼容紧凑前缀式 <tool_call>func_name{"..."}</tool_call>
+            for m in cls._INLINE_FUNC_JSON_RE.finditer(clean_text):
+                fn_name = m.group(1).strip()
+                raw_json = m.group(2).strip()
+                parsed_args = cls._parse_tool_arguments(fn_name, raw_json)
+                call_id = f"call_{uuid.uuid4().hex[:10]}"
+                tool_calls.append({
+                    "id": call_id,
+                    "function": {
+                        "name": fn_name,
+                        "arguments": json.dumps(parsed_args, ensure_ascii=False),
+                    },
+                })
+            clean_text = cls._INLINE_FUNC_JSON_RE.sub("", clean_text)
+
+            # 模式 1F: 兼容子标签嵌套式 <tool_call><func_name>...</func_name></tool_call>
+            for m in cls._SUBTAG_TOOL_RE.finditer(clean_text):
+                fn_name = m.group(1).strip()
+                body = m.group(2).strip()
+                parsed_args: dict[str, Any] = {}
+                sub_params = re.findall(r"<([a-zA-Z0-9_]+)>([\s\S]*?)</\1>", body)
+                if sub_params:
+                    for k, v in sub_params:
+                        parsed_args[k.strip()] = v.strip()
+                elif body:
+                    parsed_args = cls._parse_tool_arguments(fn_name, body)
+                call_id = f"call_{uuid.uuid4().hex[:10]}"
+                tool_calls.append({
+                    "id": call_id,
+                    "function": {
+                        "name": fn_name,
+                        "arguments": json.dumps(parsed_args, ensure_ascii=False),
+                    },
+                })
+            clean_text = cls._SUBTAG_TOOL_RE.sub("", clean_text)
 
             # 模式 1B: 兼容无属性 <tool_call>{"name": "...", "arguments": {...}}</tool_call> 变体
             pattern_bare_tc = re.compile(
@@ -1124,5 +1197,14 @@ class ToolProtocolAdapter:
         if cls._INQUIRY_TAG_RE.search(raw_text):
             return True
         return False
+
+    @classmethod
+    def strip_empty_tool_calls(cls, text: str) -> str:
+        """剔除输出中无意义的空 tool_call 壳标签，避免误触伪工具调用拦截器。"""
+        if not text:
+            return ""
+        res = cls._EMPTY_TOOL_CALL_RE.sub("", text)
+        res = cls._DSML_EMPTY_CALLS_PATTERN.sub("", res)
+        return res
 
 

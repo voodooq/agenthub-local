@@ -13,6 +13,7 @@
    - 内置单槽位 (-np 1) 防互锁嗅探与 6.0s 超时确定性正则提取器降级兜底；
    - 严格遵守 Write-Once 铁律：脱水结论一次写入 messages.content 后在热区永久保持一字不改。
 """
+import asyncio
 from collections import OrderedDict
 import math
 import re
@@ -28,8 +29,8 @@ from ..repository.tool_ref_repository import MAX_SLICE_CHARS, MAX_SLICE_LINES, T
 # 匹配中日韩统一表意文字及日韩假名/谚文，用于高精度双语 Token 估算
 _CJK_CHAR_RE = re.compile(r"[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uac00-\ud7af]")
 
-# 默认命令/批处理输出旁路脱水字符阈值（无渠道上下文时的保守基线）
-SCRUB_CHAR_THRESHOLD = 1500
+# 默认命令/批处理输出旁路脱水字符阈值（无渠道上下文时的保守基线，下探至 600 字符实现紧凑脱水）
+SCRUB_CHAR_THRESHOLD = 600
 
 # 按语义分层划分工具类别：
 # 1. EXPLICIT_COMMAND_TOOLS：终端命令 / 脚本运行 / MCP 工具（极易产出数千行安装/构建/全盘扫描刷屏日志，适合积极脱水）
@@ -72,12 +73,12 @@ def resolve_scrub_char_threshold(
             return 10_000
         return 20_000
 
-    # 命令执行、脚本工具与 MCP 外部工具：容易刷屏无用日志，阈值更紧凑但仍保障普通报错清晰可读
+    # 命令执行、脚本工具与 MCP 外部工具：容易刷屏无用日志，下探至 600~1,000 字符实现紧凑脱水
     if primary_provider_info is None:
         return SCRUB_CHAR_THRESHOLD
     if local_mode or max_ctx <= 16_384:
-        return 1_800
-    return 4_500
+        return 600
+    return 1_000
 
 
 def estimate_tokens(text: str | None) -> int:
@@ -159,19 +160,21 @@ def resolve_compression_policy(
         max_window_turns = 10
         hot_retain_turns = 3
         default_batch_turns = 6
+        trigger_tokens = int(max_ctx * trigger_ratio)
     else:
-        # 云端大窗口模式：保持长周期零中断 Cache 复用，75% 水位或满 24 轮触发
-        trigger_ratio = 0.75
-        base_retain = max(4, int(context_rounds_override)) if context_rounds_override else 10
+        # 云端大窗口模式：引入 36,000 经济软上限与 8 轮热区判定，解决云端 1M 窗口下分块坍缩恒为 0 的问题
+        trigger_ratio = 0.65
+        base_retain = max(3, int(context_rounds_override)) if context_rounds_override else 3
         hot_retain_turns = base_retain
-        max_window_turns = max(base_retain + 6, base_retain * 2 + 4)
-        default_batch_turns = max(4, max_window_turns - hot_retain_turns)
+        max_window_turns = max(8, hot_retain_turns + 5)
+        default_batch_turns = 5
+        trigger_tokens = min(int(max_ctx * trigger_ratio), 36_000)
 
     return {
         "is_local": local_mode,
         "max_context_tokens": max_ctx,
         "trigger_ratio": trigger_ratio,
-        "trigger_tokens": int(max_ctx * trigger_ratio),
+        "trigger_tokens": trigger_tokens,
         "max_window_turns": max_window_turns,
         "hot_retain_turns": hot_retain_turns,
         "default_batch_turns": default_batch_turns,
@@ -321,6 +324,90 @@ class LocalContextCompressor:
     """本地与混合架构上下文压缩与 KV Cache 守护中间件"""
 
     @classmethod
+    def fold_historical_file_writes(
+        cls,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """同路径多次写入历史自动折叠（Zone 2 瘦身守护）：
+        倒序扫描历史消息中针对相同 file_path 的多次 write_local_file 写入，
+        仅保留最后一次写入的完整代码，前序写入入参内容折叠为 '[旧版本代码已被后续步骤覆盖]'，
+        杜绝同文件多次迭代引发的上下文 Token 级数爆炸。
+        """
+        import json as _json
+        import re as _re
+
+        seen_paths: set[str] = set()
+        folded_reversed: list[dict[str, Any]] = []
+
+        for m in reversed(messages):
+            m_copy = dict(m)
+            role = m_copy.get("role")
+            content = str(m_copy.get("content") or "")
+            tc_json = m_copy.get("tool_calls_json")
+
+            if role in ("assistant", "model"):
+                # 1. 若包含结构化 tool_calls_json
+                if tc_json:
+                    try:
+                        calls = _json.loads(tc_json)
+                        if isinstance(calls, list):
+                            modified = False
+                            for call in calls:
+                                fn = call.get("function", {})
+                                if fn.get("name") == "write_local_file":
+                                    raw_args = fn.get("arguments", "{}")
+                                    args_dict = _json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                                    if isinstance(args_dict, dict):
+                                        fp = str(args_dict.get("file_path") or args_dict.get("path") or "").strip()
+                                        if fp:
+                                            if fp in seen_paths:
+                                                # 已有更新版本，折叠旧代码
+                                                args_dict["content"] = "[旧版本代码已被后续步骤覆盖]"
+                                                fn["arguments"] = _json.dumps(args_dict, ensure_ascii=False)
+                                                modified = True
+                                            else:
+                                                seen_paths.add(fp)
+                            if modified:
+                                m_copy["tool_calls_json"] = _json.dumps(calls, ensure_ascii=False)
+                                xml_calls = "\n".join(
+                                    f'<tool_call name="{tc.get("function", {}).get("name", "")}">{tc.get("function", {}).get("arguments", "{}")}</tool_call>'
+                                    for tc in calls
+                                )
+                                text_clean = _re.sub(r'<tool_call.*?</tool_call>', '', content, flags=_re.DOTALL).strip()
+                                m_copy["content"] = (text_clean + "\n" + xml_calls).strip() if text_clean else xml_calls
+                    except Exception:
+                        pass
+
+                # 2. 检查纯文本中的 <tool_call name="write_local_file">
+                elif '<tool_call' in content and 'write_local_file' in content:
+                    def _fold_xml_tc(match: _re.Match) -> str:
+                        full = match.group(0)
+                        tc_body = match.group(1).strip()
+                        try:
+                            args_dict = _json.loads(tc_body)
+                            if isinstance(args_dict, dict):
+                                fp = str(args_dict.get("file_path") or args_dict.get("path") or "").strip()
+                                if fp:
+                                    if fp in seen_paths:
+                                        args_dict["content"] = "[旧版本代码已被后续步骤覆盖]"
+                                        return f'<tool_call name="write_local_file">{_json.dumps(args_dict, ensure_ascii=False)}</tool_call>'
+                                    else:
+                                        seen_paths.add(fp)
+                        except Exception:
+                            pass
+                        return full
+
+                    m_copy["content"] = _re.sub(
+                        r'<tool_call\s+name=["\']write_local_file["\']>([\s\S]*?)</tool_call>',
+                        _fold_xml_tc,
+                        content,
+                    )
+
+            folded_reversed.append(m_copy)
+
+        return list(reversed(folded_reversed))
+
+    @classmethod
     async def count_payload_tokens(
         cls,
         system_instruction: str,
@@ -422,9 +509,12 @@ class LocalContextCompressor:
             context_rounds_override=context_rounds_override,
         )
 
+        # 对热区历史执行同路径写入自动折叠（保留最新版完整代码，前序折叠）
+        folded_zone2 = cls.fold_historical_file_writes(zone2_messages)
+
         # 过滤仅保留锚点之后的活跃消息
         active_msgs = [
-            m for m in zone2_messages if int(m.get("turn_id") or 1) > anchor_turn
+            m for m in folded_zone2 if int(m.get("turn_id") or 1) > anchor_turn
         ]
 
         # 统计已完成历史轮次（strictly < current_turn_id）的有序 turn_id 列表
@@ -592,97 +682,106 @@ class LocalContextCompressor:
         total_lines = max(1, len(raw.splitlines()))
         raw_tokens = estimate_tokens(raw)
 
-        # 检查是否适合发起无状态轻量 LLM 清洗（防范本地单槽位 -np 1 缓存互锁）
+        # 检查是否包含严重报错堆栈
+        has_abnormal_error = any(
+            kw in raw.lower()
+            for kw in ("traceback", "error:", "exception:", "syntaxerror", "failed", "errno", "denied")
+        )
+
+        # 两级漏斗机制（彻底扭转清洗倒挂亏损）：
+        # 1. 第一级：<= 3,500 字符，或无明确报错特征，100% 走纯 Python 确定性提取器（0 算力、0 延迟、0 Token 开销）
+        # 2. 第二级：仅当 > 3,500 字符且包含明确报错堆栈时，才调度无状态轻模型，且采样限制在 1,500 字符内
+        should_use_llm = len(raw) > 3500 and has_abnormal_error
+
         scrubbed_summary: str | None = None
         scrubber_metrics: dict[str, Any] | None = None
 
         try:
-            from ..service.engine_pool import engine_pool
-            from ..core.provider_adapter import ProviderAdapter
+            if should_use_llm:
+                from ..service.engine_pool import engine_pool
+                from ..core.provider_adapter import ProviderAdapter
 
-            light_candidates = await ProviderAdapter.get_enabled_providers_for_role("light")
-            # 筛选非 cooldown 的可用轻节点
-            selected_light = light_candidates[0] if light_candidates else None
+                light_candidates = await ProviderAdapter.get_enabled_providers_for_role("light")
+                # 筛选非 cooldown 的可用轻节点
+                selected_light = light_candidates[0] if light_candidates else None
 
-            can_use_llm = selected_light is not None
-            if can_use_llm and selected_light:
-                light_url = str(selected_light.get("base_url") or "").strip().rstrip("/")
-                primary_url = str((primary_provider_info or {}).get("base_url") or "").strip().rstrip("/")
-                if is_local_provider(selected_light) and light_url:
-                    slots_info = await ProviderAdapter.probe_local_slots(light_url)
-                    total_slots = int(slots_info.get("total_slots") or 0)
-                    # 单槽位且与主推理共用同一个本地服务实例，跳过 LLM 清洗以保住主会话 KV Cache
-                    if total_slots == 1 and (not primary_url or primary_url == light_url):
-                        logger.debug(
-                            f"[ContextScrubber] 检测到本地服务 {light_url} 为单槽位 (-np 1)，"
-                            "自动启用零显存开销确定性脱水提取器以保护主会话 KV Cache"
-                        )
+                can_use_llm = selected_light is not None
+                if can_use_llm and selected_light:
+                    light_url = str(selected_light.get("base_url") or "").strip().rstrip("/")
+                    primary_url = str((primary_provider_info or {}).get("base_url") or "").strip().rstrip("/")
+                    if is_local_provider(selected_light) and light_url:
+                        slots_info = await ProviderAdapter.probe_local_slots(light_url)
+                        total_slots = int(slots_info.get("total_slots") or 0)
+                        # 单槽位且与主推理共用同一个本地服务实例，跳过 LLM 清洗以保住主会话 KV Cache
+                        if total_slots == 1 and (not primary_url or primary_url == light_url):
+                            logger.debug(
+                                f"[ContextScrubber] 检测到本地服务 {light_url} 为单槽位 (-np 1)，"
+                                "自动启用零显存开销确定性脱水提取器以保护主会话 KV Cache"
+                            )
+                            can_use_llm = False
+
+                if can_use_llm and selected_light:
+                    import json as _json
+
+                    models_list = selected_light.get("models") or _json.loads(selected_light.get("models_json") or "[]")
+                    default_fallback = (
+                        "gemini-2.5-flash"
+                        if selected_light.get("provider_type") in ("google_oauth", "gemini_api", "google_pool")
+                        else ""
+                    )
+                    light_model = ProviderAdapter.pick_light_model(models_list, fallback=default_fallback)
+                    if not light_model:
                         can_use_llm = False
 
-            if can_use_llm and selected_light:
-                import asyncio
-                import json as _json
+                if can_use_llm and selected_light:
+                    # 采样严格截断在 1,500 字符以内（头部 600 + 尾部 900），单次开销降至数百 Token 以内
+                    if len(raw) > 1500:
+                        sample_text = (
+                            raw[:600]
+                            + f"\n\n... [中间省略 {len(raw) - 1500:,} 字符] ...\n\n"
+                            + raw[-900:]
+                        )
+                    else:
+                        sample_text = raw
 
-                models_list = selected_light.get("models") or _json.loads(selected_light.get("models_json") or "[]")
-                default_fallback = (
-                    "gemini-2.5-flash"
-                    if selected_light.get("provider_type") in ("google_oauth", "gemini_api", "google_pool")
-                    else ""
-                )
-                light_model = ProviderAdapter.pick_light_model(models_list, fallback=default_fallback)
-                if not light_model:
-                    can_use_llm = False
-
-            if can_use_llm and selected_light:
-
-                # 截取头尾高价值窗口喂给清洗器（最大 12,000 字符，避免把数 MB 日志全量送进小模型）
-                if len(raw) > 12000:
-                    sample_text = (
-                        raw[:6000]
-                        + f"\n\n... [中间省略 {len(raw) - 12000:,} 字符] ...\n\n"
-                        + raw[-6000:]
+                    scrub_prompt = (
+                        f"工具 `{tool_name}`（参数: {tool_args_summary[:120]}）报错堆栈输出截选（共 {total_lines} 行）：\n\n"
+                        f"{sample_text}\n\n"
+                        "请用中文提炼出**报错根因、触发异常的函数/行号或文件路径**，"
+                        "严格控制在 **120 字以内**，纯文本单行输出，绝不废话："
                     )
-                else:
-                    sample_text = raw
 
-                scrub_prompt = (
-                    f"工具 `{tool_name}`（参数: {tool_args_summary[:120]}）返回了以下超长输出（共 {total_lines} 行）。\n"
-                    "请用中文提炼出**最核心的事实结论、关键文件路径、关键数字指标或报错堆栈信息**，"
-                    "严格控制在 **180 字以内**，纯文本一行或分号分隔即可，严禁编造原文不存在的内容：\n\n"
-                    f"{sample_text}"
-                )
+                    async def _run_scrubber() -> tuple[str, dict[str, Any] | None]:
+                        acc = ""
+                        captured_metrics: dict[str, Any] | None = None
+                        async for evt in engine_pool.execute_stream_with_failover(
+                            conversation_id=conversation_id,
+                            user_prompt=scrub_prompt,
+                            model_name=light_model,
+                            thinking_level="low",
+                            system_override="你是高密度日志与工具输出脱水摘要器，只输出最关键的客观事实，绝不废话。",
+                            temperature=0.1,
+                            pre_built_history=[],
+                            task_role="light",
+                            incognito=incognito,
+                        ):
+                            etype = evt.get("type")
+                            if etype == "chunk":
+                                acc += evt.get("content", "")
+                            elif etype == "step_metrics":
+                                captured_metrics = evt.get("metrics")
+                            elif etype == "done":
+                                acc = evt.get("full_content", acc)
+                                break
+                            elif etype == "error":
+                                return "", None
+                        return acc.strip(), captured_metrics
 
-                async def _run_scrubber() -> tuple[str, dict[str, Any] | None]:
-                    acc = ""
-                    captured_metrics: dict[str, Any] | None = None
-                    async for evt in engine_pool.execute_stream_with_failover(
-                        conversation_id=conversation_id,
-                        user_prompt=scrub_prompt,
-                        model_name=light_model,
-                        thinking_level="low",
-                        system_override="你是高密度日志与工具输出脱水摘要器，只输出最关键的客观事实，绝不废话。",
-                        temperature=0.1,
-                        pre_built_history=[],
-                        task_role="light",
-                        incognito=incognito,
-                    ):
-                        etype = evt.get("type")
-                        if etype == "chunk":
-                            acc += evt.get("content", "")
-                        elif etype == "step_metrics":
-                            captured_metrics = evt.get("metrics")
-                        elif etype == "done":
-                            acc = evt.get("full_content", acc)
-                            break
-                        elif etype == "error":
-                            return "", None
-                    return acc.strip(), captured_metrics
-
-                llm_out, captured = await asyncio.wait_for(_run_scrubber(), timeout=6.0)
-                if llm_out:
-                    clean_llm = re.sub(r"\s+", " ", llm_out).strip()
-                    scrubbed_summary = clean_llm[:220]
-                    scrubber_metrics = captured
+                    llm_out, captured = await asyncio.wait_for(_run_scrubber(), timeout=6.0)
+                    if llm_out:
+                        clean_llm = re.sub(r"\s+", " ", llm_out).strip()
+                        scrubbed_summary = clean_llm[:220]
+                        scrubber_metrics = captured
         except Exception as e:
             logger.debug(f"[ContextScrubber] 轻模型旁路清洗超时或跳过，回退确定性提取器: {e}")
 

@@ -33,6 +33,9 @@ class GeminiClient:
     _DETECTED_UA: str | None = None
     _PROJECT_CACHE: dict[str, str] = {}
     _FALLBACK_CACHE: dict[str, Any] = {"token": "", "expires_at": 0.0, "legacy_tokens": set()}
+    # 模型级短期熔断锁：记录 (account_key, model_name) -> 冷却截止时间戳，429 或连续 2 次 503 触发 180s 冷却
+    _MODEL_COOLDOWN_UNTIL: dict[tuple[str, str], float] = {}
+    _MODEL_503_FAILURES: dict[tuple[str, str], int] = {}
 
     @classmethod
     async def resolve_cloudcode_ua(cls) -> str:
@@ -92,8 +95,11 @@ class GeminiClient:
         "gemini-4-argon": "gemini-2.5-pro",
         "4 Argon": "gemini-2.5-pro",
         "3.1 Pro": "gemini-2.5-pro",
-        "gemini-3.8-flash": "gemini-3-flash",
-        "3.8 Flash": "gemini-3-flash",
+        "gemini-3.8-flash": "gemini-2.5-flash",
+        "3.8 Flash": "gemini-2.5-flash",
+        "gemini-3.8-flash-high": "gemini-2.5-flash",
+        "gemini-3.8-flash-medium": "gemini-2.5-flash",
+        "gemini-3.8-flash-low": "gemini-2.5-flash",
         "3.5 Flash-Lite": "gemini-2.5-flash-lite",
         "gemini-3.5-flash-lite": "gemini-2.5-flash-lite",
         "claude-sonnet-5-5": "claude-sonnet-5-5-high",
@@ -396,14 +402,32 @@ class GeminiClient:
                 # 若模型遇到服务端 503 容量不足、429 配额限制或版本/套餐不支持，自动降级至备选高可用模型
                 candidate_models = [cc_model_id]
                 if cc_model_id in ("gemini-4-argon", "4 Argon", "gemini-2.5-pro"):
-                    candidate_models.extend(["gemini-3.8-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"])
-                elif cc_model_id == "gemini-3.8-flash":
                     candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-flash-lite"])
                 elif cc_model_id not in ("gemini-2.5-flash", "gemini-2.5-flash-lite"):
                     candidate_models.extend(["gemini-2.5-flash", "gemini-2.5-flash-lite"])
 
+                account_key = cleaned_cred[:32]
+                now_ts = time.time()
+                seen_models: set[str] = set()
+                deduped_candidates: list[str] = []
+                for m in candidate_models:
+                    if m not in seen_models:
+                        seen_models.add(m)
+                        deduped_candidates.append(m)
+
+                # 模型级短期熔断锁：过滤处于 180s 冷却期的模型（若全部冷却则保留兜底模型）
+                active_candidates: list[str] = []
+                for m in deduped_candidates:
+                    cd_until = cls._MODEL_COOLDOWN_UNTIL.get((account_key, m), 0.0)
+                    if cd_until > now_ts:
+                        logger.info(f"[GeminiClient] 账号模型 ({account_key[:8]}, {m}) 处于熔断冷却中 (剩余 {int(cd_until - now_ts)}s)，直跳备选")
+                        continue
+                    active_candidates.append(m)
+                if not active_candidates:
+                    active_candidates = ["gemini-2.5-flash"]
+
                 ua_val = await cls.resolve_cloudcode_ua()
-                for idx, target_cc_model in enumerate(candidate_models):
+                for idx, target_cc_model in enumerate(active_candidates):
                     cc_url = f"{cls.CLOUDCODE_BASE_URL}:streamGenerateContent?alt=sse"
                     cc_headers = {
                         "Authorization": f"Bearer {active_token}",
@@ -431,6 +455,7 @@ class GeminiClient:
                                     cc_headers["Authorization"] = f"Bearer {active_token}"
                                     async with client.stream("POST", cc_url, headers=cc_headers, json=cc_payload) as retry_resp:
                                         if retry_resp.status_code == 200:
+                                            cls._MODEL_503_FAILURES.pop((account_key, target_cc_model), None)
                                             first_byte_notified = False
                                             async for line in retry_resp.aiter_lines():
                                                 if line and line.startswith("data: "):
@@ -460,9 +485,20 @@ class GeminiClient:
                                                         continue
                                             return
 
+                            # 记录 429 / 503 模型级熔断冷却锁
+                            if response.status_code == 429:
+                                cls._MODEL_COOLDOWN_UNTIL[(account_key, target_cc_model)] = time.time() + 180.0
+                                logger.info(f"[GeminiClient] 模型 [{target_cc_model}] 命中 429 限流，开启 180s 熔断冷却锁")
+                            elif response.status_code == 503:
+                                fails = cls._MODEL_503_FAILURES.get((account_key, target_cc_model), 0) + 1
+                                cls._MODEL_503_FAILURES[(account_key, target_cc_model)] = fails
+                                if fails >= 2:
+                                    cls._MODEL_COOLDOWN_UNTIL[(account_key, target_cc_model)] = time.time() + 180.0
+                                    logger.info(f"[GeminiClient] 模型 [{target_cc_model}] 连续 2 次 503 容量不足，开启 180s 熔断冷却锁")
+
                             # 404 / 429 / 503 场景下，若还有候选可用模型，自动无缝降级切换
-                            if response.status_code in (404, 429, 503) and idx < len(candidate_models) - 1:
-                                next_model = candidate_models[idx + 1]
+                            if response.status_code in (404, 429, 503) and idx < len(active_candidates) - 1:
+                                next_model = active_candidates[idx + 1]
                                 logger.info(f"CloudCode 模型 [{target_cc_model}] 响应 [{response.status_code}]，自动降级至 [{next_model}]")
                                 if on_downgrade:
                                     try:
@@ -474,8 +510,8 @@ class GeminiClient:
                             if response.status_code != 200:
                                 error_text = await response.aread()
                                 err_msg = error_text.decode("utf-8", errors="ignore")
-                                if cls.is_version_deprecation_message(err_msg) and idx < len(candidate_models) - 1:
-                                    next_model = candidate_models[idx + 1]
+                                if cls.is_version_deprecation_message(err_msg) and idx < len(active_candidates) - 1:
+                                    next_model = active_candidates[idx + 1]
                                     logger.warning(f"模型 [{target_cc_model}] 提示版本/套餐受限，自动降级至 [{next_model}]")
                                     if on_downgrade:
                                         try:
@@ -484,6 +520,8 @@ class GeminiClient:
                                             logger.warning(f"触发模型降级回调异常: {cb_err}")
                                     continue
                                 raise GeminiAPIException(status_code=response.status_code, message=err_msg)
+
+                            cls._MODEL_503_FAILURES.pop((account_key, target_cc_model), None)
 
                             first_byte_notified = False
                             async for line in response.aiter_lines():

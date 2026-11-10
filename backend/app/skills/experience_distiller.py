@@ -972,9 +972,10 @@ class ExperienceDistiller:
     async def on_task_complete(self, trace: ExecutionTrace) -> dict[str, Any] | None:
         """
         统一的任务完成自动经验提炼钩子（以 loop_id 为键保证跨调用方幂等）。
+        自动触发时使用确定性规则提取（use_llm=False），零后台 Token 消耗；仅用户手动点击沉淀时才调用 LLM。
         """
         try:
-            return await self.distill_and_propose(trace, force=False, use_llm=True)
+            return await self.distill_and_propose(trace, force=False, use_llm=False)
         except Exception as e:
             logger.warning(f"[ExperienceDistiller] 任务后经验提炼异常（不影响主交付）: {e}")
             return None
