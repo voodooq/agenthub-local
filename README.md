@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.2.4-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.3.0-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,15 @@
 
 ## 🧭 版本演进总览
 
-### ✨ v1.2.0（最新 v1.2.4）— 本地上下文压缩、KV Cache 守护、双模性能水表与多源算力稳定化
+### ⚡ v1.3.0 — 工程感知与精准代码手术刀（Code Surgery & Git Checkpoint）
+- **精准局部补丁与三级容错匹配 (`replace_in_file`)**：彻底颠覆改一行重写全篇文件的传统低效模式。支持多块 `<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE` 原子化应用；支持 Level 1 精确匹配、Level 2 缩进与空行容错归一化对齐、Level 3 相似度诊断提示；生成标准 Unified Diff 红绿增量回传。
+- **带行号切片的精准代码读取 (`read_local_file`)**：支持 `start_line` 与 `end_line` 限制读取窗口，强制添加 `123 |` 行号前缀，防止长代码截断与无意义上下文填充。
+- **Tree-sitter AST 代码大纲感知与语法校验门禁 (`get_repo_skeleton`)**：原生集成 Tree-sitter，轻量提取函数、类、方法签名与文档大纲（0 Token 浪费）；落盘前强制执行 AST 语法门禁（Python / JS / TS），防止损坏语法树。
+- **Git Shadow 无损快照与单步秒级回滚 (`git_checkpoint`)**：修改前通过 `GIT_INDEX_FILE=.git/agenthub_shadow.index` 毫秒级生成 40 位 Tree Hash 快照；不污染用户工作分支与 Commit Log；配合 `POST /api/v1/workspaces/{id}/rollback` 支持一键原子还原。
+- **供应链 Skill 导入静态安全审计 (`SkillAuditor`)**：导入三方 Skill 时通过 AST 语法树遍历，阻断 `os.system`、`subprocess`、`eval`、硬编码可疑密钥及 Prompt 越狱注入风险。
+- **行级红绿 Unified Diff 渲染与一键撤销卡片**：前端全新开发 `DiffViewerCard`，直观呈现行级增删代码比对、快照 Tree Hash 与「一键撤销修改」交互按钮。
+
+### ✨ v1.2.0（包含 v1.2.4）— 本地上下文压缩、KV Cache 守护、双模性能水表与多源算力稳定化
 - **Token 消耗与执行效率深度精调（v1.2.4）**：
   - **工具变体协议与空壳清洗**：100% 兼容属性式、紧凑前缀式与子标签嵌套式非标协议，清洗空白 `<tool_call>` 块，消除无效 40k 全文纠偏重发；支持任务标记完成时安全收尾。
   - **网络加速与模型级熔断锁**：降级备选链剔除 404 死模型，新增模型级 180s 熔断冷却锁（429 或连续 503 直跳 2.5-flash，TTFT 降至 1.5s 内）；Kimi/Moonshot 通道参数自适应；地区网络受限 300s 隔离。

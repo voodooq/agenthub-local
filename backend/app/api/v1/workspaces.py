@@ -6,6 +6,8 @@ import asyncio
 import os
 import subprocess
 from pathlib import Path
+from typing import Optional
+from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, status, Query
 from ...repository.workspace_repository import WorkspaceRepository
 from ...schema.workspace_schema import (
@@ -16,6 +18,7 @@ from ...schema.workspace_schema import (
 )
 from ...core.logging_config import logger
 from ...core.runtime_paths import get_silent_subprocess_kwargs
+from ...tools.git_checkpoint import restore_shadow_snapshot
 
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
 
@@ -191,5 +194,39 @@ async def open_workspace_in_explorer(ws_id: str, subpath: str | None = Query(Non
     except Exception as e:
         logger.error(f"打开工作区文件夹失败: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class RollbackRequest(BaseModel):
+    snapshot_tree_hash: str
+    file_path: Optional[str] = None
+
+
+@router.post("/{workspace_id}/rollback")
+async def rollback_workspace_snapshot(workspace_id: str, req: RollbackRequest):
+    """一键将工作区单文件或整体回滚到指定 Git Shadow 快照"""
+    ws = await WorkspaceRepository.get_workspace_by_id(workspace_id)
+    if not ws or not ws.get("root_path"):
+        raise HTTPException(status_code=404, detail="未找到工作区物理路径")
+
+    root_path = Path(ws["root_path"]).resolve()
+    success = restore_shadow_snapshot(
+        root_path,
+        tree_hash=req.snapshot_tree_hash,
+        target_file=req.file_path,
+    )
+    if not success:
+        raise HTTPException(
+            status_code=400,
+            detail=f"撤销修改失败：无法将文件恢复到快照 {req.snapshot_tree_hash[:8]}",
+        )
+
+    logger.info(f"工作区 [{workspace_id}] 文件已无损回滚: {req.file_path or '全部文件'}")
+    return {
+        "success": True,
+        "message": f"已成功将 {req.file_path or '工作区'} 恢复至快照状态",
+        "snapshot_tree_hash": req.snapshot_tree_hash,
+        "file_path": req.file_path,
+    }
+
 
 

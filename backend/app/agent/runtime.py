@@ -40,6 +40,18 @@ from .ui_operator import ui_operator
 from ..repository.loop_run_repository import TaskLoopRepository
 from ..repository.tool_ref_repository import ToolRefRepository
 from ..repository.token_usage_repository import TokenUsageRepository, _build_turn_summary_from_rows
+from ..tools.code_surgery import (
+    read_local_file_sliced,
+    apply_search_replace_blocks,
+)
+from ..tools.ast_skeleton import (
+    get_workspace_skeleton,
+    validate_syntax_before_write,
+)
+from ..tools.git_checkpoint import (
+    create_shadow_snapshot,
+    restore_shadow_snapshot,
+)
 
 
 class AgentRuntime:
@@ -1592,6 +1604,173 @@ class AgentRuntime:
                                     "cwd": str(current_work_dir),
                                 }
 
+                    # ── 工具: 精准局部补丁修改 (replace_in_file - 代码手术刀与语法门禁) ──
+                    elif func_name == "replace_in_file":
+                        raw_path = str(args.get("file_path") or args.get("path") or "").strip()
+                        diff_blocks = str(args.get("diff_blocks") or "").strip()
+                        current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
+                        ws_guard_root = Path(target_cwd or current_work_dir).resolve()
+
+                        if not raw_path or not diff_blocks:
+                            tool_output = "Error: 缺少必要参数 `file_path` 或 `diff_blocks`。"
+                            compressed = "[局部修改失败: 缺少文件路径或补丁块]"
+                            yield {
+                                "type": "tool_end",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": "replace_in_file()",
+                                "reason": "参数缺失拒绝执行局部补丁",
+                                "status": "completed",
+                                "output": tool_output,
+                                "compressed": compressed,
+                                "cwd": str(current_work_dir),
+                            }
+                        else:
+                            target_file = Path(raw_path)
+                            if not target_file.is_absolute():
+                                target_file = (current_work_dir / target_file).resolve()
+                            else:
+                                target_file = target_file.resolve()
+
+                            rel_display = str(target_file)
+                            try:
+                                rel_display = str(target_file.relative_to(current_work_dir))
+                            except Exception:
+                                pass
+
+                            # 只读保护区拦截
+                            if (
+                                attachment_service.is_path_in_attachments_dir(target_file, workspace_root=ws_guard_root)
+                                or attachment_service.is_path_in_attachments_dir(target_file, workspace_root=current_work_dir)
+                            ):
+                                tool_output = f"Denied: 工作区输入附件目录为只读保护区，禁止修改 `{rel_display}`。"
+                                yield {
+                                    "type": "tool_end",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": f"replace_in_file({rel_display})",
+                                    "reason": "只读区安全拦截",
+                                    "status": "completed",
+                                    "output": tool_output,
+                                    "compressed": f"[安全拦截修改附件 `{rel_display}`]",
+                                    "cwd": str(current_work_dir),
+                                }
+                            elif not target_file.exists() or not target_file.is_file():
+                                tool_output = (
+                                    f"Error: 目标文件不存在: `{target_file}`。\n"
+                                    "⚠️ replace_in_file 仅用于修改已有文件；若是新建文件，请调用 write_local_file。"
+                                )
+                                yield {
+                                    "type": "tool_end",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": f"replace_in_file({rel_display})",
+                                    "reason": "目标文件不存在",
+                                    "status": "completed",
+                                    "output": tool_output,
+                                    "compressed": f"[修改失败: 文件不存在 `{rel_display}`]",
+                                    "cwd": str(current_work_dir),
+                                }
+                            else:
+                                yield {
+                                    "type": "tool_start",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": f"replace_in_file({rel_display})",
+                                    "reason": f"精准局部补丁修改 {rel_display}",
+                                    "security": "L1",
+                                }
+                                # 1. 执行写盘前无痕快照
+                                snapshot_hash = create_shadow_snapshot(current_work_dir)
+
+                                try:
+                                    orig_text = target_file.read_text(encoding="utf-8", errors="replace")
+                                    # 2. 应用局部补丁算子 (三级容错)
+                                    ok, new_text_or_err, unified_diff = apply_search_replace_blocks(orig_text, diff_blocks)
+
+                                    if not ok:
+                                        tool_output = f"Error: 局部补丁应用失败:\n{new_text_or_err}"
+                                        compressed = f"[补丁匹配失败: {rel_display}]"
+                                    else:
+                                        # 3. AST 语法安全门禁校验 (防代码损毁)
+                                        syntax_ok, syntax_err = validate_syntax_before_write(target_file.suffix, new_text_or_err)
+                                        if not syntax_ok:
+                                            tool_output = syntax_err
+                                            compressed = f"[AST 门禁拦截: {rel_display} 语法错误]"
+                                        else:
+                                            # 4. 真正物理落盘
+                                            target_file.write_text(new_text_or_err, encoding="utf-8")
+                                            tool_output = (
+                                                f"[成功应用局部补丁到 `{rel_display}`]\n"
+                                                f"```diff\n{unified_diff}\n```\n"
+                                                f"快照 Hash: {snapshot_hash or 'None'}"
+                                            )
+                                            compressed = f"[已局部修改 `{rel_display}`: 生成 Diff 共 {len(unified_diff)} 字符]"
+
+                                            # 自动注册资产
+                                            try:
+                                                attachment_service.register_workspace_artifact(
+                                                    workspace_root=ws_guard_root,
+                                                    file_path=target_file,
+                                                    conversation_id=conv_id,
+                                                    source="ai_generated",
+                                                    summary=f"AI 精准局部修改: {target_file.name}",
+                                                )
+                                            except Exception as art_err:
+                                                logger.warning(f"资产库登记异常: {art_err}")
+                                except Exception as e:
+                                    tool_output = f"Error: 局部修改执行异常: {e}"
+                                    compressed = f"[修改异常: {str(e)[:40]}]"
+
+                                yield {
+                                    "type": "tool_end",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": f"replace_in_file({rel_display})",
+                                    "reason": f"局部修改 {rel_display}",
+                                    "status": "completed",
+                                    "output": tool_output,
+                                    "compressed": compressed,
+                                    "cwd": str(current_work_dir),
+                                    "file_path": rel_display,
+                                    "unified_diff": unified_diff if 'unified_diff' in locals() and ok and syntax_ok else "",
+                                    "snapshot_tree_hash": snapshot_hash or "",
+                                }
+
+                    # ── 工具: AST 代码骨架大纲提取 (get_repo_skeleton - 防盲读爆Token) ──
+                    elif func_name == "get_repo_skeleton":
+                        target_arg = str(args.get("target_path") or args.get("path") or ".").strip()
+                        current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"get_repo_skeleton({target_arg})",
+                            "reason": f"提取目标代码大纲与函数签名: {target_arg}",
+                            "security": "SAFE",
+                        }
+                        skeleton_res = get_workspace_skeleton(current_work_dir, target_arg)
+                        if skeleton_res["status"] == "success":
+                            tool_output = skeleton_res["skeleton"]
+                            scanned = skeleton_res.get("scanned_files", 1)
+                            compressed = f"[成功提取骨架: {target_arg} (包含 {scanned} 个文件大纲)]"
+                        else:
+                            tool_output = f"Error: 提取骨架失败: {skeleton_res.get('error', '未知错误')}"
+                            compressed = f"[骨架提取失败: {target_arg}]"
+
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"get_repo_skeleton({target_arg})",
+                            "reason": f"代码骨架大纲: {target_arg}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                            "cwd": str(current_work_dir),
+                        }
+
                     # ── 工具: 物理读取本地文件 (read_local_file - 原生支持文本与 Office 结构化解析) ──
                     elif func_name == "read_local_file":
                         raw_path = str(args.get("file_path") or args.get("path") or "").strip()
@@ -1677,16 +1856,35 @@ class AgentRuntime:
                                         )
                                         compressed = f"[已结构化读取文档 `{rel_display}` ({ctx_info.get('extractor')}): 共 {len(tool_output)} 字符]"
                                     else:
-                                        raw_bytes = target_file.read_bytes()
-                                        content_text = attachment_service.decode_text_bytes(raw_bytes)
-                                        if len(content_text) > 120000:
-                                            content_text = (
-                                                content_text[:80000]
-                                                + f"\n\n... [文件过长，中间已省略 {len(content_text) - 100000} 字符；建议用脚本分段处理] ...\n\n"
-                                                + content_text[-20000:]
+                                        # 针对纯文本/源码文件，支持行号切片读取
+                                        start_l = args.get("start_line")
+                                        end_l = args.get("end_line")
+                                        if start_l is not None or end_l is not None:
+                                            s_num = int(start_l) if start_l is not None else 1
+                                            e_num = int(end_l) if end_l is not None else 250
+                                            sliced_res = read_local_file_sliced(
+                                                current_work_dir,
+                                                str(target_file),
+                                                start_line=s_num,
+                                                end_line=e_num,
                                             )
-                                        tool_output = content_text
-                                        compressed = f"[成功读取文件 `{rel_display}`: 共 {len(content_text)} 字符]"
+                                            if sliced_res["status"] == "success":
+                                                tool_output = sliced_res["content"]
+                                                compressed = f"[切片读取 `{rel_display}` (L{sliced_res['shown_range'][0]}-L{sliced_res['shown_range'][1]} / 共 {sliced_res['total_lines']} 行)]"
+                                            else:
+                                                tool_output = f"Error: {sliced_res.get('error', '切片读取失败')}"
+                                                compressed = f"[切片读取失败: {rel_display}]"
+                                        else:
+                                            raw_bytes = target_file.read_bytes()
+                                            content_text = attachment_service.decode_text_bytes(raw_bytes)
+                                            if len(content_text) > 120000:
+                                                content_text = (
+                                                    content_text[:80000]
+                                                    + f"\n\n... [文件过长，中间已省略 {len(content_text) - 100000} 字符；建议用脚本分段处理] ...\n\n"
+                                                    + content_text[-20000:]
+                                                )
+                                            tool_output = content_text
+                                            compressed = f"[成功读取文件 `{rel_display}`: 共 {len(content_text)} 字符]"
                                 except Exception as read_err:
                                     tool_output = f"Error: 读取文件失败: {read_err}"
                                     compressed = f"[读取文件异常: {str(read_err)[:40]}]"
@@ -1896,7 +2094,7 @@ class AgentRuntime:
 
                     # 智能异常探测：判断该步骤是否遇到报错，并为下一步自愈循环激活调度器
                     if (
-                        func_name in ("execute_local_command", "write_local_file", "run_skill_tool")
+                        func_name in ("execute_local_command", "write_local_file", "replace_in_file", "run_skill_tool")
                         and not str(tool_output or "").startswith("Denied:")
                     ):
                         has_workspace_mutations = True
@@ -1942,7 +2140,7 @@ class AgentRuntime:
                         last_step_error_info = None
                         if not str(tool_output or "").startswith("Error:"):
                             total_tool_steps += 1
-                            if func_name == "write_local_file":
+                            if func_name in ("write_local_file", "replace_in_file"):
                                 fp = str(args.get("file_path") or args.get("path") or "").strip()
                                 if fp and fp not in produced_artifacts:
                                     produced_artifacts.append(fp)
@@ -2074,7 +2272,7 @@ class AgentRuntime:
                                 incognito=False,
                             )
                             if (
-                                func_name == "write_local_file"
+                                func_name in ("write_local_file", "replace_in_file")
                                 and not is_step_abnormal
                                 and not str(tool_output).startswith("Error:")
                             ):

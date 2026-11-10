@@ -385,7 +385,7 @@ class ToolProtocolAdapter:
             },
             {
                 "name": "write_local_file",
-                "description": "在用户本地磁盘安全创建或写入文件（自动递归创建父目录）。所有写操作均真实落盘物理文件，拒绝幻觉。注意：工作区输入附件目录 (attachments/ 与 .agenthub/attachments/) 为只读保护区，禁止写入或伪造测试数据，交付物请写入 ./output/ 等目录。",
+                "description": "在用户本地磁盘安全创建新文件或覆写文件（自动递归创建父目录）。所有写操作均真实落盘物理文件，拒绝幻觉。注意：若要修改已有代码文件，【必须优先使用 replace_in_file 精准局部补丁】，禁止全文重写已有大文件！工作区输入附件目录 (attachments/ 与 .agenthub/attachments/) 为只读保护区，交付物请写入 ./output/ 等目录。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -406,14 +406,56 @@ class ToolProtocolAdapter:
                 },
             },
             {
+                "name": "replace_in_file",
+                "description": "【已有代码与文件修改首选工具】对本地已有代码/文本文件进行精准局部替换。必须提供严格匹配的一或多个 SEARCH/REPLACE 块。严禁全文重写大文件！系统在落盘前会自动进行 AST 语法校验，若有语法错误将被自动拦截并提醒自愈。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "目标文件相对路径或绝对路径（如 src/main.py）",
+                        },
+                        "diff_blocks": {
+                            "type": "string",
+                            "description": "包含一个或多个标准结构的补丁文本：\n<<<<<<< SEARCH\n原代码片段（确保唯一）\n=======\n修改后的新代码片段\n>>>>>>> REPLACE",
+                        },
+                    },
+                    "required": ["file_path", "diff_blocks"],
+                },
+            },
+            {
+                "name": "get_repo_skeleton",
+                "description": "基于 AST 语法树极速提取代码文件或目录的大纲结构（包含所有类、方法与函数签名首行及行号区间）。在阅读超过 200 行的长代码前，请先调用此工具获取全貌大纲，再按需切片读取，避免盲目全量读取浪费 Token。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "target_path": {
+                            "type": "string",
+                            "description": "文件或子目录相对路径（默认为当前工作区根目录 '.'）",
+                            "default": ".",
+                        },
+                    },
+                },
+            },
+            {
                 "name": "read_local_file",
-                "description": "安全读取本地磁盘指定文件内容。原生支持纯文本/源码以及 .xlsx / .docx / .pptx 等办公文档的结构化预览，并自动兼容工作区 attachments/ 目录查找。",
+                "description": "安全读取本地磁盘指定文件内容。原生支持纯文本/源码以及 .xlsx / .docx / .pptx 等办公文档的结构化预览。支持按行号区间切片读取，避免大文件一次性爆 Token。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "file_path": {
                             "type": "string",
                             "description": "要读取的文件相对路径或绝对路径（如 ./attachments/data.xlsx 或 src/main.py）",
+                        },
+                        "start_line": {
+                            "type": "integer",
+                            "description": "起始行号（从 1 开始，默认 1）。对于超长文件可切片读取",
+                            "default": 1,
+                        },
+                        "end_line": {
+                            "type": "integer",
+                            "description": "结束行号（默认 250，单次最大跨度 500 行）",
+                            "default": 250,
                         },
                     },
                     "required": ["file_path"],
@@ -588,6 +630,16 @@ class ToolProtocolAdapter:
                     "overwrite": True,
                 }
 
+        # 6.1 针对 replace_in_file 进行模式提取
+        if func_name == "replace_in_file":
+            path_m = re.search(r'"file_path"\s*:\s*"([^"]+)"', raw)
+            diff_m = re.search(r'"diff_blocks"\s*:\s*"(.*?)"\s*\}', raw, re.DOTALL)
+            if path_m and diff_m:
+                return {
+                    "file_path": path_m.group(1),
+                    "diff_blocks": diff_m.group(1).replace(r'\"', '"').replace(r'\n', '\n').replace(r'\\', '\\'),
+                }
+
         # 7. 兜底包装
         return {"command": raw} if func_name == "execute_local_command" else {}
 
@@ -595,6 +647,8 @@ class ToolProtocolAdapter:
         "execute_local_command",
         "search_memory_history",
         "write_local_file",
+        "replace_in_file",
+        "get_repo_skeleton",
         "read_local_file",
         "read_tool_ref",
         "web_fetch",
@@ -949,6 +1003,8 @@ class ToolProtocolAdapter:
                             args["command"] = body_str
                         elif t_name == "write_local_file" and "content" not in args:
                             args["content"] = body_str
+                        elif t_name == "replace_in_file" and "diff_blocks" not in args:
+                            args["diff_blocks"] = body_str
 
                 call_id = f"call_{uuid.uuid4().hex[:10]}"
                 tool_calls.append({
@@ -977,6 +1033,15 @@ class ToolProtocolAdapter:
                                         "command": obj["command"],
                                         "reason": obj.get("reason", "执行本地终端操作与异常自愈"),
                                     }, ensure_ascii=False),
+                                },
+                            })
+                            clean_text = clean_text.replace(block, "")
+                        elif "file_path" in obj and "diff_blocks" in obj:
+                            tool_calls.append({
+                                "id": call_id,
+                                "function": {
+                                    "name": "replace_in_file",
+                                    "arguments": json.dumps(obj, ensure_ascii=False),
                                 },
                             })
                             clean_text = clean_text.replace(block, "")

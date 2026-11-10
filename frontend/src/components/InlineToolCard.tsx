@@ -19,6 +19,7 @@ import {
   Wrench,
 } from 'lucide-react';
 import { ToolExecutionCardItem } from '@/types';
+import { DiffViewerCard } from './DiffViewerCard';
 
 interface InlineToolCardProps {
   events: ToolExecutionCardItem[];
@@ -33,7 +34,45 @@ function resolveToolMeta(ev: ToolExecutionCardItem) {
   const cmd = (ev.command || '').trim();
   const comp = (ev.compressed || '').trim();
 
-  // 1. 物理文件落盘 / 写入
+  // 1.0 精准代码局部补丁 (replace_in_file)
+  if (
+    name.includes('replace_in_file') ||
+    comp.includes('局部修改') ||
+    comp.includes('补丁') ||
+    cmd.startsWith('replace_in_file')
+  ) {
+    let filePath = ev.file_path || '';
+    if (!filePath) {
+      const match = comp.match(/[`'"]([^`'"]+)[`'"]/);
+      if (match) filePath = match[1];
+      else if (cmd && !cmd.includes(' ')) filePath = cmd.replace('replace_in_file(', '').replace(')', '');
+    }
+    return {
+      type: 'replace_in_file',
+      label: '局部补丁',
+      target: filePath,
+      Icon: Wrench,
+      colorClass: 'text-emerald-500 dark:text-emerald-400',
+      badgeBg: 'bg-emerald-500/10 border-emerald-500/25 text-emerald-700 dark:text-emerald-300',
+      actionText: comp || `已应用局部补丁 ${filePath}`,
+    };
+  }
+
+  // 1.1 代码骨架提取 (get_repo_skeleton)
+  if (name.includes('get_repo_skeleton') || comp.includes('骨架')) {
+    const target = cmd.replace('get_repo_skeleton(', '').replace(')', '') || '.';
+    return {
+      type: 'get_repo_skeleton',
+      label: '代码骨架',
+      target: target,
+      Icon: FileSearch,
+      colorClass: 'text-indigo-500 dark:text-indigo-400',
+      badgeBg: 'bg-indigo-500/10 border-indigo-500/25 text-indigo-700 dark:text-indigo-300',
+      actionText: comp || `提取代码骨架: ${target}`,
+    };
+  }
+
+  // 1.2 物理文件落盘 / 写入
   if (
     name.includes('write_local_file') ||
     comp.includes('落盘') ||
@@ -228,8 +267,19 @@ function SingleEventCard({ ev }: { ev: ToolExecutionCardItem }) {
         </div>
       )}
 
+      {/* 代码补丁红绿 Diff 呈现区 */}
+      {(ev.unified_diff || (rawOutput.includes('```diff\n') && rawOutput.includes('@@'))) && (
+        <div className="px-3.5 py-1.5 bg-black/85 dark:bg-zinc-950/90 border-t border-zinc-800/60">
+          <DiffViewerCard
+            filePath={meta.target || ev.file_path || 'file'}
+            unifiedDiff={ev.unified_diff || (rawOutput.match(/```diff\n([\s\S]*?)\n```/)?.[1] || '')}
+            snapshotTreeHash={ev.snapshot_tree_hash || (rawOutput.match(/快照 Hash:\s*([a-f0-9]{40})/i)?.[1])}
+          />
+        </div>
+      )}
+
       {/* 输出内容呈现区 */}
-      {rawOutput ? (
+      {rawOutput && !ev.unified_diff && !rawOutput.includes('```diff\n') ? (
         <div className="px-3.5 py-2 bg-black/80 dark:bg-zinc-950/80 text-zinc-300 font-mono text-[11px] leading-relaxed">
           <div className="whitespace-pre-wrap break-all max-h-56 overflow-y-auto selection:bg-emerald-500/30">
             {visibleOutput}
@@ -245,7 +295,7 @@ function SingleEventCard({ ev }: { ev: ToolExecutionCardItem }) {
             </button>
           )}
         </div>
-      ) : ev.compressed && meta.type !== 'command' ? (
+      ) : ev.compressed && meta.type !== 'command' && !ev.unified_diff && !rawOutput.includes('```diff\n') ? (
         <div className="px-3.5 py-1.5 bg-surface-100/60 text-[11px] text-muted-foreground font-mono">
           {ev.compressed}
         </div>

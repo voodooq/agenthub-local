@@ -42,6 +42,9 @@ export interface ToolExecutionCardItem {
   exit_code?: number;
   output?: string;
   compressed?: string;
+  file_path?: string;
+  unified_diff?: string;
+  snapshot_tree_hash?: string;
 }
 
 export interface MemoryRefItem {

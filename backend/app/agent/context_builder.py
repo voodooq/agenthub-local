@@ -197,8 +197,9 @@ class ContextBuilder:
                 "   - 若遇到预期输入文件缺失、路径报错、Sheet 名称不匹配或解析异常，**绝对严禁私自生成任何 Mock / 模拟 / 测试样例输入文件来“兜底”完成分析**！编写的数据处理脚本必须坚持 Fail-Fast 原则（缺失即抛 `FileNotFoundError` 并以非零码退出），严禁内嵌“不存在就造默认测试数据继续运行”的伪分支；\n"
                 "   - 确系真实文件缺失或无法解析时，必须立即停机并向用户如实报告预期路径与缺失原因。\n"
                 "7. 【⚡ 极速执行与代码规范（强制遵循，违者终止任务）】：\n"
+                "   - 【已有文件修改首选 replace_in_file】：修改已有代码或脚本时，【必须优先且强烈推荐使用 `replace_in_file`】提交标准的 `SEARCH/REPLACE` 补丁，绝对严禁对数百行的已有代码调用 `write_local_file` 全量重写！对于超长文件先调用 `get_repo_skeleton` 获取结构大纲或用 `read_local_file` 切片读取！\n"
                 "   - 【单步多工具并行调用】：若一个步骤需要执行多项操作（如读取多个文件、写入多个配置或串行多个命令），你必须在【同一次回复】中连续并列输出多个 `<tool_call>` 标签一次性并发提交系统执行，严禁一次只调用一个工具来回拉扯 5~10 轮！\n"
-                "   - 【原地修改文件，严禁创建副本】：修改已有代码或脚本时，必须原地覆盖原有文件名（如 `render.py`），绝对严禁创建类似 `render_v1.py`、`render_v2.py`、`render_fixed.py`、`render_final.py` 等衍生副本，违者判定为严重的代码污染；\n"
+                "   - 【原地修改文件，严禁创建副本】：必须原地覆盖原有文件名（如 `render.py`），绝对严禁创建类似 `render_v1.py`、`render_v2.py`、`render_fixed.py` 等衍生副本，违者判定为严重的代码污染；\n"
                 "   - 【Python 一次性诊断】：面对数据探索或环境探测，禁止写一个脚本看 Sheet1、再写一个脚本看 Sheet2、再写一个看列名；必须在一个紧凑的 Python 脚本中一次性打印出所有元信息与关键样例，一步完成诊断！"
             )
             if tools:
@@ -276,6 +277,15 @@ class ContextBuilder:
                         '        {"value": "opt_b", "label": "选项B名称", "desc": "备选说明"}\n'
                         "      ],\n"
                         '      "default": "opt_a"\n'
+                        '    },\n'
+                        '    {\n'
+                        '      "id": "q2",\n'
+                        '      "type": "multi_choice",\n'
+                        '      "label": "确认项 2 多选说明",\n'
+                        '      "options": [\n'
+                        '        {"value": "opt_1", "label": "选项1名称", "desc": "说明"},\n'
+                        '        {"value": "opt_2", "label": "选项2名称", "desc": "说明"}\n'
+                        '      ]\n'
                         "    }\n"
                         "  ],\n"
                         '  "fill_template": {\n'
@@ -324,7 +334,7 @@ class ContextBuilder:
                 zone3_parts.append(
                     "### 🧭【需求前置主动澄清模式 (Clarify Mode)】：\n"
                     "用户开启了需求澄清模式。当用户的提问涉及多方案分歧、前提假设不明确或缺少场景约束时，切勿盲目输出长篇泛泛而谈的理论；\n"
-                    '应先在正文中提炼核心考量，并在末尾通过**唯一一张**标准 ` ```interactive_inquiry ` 围栏代码块卡片一次性完整列出所有待确认维度，供用户按步骤逐项确认完毕后再统一提交解答。'
+                    '应先在正文中提炼核心考量，并在末尾通过**唯一一张**标准 ` ```interactive_inquiry ` 围栏代码块卡片完整逐条列出全部待确认问题，数量不限，供用户按步骤逐项确认完毕后再统一提交解答。'
                 )
 
             # L4 确定性事实 + 长期记忆 + 冷区 FTS5 召回（无痕模式下严格跳过）
@@ -485,9 +495,11 @@ class ContextBuilder:
         history_list: list[dict[str, Any]] = []
         for m in raw_msgs:
             if m.role == "tool":
-                # 严格遵守 Write-Once, Read-Many：入库时已完成旁路脱水的正文始终以固定字节流渲染，
-                # 绝不在跨轮次或 step_idx >= 4 时二次改写前文，守护 100% KV Cache 前缀命中。
-                effective_text = m.content or m.compressed_content or "[工具执行完成]"
+                # 针对非当前轮次的历史工具输出，优先使用旁路脱水后的压缩摘要，避免老日志占满上下文
+                if (m.turn_id or 1) < int(current_turn_id) and m.compressed_content:
+                    effective_text = m.compressed_content
+                else:
+                    effective_text = m.content or m.compressed_content or "[工具执行完成]"
                 history_list.append(
                     {
                         "role": "tool",
@@ -565,9 +577,9 @@ class ContextBuilder:
 
         # 将已固化的 Anchored Summary 拼入 Zone 1 末尾（日常非坍缩轮次该片段字节完全冻结不变）
         zone1_final_parts = [zone1_base_prompt]
-        if final_anchored_summary:
+        if final_anchored_summary and not incognito:
             safe_summary, _ = MemoryPolicyGuard.sanitize_text(final_anchored_summary)
-            zone1_final_parts.append(f"### 📜 已固化历史摘要 (Anchored Summary)：\n{safe_summary}")
+            zone1_final_parts.append(f"### 📜 L3 Session Summary (已固化历史摘要 Anchored Summary)：\n{safe_summary}")
         final_system_instruction = "\n\n".join(p for p in zone1_final_parts if p)
 
         # 极端保底防爆阀（仅作用于当前渲染列表，绝不改动数据库原始消息）：
