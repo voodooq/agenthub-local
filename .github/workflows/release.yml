@@ -154,11 +154,31 @@ jobs:
       - name: Download All Built Artifacts
         uses: actions/download-artifact@v4
         with:
+          pattern: release-*
           path: release_staging
           merge-multiple: true
 
-      - name: Verify All 4 Distribution Packages
-        run: ls -lh release_staging
+      - name: Verify Distribution Packages Only
+        run: |
+          ls -lh release_staging
+          test -n "$(ls -A release_staging)"
+          for f in release_staging/*; do
+            base="$(basename "$f")"
+            case "$base" in
+              AgentHub-Local-*) ;;
+              *) echo "Unexpected non-package artifact in release_staging: $base" >&2; exit 1 ;;
+            esac
+          done
+
+      - name: Clean Stale Release If Re-tagging Same Version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ github.ref_name }}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "Cleaning existing release ${{ github.ref_name }} before republishing..."
+            gh release delete "${{ github.ref_name }}" --repo "${{ github.repository }}" --yes
+            sleep 2
+          fi
 
       - name: Create GitHub Release & Upload Assets
         uses: softprops/action-gh-release@v2
@@ -167,4 +187,4 @@ jobs:
           draft: false
           prerelease: false
           generate_release_notes: true
-          files: release_staging/*
+          files: release_staging/AgentHub-Local-*
