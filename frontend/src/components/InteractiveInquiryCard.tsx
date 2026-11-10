@@ -118,12 +118,16 @@ export function InteractiveInquiryCard({
   const buildInitialAnswers = (qs: InquiryQuestion[]) => {
     const initial: Record<string, string | string[]> = {};
     for (const q of qs) {
-      if (q.default !== undefined) {
+      if (q.type === 'multi_choice') {
+        if (Array.isArray(q.default)) {
+          initial[q.id] = q.default.map((item) => String(item));
+        } else {
+          initial[q.id] = q.options.map((o) => o.value);
+        }
+      } else if (typeof q.default === 'string' && q.default.trim()) {
         initial[q.id] = q.default;
-      } else if (q.type === 'single_choice' && q.options.length > 0) {
+      } else if (q.options.length > 0) {
         initial[q.id] = q.options[0].value;
-      } else if (q.type === 'multi_choice') {
-        initial[q.id] = q.options.map((o) => o.value);
       }
     }
     return initial;
@@ -326,17 +330,23 @@ export function InteractiveInquiryCard({
   // 单选切换（不触发自动跳步或抢跑发送，由用户明确点击下一步/确认）
   const handleSingleSelect = (questionId: string, val: string) => {
     if (isLocked) return;
-    setSelectedAnswers((prev) => ({ ...prev, [questionId]: val }));
+    setSelectedAnswers((prev) => ({ ...prev, [questionId]: String(val) }));
   };
 
-  // 多选切换
+  // 多选切换（严格校验当前状态为数组，防止模型异常 default 值导致崩溃）
   const handleMultiToggle = (questionId: string, val: string) => {
     if (isLocked) return;
+    const safeVal = String(val);
     setSelectedAnswers((prev) => {
-      const current = (prev[questionId] as string[]) || [];
-      const next = current.includes(val)
-        ? current.filter((x) => x !== val)
-        : [...current, val];
+      const rawPrev = prev[questionId];
+      const current = Array.isArray(rawPrev)
+        ? rawPrev.map((item) => String(item))
+        : typeof rawPrev === 'string' && rawPrev
+          ? [rawPrev]
+          : [];
+      const next = current.includes(safeVal)
+        ? current.filter((x) => x !== safeVal)
+        : [...current, safeVal];
       return { ...prev, [questionId]: next };
     });
   };

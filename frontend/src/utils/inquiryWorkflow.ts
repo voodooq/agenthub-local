@@ -377,10 +377,14 @@ export function normalizeInquiryPayload(rawContent: string): InteractiveInquiryP
 
   if (Array.isArray(rawObj.questions)) {
     const normQuestions: InquiryQuestion[] = [];
+    const seenQuestionIds = new Set<string>();
     rawObj.questions.forEach((rawQ: unknown, qIdx: number) => {
       if (!rawQ || typeof rawQ !== 'object') return;
       const q = rawQ as Record<string, any>;
-      const qId = String(q.id ?? q.question_id ?? q.key ?? q.name ?? `q_${qIdx + 1}`).trim() || `q_${qIdx + 1}`;
+      const baseQId = String(q.id ?? q.question_id ?? q.key ?? q.name ?? `q_${qIdx + 1}`).trim() || `q_${qIdx + 1}`;
+      const qId = seenQuestionIds.has(baseQId) ? `${baseQId}_${qIdx + 1}` : baseQId;
+      seenQuestionIds.add(qId);
+
       const qLabel =
         stripAgenthubFileLinks(
           String(q.label ?? q.question ?? q.title ?? q.prompt ?? q.text ?? `确认项 ${qIdx + 1}`)
@@ -395,12 +399,51 @@ export function normalizeInquiryPayload(rawContent: string): InteractiveInquiryP
         q.multiple === true;
 
       const normOpts = normalizeInquiryOptions(q.options);
+      const validOptValues = new Set(normOpts.map((o) => o.value));
+      const labelToOptValue = new Map(normOpts.map((o) => [o.label, o.value]));
+
+      const mapRawChoiceToOptValue = (rawItem: unknown): string | null => {
+        if (typeof rawItem !== 'string' && typeof rawItem !== 'number') return null;
+        const s = String(rawItem).trim();
+        if (!s) return null;
+        if (validOptValues.has(s)) return s;
+        const byLabel = labelToOptValue.get(s);
+        return byLabel ?? null;
+      };
+
+      // 严格按题型归一化 default，防止模型输出 null / 字符串 / 对象导致多选点击时崩溃
+      let normalizedDefault: string | string[] | undefined;
+      if (q.default !== undefined && q.default !== null) {
+        if (isMulti) {
+          if (Array.isArray(q.default)) {
+            const matched = q.default
+              .map(mapRawChoiceToOptValue)
+              .filter((v): v is string => Boolean(v));
+            normalizedDefault = matched;
+          } else if (typeof q.default === 'string' && q.default.trim()) {
+            const parts = q.default
+              .split(/[,，、|]+/)
+              .map((part) => mapRawChoiceToOptValue(part))
+              .filter((v): v is string => Boolean(v));
+            if (parts.length > 0) {
+              normalizedDefault = parts;
+            }
+          }
+        } else {
+          const singleCandidate = Array.isArray(q.default) ? q.default[0] : q.default;
+          const matchedSingle = mapRawChoiceToOptValue(singleCandidate);
+          if (matchedSingle) {
+            normalizedDefault = matchedSingle;
+          }
+        }
+      }
+
       normQuestions.push({
         id: qId,
         type: isMulti ? 'multi_choice' : 'single_choice',
         label: qLabel,
         options: normOpts,
-        ...(q.default !== undefined ? { default: q.default } : {}),
+        ...(normalizedDefault !== undefined ? { default: normalizedDefault } : {}),
         ...(q.fact_key ? { fact_key: String(q.fact_key) } : {}),
         ...(q.fact_category ? { fact_category: q.fact_category } : {}),
         ...(q.fact_scope ? { fact_scope: q.fact_scope } : {}),
