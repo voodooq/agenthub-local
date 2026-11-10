@@ -204,7 +204,7 @@ class RollbackRequest(BaseModel):
 @router.post("/{workspace_id}/rollback")
 async def rollback_workspace_snapshot(workspace_id: str, req: RollbackRequest):
     """一键将工作区单文件或整体回滚到指定 Git Shadow 快照"""
-    ws = await WorkspaceRepository.get_workspace_by_id(workspace_id)
+    ws = await WorkspaceRepository.get_by_id(workspace_id)
     if not ws or not ws.get("root_path"):
         raise HTTPException(status_code=404, detail="未找到工作区物理路径")
 

@@ -91,6 +91,9 @@ class WorkspaceRepository:
 
             return item
 
+    # 别名兼容，防止调用命名不一致
+    get_workspace_by_id = get_by_id
+
     @staticmethod
     async def get_root_path_by_id(ws_id: str) -> str | None:
         """

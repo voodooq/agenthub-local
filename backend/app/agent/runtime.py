@@ -1682,6 +1682,9 @@ class AgentRuntime:
                                 }
                                 # 1. 执行写盘前无痕快照
                                 snapshot_hash = create_shadow_snapshot(current_work_dir)
+                                ok = False
+                                syntax_ok = False
+                                unified_diff = ""
 
                                 try:
                                     orig_text = target_file.read_text(encoding="utf-8", errors="replace")
@@ -1707,11 +1710,16 @@ class AgentRuntime:
                                             )
                                             compressed = f"[已局部修改 `{rel_display}`: 生成 Diff 共 {len(unified_diff)} 字符]"
 
-                                            # 自动注册资产
+                                            # 自动注册资产到工作区资产库
                                             try:
-                                                attachment_service.register_workspace_artifact(
-                                                    workspace_root=ws_guard_root,
-                                                    file_path=target_file,
+                                                from ..repository.artifact_repository import ArtifactRepository
+                                                f_type = ArtifactRepository._detect_file_type(target_file)
+                                                await ArtifactRepository.register_artifact(
+                                                    workspace_id=ws_id,
+                                                    file_path=str(target_file),
+                                                    file_name=target_file.name,
+                                                    file_type=f_type,
+                                                    file_size=len(new_text_or_err.encode("utf-8")),
                                                     conversation_id=conv_id,
                                                     source="ai_generated",
                                                     summary=f"AI 精准局部修改: {target_file.name}",
@@ -1733,7 +1741,7 @@ class AgentRuntime:
                                     "compressed": compressed,
                                     "cwd": str(current_work_dir),
                                     "file_path": rel_display,
-                                    "unified_diff": unified_diff if 'unified_diff' in locals() and ok and syntax_ok else "",
+                                    "unified_diff": unified_diff if (ok and syntax_ok) else "",
                                     "snapshot_tree_hash": snapshot_hash or "",
                                 }
 

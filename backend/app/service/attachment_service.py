@@ -1060,6 +1060,47 @@ class AttachmentService:
         return clean_body or badge
 
     @classmethod
+    def register_workspace_artifact(
+        cls,
+        workspace_root: Any = None,
+        file_path: Any = None,
+        conversation_id: str = "",
+        source: str = "ai_generated",
+        summary: str = "",
+        workspace_id: str = "",
+    ) -> Any:
+        """
+        向后兼容别名方法：将文件注册到当前工作区资产库。
+        内部自动代理转发给 ArtifactRepository.register_artifact，兼容旧代码同步/异步调用。
+        """
+        try:
+            import asyncio
+            from ..repository.artifact_repository import ArtifactRepository
+            p = Path(file_path) if file_path else None
+            if not p or not p.exists():
+                return None
+            f_type = ArtifactRepository._detect_file_type(p)
+            f_size = p.stat().st_size
+            coro = ArtifactRepository.register_artifact(
+                workspace_id=workspace_id or "default",
+                file_path=str(p),
+                file_name=p.name,
+                file_type=f_type,
+                file_size=f_size,
+                conversation_id=conversation_id,
+                source=source,
+                summary=summary or f"AI 修改落盘: {p.name}",
+            )
+            try:
+                loop = asyncio.get_running_loop()
+                return loop.create_task(coro)
+            except RuntimeError:
+                return asyncio.run(coro)
+        except Exception as e:
+            logger.debug(f"[AttachmentService] register_workspace_artifact 代理登记跳过: {e}")
+            return None
+
+    @classmethod
     def build_rules_summary(cls) -> dict[str, Any]:
         """导出统一的前后端校验规则清单"""
         return {
