@@ -1402,6 +1402,9 @@ export default function WorkbenchPage() {
 
         try {
           const parsed = JSON.parse(rawData);
+          if (parsed.type === 'heartbeat') {
+            return;
+          }
           if (parsed.type === 'conv_init') {
             // 若后端自适应升舱或调整了场景模式，同步刷新前端视图
             if (parsed.scene_mode && parsed.scene_mode !== sceneMode) {

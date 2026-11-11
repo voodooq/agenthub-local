@@ -55,15 +55,56 @@ foreach ($rp in $regPaths) {
   code --diff "fileA.py" "fileB.py"
   ```
 
-### 2. 浏览器打开特定网页或进入调试模式
-- **默认浏览器打开 URL**：
+### 2. 浏览器打开特定网页或进入调试模式（CDP 9222 规范）
+- **环境变量强制语法红线（防产生 `%SystemDrive%` 畸形目录）**：
+  - 在 PowerShell 命令或路径参数中**严禁使用** `%SystemDrive%`、`%LOCALAPPDATA%`、`%USERPROFILE%` 等 CMD 批处理 `%...%` 变量；必须统一使用 `$env:LOCALAPPDATA`、`$env:USERPROFILE`、`Join-Path` 或工作区真实绝对路径。
+- **默认浏览器快速打开 URL**（无需持续接管页面时）：
   ```powershell
   Start-Process "https://github.com"
   ```
-- **唤起指定浏览器**（Edge / Chrome）：
+- **以独立用户目录异步拉起带 CDP 调试端口（`9222`）的 Edge / Chrome（供 Playwright MCP 持续接管）**：
+  1. 桌面端若已有常规 Edge 在运行，使用默认配置目录启动 `--remote-debugging-port=9222` 会立刻附着并退出而不监听调试端口。因此**必须指定独立 `--user-data-dir`**；
+  2. 必须先检测 `9222` 端口是否已被调试实例复用，未就绪时通过 `Start-Process ... -WindowStyle Normal` 异步非阻塞启动（严禁直接前台调用阻塞式 `msedge.exe` 命令），随后在 10 秒内轮询 CDP HTTP 接口验证就绪：
   ```powershell
-  Start-Process "msedge.exe" -ArgumentList "http://localhost:8080"
+  $cdpUrl = "http://127.0.0.1:9222/json/version"
+  $targetUrl = "https://www.12306.cn/index/"
+  $ready = $false
+  try {
+      $resp = Invoke-RestMethod -Uri $cdpUrl -TimeoutSec 2 -ErrorAction Stop
+      if ($resp) { $ready = $true; Write-Output "CDP_ALREADY_READY: $($resp.Browser)" }
+  } catch {}
+
+  if (-not $ready) {
+      $edgePath = @(
+          "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe",
+          "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\msedge.exe"
+      ) | ForEach-Object {
+          if (Test-Path $_) { (Get-ItemProperty -Path $_).'(default)' }
+      } | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
+      if (-not $edgePath) { $edgePath = "${env:ProgramFiles(x86)}\Microsoft\Edge\Application\msedge.exe" }
+
+      $profileDir = Join-Path $env:LOCALAPPDATA "AgentHub\edge_cdp_profile"
+      New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
+
+      Start-Process -FilePath $edgePath -ArgumentList @(
+          "--remote-debugging-port=9222",
+          "--user-data-dir=$profileDir",
+          "--no-first-run",
+          "--no-default-browser-check",
+          $targetUrl
+      ) -WindowStyle Normal
+
+      for ($i = 0; $i -lt 10; $i++) {
+          Start-Sleep -Seconds 1
+          try {
+              $resp = Invoke-RestMethod -Uri $cdpUrl -TimeoutSec 2 -ErrorAction Stop
+              if ($resp) { Write-Output "CDP_READY: $($resp.Browser)"; $ready = $true; break }
+          } catch {}
+      }
+      if (-not $ready) { Write-Output "CDP_TIMEOUT_WAITING_9222" }
+  }
   ```
+  3. 确认 `CDP_READY` 后，若工具清单中已有 `mcp__playwright-cdp__*` 工具，立即衔接调用（如 `mcp__playwright-cdp__browser_snapshot`、`browser_navigate`、`browser_click`）操控真实页面。
 
 ### 3. 本地客户端协议唤起（URI Scheme）
 许多主流软件注册了专属协议头，可直接拉起特定界面：
@@ -143,6 +184,7 @@ docker logs --tail 20 <container_name>
 
 每次执行桌面软件唤起或系统服务重启操作后：
 1. **进程存在性确认**：使用 `Get-Process <ProcessName>` 验证软件是否真实被拉起运行；
-2. **网络探针校验**：若重启了 Web/API 服务，立即调用原子工具 `web_fetch(url="http://localhost:<port>/...")` 验证 HTTP 状态码是否为 200；
-3. **向用户汇报清晰事实**：简要说明软件 PID、打开的路径或服务健康状态。
+2. **网络与 CDP 探针校验**：若重启了 Web/API 服务或启动了浏览器调试端口（9222），校验 `http://127.0.0.1:9222/json/version` 或服务健康接口返回正常状态；
+3. **工具链路衔接**：若已挂载 `mcp__playwright-cdp__*` 工具且需要继续页面交互（查票/填表/点击），直接在下一工具步发起 MCP 页面操作，**切勿在执行完毕后挂起等待浏览器退出**；
+4. **向用户汇报清晰事实**：简要说明软件状态、工作目录或已接管的页面地址，支付与敏感提交前保留人工确认红线。
 

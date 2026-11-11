@@ -1,9 +1,11 @@
 """
 流式聊天核心接口 (SSE Stream Endpoint) 与多模态上传
 """
+import asyncio
 import json
 import uuid
 from pathlib import Path
+from typing import Any
 from fastapi import APIRouter, Request, UploadFile, File, Form, HTTPException
 from fastapi.responses import StreamingResponse, FileResponse
 from ...schema.chat_schema import ChatStreamRequest, ToolApprovalRequest, StopChatRequest
@@ -134,6 +136,10 @@ async def get_uploaded_attachment(filename: str):
     raise HTTPException(status_code=404, detail="附件不存在")
 
 
+# SSE 等待上游期间的保活心跳周期（需远小于前端 90s idle_timeout 看门狗）
+SSE_HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+
 @router.post("/stream")
 async def chat_stream(req: ChatStreamRequest, request: Request):
     """
@@ -142,32 +148,71 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
     async def event_generator():
         completed = False
         active_conv_id = req.conversation_id
+        queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+
+        async def _producer() -> None:
+            try:
+                async for event in agent_runtime.chat_stream(
+                    conversation_id=req.conversation_id,
+                    user_message=req.message,
+                    model_name=req.model_name,
+                    thinking_level=req.thinking_level,
+                    system_override=req.system_override,
+                    temperature=req.temperature,
+                    context_rounds=req.context_rounds,
+                    attachments=req.attachments,
+                    scene_mode=req.scene_mode,
+                    incognito=req.incognito,
+                    workspace_id=req.workspace_id,
+                    execution_strategy=req.execution_strategy,
+                    clarify_mode=req.clarify_mode,
+                    approved_plan_steps=req.approved_plan_steps,
+                    confirmed_facts=req.confirmed_facts,
+                    inquiry_confirmed=req.inquiry_confirmed,
+                    inquiry_action=req.inquiry_action,
+                    is_disconnected=request.is_disconnected,
+                ):
+                    await queue.put(("event", event))
+                await queue.put(("done", None))
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                await queue.put(("error", exc))
+
+        producer_task = asyncio.create_task(_producer())
         try:
-            async for event in agent_runtime.chat_stream(
-                conversation_id=req.conversation_id,
-                user_message=req.message,
-                model_name=req.model_name,
-                thinking_level=req.thinking_level,
-                system_override=req.system_override,
-                temperature=req.temperature,
-                context_rounds=req.context_rounds,
-                attachments=req.attachments,
-                scene_mode=req.scene_mode,
-                incognito=req.incognito,
-                workspace_id=req.workspace_id,
-                execution_strategy=req.execution_strategy,
-                clarify_mode=req.clarify_mode,
-                approved_plan_steps=req.approved_plan_steps,
-                confirmed_facts=req.confirmed_facts,
-                inquiry_confirmed=req.inquiry_confirmed,
-                inquiry_action=req.inquiry_action,
-                is_disconnected=request.is_disconnected,
-            ):
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    kind, payload = await asyncio.wait_for(
+                        queue.get(),
+                        timeout=SSE_HEARTBEAT_INTERVAL_SECONDS,
+                    )
+                except asyncio.TimeoutError:
+                    if producer_task.done() and queue.empty():
+                        break
+                    # NOTE: 周期性推送轻量心跳帧，防止慢工具或长推理等待超过前端 90s 无数据看门狗触发误杀
+                    yield f"data: {json.dumps({'type': 'heartbeat'}, ensure_ascii=False)}\n\n"
+                    continue
+
+                if kind == "done":
+                    completed = True
+                    break
+                if kind == "error":
+                    raise payload
+
+                event = payload
                 if event.get("type") == "conv_init" and event.get("conversation_id"):
                     active_conv_id = str(event["conversation_id"])
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
-            completed = True
         finally:
+            if not producer_task.done():
+                producer_task.cancel()
+                try:
+                    await producer_task
+                except BaseException:
+                    pass
             # 客户端非正常断连或生成器提前关闭时，触发后端执行流与遗留子进程兜底清理
             if not completed and active_conv_id:
                 agent_runtime.cancel_session_stream(active_conv_id)

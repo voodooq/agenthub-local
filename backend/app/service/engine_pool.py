@@ -976,23 +976,33 @@ class EnginePoolService:
                     "name": account.name,
                     "provider_type": "gemini_cli",
                 }
+                # NOTE: 收敛 CLI 工具主权，禁止 CLI 越权触发内置原生工具绕过 AgentHub 审计与 MCP 链路
+                cli_sovereignty_guard = (
+                    "\n\n[宿主执行引擎强制约束]: 你当前仅作为 AgentHub 宿主管线的推理核心运行。"
+                    "严禁触发你自身 CLI 环境自带的任何原生内置工具（如 run_command、view_file、write_to_file、browser_* 等），"
+                    "否则无头模式将拒绝执行并丢弃响应。\n"
+                    "当需要调用终端命令、文件编辑、网页抓取或浏览器控制时，必须以纯文本严格输出 AgentHub 约定的 "
+                    "`<tool_call name=\"...\">...</tool_call>` XML 标签交由宿主统一调度执行；无需工具时请直接给出完整文本回复。"
+                )
+                cli_effective_prompt = f"{full_cli_prompt}{cli_sovereignty_guard}"
                 cli_collector = TokenMetricsCollector(
                     turn_id=turn_id,
                     step_index=step_index,
                     agent_role=effective_agent_role,
                     provider_info=cli_prov_meta,
                     model_name=google_model_name,
-                    estimated_prompt_tokens=estimate_tokens(full_cli_prompt),
+                    estimated_prompt_tokens=estimate_tokens(cli_effective_prompt),
                 )
                 cli_completed = False
                 try:
                     async for event in run_cli_stream(
                         cli_home_dir=account.cli_home_dir,
-                        prompt=full_cli_prompt,
+                        prompt=cli_effective_prompt,
                         model=google_model_name if google_model_name != "default" else None,
                         thinking_level=thinking_level,
                         work_dir=work_dir,
-                        approval_mode="auto_edit",
+                        approval_mode="default",
+                        allow_native_tools=False,
                         conversation_id=conversation_id,
                         cancel_event=cancel_event,
                     ):
@@ -1002,7 +1012,14 @@ class EnginePoolService:
                             yield {"type": "cancelled", "content": event.get("message", "已中断执行")}
                             return
 
-                        if etype == "content":
+                        if etype == "thinking":
+                            thinking_text = str(event.get("text") or "")
+                            if thinking_text:
+                                cli_collector.mark_chunk(thinking_text)
+                                full_thinking_text += thinking_text
+                                yield {"type": "thinking_chunk", "content": thinking_text, "account": account.name}
+
+                        elif etype == "content":
                             text = event.get("text", "")
                             for seg_kind, seg_text in _split_legacy_segments(text):
                                 cli_collector.mark_chunk(seg_text)

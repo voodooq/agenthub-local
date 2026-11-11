@@ -12,6 +12,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,10 @@ from ..agent.shell_executor import LocalShellExecutor
 class _StdioMCPConnection:
     """单个 stdio 模式 MCP Server 的常驻 JSON-RPC 2.0 连接封装"""
 
+    DEFAULT_INIT_TIMEOUT_SECONDS = 30.0
+    DEFAULT_LIST_TIMEOUT_SECONDS = 20.0
+    DEFAULT_CALL_TIMEOUT_SECONDS = 35.0
+
     def __init__(
         self,
         name: str,
@@ -47,6 +52,7 @@ class _StdioMCPConnection:
         self._req_id = 0
         self._lock = asyncio.Lock()
         self.tools_cache: list[dict[str, Any]] = []
+        self._last_error: str | None = None
 
     def is_alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
@@ -101,10 +107,15 @@ class _StdioMCPConnection:
                     "capabilities": {},
                     "clientInfo": {"name": "AgentHub-Local", "version": settings.app_version},
                 },
-                timeout=10.0,
+                timeout=self.DEFAULT_INIT_TIMEOUT_SECONDS,
             )
             if init_resp is not None:
-                tools_resp = await self._send_rpc("tools/list", {}, timeout=10.0)
+                await self._send_notification("notifications/initialized", {})
+                tools_resp = await self._send_rpc(
+                    "tools/list",
+                    {},
+                    timeout=self.DEFAULT_LIST_TIMEOUT_SECONDS,
+                )
                 if isinstance(tools_resp, dict) and "tools" in tools_resp:
                     self.tools_cache = tools_resp["tools"]
                 logger.info(f"MCP Server [{self.name}] 已就绪，挂载工具数: {len(self.tools_cache)}")
@@ -114,8 +125,27 @@ class _StdioMCPConnection:
         self.close()
         return False
 
+    async def _send_notification(self, method: str, params: dict[str, Any] | None = None) -> None:
+        """发送无需响应的单向 JSON-RPC 2.0 通知"""
+        if not self.is_alive() or not self.proc or not self.proc.stdin:
+            return
+        payload = json.dumps({"jsonrpc": "2.0", "method": method, "params": params or {}}) + "\n"
+
+        def _write_notif() -> None:
+            assert self.proc and self.proc.stdin
+            self.proc.stdin.write(payload.encode("utf-8"))
+            self.proc.stdin.flush()
+
+        async with self._lock:
+            try:
+                await asyncio.wait_for(asyncio.to_thread(_write_notif), timeout=5.0)
+            except Exception as e:
+                logger.debug(f"MCP [{self.name}] 发送通知 ({method}) 异常: {e}")
+
     async def _send_rpc(self, method: str, params: dict[str, Any], timeout: float = 15.0) -> Any:
+        self._last_error = None
         if not self.is_alive() or not self.proc or not self.proc.stdin or not self.proc.stdout:
+            self._last_error = "子进程未处于存活状态"
             return None
 
         async with self._lock:
@@ -123,34 +153,63 @@ class _StdioMCPConnection:
             req_id = self._req_id
             payload = json.dumps({"jsonrpc": "2.0", "id": req_id, "method": method, "params": params}) + "\n"
 
-            def _io_step() -> str:
+            def _io_step() -> dict[str, Any] | None:
                 assert self.proc and self.proc.stdin and self.proc.stdout
                 self.proc.stdin.write(payload.encode("utf-8"))
                 self.proc.stdin.flush()
-                for _ in range(30):
+                for _ in range(100):
                     raw_line = self.proc.stdout.readline()
                     if not raw_line:
                         break
                     line = raw_line.decode("utf-8", errors="replace").strip()
-                    if line.startswith("{") and line.endswith("}") and '"jsonrpc"' in line:
-                        return line
-                return ""
+                    if not (line.startswith("{") and line.endswith("}")):
+                        continue
+                    try:
+                        parsed_obj = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if (
+                        isinstance(parsed_obj, dict)
+                        and parsed_obj.get("jsonrpc") == "2.0"
+                        and parsed_obj.get("id") == req_id
+                    ):
+                        return parsed_obj
+                return None
 
             try:
-                resp_line = await asyncio.wait_for(asyncio.to_thread(_io_step), timeout=timeout)
-                if resp_line:
-                    parsed = json.loads(resp_line)
-                    return parsed.get("result")
+                parsed = await asyncio.wait_for(asyncio.to_thread(_io_step), timeout=timeout)
+                if parsed is None:
+                    self._last_error = "未收到匹配的 JSON-RPC 响应（可能进程已退出或输出非协议内容）"
+                    return None
+                if "error" in parsed and parsed["error"]:
+                    err_obj = parsed["error"]
+                    err_msg = err_obj.get("message") if isinstance(err_obj, dict) else str(err_obj)
+                    self._last_error = str(err_msg or "MCP Server 返回 JSON-RPC error")
+                    logger.warning(f"MCP [{self.name}] RPC ({method}) 返回错误: {self._last_error}")
+                    return None
+                return parsed.get("result")
+            except asyncio.TimeoutError:
+                self._last_error = f"RPC ({method}) 等待响应超时 (>{timeout:.0f}s)"
+                logger.warning(f"MCP [{self.name}] {self._last_error}")
             except Exception as e:
+                self._last_error = str(e)
                 logger.warning(f"MCP [{self.name}] RPC ({method}) 通信异常: {e}")
             return None
 
     async def call_tool(self, tool_name: str, arguments: dict[str, Any]) -> str:
         if not await self.ensure_started():
-            return f"Error: MCP Server [{self.name}] 未就绪或启动失败。"
-        res = await self._send_rpc("tools/call", {"name": tool_name, "arguments": arguments}, timeout=35.0)
+            reason = f" ({self._last_error})" if self._last_error else ""
+            return f"Error: MCP Server [{self.name}] 未就绪或启动失败{reason}。"
+        res = await self._send_rpc(
+            "tools/call",
+            {"name": tool_name, "arguments": arguments},
+            timeout=self.DEFAULT_CALL_TIMEOUT_SECONDS,
+        )
         if res is None:
-            return f"Error: 调用 MCP 工具 [{tool_name}] 超时或无响应。"
+            if not self.is_alive():
+                self.close()
+            detail = self._last_error or "超时或无响应"
+            return f"Error: 调用 MCP 工具 [{tool_name}] 失败: {detail}。"
 
         if isinstance(res, dict) and "content" in res and isinstance(res["content"], list):
             text_parts = [
@@ -159,8 +218,13 @@ class _StdioMCPConnection:
                 if isinstance(item, dict) and item.get("type") == "text"
             ]
             if text_parts:
-                return "\n".join(text_parts)
+                joined = "\n".join(text_parts)
+                if res.get("isError") and not joined.startswith("Error:"):
+                    return f"Error: {joined}"
+                return joined
 
+        if isinstance(res, dict) and res.get("isError"):
+            return f"Error: {json.dumps(res, ensure_ascii=False)}"
         return json.dumps(res, ensure_ascii=False)
 
     def close(self) -> None:
@@ -172,7 +236,9 @@ class _StdioMCPConnection:
 
 
 class MCPManager:
-    """全局 MCP 客户端常驻连接池（支持热插拔重载与失败熔断）"""
+    """全局 MCP 客户端常驻连接池（支持热插拔重载与失败冷却自愈）"""
+
+    FAILURE_COOLDOWN_SECONDS = 20.0
 
     def __init__(self, config_path: str | Path | None = None) -> None:
         self.base_dir = get_writable_app_root()
@@ -190,7 +256,8 @@ class MCPManager:
             self.config_path = data_cfg
 
         self._connections: dict[str, _StdioMCPConnection] = {}
-        self._failed_servers: set[str] = set()
+        # 记录失败时间戳（单调时钟），超过冷却期后允许自动重新探测，避免一次波动永久拉黑
+        self._failed_servers: dict[str, float] = {}
         self._last_mtime: float = 0.0
         self._ensure_default_config()
 
@@ -260,9 +327,13 @@ class MCPManager:
 
         for srv_name, srv_cfg in cfg.items():
             if not isinstance(srv_cfg, dict) or not srv_cfg.get("enabled", False):
+                self._failed_servers.pop(srv_name, None)
                 continue
-            if srv_name in self._failed_servers:
-                continue
+            failed_at = self._failed_servers.get(srv_name)
+            if failed_at is not None:
+                if (time.monotonic() - failed_at) < self.FAILURE_COOLDOWN_SECONDS:
+                    continue
+                self._failed_servers.pop(srv_name, None)
 
             conn = self._connections.get(srv_name)
             desired_cmd = str(srv_cfg.get("command", "")).strip()
@@ -283,6 +354,7 @@ class MCPManager:
                 self._connections[srv_name] = conn
 
             if await conn.ensure_started():
+                self._failed_servers.pop(srv_name, None)
                 for t in conn.tools_cache:
                     all_tools.append({
                         "name": f"mcp__{srv_name}__{t.get('name')}",
@@ -290,7 +362,7 @@ class MCPManager:
                         "parameters": t.get("inputSchema", {"type": "object", "properties": {}}),
                     })
             else:
-                self._failed_servers.add(srv_name)
+                self._failed_servers[srv_name] = time.monotonic()
                 self._connections.pop(srv_name, None)
 
         return all_tools
@@ -302,12 +374,22 @@ class MCPManager:
             return f"Error: 非法的 MCP 工具名格式 '{namespaced_name}'"
         _, srv_name, raw_tool_name = parts
         conn = self._connections.get(srv_name)
-        if not conn:
+        if not conn or not conn.is_alive():
+            # NOTE: 当明确点名调用某 MCP 服务但此前曾短暂失败或掉线时，立即重置其冷却窗口尝试恢复
+            self._failed_servers.pop(srv_name, None)
             await self.get_enabled_tools()
             conn = self._connections.get(srv_name)
         if not conn:
             return f"Error: MCP Server '{srv_name}' 未启用或启动失败。"
         return await conn.call_tool(raw_tool_name, arguments)
+
+    def has_cooling_servers(self) -> bool:
+        """是否存在处于失败冷却期、等待重连的 MCP 服务"""
+        return bool(self._failed_servers)
+
+    def clear_cooldowns(self) -> None:
+        """清空所有失败冷却标记，允许立即重新探测已启用服务"""
+        self._failed_servers.clear()
 
     def shutdown_all(self) -> None:
         """关闭所有常驻 MCP 子进程，防止僵尸进程泄漏"""

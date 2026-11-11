@@ -1,14 +1,14 @@
 
 class _CompatSubprocess:
     """Windows 下 SelectorEventLoop 不支持异步子进程时的透明兼容适配器"""
-    def __init__(self, cmd: list[str], env: dict[str, str], cwd: str) -> None:
+    def __init__(self, cmd: list[str], env: dict[str, str], cwd: str, stdin_bytes: bytes | None = None) -> None:
         import subprocess
         import threading
         from ..core.runtime_paths import get_silent_subprocess_kwargs
 
         self._proc = subprocess.Popen(
             cmd,
-            stdin=subprocess.DEVNULL,
+            stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             env=env,
@@ -21,6 +21,22 @@ class _CompatSubprocess:
         self._loop = asyncio.get_running_loop()
         self.stdout = self
         self.stderr = self
+
+        if stdin_bytes is not None and self._proc.stdin is not None:
+            def _feed_stdin() -> None:
+                assert self._proc.stdin is not None
+                try:
+                    self._proc.stdin.write(stdin_bytes)
+                    self._proc.stdin.flush()
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        self._proc.stdin.close()
+                    except Exception:
+                        pass
+
+            threading.Thread(target=_feed_stdin, daemon=True).start()
 
         def _pump_stdout():
             assert self._proc.stdout is not None
@@ -59,6 +75,7 @@ Gemini / Antigravity CLI 子进程执行器（Agent Runner）
 本程序不接触任何 OAuth 令牌，所有认证由 CLI 自己处理。
 """
 import asyncio
+import inspect
 import json
 import os
 import shutil
@@ -120,10 +137,12 @@ def cancel_cli_processes(conversation_id: str) -> int:
 
 from ..core.proxy_helper import get_system_proxy_env
 
-# 白名单：只允许传递给子进程的环境变量 key（含代理白名单）
+# 白名单：只允许传递给子进程的环境变量 key（含代理与 Windows 系统核心目录变量）
 _ALLOWED_ENV_KEYS = {
-    "SYSTEMROOT", "PATH", "USERPROFILE", "HOME", "USERNAME",
-    "APPDATA", "LOCALAPPDATA", "TEMP", "TMP",
+    "SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATH", "USERPROFILE", "HOME", "USERNAME", "USERDOMAIN",
+    "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
+    "PROGRAMFILES", "PROGRAMFILES(X86)", "COMMONPROGRAMFILES", "COMMONPROGRAMFILES(X86)", "PUBLIC",
+    "TEMP", "TMP",
     "PATHEXT", "COMSPEC", "OS",
     "NODE_PATH",          # Node.js 需要
     "GEMINI_CLI_HOME",    # 本程序注入
@@ -177,12 +196,16 @@ def _build_safe_env(cli_home_dir: str | None = None) -> dict[str, str]:
 
 def _sanitize_prompt(prompt: str) -> str:
     """
-    对用户 prompt 做基础安全检查（防止参数溢出）。
-    若包含超长内容，保留前 64000 字符。
+    对用户 prompt 做基础安全截断保护。
+    若超过 64000 字符，保留头部系统/工具定义及尾部最新工具输出与用户问题，折叠中间冗长历史。
     """
-    if len(prompt) > 64000:
-        logger.warning("用户 prompt 超过 64000 字符，已做安全截断")
-        prompt = prompt[:64000]
+    max_chars = 64000
+    if len(prompt) > max_chars:
+        logger.warning(f"用户 prompt 超过 {max_chars} 字符（当前 {len(prompt)}），保留头尾并折叠中间历史")
+        marker = "\n...[中间历史上下文过长已截断]...\n"
+        head_len = 30000
+        tail_len = max_chars - head_len - len(marker)
+        prompt = f"{prompt[:head_len]}{marker}{prompt[-tail_len:]}"
     return prompt
 
 
@@ -243,6 +266,7 @@ async def test_cli_model_availability(
             "-p", "reply ok",
             "--model", model_flag,
             "--output-format", "json",
+            "--print-timeout", f"{max(5, int(timeout_seconds))}s",
             "--disable-slash-commands",
         ]
     else:
@@ -285,6 +309,10 @@ async def test_cli_model_availability(
             )
         except asyncio.TimeoutError:
             _kill_process_tree(proc)
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.0)
+            except Exception:
+                pass
             return {
                 "available": False,
                 "model_flag": model_flag,
@@ -350,6 +378,7 @@ async def run_cli_stream(
     system_prompt: str | None = None,
     conversation_id: str | None = None,
     cancel_event: asyncio.Event | None = None,
+    allow_native_tools: bool = False,
 ) -> AsyncGenerator[dict[str, Any], None]:
     """
     以子进程方式调用 Antigravity / Gemini CLI，逐行解析 stream-json 事件并 yield。
@@ -363,33 +392,49 @@ async def run_cli_stream(
         approval_mode: 'default'（需人工确认）或 'auto_edit'（代码编辑自动批准）
         work_dir: 子进程工作目录（白名单目录之一）
         system_prompt: 系统指令覆盖（通过前置文本传入）
+        conversation_id: 会话标识（用于注册取消句柄）
+        cancel_event: 异步取消信号
+        allow_native_tools: 是否允许 CLI 放行自带原生工具；在 AgentHub 宿主托管链路上默认 False，防止绕过宿主审计
 
     Yields:
         解析后的事件字典，type 字段为：
-        init / content / tool_request / tool_result / error / done / timeout /
+        init / content / thinking / tool_request / tool_result / error / done / timeout /
         rate_limited / auth_error
     """
     prompt = _sanitize_prompt(prompt)
     env = _build_safe_env(cli_home_dir)
     cli_bin, cli_type = _find_cli_binary()
 
-    # 根据 CLI 类型组装命令参数
+    # 根据 CLI 类型组装命令参数；长 prompt 严禁直传 Windows 命令行以防触碰 CreateProcessW 32767 字符上限 ([WinError 206])
     safe_mode = "default" if approval_mode == "yolo" else approval_mode
+    stdin_payload_bytes: bytes | None = None
 
     if cli_type == "agy":
         cmd: list[str] = [
             cli_bin,
-            "-p", prompt,
             "--output-format", "stream-json",
+            "--input-format", "stream-json",
             "--disable-slash-commands",
         ]
         # agy 必须显式传递合法的 --model 参数
         model_flag = resolve_agy_model_flag(model, thinking_level)
         cmd.extend(["--model", model_flag])
-        if safe_mode == "auto_edit":
+        # NOTE: 仅在显式放行 CLI 原生工具且处于 auto_edit 模式时才跳过权限确认，避免 agy 旁路 AgentHub 工具体系
+        if allow_native_tools and safe_mode == "auto_edit":
             cmd.append("--dangerously-skip-permissions")
+        # NOTE: agy --input-format stream-json 从 stdin 读取 {"event":"user","message":{...}}，彻底免疫 Windows 命令行长度限制
+        stdin_payload_bytes = (
+            json.dumps(
+                {
+                    "event": "user",
+                    "message": {"role": "user", "content": prompt},
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+        ).encode("utf-8")
     else:
-        # 旧版 gemini CLI 参数
+        # 旧版 gemini CLI 参数：超长文本回退 stdin 管道传参
         cmd: list[str] = [cli_bin, "-o", "stream-json"]
         if model:
             cmd.extend(["-m", model])
@@ -397,18 +442,21 @@ async def run_cli_stream(
             for tool in allowed_tools:
                 cmd.extend(["--allowed-tools", tool])
         cmd.extend(["--approval-mode", safe_mode])
-        cmd.append(prompt)
+        if len(prompt) > 20000:
+            stdin_payload_bytes = prompt.encode("utf-8")
+        else:
+            cmd.append(prompt)
 
     cwd = work_dir or str(Path.home())
     logger.info(
         f"启动 {cli_type.upper()} CLI 子进程 ({cli_bin}): alias={Path(cli_home_dir).name} "
-        f"model={model or 'default'} cwd={cwd} pid=pending"
+        f"model={model or 'default'} cwd={cwd} prompt_chars={len(prompt)} stdin_mode={stdin_payload_bytes is not None} pid=pending"
     )
 
     try:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            stdin=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.PIPE if stdin_payload_bytes is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env=env,
@@ -417,7 +465,30 @@ async def run_cli_stream(
         )
     except NotImplementedError:
         logger.info("当前环境不支持 asyncio 原生子进程传输，自动切换至 Windows 线程兼容适配器")
-        proc = _CompatSubprocess(cmd, env, cwd)
+        proc = _CompatSubprocess(cmd, env, cwd, stdin_bytes=stdin_payload_bytes)
+
+    # 向异步子进程 stdin 写入载荷并发送 EOF，通知 CLI 单轮输入结束
+    if (
+        stdin_payload_bytes is not None
+        and not isinstance(proc, _CompatSubprocess)
+        and getattr(proc, "stdin", None) is not None
+    ):
+        try:
+            proc.stdin.write(stdin_payload_bytes)
+            drain_fn = getattr(proc.stdin, "drain", None)
+            if callable(drain_fn):
+                drain_res = drain_fn()
+                if inspect.isawaitable(drain_res):
+                    await drain_res
+            write_eof_fn = getattr(proc.stdin, "write_eof", None)
+            can_eof_fn = getattr(proc.stdin, "can_write_eof", None)
+            if callable(write_eof_fn) and (not callable(can_eof_fn) or can_eof_fn()):
+                write_eof_fn()
+            close_fn = getattr(proc.stdin, "close", None)
+            if callable(close_fn):
+                close_fn()
+        except Exception as stdin_err:
+            logger.warning(f"向 {cli_type.upper()} CLI 写入 stdin 载荷异常: {stdin_err}")
 
     logger.info(f"{cli_type.upper()} CLI 子进程已启动 PID={proc.pid}")
     if conversation_id:
@@ -493,7 +564,15 @@ async def run_cli_stream(
                 evt_name = event.get("event")
                 if evt_name == "step_update":
                     step_update = event.get("step_update", {})
-                    # 多字段兼容提取文本（text_delta / text / content）
+                    thinking_delta = (
+                        step_update.get("thinking_delta")
+                        or step_update.get("thinking")
+                        or ""
+                    )
+                    if thinking_delta:
+                        yield {"type": "thinking", "text": thinking_delta}
+
+                    # 多字段兼容提取文本（text_delta / text / content / response）
                     text_delta = (
                         step_update.get("text_delta")
                         or step_update.get("text")
@@ -503,14 +582,40 @@ async def run_cli_stream(
                     if text_delta:
                         chunk_count += 1
                         yield {"type": "content", "text": text_delta}
-                    # 工具请求
-                    if step_update.get("step_type") == "tool_call" or "tool_call" in step_update:
-                        yield {
-                            "type": "tool_request",
-                            "tool_name": step_update.get("tool_name", "system_tool"),
-                            "tool_input": step_update.get("tool_input", {}),
-                            "requires_approval": True,
-                        }
+
+                    # 工具请求（实测 agy 实际推送 step_type == "tool" 及 tool_info，兼容历史 "tool_call"）
+                    step_type = step_update.get("step_type")
+                    step_state = str(step_update.get("state") or "").upper()
+                    tool_info = step_update.get("tool_info")
+                    if (
+                        step_type in ("tool", "tool_call")
+                        or "tool_call" in step_update
+                        or isinstance(tool_info, dict)
+                    ):
+                        t_info_dict = tool_info if isinstance(tool_info, dict) else {}
+                        t_name = (
+                            step_update.get("tool_name")
+                            or t_info_dict.get("name")
+                            or "system_tool"
+                        )
+                        t_input = (
+                            step_update.get("tool_input")
+                            or t_info_dict.get("parameters")
+                            or {}
+                        )
+                        if step_state == "DONE" and step_type == "tool":
+                            yield {
+                                "type": "tool_result",
+                                "tool_name": t_name,
+                                "output": t_info_dict.get("output", ""),
+                            }
+                        else:
+                            yield {
+                                "type": "tool_request",
+                                "tool_name": t_name,
+                                "tool_input": t_input,
+                                "requires_approval": True,
+                            }
                 elif evt_name == "result":
                     res = event.get("result", {})
                     if res.get("status") == "ERROR" or res.get("error"):
@@ -518,10 +623,32 @@ async def run_cli_stream(
                         logger.error(f"agy 返回 ERROR 状态: {err_msg}")
                         yield {"type": "error", "message": err_msg}
                         return
-                    fallback_text = res.get("text") or res.get("content") or ""
+                    # NOTE: agy 非增量结尾优先填充 response 字段，其次回退 text/content
+                    fallback_text = (
+                        res.get("response")
+                        or res.get("text")
+                        or res.get("content")
+                        or ""
+                    )
                     if chunk_count == 0 and fallback_text:
                         chunk_count += 1
                         yield {"type": "content", "text": fallback_text}
+                    denied_actions = res.get("denied_actions") or []
+                    if chunk_count == 0 and denied_actions:
+                        denied_names = ", ".join(
+                            str(a.get("display_name") or a.get("action") or "native_tool")
+                            for a in denied_actions
+                            if isinstance(a, dict)
+                        ) or "native_tool"
+                        logger.warning(f"agy CLI 原生工具被无头安全策略拦截: {denied_names}")
+                        yield {
+                            "type": "error",
+                            "message": (
+                                f"CLI 引擎尝试绕过宿主直接调用内置工具 ({denied_names}) 已被安全策略拦截。"
+                                "请使用 AgentHub 标准 <tool_call> XML 标签输出工具调用。"
+                            ),
+                        }
+                        return
                     yield {
                         "type": "done",
                         "usage": res.get("usage", {}),

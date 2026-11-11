@@ -1609,6 +1609,23 @@ class AgentRuntime:
                                 ctx["current_cwd"] = new_cwd
                                 await ConversationRepository.update_agent_state(conv_id, current_cwd=new_cwd)
 
+                            # 若执行了环境安装/桌面应用或 CDP 调试启动命令，尝试唤醒此前冷却中的 MCP 服务并刷新工具清单
+                            if (
+                                tool_exit_code == 0
+                                and not is_planning_phase
+                                and mcp_manager.has_cooling_servers()
+                                and re.search(
+                                    r"(9222|remote-debugging-port|playwright|mcp|npx|npm\s+install|pip\s+install|Start-Process)",
+                                    cmd_str,
+                                    re.I,
+                                )
+                            ):
+                                try:
+                                    mcp_manager.clear_cooldowns()
+                                    active_tools = ToolProtocolAdapter.get_builtin_tools() + await mcp_manager.get_enabled_tools()
+                                except Exception as mcp_refresh_err:
+                                    logger.debug(f"命令后刷新 MCP 工具跳过: {mcp_refresh_err}")
+
                             compressed = shell_executor.compress_output(
                                 cmd_str, tool_output, tool_exit_code
                             )
@@ -2438,7 +2455,7 @@ class AgentRuntime:
                             "name": func_name,
                             "command": func_name,
                             "reason": "调用 MCP 外部扩展工具",
-                            "status": "completed",
+                            "status": "error" if is_err else "completed",
                             "output": tool_output,
                             "compressed": compressed,
                         }

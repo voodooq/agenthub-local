@@ -81,6 +81,19 @@ class LocalShellExecutor:
     )
 
     _CWD_MARKER = "__GH_CWD_MARKER__="
+    # 识别需要可见桌面窗体的启动指令（未显式要求隐藏/无头时放行 GUI 窗口显示，避免继承 SW_HIDE）
+    _GUI_LAUNCH_RE = re.compile(
+        r"(\bStart-Process\b|\bcmd\s+/c\s+start\b|&\s*['\"]?[^'\"]*\b(msedge|chrome|explorer|notepad|code)\.exe\b)",
+        re.I,
+    )
+    _HIDDEN_OR_HEADLESS_RE = re.compile(r"(-WindowStyle\s+Hidden\b|--headless\b)", re.I)
+
+    @classmethod
+    def _is_gui_launch_command(cls, command: str) -> bool:
+        """判断命令是否旨在拉起可见桌面 GUI 应用，防止子窗体继承 SW_HIDE"""
+        if not command or cls._HIDDEN_OR_HEADLESS_RE.search(command):
+            return False
+        return bool(cls._GUI_LAUNCH_RE.search(command))
 
     def __init__(self) -> None:
         # 挂起等待用户审批的事件字典: call_id -> asyncio.Event
@@ -286,6 +299,8 @@ class LocalShellExecutor:
         child_env["PYTHONIOENCODING"] = "utf-8"
         child_env["PYTHONUNBUFFERED"] = "1"
 
+        allow_gui_window = self._is_gui_launch_command(command)
+
         def _sync_exec() -> tuple[bytes, bytes, int, bool]:
             proc = subprocess.Popen(
                 exec_args,
@@ -295,7 +310,7 @@ class LocalShellExecutor:
                 stderr=subprocess.PIPE,
                 env=child_env,
                 start_new_session=(sys.platform != "win32"),
-                **get_silent_subprocess_kwargs(),
+                **get_silent_subprocess_kwargs(allow_gui=allow_gui_window),
             )
             if session_id:
                 self._running_pids.setdefault(session_id, set()).add(proc.pid)
