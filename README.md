@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.3.3-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.3.4-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,15 @@
 
 ## 🧭 版本演进总览
 
-### 🛡️ v1.3.3（最新）— Loop 领航舱会话强隔离、纯闲聊与完整无错门控及 Skill 原子迭代
+### 🛠️ v1.3.4（最新）— CLI 工具主权与超时治理、CDP 浏览器韧性及最终交付结果独立呈现
+- **最终交付结果与执行过程严格分离（`AgentRuntime` · `EnginePoolService` · `ToolTagSanitizer`）**：
+  - 修复 `update_working_memory(task_completed=true)` 与实质性工具并发触发时抢先 `break` 导致最终交付正文混入过程折叠区的问题，强制切入无工具纯文本汇总步；仅归档收尾且已含完整长正文时自动拆条清理，步数达上限时兜底落盘独立收尾消息。
+  - CLI 历史序列化全面改为 `<history_turn role="...">` 结构化标签并接入 `stripPseudoTranscriptPrefixes` 双端安全清洗，消除 `[终端/工具输出]: ... [Gemini]:` 角色串台自演幻觉；前端历史重载与 SSE 流尾自动无损拆出独立最终交付气泡与「生成文件直达」栏。
+- **CLI 工具主权收敛、`WinError 206` 修复与浏览器自愈（`agent_runner` · `mcp_manager` · `chat`）**：
+  - 收敛 Antigravity/Gemini CLI 原生工具调用权限（禁止旁路内置工具），超长 Prompt 在 Windows 改为 `stdin` 管道安全喂入以彻底消除 `[WinError 206]`。
+  - 新增 SSE 连接空闲心跳保活机制与 MCP Playwright-CDP 断线自动重连/自愈韧性，避免长等待场景断流超时。
+
+### 🛡️ v1.3.3 — Loop 领航舱会话强隔离、纯闲聊与完整无错门控及 Skill 原子迭代
 - **会话强隔离与零噪按需激活 (`TaskLoopRepository` · `LoopHUD` · `Runtime`)**：`GET /api/v1/loop/workspace/{ws_id}/active` 与前端轮询/SSE 分发全面按 `conversation_id` 强隔离，欢迎页、空白会话或切换对话瞬间立即清零隐藏顶部 Loop 领航舱并拦截非当前会话背景推送；采用三层纯闲聊判定 + 渐进式惰性建 Loop，纯文本闲聊彻底零触发、零闪烁。
 - **完整无错 Skill 提纯门控与避坑容错沉淀 (`evaluate_skill_distill_eligibility`)**：彻底屏蔽非 `completed` 状态、纯单次只读检索噪音与末尾带未恢复报错（含 Windows PowerShell 中文环境与非零退出码探测）的残缺轨迹，仅完整无错工作流方开放「沉淀为可复用 Skill」；对自愈成功的轨迹自动抽取纯净 SOP 并追加 `Troubleshooting / 避坑注意事项`。
 - **已有 Skill 语义化自适应迭代与原子替换**：`/distill` 与 `apply_proposal` 对已有同名 Skill 全面支持冲突防护（`create_new` 同名自动转升级）、`run_skill_tool` `skill_name` 精准溯源、按是否改动入参契约/核心步骤自适应递增 `patch`/`minor` 版本号，并通过 Staging + 备份原子切换完整保留既有 `knowledge/` 自定义文档。
