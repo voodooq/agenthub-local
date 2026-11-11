@@ -256,21 +256,21 @@ class EnginePoolService:
         user_parts.append({"text": prompt_with_attachments})
         contents.append({"role": "user", "parts": user_parts})
 
-        # 组装 CLI 用的历史纯文本上下文
+        # 组装 CLI 用的历史上下文（使用结构化边界标签，防止模型模仿 [终端/工具输出]: 等方括号前缀产生自演幻觉）
         lines = []
         for msg in effective_history_dicts:
             r_raw = msg.get("role", "user")
             if r_raw in ("model", "assistant"):
-                role_label = "Gemini"
+                role_tag = "assistant"
             elif r_raw == "tool":
-                role_label = "终端/工具输出"
+                role_tag = "tool_result"
             else:
-                role_label = "用户"
+                role_tag = "user"
             raw_content = str(msg.get("content", "") or "")
             if r_raw == "user":
                 raw_content = attachment_service.render_attachments_for_llm_history(raw_content)
-            lines.append(f"[{role_label}]: {raw_content}")
-        context_text = "\n".join(lines) + ("\n\n---\n[当前步骤指令]: " if lines else "")
+            lines.append(f'<history_turn role="{role_tag}">\n{raw_content}\n</history_turn>')
+        context_text = ("\n".join(lines) + "\n\n---\n[当前步骤指令]:\n") if lines else ""
         full_cli_prompt = context_text + prompt_with_attachments
 
         system_instruction = system_override or cls.read_system_profile()
@@ -982,7 +982,9 @@ class EnginePoolService:
                     "严禁触发你自身 CLI 环境自带的任何原生内置工具（如 run_command、view_file、write_to_file、browser_* 等），"
                     "否则无头模式将拒绝执行并丢弃响应。\n"
                     "当需要调用终端命令、文件编辑、网页抓取或浏览器控制时，必须以纯文本严格输出 AgentHub 约定的 "
-                    "`<tool_call name=\"...\">...</tool_call>` XML 标签交由宿主统一调度执行；无需工具时请直接给出完整文本回复。"
+                    "`<tool_call name=\"...\">...</tool_call>` XML 标签交由宿主统一调度执行；无需工具时请直接给出完整文本回复。\n"
+                    "【严禁角色串台与混发终稿】：严禁在输出中自行编造 `[终端/工具输出]:`、`[Gemini]:`、`<history_turn>` 等历史角色/工具回执标签；"
+                    "凡本步需要调用 `<tool_call>` 时仅可附带简短行动旁白，严禁在同一条工具调用步骤中提前输出最终完整交付报告。"
                 )
                 cli_effective_prompt = f"{full_cli_prompt}{cli_sovereignty_guard}"
                 cli_collector = TokenMetricsCollector(

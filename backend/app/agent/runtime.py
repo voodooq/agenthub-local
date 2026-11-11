@@ -129,6 +129,27 @@ class AgentRuntime:
         "update_working_memory",
     })
 
+    ARCHIVE_ONLY_TOOLS = frozenset({
+        "update_working_memory",
+        "save_long_term_memory",
+    })
+
+    @staticmethod
+    def _is_substantive_deliverable_text(text: str) -> bool:
+        """判断文本是否为面向用户的完整交付报告（而非简短的过程过渡旁白）。"""
+        clean = (text or "").strip()
+        if not clean:
+            return False
+        if len(clean) >= 120:
+            return True
+        if len(clean) >= 40 and (
+            bool(re.search(r"^#{1,4}\s+\S", clean, re.MULTILINE))
+            or bool(re.search(r"\|[\s:-]+\|", clean))
+            or len(clean.splitlines()) >= 3
+        ):
+            return True
+        return False
+
     EXECUTION_APPROVAL_MARKERS = (
         "实施方案已通过用户审批",
         "批准执行以下步骤清单",
@@ -1006,6 +1027,48 @@ class AgentRuntime:
                     }
                     active_loop_obj = None
 
+        async def _emit_turn_tail_events(
+            summary_text: str,
+            *,
+            is_waiting_user_decision: bool = False,
+        ):
+            """统一推送本轮结束时的 Loop 收敛、物理资产同步与 Token 微水表事件。"""
+            try:
+                async for loop_ev in _finalize_turn_loop(
+                    summary_text,
+                    is_waiting_user_decision=is_waiting_user_decision,
+                ):
+                    yield loop_ev
+            except Exception as e:
+                logger.warning(f"自主循环状态收敛更新异常: {e}")
+
+            if has_workspace_mutations and ws_id:
+                try:
+                    from ..repository.artifact_repository import ArtifactRepository
+                    await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
+                except Exception as sync_err:
+                    logger.debug(f"[AgentRuntime] 任务收尾物理资产同步跳过: {sync_err}")
+
+            try:
+                turn_stats_payload = (
+                    None
+                    if active_incognito
+                    else await TokenUsageRepository.get_turn_summary(conv_id, current_turn_id)
+                )
+                if turn_stats_payload is None and in_memory_step_metrics:
+                    turn_stats_payload = _build_turn_summary_from_rows(
+                        current_turn_id, in_memory_step_metrics, 0
+                    )
+                if turn_stats_payload:
+                    yield {
+                        "type": "token_stats",
+                        "conversation_id": conv_id,
+                        "turn_id": current_turn_id,
+                        "stats": turn_stats_payload,
+                    }
+            except Exception as stats_err:
+                logger.debug(f"[AgentRuntime] 推送 token_stats 跳过: {stats_err}")
+
         # 抽取本轮视觉附件（图片/PDF），同 Turn 多步调用中保持多模态视觉输入不丢失
         visual_attachments = self._filter_visual_attachments(attachments)
 
@@ -1047,10 +1110,14 @@ class AgentRuntime:
 
         try:
             step_idx = 0
+            force_final_text_only_step = False
             while step_idx < current_max_steps:
                 if await _check_cancelled():
                     was_cancelled = True
                     break
+
+                is_forced_final_step = force_final_text_only_step
+                force_final_text_only_step = False
 
                 # 步数自适应动态扩展检查：当步数接近预算、任务仍在深度自愈且未触发死循环熔断时，自动扩展步数
                 if active_scene == "agent" and allow_step_extension and step_idx >= current_max_steps - 2:
@@ -1067,7 +1134,7 @@ class AgentRuntime:
                     conversation_id=conv_id,
                     current_turn_id=current_turn_id,
                     user_query=user_message,
-                    tools=active_tools if active_scene == "agent" else None,
+                    tools=active_tools if (active_scene == "agent" and not is_forced_final_step) else None,
                     context_rounds_override=0 if active_scene == "oneshot" else context_rounds,
                     base_system_prompt=system_override,
                     execution_strategy=execution_strategy,
@@ -1166,6 +1233,14 @@ class AgentRuntime:
                                 f"</tool_call>\n"
                                 f"```"
                             )
+                    elif is_forced_final_step:
+                        step_prompt = (
+                            "[最终交付总结阶段 - 禁止调用任何工具]:\n"
+                            "全部执行操作、校验与工作记忆归档均已完成，请立即基于上方工具返回的真实结果与物理产出文件，"
+                            "向用户输出完整、清晰、结构化的最终交付报告。\n"
+                            "1. 本步严禁输出任何 `<tool_call>` 工具调用标签；\n"
+                            "2. 严禁自行编造 `[终端/工具输出]:` 或 `[Gemini]:` 等前缀标签。"
+                        )
                     else:
                         step_prompt = (
                             "[系统工作流推进]: 上述工具已成功执行并返回真实结果（见上方记录）。\n"
@@ -1175,7 +1250,7 @@ class AgentRuntime:
                         )
 
                     # 轮内工作草稿纸协同提醒：多步执行时可将关键结论沉淀至草稿纸，防止长任务遗忘
-                    if active_scene == "agent" and step_idx >= 4:
+                    if active_scene == "agent" and step_idx >= 4 and not is_forced_final_step:
                         step_prompt += (
                             "\n\n💡 [多步任务协同提醒]: 若你已查明关键文件路径、数据结构或中间状态，"
                             "请适时通过 `update_working_memory` 记录关键结论，以便后续步骤高效直达。"
@@ -1391,45 +1466,13 @@ class AgentRuntime:
                             long_term_memory.schedule_extraction(conv_id, delay_seconds=180)
                     accumulated_visible_text += ("\n\n" + final_saved_text if accumulated_visible_text else final_saved_text)
 
-                    # ── 任务自主闭环门控：由统一真理状态机决定 waiting_approval / failed / idle / completed ──
-                    try:
-                        summary_snippet = (final_saved_text or accumulated_visible_text).strip().split("\n")[0][:80]
-                        async for loop_ev in _finalize_turn_loop(
-                            summary_snippet or "模型已完成自主闭环并输出交付结论",
-                            is_waiting_user_decision=is_waiting_user_decision,
-                        ):
-                            yield loop_ev
-                    except Exception as e:
-                        logger.warning(f"自主循环状态收敛更新异常: {e}")
-
-                    # 若本轮执行过终端命令/脚本或写盘操作，收尾增量同步一次工作区物理资产
-                    if has_workspace_mutations and ws_id:
-                        try:
-                            from ..repository.artifact_repository import ArtifactRepository
-                            await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
-                        except Exception as sync_err:
-                            logger.debug(f"[AgentRuntime] 任务收尾物理资产同步跳过: {sync_err}")
-
-                    # 汇总并推送本轮 Token / KV Cache / TTFT / TPS 微水表事件
-                    try:
-                        turn_stats_payload = (
-                            None
-                            if active_incognito
-                            else await TokenUsageRepository.get_turn_summary(conv_id, current_turn_id)
-                        )
-                        if turn_stats_payload is None and in_memory_step_metrics:
-                            turn_stats_payload = _build_turn_summary_from_rows(
-                                current_turn_id, in_memory_step_metrics, 0
-                            )
-                        if turn_stats_payload:
-                            yield {
-                                "type": "token_stats",
-                                "conversation_id": conv_id,
-                                "turn_id": current_turn_id,
-                                "stats": turn_stats_payload,
-                            }
-                    except Exception as stats_err:
-                        logger.debug(f"[AgentRuntime] 推送 token_stats 跳过: {stats_err}")
+                    # ── 任务自主闭环门控与收尾统一事件推送 ──
+                    summary_snippet = (final_saved_text or accumulated_visible_text).strip().split("\n")[0][:80]
+                    async for tail_ev in _emit_turn_tail_events(
+                        summary_snippet or "模型已完成自主闭环并输出交付结论",
+                        is_waiting_user_decision=is_waiting_user_decision,
+                    ):
+                        yield tail_ev
 
                     stream_completed_normally = True
                     yield {
@@ -1452,8 +1495,15 @@ class AgentRuntime:
                     for tc in tool_calls
                 )
                 saved_content = (clean_text + "\n" + formatted_tc_xml).strip() if clean_text else formatted_tc_xml
+                step_tool_names = [
+                    str((tc.get("function") or {}).get("name") or "").strip()
+                    for tc in tool_calls
+                ]
+                has_substantive_tools_in_step = any(
+                    tname and tname not in self.ARCHIVE_ONLY_TOOLS for tname in step_tool_names
+                )
 
-                await MessageRepository.save_message(
+                step_process_msg_id = await MessageRepository.save_message(
                     conversation_id=conv_id,
                     role="model",
                     content=saved_content,
@@ -2750,43 +2800,60 @@ class AgentRuntime:
                     was_cancelled = True
                     break
 
-                # 显式完成收尾：若模型已通过 update_working_memory 归档且无残留报错，直接安全收尾，节省冗余整轮调用
+                # 显式完成收尾：仅当本步无待消化实质工具结果且已包含完整交付正文时直接拆条收尾；否则推进纯文本最终汇总步
                 if task_marked_completed and not last_step_error_info:
-                    logger.info(f"[AgentRuntime] 模型通过 update_working_memory 显式标记任务完成，安全终止本轮 ReAct 循环")
-                    try:
-                        async for loop_ev in _finalize_turn_loop("任务标记为已完成，工作记忆已归档"):
-                            yield loop_ev
-                    except Exception:
-                        pass
-                    if has_workspace_mutations and ws_id:
-                        try:
-                            from ..repository.artifact_repository import ArtifactRepository
-                            await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
-                        except Exception as sync_err:
-                            logger.debug(f"[AgentRuntime] 任务标记完成时物理资产同步跳过: {sync_err}")
-                    try:
-                        turn_stats_payload = (
-                            None
-                            if active_incognito
-                            else await TokenUsageRepository.get_turn_summary(conv_id, current_turn_id)
+                    if has_substantive_tools_in_step or not self._is_substantive_deliverable_text(clean_text):
+                        logger.info(
+                            "[AgentRuntime] 检测到归档工具与实质性工具并发或尚缺完整终稿，推进至独立纯文本汇总步"
                         )
-                        if turn_stats_payload is None and in_memory_step_metrics:
-                            turn_stats_payload = _build_turn_summary_from_rows(
-                                current_turn_id, in_memory_step_metrics, 0
+                        force_final_text_only_step = True
+                        if step_idx + 1 >= current_max_steps:
+                            current_max_steps += 1
+                        step_idx += 1
+                        continue
+
+                    logger.info("[AgentRuntime] 模型通过 update_working_memory 显式标记任务完成，拆分为独立交付消息安全收尾")
+                    clean_deliverable = ToolProtocolAdapter.strip_pseudo_transcript_prefixes(clean_text).strip()
+                    if step_process_msg_id:
+                        try:
+                            await MessageRepository.update_message_content(
+                                step_process_msg_id,
+                                formatted_tc_xml,
+                                token_count=len(formatted_tc_xml) // 3,
                             )
-                        if turn_stats_payload:
-                            yield {
-                                "type": "token_stats",
-                                "conversation_id": conv_id,
-                                "turn_id": current_turn_id,
-                                "stats": turn_stats_payload,
-                            }
-                    except Exception:
-                        pass
+                        except Exception as upd_err:
+                            logger.debug(f"[AgentRuntime] 清理过程消息残留正文跳过: {upd_err}")
+
+                    await MessageRepository.save_message(
+                        conversation_id=conv_id,
+                        role="model",
+                        content=clean_deliverable,
+                        executed_by_account=final_account,
+                        token_count=len(clean_deliverable) // 3,
+                        turn_id=current_turn_id,
+                        tool_calls_json=None,
+                    )
+                    await ConversationRepository.touch(conv_id)
+                    if conv_id and not active_incognito:
+                        long_term_memory.schedule_extraction(conv_id, delay_seconds=180)
+
+                    yield {
+                        "type": "start",
+                        "step_index": step_idx + 1,
+                        "clear_prev_process_text": True,
+                        "account": final_account,
+                        "model": effective_model_name,
+                    }
+                    summary_snippet = clean_deliverable.split("\n")[0][:80]
+                    async for tail_ev in _emit_turn_tail_events(
+                        summary_snippet or "任务标记为已完成，工作记忆已归档",
+                    ):
+                        yield tail_ev
                     stream_completed_normally = True
                     yield {
                         "type": "done",
-                        "full_content": accumulated_visible_text.strip() or "任务已顺利完成，工作记忆草稿纸已归档。",
+                        "full_content": accumulated_visible_text.strip() or clean_deliverable,
+                        "final_step_content": clean_deliverable,
                         "account": final_account,
                         "model": effective_model_name,
                     }
@@ -2794,47 +2861,58 @@ class AgentRuntime:
 
                 step_idx += 1
 
-                # 若已到达自适应最大步数上限（最高动态扩展至 40 步），交由统一状态机收敛失败或交付状态
+                # 若已到达自适应最大步数上限（最高动态扩展至 40 步），追加独立收尾汇总气泡避免仅剩工具过程卡片
                 if step_idx >= current_max_steps:
-                    try:
-                        async for loop_ev in _finalize_turn_loop(
-                            f"已达当前执行步数上限 ({step_idx} 步)，已输出阶段性成果",
-                            is_waiting_user_decision=is_planning_phase,
-                        ):
-                            yield loop_ev
-                    except Exception:
-                        pass
-                    if has_workspace_mutations and ws_id:
+                    clean_deliverable = ToolProtocolAdapter.strip_pseudo_transcript_prefixes(clean_text).strip()
+                    promoted_prev_text = bool(
+                        not has_substantive_tools_in_step
+                        and self._is_substantive_deliverable_text(clean_deliverable)
+                    )
+                    closing_summary = (
+                        clean_deliverable
+                        if promoted_prev_text
+                        else f"已完成阶段性自主执行（共执行 {step_idx} 步），上方执行步骤中已记录全部工具调用输出。如需继续推进后续操作，请告知继续。"
+                    )
+                    if step_process_msg_id and promoted_prev_text:
                         try:
-                            from ..repository.artifact_repository import ArtifactRepository
-                            await ArtifactRepository.sync_physical_workspace_artifacts(ws_id)
-                        except Exception as sync_err:
-                            logger.debug(f"[AgentRuntime] 达到步数上限时物理资产同步跳过: {sync_err}")
-                    try:
-                        turn_stats_payload = (
-                            None
-                            if active_incognito
-                            else await TokenUsageRepository.get_turn_summary(conv_id, current_turn_id)
-                        )
-                        if turn_stats_payload is None and in_memory_step_metrics:
-                            turn_stats_payload = _build_turn_summary_from_rows(
-                                current_turn_id, in_memory_step_metrics, 0
+                            await MessageRepository.update_message_content(
+                                step_process_msg_id,
+                                formatted_tc_xml,
+                                token_count=len(formatted_tc_xml) // 3,
                             )
-                        if turn_stats_payload:
-                            yield {
-                                "type": "token_stats",
-                                "conversation_id": conv_id,
-                                "turn_id": current_turn_id,
-                                "stats": turn_stats_payload,
-                            }
-                    except Exception:
-                        pass
+                        except Exception:
+                            pass
+                    await MessageRepository.save_message(
+                        conversation_id=conv_id,
+                        role="model",
+                        content=closing_summary,
+                        executed_by_account=final_account,
+                        token_count=len(closing_summary) // 3,
+                        turn_id=current_turn_id,
+                        tool_calls_json=None,
+                    )
+                    await ConversationRepository.touch(conv_id)
+                    yield {
+                        "type": "start",
+                        "step_index": step_idx,
+                        "clear_prev_process_text": promoted_prev_text,
+                        "account": final_account,
+                        "model": effective_model_name,
+                    }
+                    async for tail_ev in _emit_turn_tail_events(
+                        f"已达当前执行步数上限 ({step_idx} 步)，已输出阶段性成果",
+                        is_waiting_user_decision=is_planning_phase,
+                    ):
+                        yield tail_ev
                     stream_completed_normally = True
                     yield {
                         "type": "done",
-                        "full_content": accumulated_visible_text.strip() or f"已完成深度推演与自主闭环执行（共执行 {step_idx} 步）。若需进一步处理请继续告知。",
+                        "full_content": accumulated_visible_text.strip() or closing_summary,
+                        "final_step_content": closing_summary,
                         "account": final_account,
+                        "model": effective_model_name,
                     }
+                    break
 
             if was_cancelled:
                 cancel_cli_processes(conv_id)

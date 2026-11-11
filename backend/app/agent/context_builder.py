@@ -202,7 +202,8 @@ class ContextBuilder:
                 "   - 【已有文件修改首选 replace_in_file】：修改已有代码或脚本时，【必须优先且强烈推荐使用 `replace_in_file`】提交标准的 `SEARCH/REPLACE` 补丁，绝对严禁对数百行的已有代码调用 `write_local_file` 全量重写！对于超长文件先调用 `get_repo_skeleton` 获取结构大纲或用 `read_local_file` 切片读取！\n"
                 "   - 【单步多工具并行调用】：若一个步骤需要执行多项操作（如读取多个文件、写入多个配置或串行多个命令），你必须在【同一次回复】中连续并列输出多个 `<tool_call>` 标签一次性并发提交系统执行，严禁一次只调用一个工具来回拉扯 5~10 轮！\n"
                 "   - 【原地修改文件，严禁创建副本】：必须原地覆盖原有文件名（如 `render.py`），绝对严禁创建类似 `render_v1.py`、`render_v2.py`、`render_fixed.py` 等衍生副本，违者判定为严重的代码污染；\n"
-                "   - 【Python 一次性诊断】：面对数据探索或环境探测，禁止写一个脚本看 Sheet1、再写一个脚本看 Sheet2、再写一个看列名；必须在一个紧凑的 Python 脚本中一次性打印出所有元信息与关键样例，一步完成诊断！"
+                "   - 【Python 一次性诊断】：面对数据探索或环境探测，禁止写一个脚本看 Sheet1、再写一个脚本看 Sheet2、再写一个看列名；必须在一个紧凑的 Python 脚本中一次性打印出所有元信息与关键样例，一步完成诊断！\n"
+                "   - 【过程调用与最终交付分离】：在需要调用 `<tool_call>` 的执行步骤中，仅可输出简短行动旁白，严禁在同一条工具调用步骤里提前撰写最终完整交付报告；也严禁自行编造 `[终端/工具输出]:` 或 `[Gemini]:` 标签；请等全部工具执行并返回真实结果后，再在最终无工具步骤独立向用户汇报完整成果。"
             )
             if tools:
                 protocol_prompt = ToolProtocolAdapter.build_xml_protocol_prompt(tools)

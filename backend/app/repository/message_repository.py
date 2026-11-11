@@ -110,3 +110,25 @@ class MessageRepository:
             )
             await conn.commit()
             return cursor.lastrowid or 0
+
+    @staticmethod
+    async def update_message_content(
+        msg_id: int,
+        content: str,
+        token_count: int | None = None,
+    ) -> None:
+        """原地更新已落盘消息正文（用于工具过程步骤与最终交付结果的拆分落盘）。"""
+        if not msg_id:
+            return
+        async with db_manager.get_connection() as conn:
+            if token_count is not None:
+                await conn.execute(
+                    "UPDATE messages SET content = ?, token_count = ? WHERE id = ?",
+                    (content, token_count, msg_id),
+                )
+            else:
+                await conn.execute(
+                    "UPDATE messages SET content = ? WHERE id = ?",
+                    (content, msg_id),
+                )
+            await conn.commit()

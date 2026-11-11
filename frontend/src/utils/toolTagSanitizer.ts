@@ -2,6 +2,7 @@
  * 前端助手输出协议清洗与思考片段拆解工具
  * 统一用于流式 SSE 增量渲染与历史数据库消息加载，彻底消除双轨正则分叉与协议源码泄露。
  */
+import type { Message } from '@/types';
 
 export interface SanitizeAssistantOptions {
   isStreaming?: boolean;
@@ -158,13 +159,14 @@ export function sanitizeAssistantContent(
     hadToolMarkup = true;
   }
 
-  // 5. 清理剥离工具标签后遗留的空围栏块与冗余空行
+  // 5. 清理剥离工具标签后遗留的空围栏块、伪造历史串台前缀与冗余空行
   text = text
     .replace(/```(?:xml|json|tool_call)?\s*```/gi, '')
     .replace(/^\s*```xml\s*$/gim, '')
-    .replace(/^\s*xml\s*$/gim, '')
-    .replace(/\n{3,}/g, '\n\n')
-    .trim();
+    .replace(/^\s*xml\s*$/gim, '');
+
+  text = stripPseudoTranscriptPrefixes(text);
+  text = text.replace(/\n{3,}/g, '\n\n').trim();
 
   return {
     cleanContent: text,
@@ -172,4 +174,167 @@ export function sanitizeAssistantContent(
     strippedToolNames: Array.from(toolNameSet),
     hadToolMarkup,
   };
+}
+
+/**
+ * 安全剥离非代码块围栏外部误混入的 [终端/工具输出]: / [Gemini]: / <history_turn> 伪串台片段
+ */
+export function stripPseudoTranscriptPrefixes(raw: string): string {
+  if (!raw) return '';
+  if (
+    !raw.includes('[终端/工具输出]:') &&
+    !raw.includes('[Gemini]:') &&
+    !raw.includes('<history_turn') &&
+    !raw.includes('</history_turn>')
+  ) {
+    return raw;
+  }
+
+  const segments = raw.split(CODE_FENCE_SPLIT_RE);
+  const cleanedSegments = segments.map((seg, idx) => {
+    if (!seg) return '';
+    if (idx % 2 === 1) {
+      return seg;
+    }
+
+    let nextSeg = seg.replace(/<\/?\s*history_turn(?:\s+[^>]*)?>/gi, '');
+    // 先剥离明确以后续角色标记收尾的伪造 [终端/工具输出]: 区块（含自演脱水/归档段落）
+    nextSeg = nextSeg.replace(
+      /(?:^|\n)[ \t]*\[终端\/工具输出\]:[\s\S]*?(?=\r?\n[ \t]*\[(?:Gemini|用户|终端\/工具输出)\]:)/g,
+      ''
+    );
+    // 剥离残留行首裸 [Gemini]: 标签前缀
+    nextSeg = nextSeg.replace(/(?:^|\n)[ \t]*\[Gemini\]:[ \t]*\r?\n?/g, '\n');
+    // 剥离无后续 [Gemini]: 的孤立 [终端/工具输出]: 脱水摘要块（仅匹配脱水元数据行，不吞后续正式正文）
+    nextSeg = nextSeg.replace(
+      /(?:^|\n)[ \t]*\[终端\/工具输出\]:[^\r\n]*(?:\r?\n[ \t]*(?:核心摘要:|物理路径:|\(提示:|### Sheet:|Row \d+:|\.\.\. \(该表共有)[^\r\n]*)*\r?\n?/g,
+      '\n'
+    );
+    return nextSeg;
+  });
+
+  return cleanedSegments
+    .join('')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+/**
+ * 判断清洗后的文本是否属于面向用户的完整交付报告（而非简短步骤过渡旁白或折叠占位句）
+ */
+export function isSubstantiveDeliverableText(content: string): boolean {
+  const clean = (content || '').trim();
+  if (!clean || clean.startsWith('（已自动折叠历史')) {
+    return false;
+  }
+  if (clean.length >= 120) {
+    return true;
+  }
+  if (
+    clean.length >= 40 &&
+    (/^#{1,4}\s+\S/m.test(clean) || /\|[\s:-]+\|/.test(clean) || clean.split('\n').length >= 3)
+  ) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * 历史/流式单节点兼容拆分：将同时包含“过程产物”和“大段最终交付正文”的单一 model 消息，
+ * 无损拆分为“过程节点（思考 + 工具卡片）”与“外部独立最终交付气泡（含生成文件直达与指标卡）”。
+ */
+export function splitSingleProcessDeliverable(
+  msg: Message,
+  isInteractiveCardFn: (text: string) => boolean = () => false
+): Message[] {
+  const content = (msg.content || '').trim();
+  const hasToolEvents = Boolean(msg.tool_events && msg.tool_events.length > 0);
+  const hasToolCallsMeta = Boolean(msg.tool_calls_json && msg.tool_calls_json !== '[]');
+  const hasProcessArtifact = Boolean(hasToolEvents || hasToolCallsMeta || msg.thinking);
+
+  if (
+    !msg.is_process_step ||
+    isInteractiveCardFn(content) ||
+    !isSubstantiveDeliverableText(content)
+  ) {
+    return [msg];
+  }
+
+  // 仅因历史标签被误置为过程步但实际没有任何工具/思考产物时，直接还原为普通独立交付卡片
+  if (!hasProcessArtifact) {
+    return [
+      {
+        ...msg,
+        is_process_step: false,
+      },
+    ];
+  }
+
+  return [
+    {
+      ...msg,
+      id: undefined,
+      content: '',
+      is_process_step: true,
+      fact_refs: undefined,
+      memory_refs: undefined,
+      token_stats: undefined,
+    },
+    {
+      ...msg,
+      thinking: undefined,
+      is_placeholder_thinking: false,
+      tool_calls_json: null,
+      tool_events: undefined,
+      merged_tool_message_ids: undefined,
+      is_process_step: false,
+    },
+  ];
+}
+
+/**
+ * 历史兼容视图拆分：当某轮最后一条 model 消息把“工具执行过程”和“大段最终交付正文”混存于同一记录时，
+ * 复用单节点拆分逻辑无损拆出独立的最终交付气泡。
+ */
+export function splitTrailingProcessDeliverables(
+  messages: Message[],
+  isInteractiveCardFn: (text: string) => boolean = () => false
+): Message[] {
+  if (!messages || messages.length === 0) return [];
+
+  const result: Message[] = [];
+  let turnStart = 0;
+
+  const flushTurnSlice = (slice: Message[]) => {
+    let lastModelIdx = -1;
+    for (let i = slice.length - 1; i >= 0; i--) {
+      if (slice[i].role === 'model') {
+        lastModelIdx = i;
+        break;
+      }
+    }
+
+    slice.forEach((msg, idx) => {
+      if (idx !== lastModelIdx) {
+        result.push(msg);
+        return;
+      }
+      result.push(...splitSingleProcessDeliverable(msg, isInteractiveCardFn));
+    });
+  };
+
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role === 'user') {
+      if (i > turnStart) {
+        flushTurnSlice(messages.slice(turnStart, i));
+      }
+      result.push(messages[i]);
+      turnStart = i + 1;
+    }
+  }
+  if (turnStart < messages.length) {
+    flushTurnSlice(messages.slice(turnStart));
+  }
+
+  return result;
 }

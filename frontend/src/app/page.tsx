@@ -64,7 +64,11 @@ import { TokenStatsModal } from '@/components/TokenStatsModal';
 import { GeneratedFileChip } from '@/components/GeneratedFileChip';
 import { buildActiveSystemOverride } from '@/utils/personalityHelper';
 import { generateScenarioThinking } from '@/utils/scenarioThinking';
-import { sanitizeAssistantContent } from '@/utils/toolTagSanitizer';
+import {
+  sanitizeAssistantContent,
+  splitSingleProcessDeliverable,
+  splitTrailingProcessDeliverables,
+} from '@/utils/toolTagSanitizer';
 import {
   Conversation,
   Message,
@@ -858,12 +862,13 @@ export default function WorkbenchPage() {
             });
           }
         }
+        const normalizedMerged = splitTrailingProcessDeliverables(merged, hasInteractiveInquiryBlock);
         // 保活当前会话最新一轮已激活的确定性事实视图引用，防止流结束重载消息时微提示闪灭
         const preservedFacts = lastStreamFactRefsRef.current;
         if (preservedFacts && preservedFacts.convId === cid && preservedFacts.facts.length > 0) {
-          for (let i = merged.length - 1; i >= 0; i--) {
-            if (merged[i].role === 'model') {
-              merged[i].fact_refs = preservedFacts.facts;
+          for (let i = normalizedMerged.length - 1; i >= 0; i--) {
+            if (normalizedMerged[i].role === 'model') {
+              normalizedMerged[i].fact_refs = preservedFacts.facts;
               break;
             }
           }
@@ -871,10 +876,10 @@ export default function WorkbenchPage() {
         // 保活当前会话最新一轮实时 Token 水表（在无痕模式未落库时防重载闪灭）
         const preservedStats = lastStreamTokenStatsRef.current;
         if (preservedStats && preservedStats.convId === cid && preservedStats.stats) {
-          for (let i = merged.length - 1; i >= 0; i--) {
-            if (merged[i].role === 'model') {
-              if (!merged[i].token_stats) {
-                merged[i].token_stats = preservedStats.stats;
+          for (let i = normalizedMerged.length - 1; i >= 0; i--) {
+            if (normalizedMerged[i].role === 'model') {
+              if (!normalizedMerged[i].token_stats) {
+                normalizedMerged[i].token_stats = preservedStats.stats;
               }
               break;
             }
@@ -885,16 +890,16 @@ export default function WorkbenchPage() {
         if (
           pendingErrNotice &&
           pendingErrNotice.convId === cid &&
-          (merged.length === 0 || merged[merged.length - 1].role === 'user')
+          (normalizedMerged.length === 0 || normalizedMerged[normalizedMerged.length - 1].role === 'user')
         ) {
-          merged.push({
+          normalizedMerged.push({
             id: Date.now(),
             conversation_id: cid,
             role: 'model',
             content: pendingErrNotice.message,
           });
         }
-        setMessages(merged);
+        setMessages(normalizedMerged);
       }
     } catch (e) {
       console.warn('获取消息失败:', e);
@@ -1431,12 +1436,22 @@ export default function WorkbenchPage() {
               setMessages((prev) => {
                 const updated = [...prev];
                 const prevLast = updated[updated.length - 1];
-                if (prevLast && prevLast.role === 'model' && prevLast.is_placeholder_thinking) {
-                  updated[updated.length - 1] = {
-                    ...prevLast,
-                    thinking: undefined,
-                    is_placeholder_thinking: false,
-                  };
+                if (prevLast && prevLast.role === 'model') {
+                  if (parsed.clear_prev_process_text) {
+                    updated[updated.length - 1] = {
+                      ...prevLast,
+                      content: '',
+                      thinking: prevLast.is_placeholder_thinking ? undefined : prevLast.thinking,
+                      is_placeholder_thinking: false,
+                      is_process_step: true,
+                    };
+                  } else if (prevLast.is_placeholder_thinking) {
+                    updated[updated.length - 1] = {
+                      ...prevLast,
+                      thinking: undefined,
+                      is_placeholder_thinking: false,
+                    };
+                  }
                 }
                 updated.push({
                   id: Date.now() + currentStreamStepIndex * 100 + Math.floor(Math.random() * 99),
@@ -1790,13 +1805,18 @@ export default function WorkbenchPage() {
               if (last && last.role === 'model') {
                 const inlineDoneThinking = sanitizedDone.thinkingParts.join('\n\n').trim();
                 const finalThinking = partialThinking || inlineDoneThinking || (last.is_placeholder_thinking ? undefined : last.thinking);
-                updated[updated.length - 1] = {
+                const updatedLast = {
                   ...last,
                   content: finalDoneText,
                   thinking: finalThinking,
                   is_placeholder_thinking: false,
                   model_name: parsed.model || last.model_name,
+                  is_process_step: Boolean(
+                    last.is_process_step || (last.tool_events && last.tool_events.length > 0)
+                  ),
                 };
+                const splitPair = splitSingleProcessDeliverable(updatedLast, hasInteractiveInquiryBlock);
+                updated.splice(updated.length - 1, 1, ...splitPair);
               }
               return updated;
             });
@@ -2732,7 +2752,7 @@ export default function WorkbenchPage() {
                   const isSearchHighlighted = Boolean(msg.id && highlightedMessageId === msg.id);
                   return (
                     <div
-                      key={msg.id || index}
+                      key={msgKey}
                       id={msg.id ? `chat-msg-${msg.id}` : undefined}
                       className={`flex flex-col group transition-all duration-300 ${
                         isContinuousProcessStep

@@ -1125,7 +1125,56 @@ class ToolProtocolAdapter:
         clean_text = re.sub(r"^\s*```xml\s*$", "", clean_text, flags=re.IGNORECASE | re.MULTILINE)
         clean_text = re.sub(r"^\s*xml\s*$", "", clean_text, flags=re.IGNORECASE | re.MULTILINE)
         clean_text = re.sub(r"\[调用工具:\s*[^\]]+\]", "", clean_text).strip()
+        clean_text = cls.strip_pseudo_transcript_prefixes(clean_text)
         return clean_text, tool_calls
+
+    @classmethod
+    def strip_pseudo_transcript_prefixes(cls, raw_text: str) -> str:
+        """安全剥离模型模仿历史对话格式误生成的 [终端/工具输出]: / [Gemini]: / <history_turn> 伪串台文本（保留代码块内字面内容）。"""
+        if not raw_text:
+            return ""
+        if (
+            "[终端/工具输出]:" not in raw_text
+            and "[Gemini]:" not in raw_text
+            and "<history_turn" not in raw_text
+            and "</history_turn>" not in raw_text
+        ):
+            return raw_text
+
+        segments = cls._CODE_FENCE_BLOCK_RE.split(raw_text)
+        cleaned_segments: list[str] = []
+        for idx, seg in enumerate(segments):
+            if not seg:
+                continue
+            if idx % 2 == 1:
+                cleaned_segments.append(seg)
+                continue
+
+            next_seg = re.sub(
+                r"</?\s*history_turn(?:\s+[^>]*)?>",
+                "",
+                seg,
+                flags=re.IGNORECASE,
+            )
+            # 先剥离所有明确以后续角色标记收尾的伪造 [终端/工具输出]: 区块（含自演脱水/归档段落）
+            next_seg = re.sub(
+                r"(?:^|\n)[ \t]*\[终端/工具输出\]:[\s\S]*?(?=\n[ \t]*\[(?:Gemini|用户|终端/工具输出)\]:)",
+                "",
+                next_seg,
+            )
+            # 剥离残留行首裸 [Gemini]: 标签前缀
+            next_seg = re.sub(r"(?:^|\n)[ \t]*\[Gemini\]:[ \t]*\r?\n?", "\n", next_seg)
+            # 剥离末尾或无后续 [Gemini]: 的行首 [终端/工具输出]: 脱水摘要块（仅匹配脱水元数据行，避免误伤后续正常正文）
+            next_seg = re.sub(
+                r"(?:^|\n)[ \t]*\[终端/工具输出\]:[^\r\n]*(?:\r?\n[ \t]*(?:核心摘要:|物理路径:|\(提示:|### Sheet:|Row \d+:|\.\.\. \(该表共有)[^\r\n]*)*\r?\n?",
+                "\n",
+                next_seg,
+            )
+            cleaned_segments.append(next_seg)
+
+        merged = "".join(cleaned_segments)
+        merged = re.sub(r"\n{3,}", "\n\n", merged)
+        return merged.strip()
 
     _CODE_FENCE_BLOCK_RE = re.compile(
         r"(```[^\r\n]*\r?\n[\s\S]*?\r?\n```|~~~[^\r\n]*\r?\n[\s\S]*?\r?\n~~~)",
