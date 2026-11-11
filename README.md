@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.3.5-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.3.6-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,17 @@
 
 ## 🧭 版本演进总览
 
-### 🛡️ v1.3.5（最新）— CLI 工具越权盘中自愈、历史数据库平滑守护与静态类型健壮性治理
+### 🛡️ v1.3.6（最新）— 反伪落盘幻觉、WinError 206 兜底、CLI 长流扩容与磁盘物理核验
+- **Windows 超长命令回退与 CLI 流式长输出防护（`LocalShellExecutor` · `agent_runner` · `AgentRuntime`）**：
+  - `LocalShellExecutor` 对超过编码安全阈值的脚本（Windows `-EncodedCommand` > 24 KB / POSIX > 64 KB）自动切换临时 `.ps1`/`.sh` 文件执行并自动清理，捕获底层 `Popen` `OSError` 结构化回传，彻底消除 `[WinError 206]` 进程崩溃。
+  - 新增 `_AsyncLineReader` 与 16 MiB 子进程缓冲区上限，消除超长单行 NDJSON 导致的 `LimitOverrunError / ValueError`；同步将 `MAX_CHUNKS_PER_SESSION` 扩容至 `30000` 并接入 `300,000` 字符双指标安全限流。
+- **纯文本伪落盘/预剧透幻觉拦截与上下文热区自适退让（`AgentRuntime` · `ContextBuilder` · `LocalContextCompressor`）**：
+  - 拦截无工具纯叙事宣称文件已写入却未真实落盘的行为（触发 `stream_reset` 并激活 `hallucinated_write` 纠偏逼出真实写盘工具）；在实质性工具调用步自动剥离首个 `<tool_call>` 后的未执行假结果剧透；流式中断落库自动补充磁盘未落盘警示。
+  - `ContextBuilder` 与 `LocalContextCompressor` 新增 CLI 字符软防爆阀（48K 渲染保护 / 44K 压缩触发）、历史跨轮大文件写入自动折叠，以及热区保留轮数动态退让逻辑；`EnginePoolService` 补齐 Google 模型缺省调度活跃账号兜底。
+- **前后端磁盘物理存在性真实核验（`artifacts` · `useVerifiedWorkspacePaths` · `AssistantMarkdownMessage` · `page.tsx`）**：
+  - 新增 `POST /api/v1/artifacts/verify-paths` 批量核验工作区真实文件大小与修改时间；前端正文行内芯片与底栏「生成文件直达」严格以工作区物理存在为前提，异常中断/零落盘气泡绝不再渲染误导性绿色交付卡片。
+
+### 🛡️ v1.3.5 — CLI 工具越权盘中自愈、历史数据库平滑守护与静态类型健壮性治理
 - **CLI 原生工具越权隔离与盘中无感自愈（`agent_runner` · `engine_pool` · `AgentRuntime` · `page.tsx`）**：
   - 托管 CLI 流全面屏蔽底层 `tool_request` / `tool_result` 内部确认请求，同步移除前端 SSE `tool_request` 对确认审批抽屉（`RightActionDrawer`）的误打开与误计数。
   - `denied_actions` 拦截升级为结构化 `cli_native_tool_denied` 事件并在 `AgentRuntime` 接入同轮最多 2 次盘中自动纠偏（搭配 `stream_reset` 与 `replace_prev_empty_step` 原地复用空白占位气泡），强指令引导模型改用标准 `<tool_call>` 协议续跑，避免多步长任务中途报错熔断。
