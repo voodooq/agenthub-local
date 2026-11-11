@@ -1032,20 +1032,11 @@ class EnginePoolService:
                                     full_response_text += seg_text
                                     yield {"type": "chunk", "content": seg_text, "account": account.name}
 
-                        elif etype == "tool_request":
-                            yield {
-                                "type": "tool_request",
-                                "tool_name": event.get("tool_name"),
-                                "tool_input": event.get("tool_input"),
-                                "account": account.name,
-                            }
-
-                        elif etype == "tool_result":
-                            yield {
-                                "type": "tool_result",
-                                "tool_name": event.get("tool_name"),
-                                "output": event.get("output"),
-                            }
+                        elif etype in ("tool_request", "tool_result"):
+                            # NOTE: AgentHub 托管 CLI 链路已禁用 CLI 原生内置工具；绝不将底层确认请求透传前端误拉开空审批抽屉
+                            logger.debug(
+                                f"已屏蔽托管 CLI 内部工具事件 ({etype}): {event.get('tool_name')}"
+                            )
 
                         elif etype == "rate_limited":
                             encountered_rate_limit = True
@@ -1062,7 +1053,15 @@ class EnginePoolService:
                             return
 
                         elif etype == "error":
-                            yield {"type": "error", "content": event.get("message", "未知错误")}
+                            err_payload: dict[str, Any] = {
+                                "type": "error",
+                                "content": event.get("message", "未知错误"),
+                            }
+                            if event.get("error_code"):
+                                err_payload["error_code"] = event["error_code"]
+                            if event.get("denied_tools"):
+                                err_payload["denied_tools"] = event["denied_tools"]
+                            yield err_payload
                             return
 
                         elif etype == "done":

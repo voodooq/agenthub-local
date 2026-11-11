@@ -1436,6 +1436,26 @@ export default function WorkbenchPage() {
               setMessages((prev) => {
                 const updated = [...prev];
                 const prevLast = updated[updated.length - 1];
+                const canReusePrevEmptyStep =
+                  Boolean(parsed.replace_prev_empty_step) &&
+                  Boolean(prevLast && prevLast.role === 'model') &&
+                  !prevLast.content?.trim() &&
+                  (!prevLast.tool_events || prevLast.tool_events.length === 0) &&
+                  (!prevLast.thinking?.trim() || Boolean(prevLast.is_placeholder_thinking));
+                if (canReusePrevEmptyStep && prevLast) {
+                  // 盘中自愈纠偏且上一步仅产生了空占位气泡时，原地复用以免列表遗留空白步骤
+                  updated[updated.length - 1] = {
+                    ...prevLast,
+                    content: '',
+                    thinking: undefined,
+                    is_placeholder_thinking: false,
+                    is_process_step: false,
+                    tool_events: undefined,
+                    executed_by_account: executorAccount,
+                    model_name: parsed.model,
+                  };
+                  return updated;
+                }
                 if (prevLast && prevLast.role === 'model') {
                   if (parsed.clear_prev_process_text) {
                     updated[updated.length - 1] = {
@@ -1820,9 +1840,6 @@ export default function WorkbenchPage() {
               }
               return updated;
             });
-          } else if (parsed.type === 'tool_request') {
-            setIsActionDrawerOpen(true);
-            setPendingActionCount((prev) => prev + 1);
           } else if (parsed.type === 'relay') {
             isRelayed = true;
             executorAccount = parsed.account;

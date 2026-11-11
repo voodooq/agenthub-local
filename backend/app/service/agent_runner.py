@@ -468,32 +468,31 @@ async def run_cli_stream(
         proc = _CompatSubprocess(cmd, env, cwd, stdin_bytes=stdin_payload_bytes)
 
     # 向异步子进程 stdin 写入载荷并发送 EOF，通知 CLI 单轮输入结束
-    if (
-        stdin_payload_bytes is not None
-        and not isinstance(proc, _CompatSubprocess)
-        and getattr(proc, "stdin", None) is not None
-    ):
-        try:
-            proc.stdin.write(stdin_payload_bytes)
-            drain_fn = getattr(proc.stdin, "drain", None)
-            if callable(drain_fn):
-                drain_res = drain_fn()
-                if inspect.isawaitable(drain_res):
-                    await drain_res
-            write_eof_fn = getattr(proc.stdin, "write_eof", None)
-            can_eof_fn = getattr(proc.stdin, "can_write_eof", None)
-            if callable(write_eof_fn) and (not callable(can_eof_fn) or can_eof_fn()):
-                write_eof_fn()
-            close_fn = getattr(proc.stdin, "close", None)
-            if callable(close_fn):
-                close_fn()
-        except Exception as stdin_err:
-            logger.warning(f"向 {cli_type.upper()} CLI 写入 stdin 载荷异常: {stdin_err}")
+    if stdin_payload_bytes is not None and not isinstance(proc, _CompatSubprocess):
+        proc_stdin = proc.stdin
+        if proc_stdin is not None:
+            try:
+                proc_stdin.write(stdin_payload_bytes)
+                drain_fn = getattr(proc_stdin, "drain", None)
+                if callable(drain_fn):
+                    drain_res = drain_fn()
+                    if inspect.isawaitable(drain_res):
+                        await drain_res
+                write_eof_fn = getattr(proc_stdin, "write_eof", None)
+                can_eof_fn = getattr(proc_stdin, "can_write_eof", None)
+                if callable(write_eof_fn) and (not callable(can_eof_fn) or can_eof_fn()):
+                    write_eof_fn()
+                close_fn = getattr(proc_stdin, "close", None)
+                if callable(close_fn):
+                    close_fn()
+            except Exception as stdin_err:
+                logger.warning(f"向 {cli_type.upper()} CLI 写入 stdin 载荷异常: {stdin_err}")
 
     logger.info(f"{cli_type.upper()} CLI 子进程已启动 PID={proc.pid}")
     if conversation_id:
         _ACTIVE_CLI_PROCESSES.setdefault(conversation_id, set()).add(proc)
     chunk_count = 0
+    accumulated_text = ""
 
     try:
         async def _read_lines() -> AsyncGenerator[str | dict, None]:
@@ -581,6 +580,7 @@ async def run_cli_stream(
                     )
                     if text_delta:
                         chunk_count += 1
+                        accumulated_text += text_delta
                         yield {"type": "content", "text": text_delta}
 
                     # 工具请求（实测 agy 实际推送 step_type == "tool" 及 tool_info，兼容历史 "tool_call"）
@@ -632,9 +632,14 @@ async def run_cli_stream(
                     )
                     if chunk_count == 0 and fallback_text:
                         chunk_count += 1
+                        accumulated_text += fallback_text
                         yield {"type": "content", "text": fallback_text}
                     denied_actions = res.get("denied_actions") or []
-                    if chunk_count == 0 and denied_actions:
+                    has_xml_tool_markup = (
+                        "<tool_call" in accumulated_text.lower()
+                        or "dsml" in accumulated_text.lower()
+                    )
+                    if denied_actions and not has_xml_tool_markup:
                         denied_names = ", ".join(
                             str(a.get("display_name") or a.get("action") or "native_tool")
                             for a in denied_actions
@@ -643,8 +648,10 @@ async def run_cli_stream(
                         logger.warning(f"agy CLI 原生工具被无头安全策略拦截: {denied_names}")
                         yield {
                             "type": "error",
+                            "error_code": "cli_native_tool_denied",
+                            "denied_tools": denied_names,
                             "message": (
-                                f"CLI 引擎尝试绕过宿主直接调用内置工具 ({denied_names}) 已被安全策略拦截。"
+                                f"CLI 引擎尝试绕过宿主直接调用内置工具 ({denied_names}) 已被安全策略拦截（非弹窗审批项），"
                                 "请使用 AgentHub 标准 <tool_call> XML 标签输出工具调用。"
                             ),
                         }

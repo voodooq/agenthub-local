@@ -3,13 +3,72 @@
 基于 Pydantic Settings 实现环境变量自适应与安全校验
 """
 import json
+import logging
 import os
+import sqlite3
 import sys
 import secrets
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from .runtime_paths import get_bundle_root, get_writable_app_root
+
+logger = logging.getLogger("agenthub")
+
+
+def has_sqlite_user_data(db_file: Path) -> bool:
+    """只读探测 SQLite 数据库是否已包含用户业务数据（会话、工作区或纳管账号）。"""
+    try:
+        if not db_file.is_file() or db_file.stat().st_size == 0:
+            return False
+    except OSError:
+        return False
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"file:{db_file}?mode=ro", uri=True, timeout=2.0)
+        cur = conn.cursor()
+        tables = {
+            row[0]
+            for row in cur.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        }
+        if "conversations" in tables and cur.execute("SELECT 1 FROM conversations LIMIT 1").fetchone():
+            return True
+        if "accounts" in tables and cur.execute("SELECT 1 FROM accounts LIMIT 1").fetchone():
+            return True
+        if "workspaces" in tables:
+            ws_cnt = cur.execute("SELECT COUNT(*) FROM workspaces").fetchone()[0]
+            if int(ws_cnt or 0) > 1:
+                return True
+        return False
+    except sqlite3.Error:
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except sqlite3.Error:
+                pass
+
+
+def resolve_default_db_path(data_dir: Path) -> str:
+    """解析默认数据库路径，防止空白或误创建的 agenthub_local.db 屏蔽原有非空老库 gemini_hub_local.db。"""
+    new_db = data_dir / "agenthub_local.db"
+    legacy_db = data_dir / "gemini_hub_local.db"
+
+    if not new_db.exists():
+        return str(legacy_db) if legacy_db.exists() else str(new_db)
+
+    # 若新库为空文件或纯空初始化占位库且老库确实存在用户数据，保护性回退至老库
+    if legacy_db.exists() and not has_sqlite_user_data(new_db) and has_sqlite_user_data(legacy_db):
+        logger.warning(
+            "[Config] 检测到空白占位库 %s，已自动回退保护原有非空历史库 %s",
+            new_db.name,
+            legacy_db.name,
+        )
+        return str(legacy_db)
+
+    return str(new_db)
 
 
 def load_version_metadata(candidates: list[Path] | None = None) -> tuple[str, str]:
@@ -94,15 +153,8 @@ class Settings(BaseSettings):
 
         if not self.db_path:
             data_dir = get_writable_app_root() / "data"
-
             data_dir.mkdir(parents=True, exist_ok=True)
-            # 默认使用 agenthub_local.db，兼容回退 gemini_hub_local.db
-            new_db = data_dir / "agenthub_local.db"
-            legacy_db = data_dir / "gemini_hub_local.db"
-            if not new_db.exists() and legacy_db.exists():
-                self.db_path = str(legacy_db)
-            else:
-                self.db_path = str(new_db)
+            self.db_path = resolve_default_db_path(data_dir)
 
         if not self.profile_path:
             profile_dir = Path(self.db_path).parent

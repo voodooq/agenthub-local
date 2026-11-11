@@ -301,7 +301,8 @@ class MCPManager:
         if not self.config_path.exists():
             return {"mcpServers": {}}
         try:
-            return json.loads(self.config_path.read_text(encoding="utf-8"))
+            # NOTE: 兼容 Windows 记事本或 PowerShell 保存的带 UTF-8 BOM JSON 文件
+            return json.loads(self.config_path.read_text(encoding="utf-8-sig"))
         except Exception as e:
             logger.warning(f"读取 mcp_servers.json 失败: {e}")
             return {"mcpServers": {}}

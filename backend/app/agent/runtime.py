@@ -819,6 +819,8 @@ class AgentRuntime:
         accumulated_visible_text = ""
         effective_model_name = model_name
         last_step_error_info: dict[str, Any] | None = None
+        cli_native_tool_retry_count = 0
+        replace_prev_empty_step_pending = False
         consecutive_stalls = 0
         allow_step_extension = not is_planning_phase
         command_history: list[dict[str, Any]] = []
@@ -1207,6 +1209,16 @@ class AgentRuntime:
                                 "1. 本轮严禁再次输出任何 `interactive_inquiry` 代码块或请求用户确认的废话；\n"
                                 "2. 立即输出标准 `<tool_call>`（如 `write_local_file` / `execute_local_command` / `read_local_file`）完成实际修改、脚本执行与验收验证！"
                             )
+                        elif last_step_error_info.get("tool") == "cli_native_tool_denied":
+                            denied_names = last_step_error_info.get("denied_tools") or "内置工具"
+                            step_prompt = (
+                                "[🚨 CLI 宿主内置工具调用越权强纠偏]:\n"
+                                f"你刚才试图调用 CLI 宿主原生工具（{denied_names}），已被沙箱策略直接拦截！\n"
+                                "本运行环境中宿主原生工具均不可用，右侧前端也**没有任何授权确认弹窗**。\n"
+                                "立即改用系统唯一合法工具协议：若需执行操作，请在正文中直接输出标准 XML 块 "
+                                '`<tool_call name="execute_local_command">{"command": "...", "reason": "..."}</tool_call>`'
+                                "（或 `read_local_file` / `write_local_file` 等），禁止再次触发任何原生工具调用；若无需工具则直接回答用户。"
+                            )
                         elif last_step_error_info.get("circuit_breaker"):
                             failed_c = last_step_error_info.get("failed_cmd", "")
                             step_prompt = (
@@ -1262,6 +1274,8 @@ class AgentRuntime:
                 step_raw_text = ""
                 encountered_stream_error = False
                 stream_error_message = ""
+                stream_error_code = ""
+                stream_denied_tools = ""
 
                 async for event in engine_pool.execute_stream_with_failover(
                     conversation_id=conv_id,
@@ -1290,7 +1304,11 @@ class AgentRuntime:
                         was_cancelled = True
                         break
                     elif etype == "start":
-                        yield {**event, "step_index": step_idx}
+                        start_payload = {**event, "step_index": step_idx}
+                        if replace_prev_empty_step_pending:
+                            start_payload["replace_prev_empty_step"] = True
+                            replace_prev_empty_step_pending = False
+                        yield start_payload
                     elif etype == "thinking_chunk":
                         yield event
                     elif etype == "model_downgrade":
@@ -1315,10 +1333,11 @@ class AgentRuntime:
                     elif etype == "error":
                         encountered_stream_error = True
                         stream_error_message = str(event.get("content") or "算力调度发生错误")
-                        yield event
+                        stream_error_code = str(event.get("error_code") or "")
+                        stream_denied_tools = str(event.get("denied_tools") or "")
                         break
                     else:
-                        # 透传 start / relay / tool_request 等事件
+                        # 透传非原生工具类的辅助事件
                         yield event
 
                 if was_cancelled or await _check_cancelled():
@@ -1326,6 +1345,34 @@ class AgentRuntime:
                     break
 
                 if encountered_stream_error:
+                    if (
+                        stream_error_code == "cli_native_tool_denied"
+                        and cli_native_tool_retry_count < 2
+                        and step_idx < current_max_steps - 1
+                        and not is_forced_final_step
+                    ):
+                        cli_native_tool_retry_count += 1
+                        logger.warning(
+                            "[AgentRuntime] 捕获 CLI 越权调用宿主内置工具 (%s)，触发盘中无感自愈纠偏 (%s/2)",
+                            stream_denied_tools or "native_tool",
+                            cli_native_tool_retry_count,
+                        )
+                        last_step_error_info = {
+                            "tool": "cli_native_tool_denied",
+                            "denied_tools": stream_denied_tools or "内置工具",
+                            "summary": stream_error_message,
+                        }
+                        replace_prev_empty_step_pending = True
+                        yield {"type": "stream_reset"}
+                        step_idx += 1
+                        continue
+                    if stream_error_code == "cli_native_tool_denied":
+                        denied_label = stream_denied_tools or "内置工具"
+                        stream_error_message = (
+                            f"CLI 引擎多次尝试调用宿主内置工具（{denied_label}）已被沙箱策略自动拦截（无需在右侧确认弹窗授权）。"
+                            "请重试或提示模型改用标准 <tool_call> 执行。"
+                        )
+                    yield {"type": "error", "content": stream_error_message}
                     # 异常中断也要保留用户可见报错并终结活跃 Loop，防止重开或切换后只剩孤零零用户消息
                     err_banner = f"⚠️ {stream_error_message or '模型响应异常，本次执行已终止。'}"
                     partial_clean = (
@@ -1371,6 +1418,11 @@ class AgentRuntime:
                         except Exception as loop_err:
                             logger.warning(f"[AgentRuntime] 报错收敛 Loop 状态失败: {loop_err}")
                     break
+
+                if (last_step_error_info or {}).get("tool") == "cli_native_tool_denied":
+                    # 上一步 CLI 越权已在本步成功自愈恢复，清理残留错误标记以免误判 stall 或 loop_failed
+                    last_step_error_info = None
+                    recovered_error_count += 1
 
                 # 6. 解析本步输出是否包含工具调用 (<tool_call>)
                 clean_text, tool_calls = ToolProtocolAdapter.parse_xml_tool_calls(step_raw_text)
