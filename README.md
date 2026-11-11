@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.3.4-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.3.5-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,17 @@
 
 ## 🧭 版本演进总览
 
-### 🛠️ v1.3.4（最新）— CLI 工具主权与超时治理、CDP 浏览器韧性及最终交付结果独立呈现
+### 🛡️ v1.3.5（最新）— CLI 工具越权盘中自愈、历史数据库平滑守护与静态类型健壮性治理
+- **CLI 原生工具越权隔离与盘中无感自愈（`agent_runner` · `engine_pool` · `AgentRuntime` · `page.tsx`）**：
+  - 托管 CLI 流全面屏蔽底层 `tool_request` / `tool_result` 内部确认请求，同步移除前端 SSE `tool_request` 对确认审批抽屉（`RightActionDrawer`）的误打开与误计数。
+  - `denied_actions` 拦截升级为结构化 `cli_native_tool_denied` 事件并在 `AgentRuntime` 接入同轮最多 2 次盘中自动纠偏（搭配 `stream_reset` 与 `replace_prev_empty_step` 原地复用空白占位气泡），强指令引导模型改用标准 `<tool_call>` 协议续跑，避免多步长任务中途报错熔断。
+- **历史数据库屏蔽防护、测试隔离与 BOM 容错（`config` · `mcp_manager` · `conftest`）**：
+  - 新增 `has_sqlite_user_data` 与 `resolve_default_db_path`，防止 0 字节或纯空白初始化的 `agenthub_local.db` 屏蔽原有非空历史库 `gemini_hub_local.db`。
+  - 新增 `pytest` 会话级数据库路径防线，双重隔离 `app.*` 与 `backend.app.*` 默认配置，杜绝测试写穿生产 `data/` 目录；`MCPManager.load_config` 改用 `utf-8-sig` 兼容带 UTF-8 BOM 的配置文件。
+- **子进程 `stdin` 类型收窄与静态健壮性修复（`agent_runner`）**：
+  - 将超长 Prompt 写入 `asyncio.subprocess.Process.stdin` 的路径由 `getattr` 改为显式 `proc_stdin = proc.stdin` + `is not None` 类型收窄，消除静态分析 `NoneType` 属性告警。
+
+### 🛠️ v1.3.4 — CLI 工具主权与超时治理、CDP 浏览器韧性及最终交付结果独立呈现
 - **最终交付结果与执行过程严格分离（`AgentRuntime` · `EnginePoolService` · `ToolTagSanitizer`）**：
   - 修复 `update_working_memory(task_completed=true)` 与实质性工具并发触发时抢先 `break` 导致最终交付正文混入过程折叠区的问题，强制切入无工具纯文本汇总步；仅归档收尾且已含完整长正文时自动拆条清理，步数达上限时兜底落盘独立收尾消息。
   - CLI 历史序列化全面改为 `<history_turn role="...">` 结构化标签并接入 `stripPseudoTranscriptPrefixes` 双端安全清洗，消除 `[终端/工具输出]: ... [Gemini]:` 角色串台自演幻觉；前端历史重载与 SSE 流尾自动无损拆出独立最终交付气泡与「生成文件直达」栏。
