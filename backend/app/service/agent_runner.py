@@ -90,10 +90,60 @@ from ..core.runtime_paths import get_silent_subprocess_kwargs
 
 # 单个请求子进程的超时时间（秒）
 PROCESS_TIMEOUT_SECONDS = 180
-# 单次会话最多允许的 chunk 块数上限（防止恶意无限流）
-MAX_CHUNKS_PER_SESSION = 5000
+# 单次会话最多允许的 chunk 块数与累计字符上限（兼顾细粒度代码流式写盘与恶意无限流防护）
+MAX_CHUNKS_PER_SESSION = 30000
+MAX_STREAM_CHARS_PER_SESSION = 300_000
+# 异步子进程 stdout/stderr 单行缓冲区上限（16 MiB，避免大型 stream-json 结果行触发 64 KiB LimitOverrunError）
+SUBPROCESS_STREAM_LIMIT = 16 * 1024 * 1024
+
+
+def _check_stream_safety_limit(chunk_count: int, char_count: int) -> str | None:
+    """检查单次 CLI 会话流是否超过块数或字符安全上限，超出时返回用户可读错误说明。"""
+    if chunk_count >= MAX_CHUNKS_PER_SESSION:
+        return "响应块数量超过安全上限，请求已终止（单步输出过长时建议改用多步 write_local_file 拆分写入）"
+    if char_count >= MAX_STREAM_CHARS_PER_SESSION:
+        return "单次响应输出字符数超过安全上限，请求已终止（建议将超大内容拆分多步写入）"
+    return None
 # 活跃 CLI 子进程注册表：conversation_id -> set[proc]
 _ACTIVE_CLI_PROCESSES: dict[str, set[Any]] = {}
+
+
+class _AsyncLineReader:
+    """兼容 asyncio.StreamReader 与兼容适配器的安全异步按行读取器。
+
+    对于原生 asyncio.StreamReader，改用固定块 read() + 内存换行切分，
+    彻底避免单行超长 NDJSON 超过 StreamReader.limit 时抛出 LimitOverrunError/ValueError。
+    """
+
+    def __init__(self, stream: Any, chunk_size: int = 65536) -> None:
+        self._stream = stream
+        self._chunk_size = chunk_size
+        self._buffer = bytearray()
+        self._eof = False
+        self._use_chunked = isinstance(stream, asyncio.StreamReader)
+
+    async def readline(self) -> bytes:
+        """异步读取下一行原始字节数据（包含末尾换行符，EOF 时返回空字节串）。"""
+        if not self._use_chunked:
+            return await self._stream.readline()
+
+        while True:
+            nl_idx = self._buffer.find(b"\n")
+            if nl_idx != -1:
+                line = bytes(self._buffer[: nl_idx + 1])
+                del self._buffer[: nl_idx + 1]
+                return line
+            if self._eof:
+                if self._buffer:
+                    line = bytes(self._buffer)
+                    self._buffer.clear()
+                    return line
+                return b""
+            chunk = await self._stream.read(self._chunk_size)
+            if not chunk:
+                self._eof = True
+            else:
+                self._buffer.extend(chunk)
 
 
 def _kill_process_tree(proc: Any) -> None:
@@ -283,6 +333,7 @@ async def test_cli_model_availability(
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=SUBPROCESS_STREAM_LIMIT,
                 env=env,
                 cwd=cwd,
                 **get_silent_subprocess_kwargs(),
@@ -293,8 +344,9 @@ async def test_cli_model_availability(
         async def _collect_output() -> tuple[str, str, int]:
             out_lines: list[str] = []
             assert proc.stdout is not None
+            line_reader = _AsyncLineReader(proc.stdout)
             while True:
-                line = await proc.stdout.readline()
+                line = await line_reader.readline()
                 if not line:
                     break
                 out_lines.append(line.decode("utf-8", errors="replace").strip())
@@ -459,6 +511,7 @@ async def run_cli_stream(
             stdin=asyncio.subprocess.PIPE if stdin_payload_bytes is not None else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            limit=SUBPROCESS_STREAM_LIMIT,
             env=env,
             cwd=cwd,
             **get_silent_subprocess_kwargs(),
@@ -492,19 +545,21 @@ async def run_cli_stream(
     if conversation_id:
         _ACTIVE_CLI_PROCESSES.setdefault(conversation_id, set()).add(proc)
     chunk_count = 0
+    accumulated_chars = 0
     accumulated_text = ""
 
     try:
         async def _read_lines() -> AsyncGenerator[str | dict, None]:
             """从 stdout 逐行读取 NDJSON，支持主动取消与超时保护"""
             assert proc.stdout is not None
+            line_reader = _AsyncLineReader(proc.stdout)
             while True:
                 if cancel_event and cancel_event.is_set():
                     _kill_process_tree(proc)
                     yield {"type": "cancelled", "message": "已中断执行"}
                     return
 
-                read_task = asyncio.create_task(proc.stdout.readline())
+                read_task = asyncio.create_task(line_reader.readline())
                 cancel_task = asyncio.create_task(cancel_event.wait()) if cancel_event else None
                 wait_tasks = {read_task, cancel_task} if cancel_task else {read_task}
                 try:
@@ -547,10 +602,13 @@ async def run_cli_stream(
                 return
             if not raw:
                 continue
-            if chunk_count >= MAX_CHUNKS_PER_SESSION:
-                logger.warning("单次会话 chunk 数量超限，终止子进程")
+            limit_error = _check_stream_safety_limit(chunk_count, accumulated_chars)
+            if limit_error:
+                logger.warning(
+                    f"单次会话流输出超过安全上限 (chunks={chunk_count}, chars={accumulated_chars})，终止子进程"
+                )
                 _kill_process_tree(proc)
-                yield {"type": "error", "message": "响应块数量超过安全上限，请求已终止"}
+                yield {"type": "error", "message": limit_error}
                 return
             try:
                 event: dict[str, Any] = json.loads(raw)
@@ -580,6 +638,7 @@ async def run_cli_stream(
                     )
                     if text_delta:
                         chunk_count += 1
+                        accumulated_chars += len(text_delta)
                         accumulated_text += text_delta
                         yield {"type": "content", "text": text_delta}
 
@@ -632,6 +691,7 @@ async def run_cli_stream(
                     )
                     if chunk_count == 0 and fallback_text:
                         chunk_count += 1
+                        accumulated_chars += len(fallback_text)
                         accumulated_text += fallback_text
                         yield {"type": "content", "text": fallback_text}
                     denied_actions = res.get("denied_actions") or []
@@ -671,15 +731,21 @@ async def run_cli_stream(
             event_type = event.get("type", "")
 
             if event_type == "content":
+                text_piece = str(event.get("content", event.get("text", "")) or "")
                 chunk_count += 1
-                yield {"type": "content", "text": event.get("content", event.get("text", ""))}
+                accumulated_chars += len(text_piece)
+                accumulated_text += text_piece
+                yield {"type": "content", "text": text_piece}
 
             elif event_type == "message":
                 chunk_count += 1
                 parts = event.get("message", {}).get("parts", [])
                 for part in parts:
                     if isinstance(part, dict) and "text" in part:
-                        yield {"type": "content", "text": part["text"]}
+                        text_piece = str(part["text"] or "")
+                        accumulated_chars += len(text_piece)
+                        accumulated_text += text_piece
+                        yield {"type": "content", "text": text_piece}
 
             elif event_type == "tool_use":
                 yield {

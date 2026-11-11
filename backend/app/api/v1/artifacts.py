@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote, unquote, urlparse
@@ -51,6 +52,11 @@ class ArtifactOpenByPathRequest(BaseModel):
 class ArtifactContentByPathRequest(BaseModel):
     workspace_id: str = Field(..., description="当前工作区 ID")
     file_path: str = Field(..., description="工作区相对路径、绝对路径或 file:// URI")
+
+
+class ArtifactVerifyPathsRequest(BaseModel):
+    workspace_id: str = Field(..., description="当前工作区 ID")
+    paths: list[str] = Field(default_factory=list, description="待核验物理存在性的路径列表（单次最多 50 项）")
 
 
 class ArtifactOpenRequest(BaseModel):
@@ -493,6 +499,51 @@ async def get_raw_artifact_by_path(
         filename=target.name,
         media_type=canonical_mime or "application/octet-stream",
     )
+
+
+@router.post("/verify-paths")
+async def verify_artifact_paths(req: ArtifactVerifyPathsRequest):
+    """
+    批量核验模型文本引用的路径是否在工作区磁盘上真实存在（防止“仅口头声称已写入但实际未落盘”的假直达按钮）。
+    """
+    eff_ws_id, _ = await _get_workspace_root_path(req.workspace_id)
+    results: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_item in req.paths:
+        raw_p = str(raw_item or "").strip()
+        if not raw_p or raw_p in seen:
+            continue
+        seen.add(raw_p)
+        if len(results) >= 50:
+            break
+        try:
+            target, _, _, rel_posix = await _resolve_workspace_target_file(
+                eff_ws_id,
+                raw_p,
+                allow_directory=False,
+            )
+            st = target.stat()
+            results.append({
+                "raw_path": raw_p,
+                "exists": True,
+                "is_file": target.is_file(),
+                "rel_path": rel_posix,
+                "file_name": target.name,
+                "file_size": st.st_size,
+                "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+            })
+        except (HTTPException, ValueError, OSError):
+            results.append({
+                "raw_path": raw_p,
+                "exists": False,
+                "is_file": False,
+                "rel_path": "",
+                "file_name": "",
+                "file_size": 0,
+                "mtime": None,
+            })
+
+    return {"workspace_id": eff_ws_id, "results": results}
 
 
 @router.post("")

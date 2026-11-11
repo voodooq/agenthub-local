@@ -391,3 +391,38 @@ export function extractFileBaseName(filePath: string): string {
   const clean = stripLineAnchorForExt(filePath).replace(/\\/g, '/');
   return clean.split('/').pop() || clean || filePath;
 }
+
+/**
+ * 归一化路径验证查询键：剥离前导 `./`、反斜杠转正斜杠以及末尾行列号锚点，以便在多处引用复用同一验证缓存。
+ */
+export function normalizeFileVerifyKey(rawPath: string): string {
+  const cleaned = cleanFilePathCandidate(rawPath);
+  if (!cleaned) return '';
+  const stripped = stripLineAnchorForExt(cleaned)
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '');
+  return stripped;
+}
+
+const ABORTED_OR_ERROR_MARKER_RE =
+  /(?:响应块数量超过安全上限|请求已终止|物理落盘未完成警示|系统磁盘核验提示|系统未在磁盘上检测到任何真实文件写入|底层执行失败|未检测到真实文件写入|(?:^>\s*)?⚠️\s*(?:模型或算力通道返回错误|生成过程发生异常|.*?(?:异常|失败|报错|警示|提示|WinError|LimitOverrunError|ValueError|Traceback)))/im;
+
+/**
+ * 判断消息体是否明确属于被错误中断、安全熔断或伪落盘警示收尾的气泡。
+ * 若为 true，则不应在底部渲染象征“已交付完成”的绿色直达卡片。
+ */
+export function isAbortedOrErrorMessage(content: string): boolean {
+  if (!content || typeof content !== 'string') return false;
+  if (ABORTED_OR_ERROR_MARKER_RE.test(content)) return true;
+  // 若末尾短行（最后两行）明确以 ⚠️ 或 （已手动停止生成） 收尾，同样视作中断消息
+  const lines = content
+    .trim()
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean);
+  const tailLines = lines.slice(-2).join('\n');
+  if (/^⚠️|（已手动停止生成）$/m.test(tailLines)) {
+    return true;
+  }
+  return false;
+}

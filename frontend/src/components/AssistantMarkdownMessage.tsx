@@ -7,6 +7,7 @@ import remarkGfm from 'remark-gfm';
 import { CodeBlock } from '@/components/CodeBlock';
 import { GeneratedFileChip } from '@/components/GeneratedFileChip';
 import { InteractiveInquiryCard } from '@/components/InteractiveInquiryCard';
+import { VerifiedFileEntry } from '@/hooks/useVerifiedWorkspacePaths';
 import {
   AGENTHUB_FILE_SCHEME,
   cleanFilePathCandidate,
@@ -46,6 +47,7 @@ interface MarkdownMessageRuntimeContextValue {
   onSaveToWorkspace: (code: string, language: string) => void;
   onOpenGeneratedFile: (rawPath: string, mode: 'launch' | 'reveal') => void;
   onPreviewGeneratedFile: (rawPath: string) => void;
+  getVerifiedFile?: (rawPath: string) => VerifiedFileEntry | undefined;
 }
 
 const MarkdownMessageRuntimeContext =
@@ -164,14 +166,33 @@ function CodeRenderer({ inline, className, children, ...props }: any) {
     !rawChildrenText.includes('\n') &&
     isNavigableLocalFilePath(codeString)
   ) {
+    const cleanPath = cleanFilePathCandidate(codeString);
+    const verified = ctx?.getVerifiedFile ? ctx.getVerifiedFile(cleanPath) : undefined;
+    if (!ctx?.getVerifiedFile || verified?.exists === true) {
+      return (
+        <GeneratedFileChip
+          filePath={cleanPath}
+          fileSize={verified?.fileSize}
+          mtime={verified?.mtime || undefined}
+          variant="inline"
+          onLaunch={(fp) => ctx?.onOpenGeneratedFile(fp, 'launch')}
+          onReveal={(fp) => ctx?.onOpenGeneratedFile(fp, 'reveal')}
+          onPreview={(fp) => ctx?.onPreviewGeneratedFile(fp)}
+        />
+      );
+    }
     return (
-      <GeneratedFileChip
-        filePath={cleanFilePathCandidate(codeString)}
-        variant="inline"
-        onLaunch={(fp) => ctx?.onOpenGeneratedFile(fp, 'launch')}
-        onReveal={(fp) => ctx?.onOpenGeneratedFile(fp, 'reveal')}
-        onPreview={(fp) => ctx?.onPreviewGeneratedFile(fp)}
-      />
+      <code
+        title={`${cleanPath} · 工作区磁盘未检测到该文件`}
+        className={
+          isMuted
+            ? 'bg-surface-200/60 border border-border/50 px-1 py-0.5 rounded font-mono text-[11px] text-muted-foreground/85 break-anywhere'
+            : 'bg-surface-200 border border-border px-1.5 py-0.5 rounded font-mono text-[12px] text-amber-600 dark:text-amber-300 break-anywhere'
+        }
+        {...props}
+      >
+        {children}
+      </code>
     );
   }
 
@@ -194,28 +215,58 @@ function LinkRenderer({ href, children, ...props }: any) {
   const hrefStr = String(href || '').trim();
   if (hrefStr.startsWith(AGENTHUB_FILE_SCHEME)) {
     const decodedPath = decodeURIComponent(hrefStr.slice(AGENTHUB_FILE_SCHEME.length));
+    const verified = ctx?.getVerifiedFile ? ctx.getVerifiedFile(decodedPath) : undefined;
+    if (!ctx?.getVerifiedFile || verified?.exists === true) {
+      return (
+        <GeneratedFileChip
+          filePath={decodedPath}
+          fileSize={verified?.fileSize}
+          mtime={verified?.mtime || undefined}
+          variant="inline"
+          onLaunch={(fp) => ctx?.onOpenGeneratedFile(fp, 'launch')}
+          onReveal={(fp) => ctx?.onOpenGeneratedFile(fp, 'reveal')}
+          onPreview={(fp) => ctx?.onPreviewGeneratedFile(fp)}
+        />
+      );
+    }
     return (
-      <GeneratedFileChip
-        filePath={decodedPath}
-        variant="inline"
-        onLaunch={(fp) => ctx?.onOpenGeneratedFile(fp, 'launch')}
-        onReveal={(fp) => ctx?.onOpenGeneratedFile(fp, 'reveal')}
-        onPreview={(fp) => ctx?.onPreviewGeneratedFile(fp)}
-      />
+      <code
+        title={`${decodedPath} · 工作区磁盘未检测到该文件`}
+        className={
+          ctx?.isMuted
+            ? 'bg-surface-200/60 border border-border/50 px-1 py-0.5 rounded font-mono text-[11px] text-muted-foreground/85 break-anywhere'
+            : 'bg-surface-200 border border-border px-1.5 py-0.5 rounded font-mono text-[12px] text-muted-foreground break-anywhere'
+        }
+      >
+        {children}
+      </code>
     );
   }
   if (hrefStr && isNavigableLocalFilePath(hrefStr)) {
     const labelText = extractPlainText(children).trim();
     const customLabel = labelText && labelText !== hrefStr ? labelText : undefined;
+    const verified = ctx?.getVerifiedFile ? ctx.getVerifiedFile(hrefStr) : undefined;
+    if (!ctx?.getVerifiedFile || verified?.exists === true) {
+      return (
+        <GeneratedFileChip
+          filePath={hrefStr}
+          label={customLabel}
+          fileSize={verified?.fileSize}
+          mtime={verified?.mtime || undefined}
+          variant="inline"
+          onLaunch={(fp) => ctx?.onOpenGeneratedFile(fp, 'launch')}
+          onReveal={(fp) => ctx?.onOpenGeneratedFile(fp, 'reveal')}
+          onPreview={(fp) => ctx?.onPreviewGeneratedFile(fp)}
+        />
+      );
+    }
     return (
-      <GeneratedFileChip
-        filePath={hrefStr}
-        label={customLabel}
-        variant="inline"
-        onLaunch={(fp) => ctx?.onOpenGeneratedFile(fp, 'launch')}
-        onReveal={(fp) => ctx?.onOpenGeneratedFile(fp, 'reveal')}
-        onPreview={(fp) => ctx?.onPreviewGeneratedFile(fp)}
-      />
+      <span
+        title={`${hrefStr} · 工作区磁盘未检测到该文件`}
+        className="font-mono text-[12px] text-muted-foreground/80 underline decoration-dotted decoration-muted-foreground/50 underline-offset-2"
+      >
+        {children}
+      </span>
     );
   }
   const isAnchorOnly = hrefStr.startsWith('#');
@@ -291,6 +342,7 @@ interface AssistantMarkdownMessageProps {
   onSaveToWorkspace: (code: string, language: string) => void;
   onOpenGeneratedFile: (rawPath: string, mode: 'launch' | 'reveal') => void;
   onPreviewGeneratedFile: (rawPath: string) => void;
+  getVerifiedFile?: (rawPath: string) => VerifiedFileEntry | undefined;
 }
 
 function AssistantMarkdownMessageInner({
@@ -308,6 +360,7 @@ function AssistantMarkdownMessageInner({
   onSaveToWorkspace,
   onOpenGeneratedFile,
   onPreviewGeneratedFile,
+  getVerifiedFile,
 }: AssistantMarkdownMessageProps) {
   const renderedMarkdown = useMemo(() => {
     const normalizedEscaped = normalizeEscapedContent(content);
@@ -332,6 +385,7 @@ function AssistantMarkdownMessageInner({
       onSaveToWorkspace,
       onOpenGeneratedFile,
       onPreviewGeneratedFile,
+      getVerifiedFile,
     }),
     [
       isStreaming,
@@ -347,6 +401,7 @@ function AssistantMarkdownMessageInner({
       onSaveToWorkspace,
       onOpenGeneratedFile,
       onPreviewGeneratedFile,
+      getVerifiedFile,
     ]
   );
 

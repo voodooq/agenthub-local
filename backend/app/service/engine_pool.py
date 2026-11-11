@@ -58,6 +58,16 @@ class EnginePoolService:
                     or is_auto_primary
                 ):
                     return prov
+
+            if EnginePoolService._is_google_model_name(model_name):
+                cand = await AccountRepository.get_active_candidate()
+                if cand is not None:
+                    ptype = "gemini_cli" if EnginePoolService._is_cli_account(cand) else "google_oauth"
+                    return {
+                        "provider_type": ptype,
+                        "model_name": model_name or "default",
+                        "account_name": cand.name,
+                    }
         except Exception:
             pass
         return None

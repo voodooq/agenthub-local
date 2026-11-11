@@ -202,7 +202,8 @@ class ContextBuilder:
                 "   - 【已有文件修改首选 replace_in_file】：修改已有代码或脚本时，【必须优先且强烈推荐使用 `replace_in_file`】提交标准的 `SEARCH/REPLACE` 补丁，绝对严禁对数百行的已有代码调用 `write_local_file` 全量重写！对于超长文件先调用 `get_repo_skeleton` 获取结构大纲或用 `read_local_file` 切片读取！\n"
                 "   - 【单步多工具并行调用】：若一个步骤需要执行多项操作（如读取多个文件、写入多个配置或串行多个命令），你必须在【同一次回复】中连续并列输出多个 `<tool_call>` 标签一次性并发提交系统执行，严禁一次只调用一个工具来回拉扯 5~10 轮！\n"
                 "   - 【原地修改文件，严禁创建副本】：必须原地覆盖原有文件名（如 `render.py`），绝对严禁创建类似 `render_v1.py`、`render_v2.py`、`render_fixed.py` 等衍生副本，违者判定为严重的代码污染；\n"
-                "   - 【Python 一次性诊断】：面对数据探索或环境探测，禁止写一个脚本看 Sheet1、再写一个脚本看 Sheet2、再写一个看列名；必须在一个紧凑的 Python 脚本中一次性打印出所有元信息与关键样例，一步完成诊断！\n"
+                "   - 【大文件落盘首选 write_local_file】：创建或重写完整代码、HTML 游戏等较长文本文件时，必须直接调用 `write_local_file` 落盘，严禁将数千上万字符的源码通过 `python -c \"...\"` 塞入单条 `execute_local_command` 命令行中；\n"
+                "   - 【Python 一次性诊断】：面对数据探索或环境探测，禁止写一个脚本看 Sheet1、再写一个脚本看 Sheet2、再看列名；必须在一个紧凑的 Python 脚本中一次性打印出所有元信息与关键样例，一步完成诊断！\n"
                 "   - 【过程调用与最终交付分离】：在需要调用 `<tool_call>` 的执行步骤中，仅可输出简短行动旁白，严禁在同一条工具调用步骤里提前撰写最终完整交付报告；也严禁自行编造 `[终端/工具输出]:` 或 `[Gemini]:` 标签；请等全部工具执行并返回真实结果后，再在最终无工具步骤独立向用户汇报完整成果。"
             )
             if tools:
@@ -619,31 +620,89 @@ class ContextBuilder:
         final_system_instruction = "\n\n".join(p for p in zone1_final_parts if p)
 
         # 极端保底防爆阀（仅作用于当前渲染列表，绝不改动数据库原始消息）：
-        # 若单轮或最近 3 轮总工具返回依然超过上限 88%，截断热区最老的超大非当前轮次超长文本避免本地服务 400 Context Overflow
+        # 1) 本地/云端按上限 88% 控制 Token；2) gemini_cli 通道额外守护 48K 渲染字符软上限，防止下游 64K 粗暴腰斩
         max_ctx_limit = int(policy.get("max_context_tokens") or 8192)
         hard_ceiling = int(max_ctx_limit * 0.88)
+        is_cli_provider = str((provider_info or {}).get("provider_type") or "").strip().lower() == "gemini_cli"
+        cli_char_ceiling = 48_000
+
         est_now = (
             estimate_tokens(final_system_instruction)
             + estimate_tokens(tail_injection_prompt)
             + estimate_tokens(user_query)
             + sum(estimate_tokens(str(item.get("content") or "")) + 8 for item in final_zone2)
         )
-        if est_now > hard_ceiling and len(final_zone2) > 2:
-            # 仅拷贝字典，不污染外部引用；优先只保留最近轮次原文，对更早工具消息做应急视图裁剪
-            guarded_zone2: list[dict[str, Any]] = []
-            for idx, item in enumerate(final_zone2):
-                item_copy = dict(item)
-                is_old_tool = (
+        est_chars_now = (
+            len(final_system_instruction)
+            + len(tail_injection_prompt)
+            + len(user_query)
+            + sum(len(str(item.get("content") or "")) + 48 for item in final_zone2)
+        )
+
+        def _over_guard_limit() -> bool:
+            return est_now > hard_ceiling or (is_cli_provider and est_chars_now > cli_char_ceiling)
+
+        if _over_guard_limit() and len(final_zone2) > 2:
+            guarded_zone2 = [dict(item) for item in final_zone2]
+            total_n = len(guarded_zone2)
+
+            def _trim_item_text(item_dict: dict[str, Any], head_len: int, tail_len: int, notice: str) -> None:
+                nonlocal est_now, est_chars_now
+                orig_txt = str(item_dict.get("content") or "")
+                truncated = f"{orig_txt[:head_len]}\n... {notice} ...\n{orig_txt[-tail_len:]}"
+                if len(truncated) < len(orig_txt):
+                    est_now -= max(0, estimate_tokens(orig_txt) - estimate_tokens(truncated))
+                    est_chars_now -= len(orig_txt) - len(truncated)
+                    item_dict["content"] = truncated
+
+            # 第一轮优先裁剪历史旧工具结果
+            for idx, item_copy in enumerate(guarded_zone2):
+                if not _over_guard_limit():
+                    break
+                if (
                     item_copy.get("role") == "tool"
                     and int(item_copy.get("turn_id") or 1) < int(current_turn_id)
-                    and idx < len(final_zone2) - 4
-                )
-                if is_old_tool and len(str(item_copy.get("content") or "")) > 600 and est_now > hard_ceiling:
-                    orig_txt = str(item_copy.get("content") or "")
-                    truncated = orig_txt[:260] + "\n... [应急上下文保护已省略过长旧输出，如需详情请调用 read_tool_ref] ...\n" + orig_txt[-160:]
-                    est_now -= max(0, estimate_tokens(orig_txt) - estimate_tokens(truncated))
-                    item_copy["content"] = truncated
-                guarded_zone2.append(item_copy)
+                    and idx < total_n - 4
+                    and len(str(item_copy.get("content") or "")) > 600
+                ):
+                    _trim_item_text(
+                        item_copy,
+                        260,
+                        160,
+                        "[应急上下文保护已省略过长旧输出，如需详情请调用 read_tool_ref]",
+                    )
+
+            # 第二轮仅当仍超标时，按从老到新对非当前轮次历史超大正文/代码回复做视图摘要裁剪
+            for idx, item_copy in enumerate(guarded_zone2):
+                if not _over_guard_limit():
+                    break
+                if (
+                    int(item_copy.get("turn_id") or 1) < int(current_turn_id)
+                    and idx < total_n - 2
+                    and len(str(item_copy.get("content") or "")) > 1200
+                ):
+                    _trim_item_text(
+                        item_copy,
+                        400,
+                        240,
+                        "[应急上下文保护已省略历史长篇代码/文本（共节省冗余前缀），如需查看完整内容请读取对应工作区文件]",
+                    )
+
+            # 第三轮极端兜底：仅当最近 1 个已完结轮次单条本身已爆炸（如 > 8,000 字）且仍超限，保留较宽首尾防撞 64K 截断
+            for item_copy in guarded_zone2:
+                if not _over_guard_limit():
+                    break
+                if (
+                    int(item_copy.get("turn_id") or 1) < int(current_turn_id)
+                    and len(str(item_copy.get("content") or "")) > 8000
+                ):
+                    _trim_item_text(
+                        item_copy,
+                        4000,
+                        2500,
+                        "[应急上下文保护已折叠超大单步历史产物，完整文件已落盘于工作区]",
+                    )
+
             final_zone2 = guarded_zone2
 
         return {

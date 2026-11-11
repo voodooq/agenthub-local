@@ -13,6 +13,7 @@ import re
 import signal
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,10 @@ class LocalShellExecutor:
     )
 
     _CWD_MARKER = "__GH_CWD_MARKER__="
+    # NOTE: Windows CreateProcessW 命令行总上限为 32,767 字符，UTF-16LE + Base64 会将命令膨胀约 2.67 倍；
+    # 超过阈值时改为写入临时 .ps1/.sh 脚本执行，彻底规避 [WinError 206] 文件名或扩展名太长。
+    _WINDOWS_ENCODED_CMD_MAX_CHARS = 24000
+    _POSIX_INLINE_CMD_MAX_BYTES = 65536
     # 识别需要可见桌面窗体的启动指令（未显式要求隐藏/无头时放行 GUI 窗口显示，避免继承 SW_HIDE）
     _GUI_LAUNCH_RE = re.compile(
         r"(\bStart-Process\b|\bcmd\s+/c\s+start\b|&\s*['\"]?[^'\"]*\b(msedge|chrome|explorer|notepad|code)\.exe\b)",
@@ -218,6 +223,83 @@ class LocalShellExecutor:
             except UnicodeDecodeError:
                 return raw_bytes.decode("utf-8", errors="replace")
 
+    @classmethod
+    def _write_temp_script(cls, script_content: str, *, suffix: str, encoding: str) -> str:
+        """将超长内联脚本安全落盘为临时文件以绕开操作系统命令行长度硬限制。"""
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            suffix=suffix,
+            prefix="agenthub_cmd_",
+            encoding=encoding,
+            delete=False,
+        ) as tmp_file:
+            tmp_file.write(script_content)
+            return tmp_file.name
+
+    def _build_execution_command(self, command: str) -> tuple[list[str], str | None]:
+        """构造待执行的 Shell/PowerShell 参数列表；超出长度安全阈值时自动切换临时脚本文件。"""
+        if sys.platform == "win32":
+            # 智能剥离模型自发嵌套的 powershell 外层包装，避免外层 Shell 将内部 $_ 变量吞掉
+            inner_cmd = command.strip()
+            ps_unwrap_pattern = re.compile(
+                r"^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\s+(?:-(?:NoProfile|NonInteractive|ExecutionPolicy\s+\w+|Command|c)\s+)*(?:\"([\s\S]*)\"|'([\s\S]*)'|([\s\S]+))$",
+                re.IGNORECASE,
+            )
+            m_unwrap = ps_unwrap_pattern.match(inner_cmd)
+            if m_unwrap:
+                inner_cmd = m_unwrap.group(1) or m_unwrap.group(2) or m_unwrap.group(3) or inner_cmd
+
+            full_ps_script = (
+                f"$ProgressPreference = 'SilentlyContinue'; "
+                f"$OutputEncoding = [System.Text.Encoding]::UTF8; "
+                f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+                f"$global:LASTEXITCODE = $null; "
+                f"{inner_cmd}\n"
+                f"$__cmd_ok = $?; "
+                f"$__real_exit = if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {{ $LASTEXITCODE }} elseif (-not $__cmd_ok) {{ 1 }} else {{ 0 }}; "
+                f"Write-Output \"`n{self._CWD_MARKER}$((Get-Location).Path)\"; "
+                f"exit $__real_exit"
+            )
+            # 使用 UTF-16LE Base64 编码通过 -EncodedCommand 直通执行，彻底免疫 Shell 引号转义与 $_ 变量丢失
+            b64_payload = base64.b64encode(full_ps_script.encode("utf-16le")).decode("ascii")
+            if len(b64_payload) <= self._WINDOWS_ENCODED_CMD_MAX_CHARS:
+                return [
+                    "powershell.exe",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-EncodedCommand",
+                    b64_payload,
+                ], None
+
+            # 超过安全阈值后切换为 utf-8-sig BOM 临时 .ps1，避免 Windows CreateProcess [WinError 206]
+            temp_ps1 = self._write_temp_script(full_ps_script, suffix=".ps1", encoding="utf-8-sig")
+            logger.info(
+                f"[ShellExecutor] 命令长度触发阈值保护 (b64={len(b64_payload)} chars)，"
+                f"自动切换临时脚本执行: {temp_ps1}"
+            )
+            return [
+                "powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                temp_ps1,
+            ], temp_ps1
+
+        wrapped_cmd = f"{command}\n__real_exit=$?; echo \"\n{self._CWD_MARKER}$(pwd)\"; exit $__real_exit"
+        if len(wrapped_cmd.encode("utf-8")) <= self._POSIX_INLINE_CMD_MAX_BYTES:
+            return ["/bin/bash", "-c", wrapped_cmd], None
+
+        temp_sh = self._write_temp_script(wrapped_cmd, suffix=".sh", encoding="utf-8")
+        logger.info(
+            f"[ShellExecutor] POSIX 命令长度触发阈值保护 ({len(wrapped_cmd.encode('utf-8'))} bytes)，"
+            f"自动切换临时脚本执行: {temp_sh}"
+        )
+        return ["/bin/bash", temp_sh], temp_sh
+
     async def run(
         self,
         command: str,
@@ -253,43 +335,7 @@ class LocalShellExecutor:
             else:
                 effective_cwd = raw_cwd
 
-        # 构造带 UTF-8 编码声明与尾部 CWD 探测标记的包装命令
-        if sys.platform == "win32":
-            # 智能剥离模型自发嵌套的 powershell 外层包装，避免外层 Shell 将内部 $_ 变量吞掉
-            inner_cmd = command.strip()
-            ps_unwrap_pattern = re.compile(
-                r"^(?:powershell(?:\.exe)?|pwsh(?:\.exe)?)\s+(?:-(?:NoProfile|NonInteractive|ExecutionPolicy\s+\w+|Command|c)\s+)*(?:\"([\s\S]*)\"|'([\s\S]*)'|([\s\S]+))$",
-                re.IGNORECASE,
-            )
-            m_unwrap = ps_unwrap_pattern.match(inner_cmd)
-            if m_unwrap:
-                inner_cmd = m_unwrap.group(1) or m_unwrap.group(2) or m_unwrap.group(3) or inner_cmd
-
-            full_ps_script = (
-                f"$ProgressPreference = 'SilentlyContinue'; "
-                f"$OutputEncoding = [System.Text.Encoding]::UTF8; "
-                f"[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-                f"$global:LASTEXITCODE = $null; "
-                f"{inner_cmd} ; "
-                f"$__cmd_ok = $?; "
-                f"$__real_exit = if ($LASTEXITCODE -ne $null -and $LASTEXITCODE -ne 0) {{ $LASTEXITCODE }} elseif (-not $__cmd_ok) {{ 1 }} else {{ 0 }}; "
-                f"Write-Output \"`n{self._CWD_MARKER}$((Get-Location).Path)\"; "
-                f"exit $__real_exit"
-            )
-            # 使用 UTF-16LE Base64 编码通过 -EncodedCommand 直通执行，彻底免疫 Shell 引号转义与 $_ 变量丢失
-            b64_payload = base64.b64encode(full_ps_script.encode("utf-16le")).decode("ascii")
-            exec_args = [
-                "powershell.exe",
-                "-NoProfile",
-                "-NonInteractive",
-                "-ExecutionPolicy",
-                "Bypass",
-                "-EncodedCommand",
-                b64_payload,
-            ]
-        else:
-            wrapped_cmd = f"{command}; __real_exit=$?; echo \"\n{self._CWD_MARKER}$(pwd)\"; exit $__real_exit"
-            exec_args = ["/bin/bash", "-c", wrapped_cmd]
+        exec_args, temp_script_path = self._build_execution_command(command)
 
         # 非冻结研发模式下将当前虚拟环境 Scripts/bin 优先注入子进程 PATH，杜绝 WindowsApps 假 Python 劫持
         child_env = os.environ.copy()
@@ -301,35 +347,58 @@ class LocalShellExecutor:
 
         allow_gui_window = self._is_gui_launch_command(command)
 
-        def _sync_exec() -> tuple[bytes, bytes, int, bool]:
-            proc = subprocess.Popen(
-                exec_args,
-                cwd=effective_cwd,
-                stdin=subprocess.DEVNULL,  # 强制关闭标准输入，防交互式挂起
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                env=child_env,
-                start_new_session=(sys.platform != "win32"),
-                **get_silent_subprocess_kwargs(allow_gui=allow_gui_window),
-            )
+        def _sync_exec() -> tuple[bytes, bytes, int, bool, str | None]:
+            try:
+                proc = subprocess.Popen(
+                    exec_args,
+                    cwd=effective_cwd,
+                    stdin=subprocess.DEVNULL,  # 强制关闭标准输入，防交互式挂起
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    env=child_env,
+                    start_new_session=(sys.platform != "win32"),
+                    **get_silent_subprocess_kwargs(allow_gui=allow_gui_window),
+                )
+            except OSError as spawn_err:
+                return b"", b"", -2, False, str(spawn_err)
+
             if session_id:
                 self._running_pids.setdefault(session_id, set()).add(proc.pid)
 
             try:
                 out_bytes, err_bytes = proc.communicate(timeout=timeout)
-                return out_bytes, err_bytes, proc.returncode or 0, False
+                return out_bytes, err_bytes, proc.returncode or 0, False, None
             except subprocess.TimeoutExpired:
                 self.kill_process_tree(proc.pid)
                 try:
                     out_bytes, err_bytes = proc.communicate(timeout=2)
                 except Exception:
                     out_bytes, err_bytes = b"", b""
-                return out_bytes, err_bytes, -1, True
+                return out_bytes, err_bytes, -1, True, None
             finally:
                 if session_id and session_id in self._running_pids:
                     self._running_pids[session_id].discard(proc.pid)
 
-        out_bytes, err_bytes, exit_code, timed_out = await asyncio.to_thread(_sync_exec)
+        try:
+            out_bytes, err_bytes, exit_code, timed_out, spawn_error = await asyncio.to_thread(_sync_exec)
+        finally:
+            if temp_script_path:
+                try:
+                    os.unlink(temp_script_path)
+                except OSError:
+                    pass
+
+        if spawn_error is not None:
+            logger.warning(f"[ShellExecutor] 子进程拉起失败: {spawn_error}")
+            return {
+                "output": (
+                    f"Error: 命令进程启动失败 ({spawn_error})。"
+                    "若因单条命令行参数过长或路径超限引发，请勿将超大源码内联进终端命令，请改用 `write_local_file` 直接写入目标文件后再运行短命令执行。"
+                ),
+                "exit_code": exit_code,
+                "new_cwd": effective_cwd,
+                "timed_out": False,
+            }
 
         stdout_str = self.decode_output(out_bytes)
         stderr_str = self.decode_output(err_bytes)

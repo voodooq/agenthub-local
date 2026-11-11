@@ -12,6 +12,7 @@ import {
   ImageIcon,
   Loader2,
 } from 'lucide-react';
+import { formatFileSize } from '@/utils/attachmentPolicy';
 import { extractFileBaseName } from '@/utils/filePathDetector';
 
 export interface GeneratedFileChipProps {
@@ -19,6 +20,10 @@ export interface GeneratedFileChipProps {
   filePath: string;
   /** 可选自定义展示文案（默认展示文件路径或文件名） */
   label?: string;
+  /** 可选已核验磁盘字节大小 */
+  fileSize?: number;
+  /** 可选已核验磁盘修改时间（ISO 字符串） */
+  mtime?: string;
   /** `inline` 用于 Markdown 正文行内替换；`card` 用于消息底栏“生成文件直达”胶囊条 */
   variant?: 'inline' | 'card';
   onLaunch: (filePath: string) => Promise<void> | void;
@@ -73,6 +78,8 @@ function renderFileKindIcon(filePath: string, className = 'w-3.5 h-3.5 shrink-0'
 export function GeneratedFileChip({
   filePath,
   label,
+  fileSize,
+  mtime,
   variant = 'inline',
   onLaunch,
   onReveal,
@@ -96,6 +103,9 @@ export function GeneratedFileChip({
   const isCard = variant === 'card';
   const baseName = extractFileBaseName(filePath);
   const displayText = label || (isCard ? baseName : filePath);
+  const sizeLabel = typeof fileSize === 'number' && fileSize >= 0 ? formatFileSize(fileSize) : '';
+  const metaParts = [filePath, sizeLabel, mtime ? mtime.replace('T', ' ') : ''].filter(Boolean);
+  const launchTitle = `${metaParts.join(' · ')} · 点击直接在系统默认应用中打开`;
 
   return (
     <span
@@ -114,7 +124,7 @@ export function GeneratedFileChip({
           runAction('launch', onLaunch);
         }}
         disabled={busyAction !== null}
-        title={`${filePath} · 点击直接在系统默认应用中打开`}
+        title={launchTitle}
         className={
           isCard
             ? 'inline-flex items-center space-x-2 px-2.5 py-1.5 text-xs font-medium text-foreground hover:text-emerald-600 dark:hover:text-emerald-300 cursor-pointer min-w-0 disabled:opacity-60'
@@ -130,6 +140,11 @@ export function GeneratedFileChip({
         {isCard && filePath !== displayText && (
           <span data-no-i18n="true" className="hidden md:inline font-mono text-[10px] text-muted-foreground truncate max-w-[180px]">
             ({filePath})
+          </span>
+        )}
+        {isCard && sizeLabel && (
+          <span data-no-i18n="true" className="text-[10px] font-mono text-emerald-600/80 dark:text-emerald-300/80 shrink-0">
+            {sizeLabel}
           </span>
         )}
         <ExternalLink className="w-3 h-3 text-emerald-500/75 shrink-0" />

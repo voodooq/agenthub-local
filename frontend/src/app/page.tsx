@@ -62,6 +62,7 @@ import { TokenMetricsFooterBar } from '@/components/TokenMetricsFooterBar';
 import { TokenStatsModal } from '@/components/TokenStatsModal';
 
 import { GeneratedFileChip } from '@/components/GeneratedFileChip';
+import { useVerifiedWorkspacePaths } from '@/hooks/useVerifiedWorkspacePaths';
 import { buildActiveSystemOverride } from '@/utils/personalityHelper';
 import { generateScenarioThinking } from '@/utils/scenarioThinking';
 import {
@@ -90,6 +91,7 @@ import { apiFetch, getAccessToken } from '@/utils/apiClient';
 import {
   cleanFilePathCandidate,
   extractGeneratedFilePaths,
+  isAbortedOrErrorMessage,
   isNavigableLocalFilePath,
 } from '@/utils/filePathDetector';
 import {
@@ -208,6 +210,11 @@ export default function WorkbenchPage() {
   const [isActionDrawerOpen, setIsActionDrawerOpen] = useState(false);
   const [pendingActionCount, setPendingActionCount] = useState(0);
   const [workspacePath, setWorkspacePath] = useState<string>('AgentHub Workspace');
+  const { getVerifiedFile, invalidateVerification } = useVerifiedWorkspacePaths(
+    activeWorkspaceId,
+    messages,
+    isStreaming
+  );
 
   // 附件、上传限制提示与拖拽状态
   interface AttachmentItem {
@@ -1690,6 +1697,9 @@ export default function WorkbenchPage() {
             if (parsed.type === 'require_approval') {
               setTimeout(() => scrollToBottom(true), 50);
             }
+            if (parsed.type === 'tool_end') {
+              invalidateVerification();
+            }
           } else if (parsed.type === 'thinking_chunk') {
             partialThinking += parsed.content || '';
             executorAccount = parsed.account || executorAccount;
@@ -1840,6 +1850,7 @@ export default function WorkbenchPage() {
               }
               return updated;
             });
+            invalidateVerification();
           } else if (parsed.type === 'relay') {
             isRelayed = true;
             executorAccount = parsed.account;
@@ -1864,6 +1875,7 @@ export default function WorkbenchPage() {
               return updated;
             });
             showFloatingToast(errTxt, 'error', 4800);
+            invalidateVerification();
           } else if (parsed.type === 'cancelled') {
             const cancelTxt = String(parsed.content || '已手动停止生成');
             const cancelNotice = `（${cancelTxt}）`;
@@ -1884,6 +1896,7 @@ export default function WorkbenchPage() {
               }
               return updated;
             });
+            invalidateVerification();
           } else if (parsed.type === 'control' && parsed.action === 'rollback_completed') {
             const targetCid = String(parsed.conversation_id || effectiveConvId || '').trim();
             if (targetCid) {
@@ -3063,6 +3076,7 @@ export default function WorkbenchPage() {
                                   onSaveToWorkspace={stableSaveToWorkspace}
                                   onOpenGeneratedFile={stableOpenGeneratedFile}
                                   onPreviewGeneratedFile={stablePreviewGeneratedFile}
+                                  getVerifiedFile={getVerifiedFile}
                                 />
                               );
 
@@ -3109,25 +3123,31 @@ export default function WorkbenchPage() {
                     })()
                   )}
 
-                      {/* 生成文件快捷直达栏（点击默认程序直接打开 / 预览 / 所在目录定位；过程步骤与待确认卡不重复显示交付栏） */}
+                      {/* 生成文件快捷直达栏（点击默认程序直接打开 / 预览 / 所在目录定位；过程步骤、待确认卡、或报错中断/零落盘气泡不显示交付栏） */}
                       {!isUser &&
                         !isProcessStep &&
                         msg.content &&
                         !isCurrentStreamingMsg &&
                         !isInteractiveCard &&
+                        !isAbortedOrErrorMessage(msg.content) &&
                         (() => {
                           const deliverablePaths = extractGeneratedFilePaths(msg.content);
-                          if (deliverablePaths.length === 0) return null;
+                          const verifiedDeliverables = deliverablePaths
+                            .map((fp) => ({ fp, info: getVerifiedFile(fp) }))
+                            .filter((item) => item.info?.exists === true);
+                          if (verifiedDeliverables.length === 0) return null;
                           return (
                             <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-xl border border-emerald-500/20 bg-emerald-500/5 max-w-[92%] md:max-w-[85%] animate-fade-in">
                               <div className="inline-flex items-center space-x-1.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 shrink-0 mr-1">
                                 <PackageOpen className="w-3.5 h-3.5 text-emerald-500" />
                                 <span>生成文件直达</span>
                               </div>
-                              {deliverablePaths.map((fp) => (
+                              {verifiedDeliverables.map(({ fp, info }) => (
                                 <GeneratedFileChip
                                   key={fp}
                                   filePath={fp}
+                                  fileSize={info?.fileSize}
+                                  mtime={info?.mtime || undefined}
                                   variant="card"
                                   onLaunch={(targetPath) => handleOpenGeneratedFile(targetPath, 'launch')}
                                   onReveal={(targetPath) => handleOpenGeneratedFile(targetPath, 'reveal')}

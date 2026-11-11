@@ -150,6 +150,152 @@ class AgentRuntime:
             return True
         return False
 
+    # 识别无工具纯文本伪落盘/伪成功宣称模式
+    _HALLUCINATED_WRITE_CLAIM_PATTERNS = (
+        re.compile(r"写入文件成功[:：]\s*[`'\"]?([^\s`'\"()（）,，\r\n]+?\.\w{1,8})", re.IGNORECASE),
+        re.compile(
+            r"(?:已成功(?:生成|创建|写入|更新|同步更新)|已完成(?:生成|创建|写入)|已物理落盘)[^。\r\n]{0,24}?[`'\"]?([A-Za-z0-9_.\u4e00-\u9fa5/\\-]+\.\w{1,8})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"[`'\"]?([A-Za-z0-9_.\u4e00-\u9fa5/\\-]+\.\w{1,8})[`'\"]?\s*(?:写入完毕|已成功物理落盘|created successfully|written successfully)",
+            re.IGNORECASE,
+        ),
+    )
+    _HALLUCINATED_WRITE_GENERIC_RE = re.compile(
+        r"(?:文件已成功物理落盘|Physical files created successfully|代码生成脚本\s*[`'\"A-Za-z0-9_.\-]+\s*写入完毕)",
+        re.IGNORECASE,
+    )
+    _DECLARED_SIZE_RE = re.compile(
+        r"[`'\"]?([A-Za-z0-9_.\u4e00-\u9fa5/\\-]+\.\w{1,8})[`'\"]?\s*(?:\(\s*(?:共\s*)?(?:字节数|文件大小|size)[:：]?\s*(\d{3,})\s*(?:字节|字符|bytes?)?\s*\)|\s+(\d{3,})\s*(?:字节|bytes?)?)",
+        re.IGNORECASE,
+    )
+    _PREMATURE_POST_TOOL_HALLUCINATION_RE = re.compile(
+        r"(?:Physical files created successfully|写入文件成功|写入完毕|已成功(?:生成并写入|同步更新|物理落盘)|文件已\s*100%\s*真实落盘|Ran\s+\d+\s+tests?\s+in\s+\d|静态健全性检查\s*100%|^\s*#{2,3}\s+)",
+        re.IGNORECASE | re.MULTILINE,
+    )
+    _FIRST_TOOL_TAG_RE = re.compile(
+        r"(?:<\s*tool_call\b|\[\s*tool_call\b|<\s*/?\s*[\uFF5C|][\uFF5C|\s]*DSML\b|<\s*(?:execute_local_command|write_local_file|replace_in_file|read_local_file|update_working_memory)\b)",
+        re.IGNORECASE,
+    )
+    _WRITE_SHELL_HINT_RE = re.compile(
+        r"(?:write_text|write_bytes|writelines|shutil\.|os\.rename|os\.replace|"
+        r"open\([^)]*['\"][wa+]|Set-Content|Add-Content|Out-File|New-Item|"
+        r"(?<![=!<>])>{1,2}(?![=])|python\s+[^\s-][^\r\n]*\.py\b|\.(?:ps1|sh|bat)\b|"
+        r"npm\s+run\s+build|vite\s+build|pip\s+install)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _detect_unverified_write_hallucination(
+        cls,
+        text: str,
+        *,
+        cwd: str | None,
+        produced_artifacts: list[str],
+        executed_mutating_shell: bool,
+    ) -> list[str]:
+        """检测纯文本中宣称文件已落盘，但本轮未真写盘或磁盘与声明不符的幻觉清单。"""
+        clean = (text or "").strip()
+        if not clean:
+            return []
+
+        ws_root = Path(cwd).resolve() if cwd else None
+        produced_norm = {p.replace("\\", "/").lstrip("./").lower() for p in produced_artifacts if p}
+        produced_names = {Path(p).name.lower() for p in produced_artifacts if p}
+
+        # 收集文本中附带的“声称字节/字符数”用于核对同名旧文件（如声明 36766 字节但磁盘仍是旧文件 25461 字节）
+        declared_sizes: dict[str, int] = {}
+        for m_sz in cls._DECLARED_SIZE_RE.finditer(clean):
+            fname_raw = (m_sz.group(1) or "").strip()
+            sz_str = m_sz.group(2) or m_sz.group(3)
+            if fname_raw and sz_str:
+                try:
+                    declared_sizes[Path(fname_raw).name.lower()] = int(sz_str)
+                except ValueError:
+                    pass
+
+        unverified: list[str] = []
+        claimed_files: list[str] = []
+        for pat in cls._HALLUCINATED_WRITE_CLAIM_PATTERNS:
+            for m in pat.finditer(clean):
+                # 跳过明确否定语境（如“未写入文件成功” / “尚未物理落盘”）
+                prefix_ctx = clean[max(0, m.start() - 12):m.start()]
+                if re.search(r"(?:未|不|尚未|没有|failed|not)\s*$", prefix_ctx, re.IGNORECASE):
+                    continue
+                cand = (m.group(1) or "").strip().strip("`'\".,;:!?")
+                if cand and cand not in claimed_files:
+                    claimed_files.append(cand)
+
+        for cand in claimed_files:
+            norm_cand = cand.replace("\\", "/").lstrip("./").lower()
+            base_cand = Path(cand).name.lower()
+            if norm_cand in produced_norm or base_cand in produced_names:
+                continue
+            if ws_root and ws_root.is_dir():
+                cand_path = (ws_root / cand.replace("\\", "/").lstrip("/"))
+                try:
+                    resolved = cand_path.resolve()
+                    is_in_ws = resolved.is_relative_to(ws_root)
+                except (ValueError, OSError):
+                    is_in_ws = False
+                if not is_in_ws or not cand_path.exists() or not cand_path.is_file():
+                    unverified.append(cand)
+                    continue
+                expected_sz = declared_sizes.get(base_cand)
+                # 本轮既未通过文件工具写盘、也未执行疑似写盘的 Shell，或磁盘字节数明显与声明不符 -> 视为复用旧文件张冠李戴
+                if not executed_mutating_shell or (
+                    expected_sz is not None and abs(cand_path.stat().st_size - expected_sz) > 64
+                ):
+                    unverified.append(cand)
+            else:
+                unverified.append(cand)
+
+        if not unverified and cls._HALLUCINATED_WRITE_GENERIC_RE.search(clean):
+            if not produced_artifacts and not executed_mutating_shell:
+                unverified.append("声明生成的文件")
+
+        return unverified
+
+    @classmethod
+    def _strip_premature_post_tool_hallucination(
+        cls,
+        raw_text: str,
+        clean_text: str,
+        *,
+        has_substantive_tools: bool,
+    ) -> tuple[str, bool]:
+        """若实质性工具调用步骤在首个 <tool_call> 后夹带了提前脑补的执行结果/交付报告，剥离后半段伪剧透。"""
+        if not has_substantive_tools or not clean_text or not raw_text:
+            return clean_text, False
+
+        first_tag = cls._FIRST_TOOL_TAG_RE.search(raw_text)
+        if not first_tag:
+            return clean_text, False
+
+        pre_raw = raw_text[:first_tag.start()].strip()
+        post_raw = raw_text[first_tag.start():]
+        def _clean_segment(seg_raw: str) -> str:
+            parsed_seg, _ = ToolProtocolAdapter.parse_xml_tool_calls(seg_raw)
+            return ToolProtocolAdapter.strip_pseudo_transcript_prefixes(parsed_seg or "").strip()
+
+        # 仅查看首个工具标签之后除工具调用外的文本片段，判断是否夹带伪结果/提前终稿
+        post_clean = _clean_segment(post_raw)
+        if not post_clean:
+            return clean_text, False
+
+        looks_like_fake_deliverable = bool(
+            cls._PREMATURE_POST_TOOL_HALLUCINATION_RE.search(post_clean)
+            or (len(post_clean) >= 320 and ("\n### " in post_clean or "\n## " in post_clean or "```" in post_clean))
+        )
+        if not looks_like_fake_deliverable:
+            return clean_text, False
+
+        pre_clean = _clean_segment(pre_raw)
+        if not pre_clean or cls._PREMATURE_POST_TOOL_HALLUCINATION_RE.search(pre_clean):
+            return "正在调用本地工具执行并核验结果...", True
+        return pre_clean, True
+
     EXECUTION_APPROVAL_MARKERS = (
         "实施方案已通过用户审批",
         "批准执行以下步骤清单",
@@ -830,6 +976,7 @@ class AgentRuntime:
         circuit_breaker_triggered = False
         produced_artifacts: list[str] = []
         has_workspace_mutations = False
+        executed_mutating_shell = False
         injected_case_ids: list[str] = []
         turn_checkpoint_taken = False
 
@@ -1104,6 +1251,50 @@ class AgentRuntime:
                     pass
             return False
 
+        async def _cleanup_and_pause_loop_on_abort(abort_reason: str) -> None:
+            """流断开或协程被取消时，统一终止子进程并确保活跃 Loop 可靠收敛为 paused。"""
+            nonlocal active_loop_obj
+            cancel_event.set()
+            cancel_cli_processes(conv_id)
+            shell_executor.cancel_session_processes(conv_id)
+
+            async def _persist_paused_state() -> None:
+                nonlocal active_loop_obj
+                try:
+                    if (
+                        active_scene == "agent"
+                        and ws_id
+                        and not active_loop_obj
+                        and not tracked_loop_id
+                        and not is_chitchat_turn
+                    ):
+                        await _ensure_active_loop(initial_status="paused")
+                        return
+
+                    target_loop = active_loop_obj
+                    if target_loop is None and tracked_loop_id:
+                        target_loop = await TaskLoopRepository.get_loop(tracked_loop_id)
+                    if target_loop is not None:
+                        latest_loop = await TaskLoopRepository.get_loop(target_loop.id) or target_loop
+                        if latest_loop.loop_status in (
+                            "planning",
+                            "executing",
+                            "verifying",
+                            "reflecting",
+                        ):
+                            await TaskLoopRepository.update_loop_status(
+                                loop_id=latest_loop.id,
+                                status="paused",
+                            )
+                except Exception as pause_err:
+                    logger.warning(f"[AgentRuntime] {abort_reason} 收敛 Loop 为 paused 失败: {pause_err}")
+
+            persist_task = asyncio.create_task(_persist_paused_state())
+            try:
+                await asyncio.shield(persist_task)
+            except BaseException as shield_err:
+                logger.debug(f"[AgentRuntime] {abort_reason} 外层等待被二次中断，状态更新移交后台完成: {shield_err}")
+
         step_raw_text = ""
         encountered_stream_error = False
         stream_error_message = ""
@@ -1218,6 +1409,15 @@ class AgentRuntime:
                                 "立即改用系统唯一合法工具协议：若需执行操作，请在正文中直接输出标准 XML 块 "
                                 '`<tool_call name="execute_local_command">{"command": "...", "reason": "..."}</tool_call>`'
                                 "（或 `read_local_file` / `write_local_file` 等），禁止再次触发任何原生工具调用；若无需工具则直接回答用户。"
+                            )
+                        elif last_step_error_info.get("tool") == "hallucinated_write":
+                            claimed_list = ", ".join(last_step_error_info.get("unverified_files") or ["目标文件"])
+                            step_prompt = (
+                                "[🚨 严禁无工具纯文本伪落盘 —— 立即真实调用工具]:\n"
+                                f"系统核验发现你刚才在正文中声称已生成或写入 `{claimed_list}`，但本轮尚未执行任何真实写盘调用，且磁盘中并无对应最新产出！\n"
+                                "1. 严禁再用纯文字编造「写入文件成功 / 已物理落盘 / 字节数: xxx」等虚假日志或交付报告；\n"
+                                "2. 你必须立即在正文中输出标准 `<tool_call name=\"write_local_file\">` 标签将完整源码直接写入目标文件（切勿将上万字符内联塞入 `execute_local_command`）；\n"
+                                "3. 仅当工具返回真实成功回执后，方可向用户汇报完成。"
                             )
                         elif last_step_error_info.get("circuit_breaker"):
                             failed_c = last_step_error_info.get("failed_cmd", "")
@@ -1380,6 +1580,19 @@ class AgentRuntime:
                         if step_raw_text
                         else ""
                     )
+                    unverified_partial = self._detect_unverified_write_hallucination(
+                        partial_clean,
+                        cwd=ctx.get("current_cwd"),
+                        produced_artifacts=produced_artifacts,
+                        executed_mutating_shell=executed_mutating_shell,
+                    )
+                    if unverified_partial:
+                        err_banner = (
+                            f"{err_banner}\n\n"
+                            f"> ⚠️ **物理落盘未完成警示**：本次执行已在完成前中断，上文中提及的 `"
+                            + "`, `".join(unverified_partial[:5])
+                            + "` 尚未通过真实写盘工具生效，请以工作区目录实际文件为准。"
+                        )
                     persisted_err = f"{partial_clean}\n\n{err_banner}" if partial_clean else err_banner
                     if not active_incognito and conv_id:
                         try:
@@ -1456,6 +1669,39 @@ class AgentRuntime:
 
                 # 情况 A：模型未发起真实工具调用
                 if not tool_calls or active_scene != "agent":
+                    unverified_write_claims = (
+                        self._detect_unverified_write_hallucination(
+                            stripped_without_empty,
+                            cwd=ctx.get("current_cwd"),
+                            produced_artifacts=produced_artifacts,
+                            executed_mutating_shell=executed_mutating_shell,
+                        )
+                        if (active_scene == "agent" and not is_planning_phase)
+                        else []
+                    )
+                    if (
+                        active_scene == "agent"
+                        and not is_planning_phase
+                        and not is_forced_final_step
+                        and unverified_write_claims
+                        and not is_user_confirmation_request
+                        and consecutive_stalls < 3
+                        and step_idx < current_max_steps - 1
+                    ):
+                        consecutive_stalls += 1
+                        logger.warning(
+                            f"[AgentRuntime] 拦截无工具纯叙事伪落盘幻觉 ({unverified_write_claims})，激活纠偏 (第{consecutive_stalls}次)"
+                        )
+                        replace_prev_empty_step_pending = True
+                        yield {"type": "stream_reset"}
+                        last_step_error_info = {
+                            "tool": "hallucinated_write",
+                            "unverified_files": unverified_write_claims,
+                            "summary": "模型未调用写盘工具却在纯文本中宣称文件已落盘，强制要求通过 write_local_file 真实写入",
+                        }
+                        step_idx += 1
+                        continue
+
                     # 防止用户已点确认执行后，模型仍违背指令二次吐出 interactive_inquiry 卡空转
                     if (
                         active_scene == "agent"
@@ -1500,6 +1746,12 @@ class AgentRuntime:
                         final_saved_text = raw_final_text
 
                     has_inquiry_card = ToolProtocolAdapter.contains_interactive_inquiry(final_saved_text)
+                    if unverified_write_claims and final_saved_text and not has_inquiry_card:
+                        final_saved_text += (
+                            "\n\n> ⚠️ **系统磁盘核验提示**：未能在工作区中核实 `"
+                            + "`, `".join(unverified_write_claims[:5])
+                            + "` 的有效落盘记录，实际产出请以工作区物理文件夹为准。"
+                        )
                     is_waiting_user_decision = bool(
                         active_scene == "agent" and (has_inquiry_card or is_planning_phase)
                     )
@@ -1538,7 +1790,27 @@ class AgentRuntime:
 
                 consecutive_stalls = 0
 
-                # 情况 B：模型发起了工具调用 -> 规范化工具调用 XML 示范并落盘（杜绝带偏后续历史）
+                # 情况 B：模型发起了工具调用 -> 先清洗工具调用前的预剧透伪结果，再规范化工具 XML 并落盘
+                step_tool_names = [
+                    str((tc.get("function") or {}).get("name") or "").strip()
+                    for tc in tool_calls
+                ]
+                has_substantive_tools_in_step = any(
+                    tname and tname not in self.ARCHIVE_ONLY_TOOLS for tname in step_tool_names
+                )
+                clean_text, was_premature_stripped = self._strip_premature_post_tool_hallucination(
+                    step_raw_text,
+                    clean_text,
+                    has_substantive_tools=has_substantive_tools_in_step,
+                )
+                if was_premature_stripped:
+                    logger.warning(
+                        "[AgentRuntime] 拦截并剥离实质性工具调用后的未执行预剧透伪落盘报告 "
+                        f"(conversation={conv_id}, turn={current_turn_id}, tools={step_tool_names})"
+                    )
+                    yield {"type": "stream_reset"}
+                    if clean_text:
+                        yield {"type": "chunk", "content": clean_text, "account": final_account}
                 if clean_text and "interactive_inquiry" in clean_text.lower():
                     clean_text = ToolProtocolAdapter.normalize_interactive_inquiry_markdown(clean_text)
                 accumulated_visible_text += ("\n\n" + clean_text if (accumulated_visible_text and clean_text) else clean_text)
@@ -1547,13 +1819,6 @@ class AgentRuntime:
                     for tc in tool_calls
                 )
                 saved_content = (clean_text + "\n" + formatted_tc_xml).strip() if clean_text else formatted_tc_xml
-                step_tool_names = [
-                    str((tc.get("function") or {}).get("name") or "").strip()
-                    for tc in tool_calls
-                ]
-                has_substantive_tools_in_step = any(
-                    tname and tname not in self.ARCHIVE_ONLY_TOOLS for tname in step_tool_names
-                )
 
                 step_process_msg_id = await MessageRepository.save_message(
                     conversation_id=conv_id,
@@ -1699,11 +1964,22 @@ class AgentRuntime:
                                 "reason": reason_str,
                                 "security": "AUTO_CONFIRMED" if sec_level == "CONFIRM" else "SAFE",
                             }
-                            exec_res = await shell_executor.run(
-                                command=cmd_str,
-                                cwd=ctx.get("current_cwd"),
-                                session_id=conv_id,
-                            )
+                            try:
+                                exec_res = await shell_executor.run(
+                                    command=cmd_str,
+                                    cwd=ctx.get("current_cwd"),
+                                    session_id=conv_id,
+                                )
+                            except OSError as shell_os_err:
+                                logger.warning(f"[AgentRuntime] 本地命令子进程启动异常: {shell_os_err}")
+                                exec_res = {
+                                    "output": (
+                                        f"Error: 命令进程启动失败 ({shell_os_err})。"
+                                        "若因单条命令行参数过长或路径超限引发（如 WinError 206），请改用 `write_local_file` 直接写入目标文件后再执行。"
+                                    ),
+                                    "exit_code": -2,
+                                    "new_cwd": ctx.get("current_cwd"),
+                                }
                             tool_output = exec_res["output"]
                             tool_exit_code = int(exec_res.get("exit_code", 0) or 0)
                             new_cwd = exec_res["new_cwd"]
@@ -2639,6 +2915,8 @@ class AgentRuntime:
                         if func_name == "execute_local_command":
                             cmd_entry = str(args.get("command", "")).strip()
                             command_history.append({"cmd": re.sub(r"\s+", " ", cmd_entry), "abnormal": False})
+                            if self._WRITE_SHELL_HINT_RE.search(cmd_entry):
+                                executed_mutating_shell = True
                         last_step_error_info = None
                         if not str(tool_output or "").startswith("Error:"):
                             total_tool_steps += 1
@@ -3024,56 +3302,12 @@ class AgentRuntime:
                 yield {"type": "cancelled", "content": "已手动停止生成"}
 
         except GeneratorExit:
-            # 客户端断开导致 async generator aclose() 时：仅执行同步清理与 shield 落库，严禁 yield
-            cancel_event.set()
-            cancel_cli_processes(conv_id)
-            shell_executor.cancel_session_processes(conv_id)
-            if active_scene == "agent" and ws_id and not active_loop_obj and not is_chitchat_turn:
-                try:
-                    await asyncio.shield(_ensure_active_loop(initial_status="paused"))
-                except BaseException:
-                    pass
-            elif active_loop_obj and active_loop_obj.loop_status in (
-                "planning",
-                "executing",
-                "verifying",
-                "reflecting",
-            ):
-                try:
-                    await asyncio.shield(
-                        TaskLoopRepository.update_loop_status(
-                            loop_id=active_loop_obj.id,
-                            status="paused",
-                        )
-                    )
-                except BaseException:
-                    pass
+            # 客户端断开导致 async generator aclose() 时：仅执行清理与独立落库，严禁 yield
+            await _cleanup_and_pause_loop_on_abort("SSE断连(GeneratorExit)")
             return
 
         except asyncio.CancelledError:
-            cancel_event.set()
-            cancel_cli_processes(conv_id)
-            shell_executor.cancel_session_processes(conv_id)
-            if active_scene == "agent" and ws_id and not active_loop_obj and not is_chitchat_turn:
-                try:
-                    await asyncio.shield(_ensure_active_loop(initial_status="paused"))
-                except BaseException:
-                    pass
-            elif active_loop_obj and active_loop_obj.loop_status in (
-                "planning",
-                "executing",
-                "verifying",
-                "reflecting",
-            ):
-                try:
-                    await asyncio.shield(
-                        TaskLoopRepository.update_loop_status(
-                            loop_id=active_loop_obj.id,
-                            status="paused",
-                        )
-                    )
-                except BaseException:
-                    pass
+            await _cleanup_and_pause_loop_on_abort("任务取消(CancelledError)")
             raise
 
         except Exception as unexpected_err:

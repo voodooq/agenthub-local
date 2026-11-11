@@ -327,11 +327,15 @@ class LocalContextCompressor:
     def fold_historical_file_writes(
         cls,
         messages: list[dict[str, Any]],
+        *,
+        current_turn_id: int | None = None,
+        stale_write_char_threshold: int = 2400,
     ) -> list[dict[str, Any]]:
-        """同路径多次写入历史自动折叠（Zone 2 瘦身守护）：
-        倒序扫描历史消息中针对相同 file_path 的多次 write_local_file 写入，
-        仅保留最后一次写入的完整代码，前序写入入参内容折叠为 '[旧版本代码已被后续步骤覆盖]'，
-        杜绝同文件多次迭代引发的上下文 Token 级数爆炸。
+        """同路径与历史跨轮大文件写入自动折叠（Zone 2 瘦身守护）：
+        1. 倒序扫描历史消息中针对相同 file_path 的多次 write_local_file 写入，
+           仅保留最后一次写入的完整代码，前序写入入参内容折叠为 '[旧版本代码已被后续步骤覆盖]'；
+        2. 当指定 current_turn_id 时，对更早历史轮次（< current_turn_id - 1）的超长已落盘文件写入
+           同步省略冗余源码正文，防止多文件连续生成导致热区级数膨胀。
         """
         import json as _json
         import re as _re
@@ -339,9 +343,31 @@ class LocalContextCompressor:
         seen_paths: set[str] = set()
         folded_reversed: list[dict[str, Any]] = []
 
+        def _fold_write_args(args_dict: dict[str, Any], msg_turn: int) -> bool:
+            """对单次 write_local_file 参数字典执行就地折叠，返回是否发生变更。"""
+            fp = str(args_dict.get("file_path") or args_dict.get("path") or "").strip()
+            if not fp:
+                return False
+            if fp in seen_paths:
+                if args_dict.get("content") != "[旧版本代码已被后续步骤覆盖]":
+                    args_dict["content"] = "[旧版本代码已被后续步骤覆盖]"
+                    return True
+                return False
+            seen_paths.add(fp)
+            if current_turn_id is not None and msg_turn < (int(current_turn_id) - 1):
+                orig_content = args_dict.get("content")
+                if isinstance(orig_content, str) and len(orig_content) > stale_write_char_threshold:
+                    args_dict["content"] = (
+                        f"[历史轮次已落盘文件内容（共 {len(orig_content)} 字符）已折叠，"
+                        f"如需核查请调用 read_local_file 读取 {fp}]"
+                    )
+                    return True
+            return False
+
         for m in reversed(messages):
             m_copy = dict(m)
             role = m_copy.get("role")
+            msg_turn = int(m_copy.get("turn_id") or 1)
             content = str(m_copy.get("content") or "")
             tc_json = m_copy.get("tool_calls_json")
 
@@ -357,16 +383,9 @@ class LocalContextCompressor:
                                 if fn.get("name") == "write_local_file":
                                     raw_args = fn.get("arguments", "{}")
                                     args_dict = _json.loads(raw_args) if isinstance(raw_args, str) else raw_args
-                                    if isinstance(args_dict, dict):
-                                        fp = str(args_dict.get("file_path") or args_dict.get("path") or "").strip()
-                                        if fp:
-                                            if fp in seen_paths:
-                                                # 已有更新版本，折叠旧代码
-                                                args_dict["content"] = "[旧版本代码已被后续步骤覆盖]"
-                                                fn["arguments"] = _json.dumps(args_dict, ensure_ascii=False)
-                                                modified = True
-                                            else:
-                                                seen_paths.add(fp)
+                                    if isinstance(args_dict, dict) and _fold_write_args(args_dict, msg_turn):
+                                        fn["arguments"] = _json.dumps(args_dict, ensure_ascii=False)
+                                        modified = True
                             if modified:
                                 m_copy["tool_calls_json"] = _json.dumps(calls, ensure_ascii=False)
                                 xml_calls = "\n".join(
@@ -385,14 +404,8 @@ class LocalContextCompressor:
                         tc_body = match.group(1).strip()
                         try:
                             args_dict = _json.loads(tc_body)
-                            if isinstance(args_dict, dict):
-                                fp = str(args_dict.get("file_path") or args_dict.get("path") or "").strip()
-                                if fp:
-                                    if fp in seen_paths:
-                                        args_dict["content"] = "[旧版本代码已被后续步骤覆盖]"
-                                        return f'<tool_call name="write_local_file">{_json.dumps(args_dict, ensure_ascii=False)}</tool_call>'
-                                    else:
-                                        seen_paths.add(fp)
+                            if isinstance(args_dict, dict) and _fold_write_args(args_dict, msg_turn):
+                                return f'<tool_call name="write_local_file">{_json.dumps(args_dict, ensure_ascii=False)}</tool_call>'
                         except Exception:
                             pass
                         return full
@@ -509,8 +522,11 @@ class LocalContextCompressor:
             context_rounds_override=context_rounds_override,
         )
 
-        # 对热区历史执行同路径写入自动折叠（保留最新版完整代码，前序折叠）
-        folded_zone2 = cls.fold_historical_file_writes(zone2_messages)
+        # 对热区历史执行同路径与跨轮大文件写入自动折叠
+        folded_zone2 = cls.fold_historical_file_writes(
+            zone2_messages,
+            current_turn_id=current_turn_id,
+        )
 
         # 过滤仅保留锚点之后的活跃消息
         active_msgs = [
@@ -526,9 +542,13 @@ class LocalContextCompressor:
             }
         )
 
-        # 若已完成历史轮次不超过保底热留存轮数，直接返回，守护 Prefix Cache 100% 稳定
+        is_cli_provider = str((provider_info or {}).get("provider_type") or "").strip().lower() == "gemini_cli"
+        cli_char_budget = 44_000
+        trigger_token_budget = int(policy["trigger_tokens"])
+
+        # 至少需 2 个已完成轮次才存在可打包归档轮次；常规未超预算时严守 hot_retain_turns 守护 Prefix Cache
         hot_retain = int(policy["hot_retain_turns"])
-        if len(completed_turns) <= hot_retain:
+        if len(completed_turns) <= 1:
             return {
                 "collapse_anchor_turn_id": anchor_turn,
                 "anchored_summary": summary_text,
@@ -547,6 +567,26 @@ class LocalContextCompressor:
                 else f"### 📜 已固化历史摘要 (Anchored Summary)：\n{summary_text}"
             )
 
+        base_chars = len(preview_zone1) + len(zone3_tail_prompt) + len(current_user_query)
+        active_chars = base_chars + sum(len(str(m.get("content") or "")) for m in active_msgs)
+        if len(completed_turns) <= hot_retain:
+            quick_tokens = (
+                estimate_tokens(preview_zone1)
+                + estimate_messages_tokens(active_msgs)
+                + estimate_tokens(zone3_tail_prompt)
+                + estimate_tokens(current_user_query)
+                + 16
+            )
+            if quick_tokens < trigger_token_budget and (not is_cli_provider or active_chars < cli_char_budget):
+                return {
+                    "collapse_anchor_turn_id": anchor_turn,
+                    "anchored_summary": summary_text,
+                    "zone2_messages": active_msgs,
+                    "collapsed_triggered": False,
+                    "added_saved_tokens": 0,
+                    "policy": policy,
+                }
+
         total_tokens, _ = await cls.count_payload_tokens(
             system_instruction=preview_zone1,
             history_messages=active_msgs,
@@ -556,7 +596,8 @@ class LocalContextCompressor:
         )
 
         hit_turn_limit = len(completed_turns) >= int(policy["max_window_turns"])
-        hit_token_limit = total_tokens >= int(policy["trigger_tokens"])
+        hit_cli_char_limit = bool(is_cli_provider and active_chars >= cli_char_budget)
+        hit_token_limit = (total_tokens >= trigger_token_budget) or hit_cli_char_limit
 
         if not hit_turn_limit and not hit_token_limit:
             return {
@@ -569,10 +610,27 @@ class LocalContextCompressor:
             }
 
         # 计算新锚点：
-        # - 若因 Token 超水位触发，直接截留最新 hot_retain_turns（3 轮），打包更早全部轮次；
-        # - 若因轮数满 10 轮触发，按批打包最老 default_batch_turns（6 轮，留最新 4 轮），减少频繁触发。
+        # - 若因 Token/字符超预算触发，按预算动态退让热区保留轮数（最低保底保留 1 个已完结轮次）；
+        # - 若仅因轮数满阈值触发，按批打包最老 default_batch_turns，保留最新热区原文。
         if hit_token_limit:
-            turns_to_collapse = completed_turns[:-hot_retain]
+            effective_retain = min(hot_retain, len(completed_turns) - 1)
+            base_tokens = (
+                estimate_tokens(preview_zone1)
+                + estimate_tokens(zone3_tail_prompt)
+                + estimate_tokens(current_user_query)
+                + 16
+            )
+            while effective_retain > 1:
+                probe_anchor = completed_turns[-effective_retain - 1]
+                probe_msgs = [
+                    m for m in active_msgs if int(m.get("turn_id") or 1) > probe_anchor
+                ]
+                probe_tokens = base_tokens + estimate_messages_tokens(probe_msgs)
+                probe_chars = base_chars + sum(len(str(m.get("content") or "")) for m in probe_msgs)
+                if probe_tokens < trigger_token_budget and (not is_cli_provider or probe_chars < cli_char_budget):
+                    break
+                effective_retain -= 1
+            turns_to_collapse = completed_turns[:-effective_retain]
         else:
             batch_cnt = min(len(completed_turns) - hot_retain, int(policy["default_batch_turns"]))
             turns_to_collapse = completed_turns[: max(1, batch_cnt)]
@@ -626,9 +684,14 @@ class LocalContextCompressor:
         remaining_msgs = [
             m for m in active_msgs if int(m.get("turn_id") or 1) > new_anchor
         ]
+        collapse_reason = (
+            "token超70%"
+            if total_tokens >= trigger_token_budget
+            else ("CLI字符超预算" if hit_cli_char_limit else "满轮次阈值")
+        )
         logger.info(
             f"[LocalContextCompressor] 会话 {conversation_id} 触发分块坍缩: "
-            f"anchor {anchor_turn} -> {new_anchor} (原因: {'token超70%' if hit_token_limit else '满轮次阈值'}), "
+            f"anchor {anchor_turn} -> {new_anchor} (原因: {collapse_reason}), "
             f"释放热区 {len(collapsed_msgs)} 条消息, 净省 ~{added_saved} tokens"
         )
 
