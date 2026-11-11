@@ -495,11 +495,23 @@ export default function WorkbenchPage() {
   }, []);
 
   const fetchActiveLoop = useCallback(async () => {
-    if (!activeWorkspaceId) return;
+    if (!activeWorkspaceId || !activeConvId) {
+      if (lastActiveLoopSigRef.current !== 'null') {
+        lastActiveLoopSigRef.current = 'null';
+        setActiveLoop(null);
+      }
+      return;
+    }
+    const reqConvId = activeConvId;
     try {
-      const res = await apiFetch(`/api/v1/loop/workspace/${activeWorkspaceId}/active`);
+      const res = await apiFetch(
+        `/api/v1/loop/workspace/${activeWorkspaceId}/active?conversation_id=${encodeURIComponent(reqConvId)}`
+      );
+      // 防止异步拉取竞态：若请求途中用户已切换其他对话，立即丢弃过期数据
+      if (activeConvIdRef.current !== reqConvId) return;
       if (res.ok) {
-        const data = await res.json();
+        const data: TaskLoopResponse | null = await res.json();
+        if (data && data.conversation_id !== reqConvId) return;
         const sig = JSON.stringify(data);
         if (sig !== lastActiveLoopSigRef.current) {
           lastActiveLoopSigRef.current = sig;
@@ -510,7 +522,7 @@ export default function WorkbenchPage() {
         setActiveLoop(null);
       }
     } catch (e) { }
-  }, [activeWorkspaceId]);
+  }, [activeWorkspaceId, activeConvId]);
 
   useEffect(() => {
     fetchActiveLoop();
@@ -1472,26 +1484,36 @@ export default function WorkbenchPage() {
           } else if (parsed.type === 'scratchpad_update') {
             setWorkingMemory(parsed.working_memory || {});
           } else if (parsed.type === 'loop_step') {
+            const evtConvId = parsed.conversation_id || effectiveConvId || activeConvId;
+            if (!evtConvId || evtConvId !== activeConvIdRef.current) return;
+            const nextStatus = parsed.status ?? 'executing';
+            if (nextStatus === 'idle') {
+              lastActiveLoopSigRef.current = 'null';
+              setActiveLoop(null);
+              return;
+            }
             setActiveLoop((prev) => {
-              const nextStatus = parsed.status ?? prev?.loop_status ?? 'executing';
+              const effStatus = parsed.status ?? prev?.loop_status ?? 'executing';
               const nextPendingApproval =
                 'pending_approval_call' in parsed
                   ? parsed.pending_approval_call ?? null
-                  : nextStatus !== 'waiting_approval'
+                  : effStatus !== 'waiting_approval'
                     ? null
                     : prev?.pending_approval_call ?? null;
               if (!prev) {
                 return {
                   id: parsed.loop_id,
                   workspace_id: activeWorkspaceId || 'default',
-                  conversation_id: effectiveConvId || activeConvId || 'default',
+                  conversation_id: evtConvId,
                   goal_prompt: rawPrompt,
                   scratchpad_md: parsed.scratchpad_md,
-                  loop_status: nextStatus,
+                  loop_status: effStatus,
                   current_iteration: parsed.iteration || 0,
                   max_iterations: parsed.max_iterations || 10,
                   pending_approval_call: nextPendingApproval,
                   error_fingerprints: [],
+                  distillable: false,
+                  distill_reason: null,
                   created_at: new Date().toISOString(),
                   updated_at: new Date().toISOString(),
                 };
@@ -1499,20 +1521,31 @@ export default function WorkbenchPage() {
               return {
                 ...prev,
                 id: parsed.loop_id ?? prev.id,
+                conversation_id: evtConvId,
                 current_iteration: parsed.iteration ?? prev.current_iteration,
-                loop_status: nextStatus,
+                loop_status: effStatus,
                 pending_approval_call: nextPendingApproval,
                 scratchpad_md: parsed.scratchpad_md ?? prev.scratchpad_md,
               };
             });
           } else if (parsed.type === 'loop_completed') {
+            const evtConvId = parsed.conversation_id || effectiveConvId || activeConvId;
+            if (!evtConvId || evtConvId !== activeConvIdRef.current) return;
             setActiveLoop((prev) => {
+              const nextDistillable =
+                typeof parsed.distillable === 'boolean'
+                  ? parsed.distillable
+                  : (prev?.distillable ?? false);
+              const nextDistillReason =
+                parsed.distill_reason !== undefined
+                  ? parsed.distill_reason
+                  : (prev?.distill_reason ?? null);
               if (!prev) {
                 if (!parsed.loop_id) return null;
                 return {
                   id: parsed.loop_id,
                   workspace_id: activeWorkspaceId || 'default',
-                  conversation_id: effectiveConvId || activeConvId || 'default',
+                  conversation_id: evtConvId,
                   goal_prompt: rawPrompt.split('\n')[0].slice(0, 120),
                   scratchpad_md: parsed.scratchpad_md,
                   loop_status: 'completed',
@@ -1520,6 +1553,8 @@ export default function WorkbenchPage() {
                   max_iterations: parsed.max_iterations ?? 10,
                   pending_approval_call: null,
                   error_fingerprints: [],
+                  distillable: nextDistillable,
+                  distill_reason: nextDistillReason,
                   created_at: new Date().toISOString(),
                   updated_at: new Date().toISOString(),
                 };
@@ -1527,19 +1562,46 @@ export default function WorkbenchPage() {
               return {
                 ...prev,
                 id: parsed.loop_id ?? prev.id,
+                conversation_id: evtConvId,
                 loop_status: 'completed',
                 current_iteration: parsed.iteration ?? prev.current_iteration,
                 max_iterations: parsed.max_iterations ?? prev.max_iterations,
                 scratchpad_md: parsed.scratchpad_md ?? prev.scratchpad_md,
                 pending_approval_call: null,
+                distillable: nextDistillable,
+                distill_reason: nextDistillReason,
               };
             });
           } else if (parsed.type === 'loop_failed') {
+            const evtConvId = parsed.conversation_id || effectiveConvId || activeConvId;
+            if (!evtConvId || evtConvId !== activeConvIdRef.current) return;
             setActiveLoop((prev) => {
-              if (!prev) return null;
+              if (!prev) {
+                if (!parsed.loop_id) return null;
+                return {
+                  id: parsed.loop_id,
+                  workspace_id: activeWorkspaceId || 'default',
+                  conversation_id: evtConvId,
+                  goal_prompt: rawPrompt.split('\n')[0].slice(0, 120),
+                  scratchpad_md: parsed.scratchpad_md ?? null,
+                  loop_status: 'failed',
+                  current_iteration: parsed.iteration ?? 0,
+                  max_iterations: parsed.max_iterations ?? 10,
+                  pending_approval_call: null,
+                  error_fingerprints: [],
+                  distillable: false,
+                  distill_reason: parsed.error || '流程执行报错',
+                  created_at: new Date().toISOString(),
+                  updated_at: new Date().toISOString(),
+                };
+              }
               return {
                 ...prev,
+                id: parsed.loop_id ?? prev.id,
+                conversation_id: evtConvId,
                 loop_status: 'failed',
+                distillable: false,
+                distill_reason: parsed.error || '流程执行报错',
               };
             });
           } else if (
@@ -2391,9 +2453,11 @@ export default function WorkbenchPage() {
           void stopActiveStream('switch');
           lastStreamFactRefsRef.current = null;
           lastStreamErrorNoticeRef.current = null;
+          lastActiveLoopSigRef.current = 'null';
           activeConvIdRef.current = null;
           setActiveWorkspaceId(wsId);
           setActiveConvId(null);
+          setActiveLoop(null);
           setMessages([]);
         }}
         onRefreshWorkspaces={fetchWorkspaces}
@@ -2409,6 +2473,8 @@ export default function WorkbenchPage() {
           if (id !== activeConvId) {
             void stopActiveStream('switch');
             lastStreamErrorNoticeRef.current = null;
+            lastActiveLoopSigRef.current = 'null';
+            setActiveLoop(null);
           }
           activeConvIdRef.current = id;
           setActiveConvId(id);
@@ -2417,8 +2483,10 @@ export default function WorkbenchPage() {
           void stopActiveStream('switch');
           lastStreamFactRefsRef.current = null;
           lastStreamErrorNoticeRef.current = null;
+          lastActiveLoopSigRef.current = 'null';
           activeConvIdRef.current = null;
           setActiveConvId(null);
+          setActiveLoop(null);
           setMessages([]);
         }}
         onDeleteConv={async (id) => {
@@ -2429,8 +2497,10 @@ export default function WorkbenchPage() {
           fetchConversations();
           if (activeConvId === id) {
             lastStreamErrorNoticeRef.current = null;
+            lastActiveLoopSigRef.current = 'null';
             activeConvIdRef.current = null;
             setActiveConvId(null);
+            setActiveLoop(null);
             setMessages([]);
           }
         }}
@@ -2573,22 +2643,27 @@ export default function WorkbenchPage() {
 
         {activeNavHub === 'chat' && (
           <>
-            {/* 顶部长程任务领航舱 (Loop HUD) 与敏感操作审批拦截卡片 */}
-            <div className="px-4 md:px-12 lg:px-24 pt-3">
-              <LoopHUD
-                loop={activeLoop}
-                onRefresh={fetchActiveLoop}
-              />
-              {activeLoop &&
-                activeLoop.loop_status === 'waiting_approval' &&
-                activeLoop.pending_approval_call && (
-                  <ApprovalCard
-                    loopId={activeLoop.id}
-                    approvalCall={activeLoop.pending_approval_call}
-                    onResolved={fetchActiveLoop}
+            {/* 顶部长程任务领航舱 (Loop HUD) 与敏感操作审批拦截卡片：仅当存在所属当前激活会话的非闲聊任务且有实际对话流时展示 */}
+            {activeConvId &&
+              activeLoop &&
+              activeLoop.conversation_id === activeConvId &&
+              activeLoop.loop_status !== 'idle' &&
+              messages.length > 0 && (
+                <div className="px-4 md:px-12 lg:px-24 pt-3">
+                  <LoopHUD
+                    loop={activeLoop}
+                    onRefresh={fetchActiveLoop}
                   />
-                )}
-            </div>
+                  {activeLoop.loop_status === 'waiting_approval' &&
+                    activeLoop.pending_approval_call && (
+                      <ApprovalCard
+                        loopId={activeLoop.id}
+                        approvalCall={activeLoop.pending_approval_call}
+                        onResolved={fetchActiveLoop}
+                      />
+                    )}
+                </div>
+              )}
 
             {/* 顶部置顶任务草稿纸条 (Sticky Scratchpad Bar)：仅当 workingMemory 非空时显示 */}
             {workingMemory && Object.keys(workingMemory).length > 0 && (

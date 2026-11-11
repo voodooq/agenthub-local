@@ -214,7 +214,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
             </button>
           )}
 
-          {loop.loop_status === 'completed' && (
+          {loop.loop_status === 'completed' && Boolean(loop.distillable) && (
             <button
               onClick={handleDistillSkill}
               disabled={loadingAction !== null}

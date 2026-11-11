@@ -388,6 +388,8 @@ export interface TaskLoopResponse {
   max_iterations: number;
   pending_approval_call?: PendingApprovalCall | null;
   error_fingerprints?: string[];
+  distillable?: boolean;
+  distill_reason?: string | null;
   created_at: string;
   updated_at: string;
 }

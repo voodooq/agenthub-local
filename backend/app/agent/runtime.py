@@ -66,6 +66,44 @@ class AgentRuntime:
     # 活跃流式执行注册表：conversation_id -> {"token": str, "cancel_event": asyncio.Event}
     _active_streams: dict[str, dict[str, Any]] = {}
 
+    _CHITCHAT_GREETING_RE = re.compile(
+        r"^\s*(?:你好|您好|hi+|hello+|hey+|早安|早上好|下午好|晚上好|在吗|在不在|谢谢|多谢|感谢|再见|拜拜|晚安|你是谁|你叫什么|你能做什么|你会什么|介绍一下你自己|讲个笑话|陪我聊聊天)[！!。.?？\s]*$",
+        re.IGNORECASE,
+    )
+    _TASK_INTENT_KEYWORDS_RE = re.compile(
+        r"(?:/[a-zA-Z0-9_-]+|\.(?:py|ts|tsx|js|jsx|json|md|csv|xlsx|sql|yaml|yml|sh|ps1|txt|pdf|png|jpg)\b|"
+        r"分析|重构|修复|调试|排查|检查|创建|新建|生成|编写|写一个|修改|编辑|删除|清理|运行|执行|测试|验证|部署|构建|打包|"
+        r"读取|写入|搜索|检索|导出|汇总|统计|对比|整理|画图|渲染|优化|安装|配置|回滚|提炼|蒸馏|任务|代码|文件|目录|脚本|数据库|接口)",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_likely_pure_chitchat(
+        cls,
+        user_message: str,
+        *,
+        has_pending_loop: bool = False,
+        has_attachments: bool = False,
+        explicit_execute_unlock: bool = False,
+    ) -> bool:
+        """
+        三层纯闲聊判断（第一层事前语义识别 + 第三层上下文防误伤）：
+        1. 若存在未完结/待审批的历史任务、附带上传文件或显式执行确认标记，绝不视为闲聊；
+        2. 命中明确寒暄词或超短无工程动作关键词的纯问答返回 True，避免无谓激活 LoopHUD。
+        """
+        if has_pending_loop or has_attachments or explicit_execute_unlock:
+            return False
+        msg = (user_message or "").strip()
+        if not msg:
+            return True
+        if msg.startswith("/") or len(msg) > 160:
+            return False
+        if cls._CHITCHAT_GREETING_RE.match(msg):
+            return True
+        if cls._TASK_INTENT_KEYWORDS_RE.search(msg):
+            return False
+        return len(msg) <= 36
+
     @classmethod
     def cancel_session_stream(cls, conversation_id: str) -> bool:
         """主动中止指定会话正在执行的 ReAct 推理流与关联 CLI 子进程"""
@@ -772,26 +810,20 @@ class AgentRuntime:
         injected_case_ids: list[str] = []
         turn_checkpoint_taken = False
 
-        # 4.5 关联工作区长程自主领航舱 (TaskLoopRunner 闭环驱动)
+        # 4.5 关联工作区长程自主领航舱 (TaskLoopRunner 闭环驱动：严格按 conversation_id 隔离 + 渐进式按需激活)
         active_loop_obj = None
         tracked_loop_id: str | None = None
+        existing_loop = None
         if active_scene == "agent" and ws_id:
             try:
-                existing_loop = await TaskLoopRepository.get_active_loop_by_workspace(ws_id, include_completed=False)
-                if not is_planning_phase:
+                existing_loop = await TaskLoopRepository.get_active_loop_by_workspace(
+                    ws_id,
+                    include_completed=False,
+                    conversation_id=conv_id,
+                )
+                if not is_planning_phase and existing_loop:
                     active_loop_obj = existing_loop
-                    if not active_loop_obj:
-                        raw_goal_line = user_message.strip().split("\n")[0][:120]
-                        if raw_goal_line.startswith(("已确认", "✅ 实施方案", "✅")):
-                            raw_goal_line = "按确认决策执行任务"
-                        # 兜底自动初始化当前工作区的自主执行记录
-                        active_loop_obj = await TaskLoopRepository.create_loop(
-                            workspace_id=ws_id,
-                            conversation_id=conv_id,
-                            goal_prompt=raw_goal_line or "执行自主推演任务",
-                            max_iterations=10,
-                        )
-                    elif (
+                    if (
                         active_loop_obj.loop_status == "waiting_approval"
                         and active_loop_obj.pending_approval_call is None
                     ):
@@ -805,6 +837,7 @@ class AgentRuntime:
                             active_loop_obj = refreshed_loop
                         yield {
                             "type": "loop_step",
+                            "conversation_id": conv_id,
                             "loop_id": active_loop_obj.id,
                             "iteration": active_loop_obj.current_iteration,
                             "max_iterations": active_loop_obj.max_iterations,
@@ -818,6 +851,160 @@ class AgentRuntime:
                     tracked_loop_id = active_loop_obj.id
             except Exception as e:
                 logger.warning(f"初始化任务自主领航舱实例异常: {e}")
+
+        is_chitchat_turn = self._is_likely_pure_chitchat(
+            user_message,
+            has_pending_loop=bool(existing_loop),
+            has_attachments=bool(attachments),
+            explicit_execute_unlock=bool(explicit_execute_unlock),
+        )
+
+        async def _ensure_active_loop(initial_status: str = "executing"):
+            """渐进式按需创建 Loop：仅在实质工具调用、待确认交互或故障中断时才创建，避免纯闲聊触发 HUD 闪现"""
+            nonlocal active_loop_obj, tracked_loop_id
+            if active_loop_obj is not None:
+                return active_loop_obj
+            if active_scene != "agent" or not ws_id:
+                return None
+            raw_goal_line = user_message.strip().split("\n")[0][:120]
+            if raw_goal_line.startswith(("已确认", "✅ 实施方案", "✅")):
+                raw_goal_line = "按确认决策执行任务"
+            created = await TaskLoopRepository.create_loop(
+                workspace_id=ws_id,
+                conversation_id=conv_id,
+                goal_prompt=raw_goal_line or "执行自主推演任务",
+                max_iterations=10,
+            )
+            if initial_status != "executing":
+                await TaskLoopRepository.update_loop_status(
+                    loop_id=created.id,
+                    status=initial_status,
+                )
+                created = await TaskLoopRepository.get_loop(created.id) or created
+            active_loop_obj = created
+            tracked_loop_id = created.id
+            return active_loop_obj
+
+        async def _finalize_turn_loop(
+            summary_text: str,
+            *,
+            is_waiting_user_decision: bool = False,
+        ) -> AsyncGenerator[dict[str, Any], None]:
+            """
+            循环收尾唯一真理状态机：
+            1) 存在未恢复报错或触发死循环熔断 -> 标记 failed 并推 loop_failed；
+            2) 处于待用户确认交互卡或规划阶段 -> 创建/更新为 waiting_approval；
+            3) 零工具零产出零变更且未推进任何轮次（纯闲聊/纯提问）-> 归档为 idle 或无痕退出，绝不虚标 completed；
+            4) 完整无错工具执行闭环 -> complete_loop 并附带精确 distillable 资格信号。
+            """
+            nonlocal active_loop_obj
+            if active_scene != "agent" or not ws_id:
+                return
+
+            if last_step_error_info is not None or circuit_breaker_triggered:
+                eff_loop = await _ensure_active_loop()
+                if eff_loop:
+                    err_detail = str(
+                        (last_step_error_info or {}).get("summary")
+                        or "执行链路存在未解决异常或触发死循环熔断"
+                    )
+                    err_pad = eff_loop.scratchpad_md or ""
+                    err_note = f"\n\n> ⚠️ 终止原因: {err_detail[:200]}"
+                    await TaskLoopRepository.update_loop_status(
+                        loop_id=eff_loop.id,
+                        status="failed",
+                        scratchpad_md=f"{err_pad}{err_note}",
+                    )
+                    yield {
+                        "type": "loop_failed",
+                        "conversation_id": conv_id,
+                        "loop_id": eff_loop.id,
+                        "iteration": eff_loop.current_iteration,
+                        "max_iterations": eff_loop.max_iterations,
+                        "status": "failed",
+                        "error": err_detail,
+                    }
+                    active_loop_obj = None
+                return
+
+            if is_waiting_user_decision:
+                eff_loop = await _ensure_active_loop(initial_status="waiting_approval")
+                if eff_loop:
+                    if eff_loop.loop_status != "waiting_approval":
+                        await TaskLoopRepository.update_loop_status(
+                            loop_id=eff_loop.id,
+                            status="waiting_approval",
+                        )
+                        refreshed = await TaskLoopRepository.get_loop(eff_loop.id)
+                        eff_loop = refreshed or eff_loop
+                    if target_cwd:
+                        try:
+                            ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
+                            ws_sp.parent.mkdir(parents=True, exist_ok=True)
+                            ws_sp.write_text(eff_loop.scratchpad_md or "", encoding="utf-8")
+                        except Exception:
+                            pass
+                    yield {
+                        "type": "loop_step",
+                        "conversation_id": conv_id,
+                        "loop_id": eff_loop.id,
+                        "iteration": eff_loop.current_iteration,
+                        "max_iterations": eff_loop.max_iterations,
+                        "status": "waiting_approval",
+                        "pending_approval_call": None,
+                        "scratchpad_md": eff_loop.scratchpad_md,
+                    }
+                    active_loop_obj = eff_loop
+                return
+
+            is_zero_action_turn = (
+                total_tool_steps == 0
+                and not produced_artifacts
+                and not has_workspace_mutations
+                and (not active_loop_obj or active_loop_obj.current_iteration == 0)
+            )
+            if is_zero_action_turn:
+                if active_loop_obj:
+                    await TaskLoopRepository.archive_loop(active_loop_obj.id)
+                    yield {
+                        "type": "loop_step",
+                        "conversation_id": conv_id,
+                        "loop_id": active_loop_obj.id,
+                        "iteration": active_loop_obj.current_iteration,
+                        "max_iterations": active_loop_obj.max_iterations,
+                        "status": "idle",
+                        "pending_approval_call": None,
+                        "scratchpad_md": active_loop_obj.scratchpad_md,
+                    }
+                    active_loop_obj = None
+                return
+
+            if active_loop_obj:
+                completed_loop = await TaskLoopRepository.complete_loop(
+                    loop_id=active_loop_obj.id,
+                    summary=summary_text or "模型已完成自主闭环并输出交付结论",
+                )
+                if completed_loop:
+                    await TaskLoopRepository._enrich_distill_eligibility(completed_loop)
+                    if target_cwd:
+                        try:
+                            ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
+                            ws_sp.parent.mkdir(parents=True, exist_ok=True)
+                            ws_sp.write_text(completed_loop.scratchpad_md or "", encoding="utf-8")
+                        except Exception:
+                            pass
+                    yield {
+                        "type": "loop_completed",
+                        "conversation_id": conv_id,
+                        "loop_id": completed_loop.id,
+                        "iteration": completed_loop.current_iteration,
+                        "max_iterations": completed_loop.max_iterations,
+                        "status": "completed",
+                        "distillable": bool(completed_loop.distillable),
+                        "distill_reason": completed_loop.distill_reason,
+                        "scratchpad_md": completed_loop.scratchpad_md,
+                    }
+                    active_loop_obj = None
 
         # 抽取本轮视觉附件（图片/PDF），同 Turn 多步调用中保持多模态视觉输入不丢失
         visual_attachments = self._filter_visual_attachments(attachments)
@@ -1085,24 +1272,27 @@ class AgentRuntime:
                             await ConversationRepository.touch(conv_id)
                         except Exception as save_err:
                             logger.warning(f"[AgentRuntime] 保存流式报错消息失败: {save_err}")
-                    if active_loop_obj:
+                    if active_scene == "agent" and ws_id:
                         try:
-                            err_pad = active_loop_obj.scratchpad_md or ""
-                            err_note = f"\n\n> ⚠️ 终止原因: {stream_error_message[:200]}" if stream_error_message else ""
-                            await TaskLoopRepository.update_loop_status(
-                                loop_id=active_loop_obj.id,
-                                status="failed",
-                                scratchpad_md=(f"{err_pad}{err_note}" if err_pad and err_note else None),
-                            )
-                            yield {
-                                "type": "loop_failed",
-                                "loop_id": active_loop_obj.id,
-                                "iteration": active_loop_obj.current_iteration,
-                                "max_iterations": active_loop_obj.max_iterations,
-                                "status": "failed",
-                                "error": stream_error_message,
-                            }
-                            active_loop_obj = None
+                            eff_err_loop = await _ensure_active_loop()
+                            if eff_err_loop:
+                                err_pad = eff_err_loop.scratchpad_md or ""
+                                err_note = f"\n\n> ⚠️ 终止原因: {stream_error_message[:200]}" if stream_error_message else ""
+                                await TaskLoopRepository.update_loop_status(
+                                    loop_id=eff_err_loop.id,
+                                    status="failed",
+                                    scratchpad_md=(f"{err_pad}{err_note}" if err_pad and err_note else None),
+                                )
+                                yield {
+                                    "type": "loop_failed",
+                                    "conversation_id": conv_id,
+                                    "loop_id": eff_err_loop.id,
+                                    "iteration": eff_err_loop.current_iteration,
+                                    "max_iterations": eff_err_loop.max_iterations,
+                                    "status": "failed",
+                                    "error": stream_error_message,
+                                }
+                                active_loop_obj = None
                         except Exception as loop_err:
                             logger.warning(f"[AgentRuntime] 报错收敛 Loop 状态失败: {loop_err}")
                     break
@@ -1201,58 +1391,16 @@ class AgentRuntime:
                             long_term_memory.schedule_extraction(conv_id, delay_seconds=180)
                     accumulated_visible_text += ("\n\n" + final_saved_text if accumulated_visible_text else final_saved_text)
 
-                    # ── 任务自主闭环门控：包含待确认交互卡或仍在规划停顿期时严禁标为 completed ──
-                    if active_loop_obj:
-                        try:
-                            if is_waiting_user_decision:
-                                await TaskLoopRepository.update_loop_status(
-                                    loop_id=active_loop_obj.id,
-                                    status="waiting_approval",
-                                )
-                                waiting_loop = await TaskLoopRepository.get_loop(active_loop_obj.id)
-                                eff_loop = waiting_loop or active_loop_obj
-                                if target_cwd:
-                                    try:
-                                        ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
-                                        ws_sp.parent.mkdir(parents=True, exist_ok=True)
-                                        ws_sp.write_text(eff_loop.scratchpad_md or "", encoding="utf-8")
-                                    except Exception:
-                                        pass
-                                yield {
-                                    "type": "loop_step",
-                                    "loop_id": eff_loop.id,
-                                    "iteration": eff_loop.current_iteration,
-                                    "max_iterations": eff_loop.max_iterations,
-                                    "status": "waiting_approval",
-                                    "pending_approval_call": None,
-                                    "scratchpad_md": eff_loop.scratchpad_md,
-                                }
-                                active_loop_obj = eff_loop
-                            else:
-                                summary_snippet = (final_saved_text or accumulated_visible_text).strip().split("\n")[0][:80]
-                                completed_loop = await TaskLoopRepository.complete_loop(
-                                    loop_id=active_loop_obj.id,
-                                    summary=summary_snippet or "模型已完成自主闭环并输出交付结论",
-                                )
-                                if completed_loop:
-                                    if target_cwd:
-                                        try:
-                                            ws_sp = Path(target_cwd) / ".agenthub" / "scratchpad.md"
-                                            ws_sp.parent.mkdir(parents=True, exist_ok=True)
-                                            ws_sp.write_text(completed_loop.scratchpad_md or "", encoding="utf-8")
-                                        except Exception:
-                                            pass
-                                    yield {
-                                        "type": "loop_completed",
-                                        "loop_id": completed_loop.id,
-                                        "iteration": completed_loop.current_iteration,
-                                        "max_iterations": completed_loop.max_iterations,
-                                        "status": "completed",
-                                        "scratchpad_md": completed_loop.scratchpad_md,
-                                    }
-                                    active_loop_obj = None
-                        except Exception as e:
-                            logger.warning(f"自主循环状态收敛更新异常: {e}")
+                    # ── 任务自主闭环门控：由统一真理状态机决定 waiting_approval / failed / idle / completed ──
+                    try:
+                        summary_snippet = (final_saved_text or accumulated_visible_text).strip().split("\n")[0][:80]
+                        async for loop_ev in _finalize_turn_loop(
+                            summary_snippet or "模型已完成自主闭环并输出交付结论",
+                            is_waiting_user_decision=is_waiting_user_decision,
+                        ):
+                            yield loop_ev
+                    except Exception as e:
+                        logger.warning(f"自主循环状态收敛更新异常: {e}")
 
                     # 若本轮执行过终端命令/脚本或写盘操作，收尾增量同步一次工作区物理资产
                     if has_workspace_mutations and ws_id:
@@ -1333,6 +1481,7 @@ class AgentRuntime:
                     tool_output = ""
                     compressed = ""
                     rescue_addon = ""
+                    tool_exit_code: int | None = None
 
                     # 🛡️ 物理只读硬门控拦截：若处于规划阶段，绝对禁止执行任何破坏性写入或终端命令
                     if is_planning_phase and func_name not in PLANNING_SAFE_TOOLS:
@@ -1363,6 +1512,13 @@ class AgentRuntime:
                             "summary": deny_reason,
                         }
                         continue
+
+                    # 渐进式按需激活 Loop：确认即将实际执行合法工具时才初始化领航舱实例
+                    if active_scene == "agent" and ws_id and not is_planning_phase and not active_loop_obj:
+                        try:
+                            await _ensure_active_loop()
+                        except Exception as init_loop_err:
+                            logger.warning(f"按需激活自主循环实例异常: {init_loop_err}")
 
                     # 🕰️ Pre-Tool 自动静默快照：本轮首次准备修改代码/执行终端命令时自动建立双态还原点
                     if (
@@ -1447,13 +1603,14 @@ class AgentRuntime:
                                 session_id=conv_id,
                             )
                             tool_output = exec_res["output"]
+                            tool_exit_code = int(exec_res.get("exit_code", 0) or 0)
                             new_cwd = exec_res["new_cwd"]
                             if new_cwd and new_cwd != ctx.get("current_cwd"):
                                 ctx["current_cwd"] = new_cwd
                                 await ConversationRepository.update_agent_state(conv_id, current_cwd=new_cwd)
 
                             compressed = shell_executor.compress_output(
-                                cmd_str, tool_output, exec_res["exit_code"]
+                                cmd_str, tool_output, tool_exit_code
                             )
                             yield {
                                 "type": "tool_end",
@@ -1461,8 +1618,8 @@ class AgentRuntime:
                                 "name": func_name,
                                 "command": cmd_str,
                                 "reason": reason_str,
-                                "status": "completed",
-                                "exit_code": exec_res["exit_code"],
+                                "status": "completed" if tool_exit_code == 0 else "error",
+                                "exit_code": tool_exit_code,
                                 "output": tool_output,
                                 "compressed": compressed,
                                 "cwd": new_cwd,
@@ -2298,11 +2455,17 @@ class AgentRuntime:
                         has_workspace_mutations = True
                     prev_step_error = last_step_error_info
                     out_lower = (tool_output or "").lower()
-                    is_step_abnormal = any(
-                        err_kw in out_lower
-                        for err_kw in (
-                            "npm error", "enoent", "error:", "traceback", "syntaxerror",
-                            "command not found", "cannot find module", "failed", "denied"
+                    is_step_abnormal = (
+                        (tool_exit_code is not None and tool_exit_code != 0)
+                        or str(tool_output or "").startswith(("Error:", "Denied:"))
+                        or any(
+                            err_kw in out_lower
+                            for err_kw in (
+                                "npm error", "enoent", "error:", "traceback", "syntaxerror",
+                                "command not found", "cannot find module", "failed", "denied",
+                                "commandnotfoundexception", "fullyqualifiederrorid",
+                                "无法将", "不是内部或外部命令",
+                            )
                         )
                     )
                     if is_step_abnormal:
@@ -2556,6 +2719,7 @@ class AgentRuntime:
                                         pass
                                 yield {
                                     "type": "loop_step",
+                                    "conversation_id": conv_id,
                                     "loop_id": updated_loop.id,
                                     "iteration": updated_loop.current_iteration,
                                     "max_iterations": updated_loop.max_iterations,
@@ -2572,24 +2736,11 @@ class AgentRuntime:
                 # 显式完成收尾：若模型已通过 update_working_memory 归档且无残留报错，直接安全收尾，节省冗余整轮调用
                 if task_marked_completed and not last_step_error_info:
                     logger.info(f"[AgentRuntime] 模型通过 update_working_memory 显式标记任务完成，安全终止本轮 ReAct 循环")
-                    if active_loop_obj:
-                        try:
-                            completed_loop = await TaskLoopRepository.complete_loop(
-                                loop_id=active_loop_obj.id,
-                                summary="任务标记为已完成，工作记忆已归档",
-                            )
-                            if completed_loop:
-                                yield {
-                                    "type": "loop_completed",
-                                    "loop_id": completed_loop.id,
-                                    "iteration": completed_loop.current_iteration,
-                                    "max_iterations": completed_loop.max_iterations,
-                                    "status": "completed",
-                                    "scratchpad_md": completed_loop.scratchpad_md,
-                                }
-                                active_loop_obj = None
-                        except Exception:
-                            pass
+                    try:
+                        async for loop_ev in _finalize_turn_loop("任务标记为已完成，工作记忆已归档"):
+                            yield loop_ev
+                    except Exception:
+                        pass
                     if has_workspace_mutations and ws_id:
                         try:
                             from ..repository.artifact_repository import ArtifactRepository
@@ -2626,26 +2777,16 @@ class AgentRuntime:
 
                 step_idx += 1
 
-                # 若已到达自适应最大步数上限（最高动态扩展至 40 步），给出收尾完成信号
+                # 若已到达自适应最大步数上限（最高动态扩展至 40 步），交由统一状态机收敛失败或交付状态
                 if step_idx >= current_max_steps:
-                    if active_loop_obj:
-                        try:
-                            completed_loop = await TaskLoopRepository.complete_loop(
-                                loop_id=active_loop_obj.id,
-                                summary=f"已达当前执行步数上限 ({step_idx} 步)，已输出阶段性成果",
-                            )
-                            if completed_loop:
-                                yield {
-                                    "type": "loop_completed",
-                                    "loop_id": completed_loop.id,
-                                    "iteration": completed_loop.current_iteration,
-                                    "max_iterations": completed_loop.max_iterations,
-                                    "status": "completed",
-                                    "scratchpad_md": completed_loop.scratchpad_md,
-                                }
-                                active_loop_obj = None
-                        except Exception:
-                            pass
+                    try:
+                        async for loop_ev in _finalize_turn_loop(
+                            f"已达当前执行步数上限 ({step_idx} 步)，已输出阶段性成果",
+                            is_waiting_user_decision=is_planning_phase,
+                        ):
+                            yield loop_ev
+                    except Exception:
+                        pass
                     if has_workspace_mutations and ws_id:
                         try:
                             from ..repository.artifact_repository import ArtifactRepository
@@ -2704,6 +2845,11 @@ class AgentRuntime:
                         await ConversationRepository.touch(conv_id)
                     except Exception as save_err:
                         logger.warning(f"[AgentRuntime] 保存手动停止消息失败: {save_err}")
+                if active_scene == "agent" and ws_id and not active_loop_obj and not is_chitchat_turn:
+                    try:
+                        await _ensure_active_loop()
+                    except Exception:
+                        pass
                 if active_loop_obj and active_loop_obj.loop_status in (
                     "planning",
                     "executing",
@@ -2717,6 +2863,7 @@ class AgentRuntime:
                         )
                         yield {
                             "type": "loop_step",
+                            "conversation_id": conv_id,
                             "loop_id": active_loop_obj.id,
                             "iteration": active_loop_obj.current_iteration,
                             "max_iterations": active_loop_obj.max_iterations,
@@ -2734,7 +2881,12 @@ class AgentRuntime:
             cancel_event.set()
             cancel_cli_processes(conv_id)
             shell_executor.cancel_session_processes(conv_id)
-            if active_loop_obj and active_loop_obj.loop_status in (
+            if active_scene == "agent" and ws_id and not active_loop_obj and not is_chitchat_turn:
+                try:
+                    await asyncio.shield(_ensure_active_loop(initial_status="paused"))
+                except BaseException:
+                    pass
+            elif active_loop_obj and active_loop_obj.loop_status in (
                 "planning",
                 "executing",
                 "verifying",
@@ -2755,7 +2907,12 @@ class AgentRuntime:
             cancel_event.set()
             cancel_cli_processes(conv_id)
             shell_executor.cancel_session_processes(conv_id)
-            if active_loop_obj and active_loop_obj.loop_status in (
+            if active_scene == "agent" and ws_id and not active_loop_obj and not is_chitchat_turn:
+                try:
+                    await asyncio.shield(_ensure_active_loop(initial_status="paused"))
+                except BaseException:
+                    pass
+            elif active_loop_obj and active_loop_obj.loop_status in (
                 "planning",
                 "executing",
                 "verifying",
@@ -2790,21 +2947,24 @@ class AgentRuntime:
                     await ConversationRepository.touch(conv_id)
                 except Exception:
                     pass
-            if active_loop_obj:
+            if active_scene == "agent" and ws_id:
                 try:
-                    await TaskLoopRepository.update_loop_status(
-                        loop_id=active_loop_obj.id,
-                        status="failed",
-                    )
-                    yield {
-                        "type": "loop_failed",
-                        "loop_id": active_loop_obj.id,
-                        "iteration": active_loop_obj.current_iteration,
-                        "max_iterations": active_loop_obj.max_iterations,
-                        "status": "failed",
-                        "error": str(unexpected_err),
-                    }
-                    active_loop_obj = None
+                    eff_err_loop = await _ensure_active_loop()
+                    if eff_err_loop:
+                        await TaskLoopRepository.update_loop_status(
+                            loop_id=eff_err_loop.id,
+                            status="failed",
+                        )
+                        yield {
+                            "type": "loop_failed",
+                            "conversation_id": conv_id,
+                            "loop_id": eff_err_loop.id,
+                            "iteration": eff_err_loop.current_iteration,
+                            "max_iterations": eff_err_loop.max_iterations,
+                            "status": "failed",
+                            "error": str(unexpected_err),
+                        }
+                        active_loop_obj = None
                 except Exception:
                     pass
             yield {"type": "error", "content": err_text}

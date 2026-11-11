@@ -5,6 +5,7 @@ TaskLoopRun 数据仓储层
 import json
 import uuid
 from datetime import datetime
+from typing import Any
 from ..core.logging_config import logger
 from ..repository.db import db_manager
 from ..schema.loop_schema import PendingApprovalCall, TaskLoopResponse
@@ -37,22 +38,22 @@ class TaskLoopRepository:
         )
 
         async with db_manager.get_connection() as conn:
-            # 自动将旧的未完结活跃任务标记为 completed，将被新任务取代的旧待确认任务归档为 idle，避免孤儿悬挂
+            # 仅收敛同一工作区同一会话下的历史未完结任务为 paused，并将旧待确认归档为 idle，避免跨会话误杀后台任务
             await conn.execute(
                 """
                 UPDATE task_loop_runs
-                SET loop_status = 'completed', updated_at = ?
-                WHERE workspace_id = ? AND loop_status IN ('planning', 'executing', 'verifying', 'reflecting');
+                SET loop_status = 'paused', updated_at = ?
+                WHERE workspace_id = ? AND conversation_id = ? AND loop_status IN ('planning', 'executing', 'verifying', 'reflecting');
                 """,
-                (now, workspace_id),
+                (now, workspace_id, conversation_id),
             )
             await conn.execute(
                 """
                 UPDATE task_loop_runs
                 SET loop_status = 'idle', pending_approval_call = NULL, updated_at = ?
-                WHERE workspace_id = ? AND loop_status = 'waiting_approval';
+                WHERE workspace_id = ? AND conversation_id = ? AND loop_status = 'waiting_approval';
                 """,
-                (now, workspace_id),
+                (now, workspace_id, conversation_id),
             )
             await conn.execute(
                 """
@@ -75,7 +76,7 @@ class TaskLoopRepository:
             )
             await conn.commit()
 
-        logger.info(f"成功初始化任务自主循环: {loop_id} (工作区: {workspace_id})")
+        logger.info(f"成功初始化任务自主循环: {loop_id} (工作区: {workspace_id}, 会话: {conversation_id})")
         return TaskLoopResponse(
             id=loop_id,
             workspace_id=workspace_id,
@@ -87,12 +88,86 @@ class TaskLoopRepository:
             max_iterations=max_iterations,
             pending_approval_call=None,
             error_fingerprints=[],
+            distillable=False,
+            distill_reason="任务尚在执行中",
             created_at=now,
             updated_at=now,
         )
 
     @staticmethod
-    async def get_loop(loop_id: str) -> TaskLoopResponse | None:
+    def _row_to_loop_response(row) -> TaskLoopResponse:
+        """将 SQLite 行数据转换为 TaskLoopResponse 对象"""
+        pending_call = None
+        if row["pending_approval_call"]:
+            try:
+                pending_call = PendingApprovalCall(**json.loads(row["pending_approval_call"]))
+            except Exception as e:
+                logger.warning(f"解析 pending_approval_call 失败: {e}")
+
+        fingerprints = []
+        if row["error_fingerprints"]:
+            try:
+                fingerprints = json.loads(row["error_fingerprints"])
+            except Exception:
+                fingerprints = []
+
+        return TaskLoopResponse(
+            id=row["id"],
+            workspace_id=row["workspace_id"],
+            conversation_id=row["conversation_id"],
+            goal_prompt=row["goal_prompt"],
+            scratchpad_md=row["scratchpad_md"],
+            loop_status=row["loop_status"],
+            current_iteration=row["current_iteration"],
+            max_iterations=row["max_iterations"],
+            pending_approval_call=pending_call,
+            error_fingerprints=fingerprints,
+            created_at=str(row["created_at"]),
+            updated_at=str(row["updated_at"]),
+        )
+
+    @staticmethod
+    async def _enrich_distill_eligibility(loop_resp: TaskLoopResponse | None) -> TaskLoopResponse | None:
+        """基于账本轨迹评估并返回当前 Loop 的 Skill 沉淀可用性标记"""
+        if not loop_resp:
+            return None
+        if loop_resp.loop_status != "completed":
+            reason_map = {
+                "failed": "流程存在报错或触发熔断，禁止沉淀为 Skill",
+                "idle": "非任务流或已归档",
+                "paused": "任务尚未完结",
+            }
+            loop_resp.distillable = False
+            loop_resp.distill_reason = reason_map.get(loop_resp.loop_status, "仅完整闭环任务可沉淀为 Skill")
+            return loop_resp
+
+        try:
+            from ..memory.ledger import event_ledger
+            from ..skills.experience_distiller import evaluate_skill_distill_eligibility
+
+            events = await event_ledger.get_trace_for_distillation(
+                loop_resp.conversation_id,
+                loop_id=loop_resp.id,
+                limit=80,
+            )
+            res = evaluate_skill_distill_eligibility(
+                events,
+                loop_status=loop_resp.loop_status,
+            )
+            loop_resp.distillable = bool(res.get("distillable", False))
+            loop_resp.distill_reason = res.get("reason")
+        except Exception as e:
+            logger.debug(f"评估 Loop 沉淀资格跳过: {e}")
+            loop_resp.distillable = False
+            loop_resp.distill_reason = "暂无可用于校验的执行轨迹"
+        return loop_resp
+
+    @staticmethod
+    async def get_loop(
+        loop_id: str,
+        *,
+        enrich_distillable: bool = False,
+    ) -> TaskLoopResponse | None:
         """
         根据 ID 查询任务循环
         """
@@ -109,93 +184,53 @@ class TaskLoopRepository:
                 row = await cursor.fetchone()
                 if not row:
                     return None
-
-                pending_call = None
-                if row["pending_approval_call"]:
-                    try:
-                        pending_call = PendingApprovalCall(**json.loads(row["pending_approval_call"]))
-                    except Exception as e:
-                        logger.warning(f"解析 pending_approval_call 失败: {e}")
-
-                fingerprints = []
-                if row["error_fingerprints"]:
-                    try:
-                        fingerprints = json.loads(row["error_fingerprints"])
-                    except Exception:
-                        fingerprints = []
-
-                return TaskLoopResponse(
-                    id=row["id"],
-                    workspace_id=row["workspace_id"],
-                    conversation_id=row["conversation_id"],
-                    goal_prompt=row["goal_prompt"],
-                    scratchpad_md=row["scratchpad_md"],
-                    loop_status=row["loop_status"],
-                    current_iteration=row["current_iteration"],
-                    max_iterations=row["max_iterations"],
-                    pending_approval_call=pending_call,
-                    error_fingerprints=fingerprints,
-                    created_at=str(row["created_at"]),
-                    updated_at=str(row["updated_at"]),
-                )
+                resp = TaskLoopRepository._row_to_loop_response(row)
+        if enrich_distillable:
+            await TaskLoopRepository._enrich_distill_eligibility(resp)
+        return resp
 
     @staticmethod
     async def get_active_loop_by_workspace(
         workspace_id: str,
         include_completed: bool = True,
+        *,
+        conversation_id: str | None = None,
+        enrich_distillable: bool = True,
     ) -> TaskLoopResponse | None:
         """
-        获取当前工作区中正在运行、等待审批、已暂停或最新已交付的任务循环
+        获取当前工作区（或指定会话严格隔离）中正在运行、等待审批、已暂停或最新已交付的任务循环
         """
         status_filter = (
             "('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval', 'paused', 'completed', 'failed')"
             if include_completed
             else "('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval')"
         )
+        clean_conv = (conversation_id or "").strip()
+        sql_where = f"WHERE workspace_id = ? AND loop_status IN {status_filter}"
+        params: tuple[Any, ...] = (workspace_id,)
+        if clean_conv:
+            sql_where += " AND conversation_id = ?"
+            params = (workspace_id, clean_conv)
+
         async with db_manager.get_connection() as conn:
             async with conn.execute(
                 f"""
                 SELECT id, workspace_id, conversation_id, goal_prompt, scratchpad_md,
                        loop_status, current_iteration, max_iterations, pending_approval_call,
                        error_fingerprints, created_at, updated_at
-                FROM task_loop_runs 
-                WHERE workspace_id = ? AND loop_status IN {status_filter}
+                FROM task_loop_runs
+                {sql_where}
                 ORDER BY updated_at DESC LIMIT 1;
                 """,
-                (workspace_id,),
+                params,
             ) as cursor:
                 row = await cursor.fetchone()
                 if not row:
                     return None
-
-                pending_call = None
-                if row["pending_approval_call"]:
-                    try:
-                        pending_call = PendingApprovalCall(**json.loads(row["pending_approval_call"]))
-                    except Exception:
-                        pass
-
-                fingerprints = []
-                if row["error_fingerprints"]:
-                    try:
-                        fingerprints = json.loads(row["error_fingerprints"])
-                    except Exception:
-                        pass
-
-                return TaskLoopResponse(
-                    id=row["id"],
-                    workspace_id=row["workspace_id"],
-                    conversation_id=row["conversation_id"],
-                    goal_prompt=row["goal_prompt"],
-                    scratchpad_md=row["scratchpad_md"],
-                    loop_status=row["loop_status"],
-                    current_iteration=row["current_iteration"],
-                    max_iterations=row["max_iterations"],
-                    pending_approval_call=pending_call,
-                    error_fingerprints=fingerprints,
-                    created_at=str(row["created_at"]),
-                    updated_at=str(row["updated_at"]),
-                )
+                resp = TaskLoopRepository._row_to_loop_response(row)
+        if enrich_distillable:
+            await TaskLoopRepository._enrich_distill_eligibility(resp)
+        return resp
 
     @staticmethod
     async def record_tool_step(

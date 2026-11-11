@@ -19,6 +19,7 @@ from ...schema.loop_schema import (
 )
 from ...skills.experience_distiller import (
     ExecutionTrace,
+    evaluate_skill_distill_eligibility,
     experience_distiller,
     skill_experience_service,
 )
@@ -81,7 +82,7 @@ async def get_loop_detail(loop_id: str) -> TaskLoopResponse:
     """
     获取指定任务循环的当前执行状态、DAG 记事板与审批拦截信息
     """
-    loop_data = await TaskLoopRepository.get_loop(loop_id)
+    loop_data = await TaskLoopRepository.get_loop(loop_id, enrich_distillable=True)
     if not loop_data:
         raise HTTPException(status_code=404, detail="未找到指定的任务循环")
     return loop_data
@@ -90,12 +91,21 @@ async def get_loop_detail(loop_id: str) -> TaskLoopResponse:
 @router.get("/workspace/{workspace_id}/active", response_model=TaskLoopResponse | None)
 async def get_active_loop_by_workspace(
     workspace_id: str,
+    conversation_id: str | None = None,
     include_completed: bool = True,
 ) -> TaskLoopResponse | None:
     """
-    获取指定工作区中正在执行或最新交付的任务循环
+    获取指定工作区与特定对话的活跃或最新交付任务循环；
+    未指定 conversation_id 时严格返回 None，避免空欢迎页或新会话串台显示历史 Loop。
     """
-    return await TaskLoopRepository.get_active_loop_by_workspace(workspace_id, include_completed=include_completed)
+    clean_conv = (conversation_id or "").strip()
+    if not clean_conv:
+        return None
+    return await TaskLoopRepository.get_active_loop_by_workspace(
+        workspace_id,
+        include_completed=include_completed,
+        conversation_id=clean_conv,
+    )
 
 
 @router.post("/{loop_id}/action")
@@ -157,8 +167,8 @@ async def handle_loop_action(
 @router.post("/{loop_id}/distill-skill")
 async def distill_loop_to_skill(loop_id: str) -> dict:
     """
-    从已执行/已交付的任务 Loop 轨迹（账本 + scratchpad.md）手动强触发经验提炼，
-    生成一条 pending 状态的 experience_proposal 供前端预览 Diff 并确认沉淀为可复用 Skill。
+    从完整无误交付的任务 Loop 轨迹（账本 + scratchpad.md）手动触发经验提炼，
+    生成一条 pending 状态的 experience_proposal 供前端预览 Diff 并确认沉淀/版本迭代。
     """
     loop_data = await TaskLoopRepository.get_loop(loop_id)
     if not loop_data:
@@ -168,36 +178,48 @@ async def distill_loop_to_skill(loop_id: str) -> dict:
     if conv and bool(conv.incognito):
         raise HTTPException(status_code=400, detail="无痕模式下禁止沉淀会话执行经验")
 
+    if loop_data.loop_status != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail="仅完整无误交付的任务闭环允许沉淀为 Skill（当前任务未完结或存在未解决报错）",
+        )
+
     ws_root = await WorkspaceRepository.get_root_path_by_id(loop_data.workspace_id)
     events = await event_ledger.get_trace_for_distillation(
         loop_data.conversation_id,
         loop_id=loop_id,
         limit=150,
     )
-    active_skills: list[str] = []
-    recovered_cnt = 0
-    had_intervention = False
-    tool_steps = 0
+    eligibility = evaluate_skill_distill_eligibility(
+        events,
+        loop_status=loop_data.loop_status,
+    )
+    if not eligibility["distillable"]:
+        raise HTTPException(
+            status_code=400,
+            detail=eligibility["reason"] or "当前对话流程不符合可复用 Skill 沉淀条件",
+        )
+
+    active_skills: list[str] = list(eligibility.get("skill_hints") or [])
+    recovered_cnt = int(eligibility.get("recovery_count") or 0)
+    had_intervention = int(eligibility.get("intervention_count") or 0) > 0
+    tool_steps = int(eligibility.get("effective_tool_count") or 0)
     artifacts: list[str] = []
 
     for evt in events:
         etype = evt.get("event_type")
         evt_payload = evt.get("payload") if isinstance(evt.get("payload"), dict) else {}
-        sid = str(evt.get("skill_id") or "").strip()
-        if sid and sid not in active_skills:
-            active_skills.append(sid)
         for p_sid in (evt_payload.get("active_skill_ids") or []):
             clean_p_sid = str(p_sid or "").strip()
             if clean_p_sid and clean_p_sid not in active_skills:
                 active_skills.append(clean_p_sid)
         if etype == "tool_executed":
-            tool_steps += 1
-        elif etype == "tool_error_recovered":
-            recovered_cnt += 1
-        elif etype == "user_intervention":
-            had_intervention = True
+            args = evt_payload.get("args") if isinstance(evt_payload.get("args"), dict) else {}
+            arg_sk = str(args.get("skill_name") or "").strip()
+            if arg_sk and arg_sk not in active_skills:
+                active_skills.append(arg_sk)
         elif etype == "artifact_produced":
-            p = str(evt_payload.get("file_path") or "").strip()
+            p = str(evt_payload.get("file_path") or evt_payload.get("path") or "").strip()
             if p and p not in artifacts:
                 artifacts.append(p)
 
@@ -246,8 +268,8 @@ async def distill_loop_to_skill(loop_id: str) -> dict:
         active_skill_ids=active_skills,
         recovered_error_count=recovered_cnt,
         had_user_intervention=had_intervention,
-        total_tool_steps=max(tool_steps, int(loop_data.current_iteration or 0)),
-        circuit_breaker_triggered=(loop_data.loop_status == "failed"),
+        total_tool_steps=tool_steps,
+        circuit_breaker_triggered=False,
         final_success=True,
         final_summary=loop_data.scratchpad_md or "",
         produced_artifacts=artifacts,

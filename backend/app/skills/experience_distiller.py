@@ -83,6 +83,244 @@ def _build_unified_diff(old_text: str, new_text: str, file_label: str) -> str:
     return "\n".join(diff_lines)
 
 
+# 纯只读查询工具集合：单次或浅层调用不具备工作流 SOP 沉淀价值
+_READONLY_QUERY_TOOLS = frozenset(
+    {
+        "read_local_file",
+        "list_local_directory",
+        "list_dir",
+        "find_by_name",
+        "grep_search",
+        "search_files",
+        "search_web",
+        "web_search",
+        "get_current_time",
+        "search_memory",
+        "query_memory",
+        "get_workspace_info",
+    }
+)
+
+
+def evaluate_skill_distill_eligibility(
+    ledger_events: list[dict[str, Any]],
+    *,
+    loop_status: str = "completed",
+    has_pending_error: bool = False,
+) -> dict[str, Any]:
+    """
+    评估一次任务循环是否具备合法、无误、值得沉淀为可复用 Skill 的资格：
+    1. 必须是已完成状态（completed），且尾部无未恢复报错；
+    2. 必须至少有 1 步有效成功的工具执行（纯闲聊直接否决）；
+    3. 过滤单纯 1~2 步纯只读查询噪音（除非伴随产物输出、故障自愈、人工纠偏或 >= 3 步组合链）。
+    """
+    if loop_status != "completed":
+        return {
+            "distillable": False,
+            "reason": "仅完整闭环且无错误交付的任务流程可沉淀为 Skill",
+            "effective_tool_count": 0,
+            "recovery_count": 0,
+            "intervention_count": 0,
+            "artifact_count": 0,
+            "skill_hints": [],
+            "has_trailing_error": False,
+        }
+
+    if has_pending_error:
+        return {
+            "distillable": False,
+            "reason": "流程末尾仍存在未修复报错，禁止沉淀带病 Skill",
+            "effective_tool_count": 0,
+            "recovery_count": 0,
+            "intervention_count": 0,
+            "artifact_count": 0,
+            "skill_hints": [],
+            "has_trailing_error": True,
+        }
+
+    effective_tools: list[dict[str, Any]] = []
+    recoveries: list[dict[str, Any]] = []
+    interventions: list[str] = []
+    artifacts: list[str] = []
+    skill_hints: list[str] = []
+    has_trailing_error = False
+
+    for evt in ledger_events or []:
+        etype = evt.get("event_type")
+        payload = evt.get("payload") if isinstance(evt.get("payload"), dict) else {}
+        s_id = str(evt.get("skill_id") or "").strip()
+        if s_id and s_id not in skill_hints:
+            skill_hints.append(s_id)
+
+        if etype == "tool_executed":
+            tool_name = str(payload.get("tool") or "").strip()
+            if not tool_name:
+                continue
+            args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+            arg_sk = str(args.get("skill_name") or "").strip()
+            if arg_sk and arg_sk not in skill_hints:
+                skill_hints.append(arg_sk)
+            if payload.get("is_error"):
+                has_trailing_error = True
+            else:
+                has_trailing_error = False
+                effective_tools.append(
+                    {
+                        "tool": tool_name,
+                        "args": args,
+                        "compressed": str(payload.get("compressed") or ""),
+                    }
+                )
+        elif etype == "tool_error_recovered":
+            has_trailing_error = False
+            recoveries.append(payload)
+        elif etype == "user_intervention":
+            interventions.append(str(payload.get("guidance") or payload.get("action") or "intervention"))
+        elif etype == "artifact_produced":
+            fp = str(payload.get("file_path") or payload.get("path") or "").strip()
+            if fp and fp not in artifacts:
+                artifacts.append(fp)
+
+    base_stats = {
+        "effective_tool_count": len(effective_tools),
+        "recovery_count": len(recoveries),
+        "intervention_count": len(interventions),
+        "artifact_count": len(artifacts),
+        "skill_hints": skill_hints,
+        "has_trailing_error": has_trailing_error,
+    }
+
+    if has_trailing_error:
+        return {
+            **base_stats,
+            "distillable": False,
+            "reason": "执行链路结尾存在未恢复报错，禁止沉淀带病 Skill",
+        }
+
+    if not effective_tools:
+        return {
+            **base_stats,
+            "distillable": False,
+            "reason": "纯文本对话无实际工具调用链路，不满足 Skill 提炼门槛",
+        }
+
+    has_action_tool = any(t["tool"] not in _READONLY_QUERY_TOOLS for t in effective_tools)
+    has_workflow_value = (
+        has_action_tool
+        or bool(artifacts)
+        or bool(recoveries)
+        or bool(interventions)
+        or len(effective_tools) >= 3
+    )
+    if not has_workflow_value:
+        return {
+            **base_stats,
+            "distillable": False,
+            "reason": "仅包含轻量只读检索，缺乏可复用工作流与状态变更价值",
+        }
+
+    return {**base_stats, "distillable": True, "reason": None}
+
+
+def determine_semver_bump_level(
+    *,
+    has_schema_change: bool = False,
+    do_steps: list[str] | None = None,
+    has_new_script: bool = False,
+    has_new_artifacts: bool = False,
+    force_patch_only: bool = False,
+) -> str:
+    """
+    判定语义化版本递增粒度：
+    - 新增或变更外部入参契约 (`schema.json`)、核心执行步骤、新交付产物或主干脚本时返回 `minor`；
+    - 仅补充避坑提示、微调正文或补充上下文文档时默认返回 `patch`。
+    """
+    if force_patch_only:
+        return "patch"
+    if (
+        has_schema_change
+        or has_new_script
+        or has_new_artifacts
+        or bool(do_steps and len(do_steps) > 0)
+    ):
+        return "minor"
+    return "patch"
+
+
+def _build_troubleshooting_bullets(recoveries: list[dict[str, str]]) -> list[str]:
+    """将轨迹中的失败自愈记录脱敏后转化为 Skill 避坑指南条款，供容错沉淀"""
+    notes: list[str] = []
+    seen: set[str] = set()
+    for rec in recoveries:
+        failed_tool = str(rec.get("failed_tool") or "").strip()
+        failed_sum = str(rec.get("failed_summary") or "").strip()
+        rec_tool = str(rec.get("recovery_tool") or "").strip()
+        rec_sum = str(rec.get("recovery_compressed") or "").strip()
+        if not (failed_sum or rec_sum):
+            continue
+        raw_line = (
+            f"若调用 `{failed_tool or 'tool'}` 遇到 `{failed_sum[:120]}`，"
+            f"应改为通过 `{rec_tool or failed_tool or 'tool'}` 处理：{rec_sum[:140] or '按已验证路径执行'}"
+        )
+        safe_line, _ = MemoryPolicyGuard.sanitize_text(raw_line)
+        key = safe_line.lower()
+        if safe_line and key not in seen:
+            seen.add(key)
+            notes.append(safe_line)
+    return notes[:6]
+
+
+def _append_dedup_playbook_entry(pb_path: Path, new_entry: str) -> None:
+    """去重增量追加经验条目到 knowledge/experience_playbook.md，不覆写既有条目"""
+    clean_entry = _normalize_newlines(new_entry).strip()
+    if not clean_entry:
+        return
+    old_pb = _normalize_newlines(pb_path.read_text(encoding="utf-8", errors="replace")) if pb_path.is_file() else ""
+    if old_pb.strip():
+        entry_sig = clean_entry.splitlines()[0].strip()
+        # 若完全相同的正文已存在则跳过重复写入；同日标题微调差异时仍安全保留新条目
+        if clean_entry in old_pb:
+            return
+        if entry_sig.startswith("## ") and entry_sig in old_pb and len(clean_entry) < 180:
+            return
+        final_pb = old_pb.rstrip() + "\n\n" + clean_entry + "\n"
+    else:
+        final_pb = (
+            "# 实战避坑守则与演进经验台账 (Experience Playbook)\n\n"
+            + clean_entry
+            + "\n"
+        )
+    pb_path.parent.mkdir(parents=True, exist_ok=True)
+    pb_path.write_text(final_pb, encoding="utf-8")
+
+
+def _atomic_replace_skill_dir(staging_dir: Path, target_dir: Path) -> None:
+    """
+    通过临时备份 + 目录原子移动替换目标 Skill 目录，避免中断产生残损或误删用户自定义资产；
+    若替换过程中发生异常自动将备份回滚恢复。
+    """
+    target_dir.parent.mkdir(parents=True, exist_ok=True)
+    backup_dir: Path | None = None
+    if target_dir.exists():
+        backup_dir = target_dir.parent / f".backup_{target_dir.name}_{uuid.uuid4().hex[:6]}"
+        if backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
+        shutil.move(str(target_dir), str(backup_dir))
+
+    try:
+        shutil.move(str(staging_dir), str(target_dir))
+    except Exception:
+        if backup_dir and backup_dir.exists() and not target_dir.exists():
+            try:
+                shutil.move(str(backup_dir), str(target_dir))
+            except Exception as rollback_err:
+                logger.error(f"[ExperienceDistiller] 回滚既有 Skill 目录失败: {rollback_err}")
+        raise
+    else:
+        if backup_dir and backup_dir.exists():
+            shutil.rmtree(backup_dir, ignore_errors=True)
+
+
 def _safe_json_loads(raw: str | None, fallback: Any) -> Any:
     if not raw:
         return fallback
@@ -238,15 +476,14 @@ class ExperienceDistiller:
                 tool_name = str(payload.get("tool") or "").strip()
                 if not tool_name:
                     continue
-                if not s_id:
-                    args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
-                    arg_sk = str(args.get("skill_name") or "").strip()
-                    if arg_sk and arg_sk not in skill_hints:
-                        skill_hints.append(arg_sk)
+                args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+                arg_sk = str(args.get("skill_name") or "").strip()
+                if arg_sk and arg_sk not in skill_hints:
+                    skill_hints.append(arg_sk)
                 if not payload.get("is_error"):
                     effective_tools.append({
                         "tool": tool_name,
-                        "args": payload.get("args") or {},
+                        "args": args,
                         "compressed": str(payload.get("compressed") or ""),
                     })
             elif etype == "tool_error_recovered":
@@ -265,7 +502,7 @@ class ExperienceDistiller:
                 ).strip()
                 interventions.append(msg)
             elif etype == "artifact_produced":
-                fp = str(payload.get("file_path") or "").strip()
+                fp = str(payload.get("file_path") or payload.get("path") or "").strip()
                 if fp and fp not in artifacts:
                     artifacts.append(fp)
 
@@ -323,6 +560,8 @@ class ExperienceDistiller:
         do_steps: list[str],
         llm_upgraded_body: str = "",
         next_version_override: str | None = None,
+        troubleshooting_notes: list[str] | None = None,
+        bump_level: str | None = None,
     ) -> tuple[str, str, str, str, str]:
         """
         基于已有 Skill 的 SKILL.md 融合本次优化经验与 SOP，生成递增版本号后的新版 SKILL.md。
@@ -356,10 +595,14 @@ class ExperienceDistiller:
             }
 
         current_version = normalize_version_str(meta.get("version"))
+        effective_bump = bump_level or determine_semver_bump_level(
+            do_steps=do_steps,
+            force_patch_only=bool(not do_steps and troubleshooting_notes),
+        )
         next_version = (
             normalize_version_str(next_version_override)
             if next_version_override
-            else bump_semver(current_version, level="minor")
+            else bump_semver(current_version, level=effective_bump)
         )
         now_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
@@ -384,6 +627,13 @@ class ExperienceDistiller:
                     iter_lines.append(f"  {idx}. {st}")
             iter_block = "\n".join(iter_lines).strip()
             new_body = f"{old_body}\n\n{iter_block}" if old_body else iter_block
+
+        # 将自愈避坑要点固化为 Troubleshooting 节（已存在相同提示则跳过）
+        clean_notes = [n.strip() for n in (troubleshooting_notes or []) if n and n.strip()]
+        unseen_notes = [n for n in clean_notes if n not in new_body]
+        if unseen_notes:
+            ts_section = "## Troubleshooting / 避坑注意事项\n" + "\n".join(f"- {note}" for note in unseen_notes)
+            new_body = f"{new_body.rstrip()}\n\n{ts_section}"
 
         desc_clean, _ = MemoryPolicyGuard.sanitize_text(meta.get("description") or f"{meta['name']} 专业技能")
         body_clean, _ = MemoryPolicyGuard.sanitize_text(new_body)
@@ -415,6 +665,7 @@ class ExperienceDistiller:
         active_facts: list[dict[str, Any]],
         artifacts: list[str],
         trigger_reason: str,
+        troubleshooting_notes: list[str] | None = None,
     ) -> tuple[str, dict[str, Any] | None, str]:
         """生成新四元组 Skill 的 SKILL.md、schema.json 与创世 experience_playbook.md"""
         cmd_clean = command if command.startswith("/") else f"/{command}"
@@ -472,6 +723,13 @@ class ExperienceDistiller:
             skill_md_parts.extend([
                 "## 2. 最短有效执行 SOP（已剔除历史试错弯路）",
                 *step_lines,
+            ])
+
+        if troubleshooting_notes:
+            skill_md_parts.extend([
+                "",
+                "## Troubleshooting / 避坑注意事项",
+                *[f"- {note}" for note in troubleshooting_notes],
             ])
 
         if artifacts:
@@ -827,6 +1085,7 @@ class ExperienceDistiller:
         alt_desc = MemoryPolicyGuard.sanitize_text(
             llm_desc or f"自动沉淀技能：{clean_goal[:70]}"
         )[0]
+        troubleshooting_notes = _build_troubleshooting_bullets(recoveries)
         alt_skill_md, alt_schema_json, alt_playbook_md = self._build_new_skill_files(
             skill_id=alt_skill_name,
             command=alt_command,
@@ -837,6 +1096,7 @@ class ExperienceDistiller:
             active_facts=active_facts,
             artifacts=artifacts,
             trigger_reason=reason,
+            troubleshooting_notes=troubleshooting_notes,
         )
         alt_skill_md, _ = MemoryPolicyGuard.sanitize_text(alt_skill_md)
         alt_playbook_md, _ = MemoryPolicyGuard.sanitize_text(alt_playbook_md)
@@ -846,11 +1106,22 @@ class ExperienceDistiller:
             "goal": clean_goal[:140],
             "triple": triple,
             "steps": steps_list,
+            "artifacts": artifacts,
+            "troubleshooting_notes": troubleshooting_notes,
             "trigger_reason": reason,
         }
 
         if proposal_type == "skill_patch" and target_skill_id:
             proposed_skill_name = target_skill_id
+            bump_lvl = determine_semver_bump_level(
+                has_schema_change=bool(alt_schema_json),
+                do_steps=steps_list,
+                has_new_script=False,
+                has_new_artifacts=bool(artifacts),
+                force_patch_only=bool(
+                    not steps_list and not artifacts and (recoveries or troubleshooting_notes)
+                ),
+            )
             old_skill_md, upgraded_skill_md, current_ver, next_ver, target_cmd = self.build_upgraded_skill_md(
                 skill_id=target_skill_id,
                 workspace_root=ws_root,
@@ -861,6 +1132,8 @@ class ExperienceDistiller:
                 solution=solution,
                 do_steps=steps_list,
                 llm_upgraded_body=llm_upgraded_body,
+                troubleshooting_notes=troubleshooting_notes,
+                bump_level=bump_lvl,
             )
             markdown_entry = self._build_skill_patch_entry(
                 title=title,
@@ -1415,22 +1688,76 @@ class ExperienceDistiller:
                 if syn_ok:
                     pipeline_code = candidate_py
 
-        # 1. 在临时 Staging 目录生成 Skill 包并执行 AST + SkillAuditor 安全门禁
+        # 1. 检测工作区或全局是否已存在同名 Skill，支持版本自适应迭代与既定资产完整保留
+        existing_dir, existing_scope = skill_loader.resolve_skill_dir_with_scope(
+            kebab_id,
+            workspace_root=str(ws_path),
+        )
+        target_skill_dir = (
+            existing_dir
+            if (existing_dir and existing_scope == "workspace")
+            else (ws_path / ".agenthub" / "skills" / kebab_id)
+        )
+        is_upgrade = bool(existing_dir and (existing_dir / "SKILL.md").is_file())
+        troubleshooting_notes = _build_troubleshooting_bullets(extracted["recoveries"])
+
         safe_desc, _ = MemoryPolicyGuard.sanitize_text(skill_desc)
         steps_md = "\n".join(f"{idx}. {MemoryPolicyGuard.sanitize_text(step)[0]}" for idx, step in enumerate(steps, 1))
-        skill_md_text = (
-            "---\n"
-            f"name: {kebab_id}\n"
-            f"description: {safe_desc}\n"
-            f"command: /{kebab_id}\n"
-            "version: 1.0.0\n"
-            "---\n\n"
-            f"# {kebab_id} 标准作业规范\n\n"
-            "## 执行门控流程 (Three-Stage Gate)\n\n"
-            f"{steps_md}\n\n"
-            "## 可执行流水线脚手架\n\n"
-            f"- 脚手架脚本：`scripts/pipeline.py`（支持 `--workspace` 与 `--dry-run` 参数）\n"
+
+        # 判断语义化版本递增粒度：既有 Skill 无新实操命令且仅追加避坑/上下文时升 patch，否则升 minor
+        existing_version = "1.0.0"
+        if is_upgrade and existing_dir:
+            try:
+                old_raw = (existing_dir / "SKILL.md").read_text(encoding="utf-8", errors="replace")
+                old_meta = skill_loader._parse_frontmatter(old_raw, kebab_id)
+                existing_version = normalize_version_str(old_meta.get("version"))
+            except OSError:
+                existing_version = "1.0.0"
+            has_new_action_steps = bool(heuristic["effective_commands"]) or bool(llm_res and llm_res.get("pipeline_py"))
+            bump_lvl = determine_semver_bump_level(
+                has_schema_change=False,
+                do_steps=heuristic["effective_commands"] if has_new_action_steps else [],
+                has_new_script=bool(llm_res and llm_res.get("pipeline_py")),
+                force_patch_only=not has_new_action_steps,
+            )
+            skill_version = bump_semver(existing_version, level=bump_lvl)
+        else:
+            skill_version = "1.0.0"
+
+        now_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        skill_md_sections = [
+            "---",
+            f"name: {kebab_id}",
+            f"description: {safe_desc}",
+            f"command: /{kebab_id}",
+            f"version: {skill_version}",
+            f"updated_at: {now_day}",
+            "---",
+            "",
+            f"# {kebab_id} 标准作业规范",
+            "",
+            "## 执行门控流程 (Three-Stage Gate)",
+            "",
+            steps_md,
+            "",
+        ]
+        if troubleshooting_notes:
+            skill_md_sections.extend(
+                [
+                    "## Troubleshooting / 避坑注意事项",
+                    "",
+                    *[f"- {note}" for note in troubleshooting_notes],
+                    "",
+                ]
+            )
+        skill_md_sections.extend(
+            [
+                "## 可执行流水线脚手架",
+                "",
+                "- 脚手架脚本：`scripts/pipeline.py`（支持 `--workspace` 与 `--dry-run` 参数）",
+            ]
         )
+        skill_md_text = _normalize_newlines("\n".join(skill_md_sections).strip() + "\n")
 
         # 确保 pipeline_code 语法绝对正确，否则自动退回确定性安全模板
         syn_ok, _ = validate_syntax_before_write(".py", pipeline_code)
@@ -1438,17 +1765,40 @@ class ExperienceDistiller:
             pipeline_code = self._build_safe_default_pipeline_py(kebab_id, safe_desc)
 
         staging_dir = ws_path / ".agenthub" / ".staging_skills" / f"{kebab_id}_{uuid.uuid4().hex[:6]}"
-        target_skill_dir = ws_path / ".agenthub" / "skills" / kebab_id
         try:
+            if existing_dir and existing_dir.is_dir():
+                # 完整保留原目录下的 knowledge/ 自定义文件、脚本及其他附属资源
+                shutil.copytree(
+                    existing_dir,
+                    staging_dir,
+                    dirs_exist_ok=True,
+                    ignore=shutil.ignore_patterns(".git", "__pycache__", "node_modules"),
+                )
             (staging_dir / "scripts").mkdir(parents=True, exist_ok=True)
             (staging_dir / "SKILL.md").write_text(skill_md_text, encoding="utf-8")
-            (staging_dir / "scripts" / "pipeline.py").write_text(pipeline_code, encoding="utf-8")
+
+            pipeline_target = staging_dir / "scripts" / "pipeline.py"
+            if not pipeline_target.exists() or bool(llm_res and llm_res.get("pipeline_py")):
+                pipeline_target.write_text(pipeline_code, encoding="utf-8")
+
+            if troubleshooting_notes or heuristic["error_signature"] or extracted["recoveries"]:
+                pb_entry = self._build_skill_patch_entry(
+                    title=f"{kebab_id} /distill 经验增量归档",
+                    trigger_reason="manual_distill",
+                    problem=heuristic["error_signature"] or safe_desc,
+                    root_cause=heuristic["root_cause"] or "执行过程存在可复用约束或避坑节点",
+                    solution="; ".join(troubleshooting_notes) if troubleshooting_notes else heuristic["verified_solution"],
+                    do_steps=steps[:5],
+                    version_transition=(f"v{existing_version} → v{skill_version}" if is_upgrade else "v1.0.0"),
+                )
+                pb_clean, _ = MemoryPolicyGuard.sanitize_text(pb_entry)
+                _append_dedup_playbook_entry(staging_dir / "knowledge" / "experience_playbook.md", pb_clean)
 
             audit_res = audit_skill_package(staging_dir)
             if not audit_res.get("passed", False):
                 # 若是 LLM 生成的脚本触碰了敏感 AST 黑名单，替换为安全标准脚手架再审
                 fallback_py = self._build_safe_default_pipeline_py(kebab_id, safe_desc)
-                (staging_dir / "scripts" / "pipeline.py").write_text(fallback_py, encoding="utf-8")
+                pipeline_target.write_text(fallback_py, encoding="utf-8")
                 audit_res = audit_skill_package(staging_dir)
                 if not audit_res.get("passed", False):
                     return {
@@ -1456,10 +1806,7 @@ class ExperienceDistiller:
                         "error": f"Skill 安全审计未通过: {audit_res.get('summary')}",
                     }
 
-            target_skill_dir.parent.mkdir(parents=True, exist_ok=True)
-            if target_skill_dir.exists():
-                shutil.rmtree(target_skill_dir)
-            shutil.copytree(staging_dir, target_skill_dir)
+            _atomic_replace_skill_dir(staging_dir, target_skill_dir)
         finally:
             if staging_dir.exists():
                 shutil.rmtree(staging_dir, ignore_errors=True)
@@ -1501,7 +1848,13 @@ class ExperienceDistiller:
             )
             cases_saved += 1
 
-        # 4. 0ms 热更新 Skill 注册缓存
+        # 4. 同步 FTS5 知识库并 0ms 热更新 Skill 注册缓存
+        eff_project_id = skill_loader._build_knowledge_project_id(str(ws_path), "workspace")
+        await skill_loader.sync_skill_knowledge(
+            target_skill_dir.name,
+            project_id=eff_project_id,
+            skill_dir_override=target_skill_dir,
+        )
         skill_loader.invalidate_cache()
         invalidate_skill_file_cache()
 
@@ -1509,6 +1862,8 @@ class ExperienceDistiller:
             "ok": True,
             "skill_id": kebab_id,
             "skill_dir": str(target_skill_dir),
+            "version": skill_version,
+            "is_upgrade": is_upgrade,
             "facts_saved": facts_saved,
             "cases_saved": cases_saved,
             "audit_summary": str(audit_res.get("summary") or "SAFE"),
@@ -1804,6 +2159,7 @@ class SkillExperienceService:
             )
             same_as_initial_target = safe_skill_id == (payload.get("target_skill_id") or proposal.get("target_skill_id"))
 
+            ts_ctx_notes = [str(n) for n in (distill_ctx.get("troubleshooting_notes") or []) if str(n).strip()]
             if is_full_skill_md_edit:
                 sanitized_skill_md, _ = MemoryPolicyGuard.sanitize_text(raw_edited)
                 if not sanitized_skill_md.startswith("---"):
@@ -1818,6 +2174,7 @@ class SkillExperienceService:
                         do_steps=[str(s) for s in (distill_ctx.get("steps") or []) if str(s).strip()],
                         llm_upgraded_body=sanitized_skill_md,
                         next_version_override=next_version,
+                        troubleshooting_notes=ts_ctx_notes,
                     )
                     sanitized_skill_md = generated_md
                     final_version = nxt_v
@@ -1862,6 +2219,7 @@ class SkillExperienceService:
                         solution=str(triple.get("solution") or ""),
                         do_steps=[str(s) for s in (distill_ctx.get("steps") or []) if str(s).strip()],
                         next_version_override=next_version,
+                        troubleshooting_notes=ts_ctx_notes,
                     )
                     sanitized_skill_md = generated_md
                     final_version = nxt_v
@@ -1873,19 +2231,7 @@ class SkillExperienceService:
 
             pb_entry_clean, _ = MemoryPolicyGuard.sanitize_text(_normalize_newlines(pb_entry).strip())
             if pb_entry_clean:
-                kb_dir = target_dir / "knowledge"
-                kb_dir.mkdir(parents=True, exist_ok=True)
-                pb_file = kb_dir / "experience_playbook.md"
-                old_pb = _normalize_newlines(pb_file.read_text(encoding="utf-8", errors="replace")) if pb_file.is_file() else ""
-                if old_pb.strip():
-                    final_pb = old_pb.rstrip() + "\n\n" + pb_entry_clean + "\n"
-                else:
-                    final_pb = (
-                        "# 实战避坑守则与演进经验台账 (Experience Playbook)\n\n"
-                        + pb_entry_clean
-                        + "\n"
-                    )
-                pb_file.write_text(final_pb, encoding="utf-8")
+                _append_dedup_playbook_entry(target_dir / "knowledge" / "experience_playbook.md", pb_entry_clean)
             written_path = str(skill_md_file.resolve())
         else:
             raw_new_id = (
@@ -1899,40 +2245,124 @@ class SkillExperienceService:
             final_target_skill_id = None
             final_version = "1.0.0"
 
-            if final_scope == "workspace" and ws_root:
-                target_dir = Path(ws_root).resolve() / "skills" / safe_skill_id
-            else:
-                target_dir = skill_loader.skills_dir / safe_skill_id
-
-            target_dir.mkdir(parents=True, exist_ok=True)
-            skill_md_raw = (
-                edited_content
-                if (edited_content is not None and edited_content.strip())
-                else str(payload.get("new_skill_md") or payload.get("skill_md") or "")
+            collided_dir, collided_scope = skill_loader.resolve_skill_dir_with_scope(
+                safe_skill_id,
+                workspace_root=ws_root if final_scope == "workspace" else None,
             )
-            skill_md_clean, _ = MemoryPolicyGuard.sanitize_text(_normalize_newlines(skill_md_raw).strip())
-            if not skill_md_clean:
-                raise ValueError("新建 Skill 的 SKILL.md 内容不能为空")
+            if final_scope == "workspace" and ws_root:
+                default_target_dir = Path(ws_root).resolve() / "skills" / safe_skill_id
+            else:
+                default_target_dir = skill_loader.skills_dir / safe_skill_id
 
-            skill_md_file = target_dir / "SKILL.md"
-            skill_md_file.write_text(skill_md_clean + "\n", encoding="utf-8")
-            skill_loader.normalize_skill_file(skill_md_file)
+            if collided_dir and collided_scope == final_scope and (collided_dir / "SKILL.md").is_file():
+                target_dir = collided_dir
+            else:
+                target_dir = default_target_dir
 
+            has_existing_skill = (target_dir / "SKILL.md").is_file()
             schema_obj = payload.get("new_schema_json") or payload.get("schema_json")
-            if isinstance(schema_obj, dict) and schema_obj:
-                (target_dir / "schema.json").write_text(
-                    json.dumps(schema_obj, ensure_ascii=False, indent=2) + "\n",
-                    encoding="utf-8",
-                )
+            pb_source = str(
+                payload.get("markdown_entry")
+                or payload.get("new_playbook_md")
+                or payload.get("playbook_md")
+                or ""
+            ).strip()
+            ts_ctx_notes = [str(n) for n in (distill_ctx.get("troubleshooting_notes") or []) if str(n).strip()]
 
-            playbook_md = str(payload.get("new_playbook_md") or payload.get("playbook_md") or "").strip()
-            if playbook_md:
-                pb_clean, _ = MemoryPolicyGuard.sanitize_text(_normalize_newlines(playbook_md))
-                kb_dir = target_dir / "knowledge"
-                kb_dir.mkdir(parents=True, exist_ok=True)
-                (kb_dir / "experience_playbook.md").write_text(pb_clean.strip() + "\n", encoding="utf-8")
+            staging_base = (
+                Path(ws_root).resolve() / ".agenthub" / ".staging_skills"
+                if (final_scope == "workspace" and ws_root)
+                else target_dir.parent / ".staging_skills"
+            )
+            staging_dir = staging_base / f"{safe_skill_id}_{uuid.uuid4().hex[:6]}"
 
-            written_path = str(skill_md_file.resolve())
+            try:
+                if has_existing_skill:
+                    # 同名碰撞防护：自动转为基于既有资产的版本递增融合升级，严禁丢失原 knowledge/ 自定义资产
+                    shutil.copytree(
+                        target_dir,
+                        staging_dir,
+                        dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns(".git", "__pycache__", "node_modules"),
+                    )
+                    final_proposal_type = "skill_patch"
+                    final_target_skill_id = safe_skill_id
+                    do_steps_list = [str(s) for s in (distill_ctx.get("steps") or []) if str(s).strip()]
+                    bump_lvl = determine_semver_bump_level(
+                        has_schema_change=isinstance(schema_obj, dict) and bool(schema_obj),
+                        do_steps=do_steps_list,
+                    )
+                    _, generated_md, cur_v, nxt_v, _ = ExperienceDistiller.build_upgraded_skill_md(
+                        skill_id=safe_skill_id,
+                        workspace_root=ws_root if final_scope == "workspace" else None,
+                        title=str(distill_ctx.get("title") or proposal.get("title") or ""),
+                        goal=str(distill_ctx.get("goal") or ""),
+                        problem=str(triple.get("problem") or ""),
+                        root_cause=str(triple.get("root_cause") or ""),
+                        solution=str(triple.get("solution") or ""),
+                        do_steps=do_steps_list,
+                        next_version_override=next_version,
+                        troubleshooting_notes=ts_ctx_notes,
+                        bump_level=bump_lvl,
+                    )
+                    if edited_content is not None and edited_content.strip():
+                        raw_new_edit, _ = MemoryPolicyGuard.sanitize_text(_normalize_newlines(edited_content).strip())
+                        if raw_new_edit.startswith("---"):
+                            meta_edited = skill_loader._parse_frontmatter(raw_new_edit, safe_skill_id)
+                            desired_ver = normalize_version_str(next_version) if next_version else meta_edited.get("version") or nxt_v
+                            if desired_ver == normalize_version_str(cur_v):
+                                desired_ver = bump_semver(cur_v, bump_lvl)
+                            nxt_v = desired_ver
+                            now_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                            mcp_line = f"mcp_server: {meta_edited['mcp_server']}\n" if meta_edited.get("mcp_server") else ""
+                            generated_md = (
+                                f"---\nname: {meta_edited['name']}\ncommand: {meta_edited['command']}\n"
+                                f"version: {desired_ver}\nupdated_at: {now_day}\ntype: {meta_edited.get('type') or 'skill'}\n"
+                                f"{mcp_line}description: {meta_edited['description']}\n---\n\n{meta_edited['body']}\n"
+                            )
+                    final_version = nxt_v
+                    skill_md_clean = generated_md
+                else:
+                    staging_dir.mkdir(parents=True, exist_ok=True)
+                    skill_md_raw = (
+                        edited_content
+                        if (edited_content is not None and edited_content.strip())
+                        else str(payload.get("new_skill_md") or payload.get("skill_md") or "")
+                    )
+                    skill_md_clean, _ = MemoryPolicyGuard.sanitize_text(_normalize_newlines(skill_md_raw).strip())
+                    if not skill_md_clean:
+                        raise ValueError("新建 Skill 的 SKILL.md 内容不能为空")
+
+                staging_skill_md = staging_dir / "SKILL.md"
+                staging_skill_md.write_text(skill_md_clean.strip() + "\n", encoding="utf-8")
+                skill_loader.normalize_skill_file(staging_skill_md)
+
+                if isinstance(schema_obj, dict) and schema_obj:
+                    (staging_dir / "schema.json").write_text(
+                        json.dumps(schema_obj, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+
+                if pb_source:
+                    pb_clean, _ = MemoryPolicyGuard.sanitize_text(_normalize_newlines(pb_source))
+                    if has_existing_skill:
+                        # 剥离可能带有的顶层一级标题，按节去重追加到既有 playbook
+                        stripped_pb = re.sub(r"^#\s+[^\n]+\n+", "", pb_clean.strip()).strip()
+                        _append_dedup_playbook_entry(
+                            staging_dir / "knowledge" / "experience_playbook.md",
+                            stripped_pb or pb_clean,
+                        )
+                    else:
+                        kb_dir = staging_dir / "knowledge"
+                        kb_dir.mkdir(parents=True, exist_ok=True)
+                        (kb_dir / "experience_playbook.md").write_text(pb_clean.strip() + "\n", encoding="utf-8")
+
+                _atomic_replace_skill_dir(staging_dir, target_dir)
+            finally:
+                if staging_dir.exists():
+                    shutil.rmtree(staging_dir, ignore_errors=True)
+
+            written_path = str((target_dir / "SKILL.md").resolve())
 
         # 同步切块写入 FTS5 并清理前后端 Skill 缓存，实现 0ms 即时生效
         eff_project_id = skill_loader._build_knowledge_project_id(ws_root, final_scope)

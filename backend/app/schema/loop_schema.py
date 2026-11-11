@@ -91,6 +91,8 @@ class TaskLoopResponse(BaseModel):
     max_iterations: int
     pending_approval_call: PendingApprovalCall | None = None
     error_fingerprints: list[str] = Field(default_factory=list)
+    distillable: bool = False
+    distill_reason: str | None = None
     created_at: datetime | str
     updated_at: datetime | str
 
