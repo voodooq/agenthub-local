@@ -20,6 +20,7 @@ from ..service.agent_runner import cancel_cli_processes
 from ..service.engine_pool import engine_pool
 from ..service.audit_service import audit_service
 from ..service.attachment_service import attachment_service
+from ..memory.experience_store import episodic_experience_store
 from ..memory.fact_manager import fact_manager
 from ..memory.ledger import event_ledger
 from ..memory.long_term import long_term_memory
@@ -28,6 +29,8 @@ from ..memory.session_summary import session_summary_manager
 from ..memory.workspace_fts import WorkspaceFTSEngine
 from ..extensions.skill_loader import skill_loader
 from ..extensions.mcp_manager import mcp_manager
+from ..skills.experience_distiller import ExecutionTrace, experience_distiller
+from .checkpoint_manager import ShadowCheckpointManager
 from .shell_executor import shell_executor
 from .tool_protocol import ToolProtocolAdapter
 from .context_builder import ContextBuilder
@@ -456,6 +459,161 @@ class AgentRuntime:
         active_incognito = bool(conv_obj.incognito) if conv_obj else bool(incognito)
         ws_id = (getattr(conv_obj, "workspace_id", None) if conv_obj else None) or ws_id
 
+        # ── Pre-Turn 0-Token 斜杠管理指令即时拦截 (/ckpt /rollback /remember /distill) ──
+        trimmed_cmd_text = (user_message or "").strip()
+        cmd_match = re.match(r"^/(ckpt|rollback|remember|distill)(?:\s+([\s\S]*))?$", trimmed_cmd_text, re.IGNORECASE)
+        if cmd_match:
+            cmd_verb = cmd_match.group(1).lower()
+            cmd_arg = (cmd_match.group(2) or "").strip()
+            effective_ws_root = target_cwd or os.getcwd()
+            current_max_turn = await MessageRepository.get_max_turn_id(conv_id)
+            yield {
+                "type": "conv_init",
+                "conversation_id": conv_id,
+                "is_new": is_new_conv,
+                "title": short_title,
+                "turn_id": current_max_turn,
+                "scene_mode": active_scene,
+                "incognito": active_incognito,
+            }
+
+            reply_text = ""
+            if cmd_verb == "ckpt":
+                if cmd_arg.lower() in ("list", "--list", "-l"):
+                    ckpts = await ShadowCheckpointManager.list_checkpoints(conv_id, limit=10)
+                    if not ckpts:
+                        reply_text = "🕰️ 当前会话尚无历史检查点，可使用 `/ckpt 备注` 创建快照。"
+                    else:
+                        lines = ["🕰️ **当前会话检查点列表**（越靠前越新）：\n"]
+                        for c in ckpts:
+                            lines.append(
+                                f"- `{c['ckpt_id']}` | Turn {c['turn_id']} | 提交 `{str(c['git_hash'])[:7]}` | {c['note']} ({str(c['created_at'])[:19]})"
+                            )
+                        lines.append("\n提示：输入 `/rollback <ckpt_id>` 可回滚到指定节点。")
+                        reply_text = "\n".join(lines)
+                else:
+                    try:
+                        ckpt_info = await ShadowCheckpointManager.create_checkpoint(
+                            conversation_id=conv_id,
+                            workspace_id=ws_id,
+                            workspace_root=effective_ws_root,
+                            turn_id=current_max_turn,
+                            note=cmd_arg or f"manual_turn_{current_max_turn}",
+                        )
+                        reply_text = (
+                            f"✅ **已创建双态时光机检查点**\n"
+                            f"- **检查点 ID**：`{ckpt_info['ckpt_id']}`\n"
+                            f"- **对话水位**：Turn `{ckpt_info['turn_id']}`\n"
+                            f"- **影子 Git 提交**：`{str(ckpt_info['git_hash'])[:7]}`（已隔离于 `.agenthub/shadow_git`）\n"
+                            f"- **备注**：{ckpt_info['note']}\n\n"
+                            f"后续若修改偏航，输入 `/rollback` 即可一键还原文件与记忆状态。"
+                        )
+                    except Exception as ckpt_err:
+                        reply_text = f"⚠️ 创建检查点失败：{ckpt_err}"
+
+            elif cmd_verb == "rollback":
+                target_ckpt = None if cmd_arg.lower() in ("", "latest") else cmd_arg.split()[0]
+                try:
+                    rb_res = await ShadowCheckpointManager.rollback(
+                        conversation_id=conv_id,
+                        workspace_root=effective_ws_root,
+                        ckpt_id=target_ckpt,
+                    )
+                    if rb_res.get("ok"):
+                        yield {
+                            "type": "control",
+                            "action": "rollback_completed",
+                            "target_turn_id": rb_res["target_turn_id"],
+                            "conversation_id": conv_id,
+                            "ckpt_id": rb_res["ckpt_id"],
+                        }
+                        reply_text = (
+                            f"⏪ **已执行全量双回滚时光机还原**\n"
+                            f"- **还原节点**：`{rb_res['ckpt_id']}` (Turn `{rb_res['target_turn_id']}`, 备注: {rb_res['note']})\n"
+                            f"- **磁盘代码**：已通过 `.agenthub/shadow_git` 硬重置至 `{str(rb_res['git_hash'])[:7]}`，并同步还原工作草稿纸\n"
+                            f"- **数据库截断**：已清理后续 `{rb_res['deleted_messages']}` 条消息与 `{rb_res['deleted_ledger']}` 条行为账本，提取水位已同步回退"
+                        )
+                    else:
+                        reply_text = f"⚠️ 回滚失败：{rb_res.get('error', '未找到匹配检查点')}"
+                except Exception as rb_err:
+                    reply_text = f"⚠️ 执行回滚异常：{rb_err}"
+
+            elif cmd_verb == "remember":
+                if not cmd_arg:
+                    reply_text = "ℹ️ 用法：`/remember <规则标签> <规范内容>` 或 `/remember <需要长期遵守的规范>`"
+                elif active_incognito:
+                    reply_text = "🕵️ 当前处于无痕模式，为保护隐私，`/remember` 未向持久化记忆库写入规则。"
+                else:
+                    parts = cmd_arg.split(None, 1)
+                    if len(parts) == 2 and len(parts[0]) <= 36 and not re.search(r"[，。；！？]", parts[0]):
+                        raw_key, raw_val = parts[0], parts[1]
+                    else:
+                        raw_key, raw_val = f"manual.{uuid.uuid4().hex[:6]}", cmd_arg
+                    try:
+                        res_fact = await fact_manager.upsert_fact(
+                            fact_key=raw_key,
+                            fact_value=raw_val,
+                            workspace_id=ws_id,
+                            category="biz_rule",
+                            source_type="explicit_cmd",
+                            verified=True,
+                        )
+                        if res_fact.get("status") == "blocked":
+                            reply_text = f"🛡️ 安全策略已拦截写入：{res_fact.get('reason', '包含高敏凭据信息')}"
+                        else:
+                            fact_obj = res_fact.get("fact") if isinstance(res_fact.get("fact"), dict) else {}
+                            saved_k = fact_obj.get("fact_key") or raw_key
+                            saved_v = fact_obj.get("fact_value") or raw_val
+                            reply_text = (
+                                f"📌 **已直接固化 L4 确定性契约规则**（后续每轮自动前置生效）\n"
+                                f"- **工作区作用域**：`{ws_id}`\n"
+                                f"- **规则键**：`{saved_k}`\n"
+                                f"- **规则内容**：{saved_v}"
+                            )
+                    except Exception as rem_err:
+                        reply_text = f"🛡️ 写入规则未通过校验或异常：{rem_err}"
+
+            elif cmd_verb == "distill":
+                if not cmd_arg:
+                    reply_text = "ℹ️ 用法：`/distill <技能名称> [附加提纯说明]`（例如：`/distill excel-audit 严格校验汇总行`）"
+                elif active_incognito:
+                    reply_text = "🕵️ 无痕模式下禁用 `/distill` 资产持久化沉淀。"
+                else:
+                    dist_parts = cmd_arg.split(None, 1)
+                    raw_sk_name = dist_parts[0]
+                    extra_desc = dist_parts[1] if len(dist_parts) > 1 else ""
+                    yield {"type": "chunk", "content": f"⚗️ 正在针对 `{raw_sk_name}` 执行正交双提纯与安全审计...\n\n"}
+                    try:
+                        d_res = await experience_distiller.dual_distill_skill_and_memory(
+                            skill_name=raw_sk_name,
+                            conversation_id=conv_id,
+                            workspace_id=ws_id,
+                            workspace_root=effective_ws_root,
+                            user_instruction=extra_desc,
+                        )
+                        if d_res.get("ok"):
+                            reply_text = (
+                                f"✅ **正交双提纯完成并已 0ms 热加载**\n"
+                                f"- **新技能标识**：`/{d_res['skill_id']}`\n"
+                                f"- **落盘目录**：`{d_res['skill_dir']}`（已生成 `SKILL.md` + `scripts/pipeline.py`）\n"
+                                f"- **安全审计**：{d_res['audit_summary']}\n"
+                                f"- **记忆正交分流**：已同步沉淀 `{d_res['facts_saved']}` 条 L4 业务契约与 `{d_res['cases_saved']}` 条 L5 实战避坑案例"
+                            )
+                        else:
+                            reply_text = f"⚠️ 正交双提纯被拦截：{d_res.get('error', '未知错误')}"
+                    except Exception as dist_err:
+                        reply_text = f"⚠️ 正交双提纯异常：{dist_err}"
+
+            yield {"type": "chunk", "content": reply_text}
+            yield {
+                "type": "done",
+                "full_content": reply_text,
+                "final_step_content": reply_text,
+                "account": "local-command",
+                "model": "AgentHub-Control",
+            }
+            return
+
         # 用户发起新一轮消息，立即取消该会话挂起的后台记忆提炼定时器，避免争抢算力
         long_term_memory.cancel_extraction(conv_id)
 
@@ -611,6 +769,8 @@ class AgentRuntime:
         circuit_breaker_triggered = False
         produced_artifacts: list[str] = []
         has_workspace_mutations = False
+        injected_case_ids: list[str] = []
+        turn_checkpoint_taken = False
 
         # 4.5 关联工作区长程自主领航舱 (TaskLoopRunner 闭环驱动)
         active_loop_obj = None
@@ -741,6 +901,9 @@ class AgentRuntime:
                 # 首步向前端推送命中的长期记忆溯源、活跃确定性事实视图与当前任务草稿纸
                 if step_idx == 0:
                     frozen_turn_tail_prompt = str(ctx.get("tail_injection_prompt") or "")
+                    for exp_cid in ctx.get("injected_case_ids") or []:
+                        if exp_cid and exp_cid not in injected_case_ids:
+                            injected_case_ids.append(str(exp_cid))
                     matched_ids_from_ctx = ctx.get("matched_skill_ids") or []
                     if not matched_ids_from_ctx and ctx.get("matched_skill_id"):
                         matched_ids_from_ctx = [ctx["matched_skill_id"]]
@@ -1169,6 +1332,7 @@ class AgentRuntime:
 
                     tool_output = ""
                     compressed = ""
+                    rescue_addon = ""
 
                     # 🛡️ 物理只读硬门控拦截：若处于规划阶段，绝对禁止执行任何破坏性写入或终端命令
                     if is_planning_phase and func_name not in PLANNING_SAFE_TOOLS:
@@ -1199,6 +1363,32 @@ class AgentRuntime:
                             "summary": deny_reason,
                         }
                         continue
+
+                    # 🕰️ Pre-Tool 自动静默快照：本轮首次准备修改代码/执行终端命令时自动建立双态还原点
+                    if (
+                        not turn_checkpoint_taken
+                        and not is_planning_phase
+                        and active_scene == "agent"
+                        and func_name in ("write_local_file", "replace_in_file", "execute_local_command", "run_skill_tool")
+                    ):
+                        turn_checkpoint_taken = True
+                        try:
+                            ckpt_ws_root = target_cwd or os.getcwd()
+                            ckpt_info = await ShadowCheckpointManager.create_checkpoint(
+                                conversation_id=conv_id,
+                                workspace_id=ws_id,
+                                workspace_root=ckpt_ws_root,
+                                turn_id=max(0, current_turn_id - 1),
+                                note=f"pre_{func_name}",
+                            )
+                            yield {
+                                "type": "checkpoint_created",
+                                "ckpt_id": ckpt_info["ckpt_id"],
+                                "turn_id": ckpt_info["turn_id"],
+                                "note": ckpt_info["note"],
+                            }
+                        except Exception as ckpt_err:
+                            logger.warning(f"[AgentRuntime] Pre-Tool 自动静默快照跳过: {ckpt_err}")
 
                     # ── 工具 1: 受控本地终端命令 (execute_local_command) ──
                     if func_name == "execute_local_command":
@@ -2141,6 +2331,28 @@ class AgentRuntime:
                             "circuit_breaker": is_circuit_breaker,
                             "failed_cmd": re.sub(r"\s+", " ", str(args.get("command", "")).strip()) if func_name == "execute_local_command" else "",
                         }
+                        # 🚑 盘中报错即时急救：触发异常时立即从 L5 经验库检索相似踩坑避坑解
+                        if not active_incognito and active_scene != "oneshot":
+                            try:
+                                rescue_cases = await episodic_experience_store.search_by_error(
+                                    tool_output or "",
+                                    workspace_id=ws_id,
+                                    limit=2,
+                                    min_score=0.65,
+                                )
+                                if rescue_cases:
+                                    rescue_lines = ["\n\n💡 **[L5 盘中历史避坑急救建议]**（匹配历史已验证解法，请优先采纳）："]
+                                    for rc in rescue_cases:
+                                        if rc.id and rc.id not in injected_case_ids:
+                                            injected_case_ids.append(rc.id)
+                                        safe_scene_txt, _ = MemoryPolicyGuard.sanitize_text(rc.scene_summary)
+                                        safe_sol_txt, _ = MemoryPolicyGuard.sanitize_text(rc.verified_solution)
+                                        rescue_lines.append(
+                                            f"- (匹配度:{rc.match_score:.2f}) **{safe_scene_txt}** -> {safe_sol_txt}"
+                                        )
+                                    rescue_addon = "\n".join(rescue_lines)
+                            except Exception as rescue_err:
+                                logger.debug(f"[AgentRuntime] 盘中 L5 报错急救检索跳过: {rescue_err}")
                     else:
                         if func_name == "execute_local_command":
                             cmd_entry = str(args.get("command", "")).strip()
@@ -2243,6 +2455,9 @@ class AgentRuntime:
                                         )
                         except Exception as scrub_err:
                             logger.debug(f"[AgentRuntime] 旁路工具清洗跳过: {scrub_err}")
+
+                    if rescue_addon:
+                        tool_output = (tool_output or "") + rescue_addon
 
                     # 将工具输出与单行折叠摘要同时落盘
                     await MessageRepository.save_message(
@@ -2612,6 +2827,55 @@ class AgentRuntime:
                     incognito=active_incognito,
                 )
             )
+            round_clean_success = (last_step_error_info is None) and (not circuit_breaker_triggered)
+            micro_trace = ExecutionTrace(
+                workspace_id=ws_id,
+                conversation_id=conv_id,
+                loop_id=tracked_loop_id,
+                scene_mode="plan_first" if is_planning_phase else active_scene,
+                incognito=active_incognito,
+                user_goal=user_message,
+                active_skill_ids=active_skill_ids,
+                recovered_error_count=recovered_error_count,
+                had_user_intervention=bool(confirmed_facts or approved_plan_steps),
+                total_tool_steps=total_tool_steps,
+                circuit_breaker_triggered=circuit_breaker_triggered,
+                final_success=round_clean_success,
+                final_summary=(accumulated_visible_text or "")[:400],
+                produced_artifacts=produced_artifacts,
+                workspace_root=target_cwd,
+            )
+            asyncio.create_task(
+                self._post_turn_l5_feedback_and_distill(
+                    injected_case_ids=list(injected_case_ids),
+                    round_clean_success=round_clean_success,
+                    trace=micro_trace,
+                    turn_id=current_turn_id,
+                )
+            )
+
+    @staticmethod
+    async def _post_turn_l5_feedback_and_distill(
+        *,
+        injected_case_ids: list[str],
+        round_clean_success: bool,
+        trace: ExecutionTrace,
+        turn_id: int,
+    ) -> None:
+        """后台异步执行 L5 微经验闭环赏罚反馈与盘后静默微经验萃取。"""
+        try:
+            if injected_case_ids:
+                await episodic_experience_store.record_feedback(
+                    injected_case_ids,
+                    success=round_clean_success,
+                )
+            if round_clean_success:
+                await experience_distiller.distill_micro_case_silently(
+                    trace,
+                    turn_id=turn_id,
+                )
+        except Exception as exc:
+            logger.warning(f"[AgentRuntime] 回合后 L5 闭环反馈或静默复盘跳过: {exc}")
 
     @staticmethod
     async def _post_turn_memory_maintenance(user_message: str) -> None:

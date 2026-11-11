@@ -670,9 +670,91 @@ class DatabaseManager:
                 "CREATE INDEX IF NOT EXISTS idx_token_logs_created ON token_usage_logs(created_at);"
             )
 
+            # 21. 个人实战微经验库 (L5 Episodic Experience Cases) + FTS5 trigram 自同步索引
+            await conn.executescript("""
+            CREATE TABLE IF NOT EXISTS experience_cases (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL DEFAULT 'GLOBAL',
+                task_category TEXT NOT NULL DEFAULT 'general',
+                entity_tags TEXT NOT NULL DEFAULT '',
+                error_signature TEXT NOT NULL DEFAULT '',
+                symptom_keywords TEXT NOT NULL DEFAULT '',
+                scene_summary TEXT NOT NULL DEFAULT '',
+                root_cause TEXT NOT NULL DEFAULT '',
+                verified_solution TEXT NOT NULL DEFAULT '',
+                effective_commands TEXT NOT NULL DEFAULT '[]',
+                origin_type TEXT NOT NULL DEFAULT 'auto_recover',
+                confidence REAL NOT NULL DEFAULT 0.85,
+                hit_count INTEGER NOT NULL DEFAULT 0,
+                fail_count INTEGER NOT NULL DEFAULT 0,
+                scope TEXT NOT NULL DEFAULT 'private',
+                embedding BLOB,
+                source_conversation_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_used_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_exp_cases_ws ON experience_cases(workspace_id, confidence DESC);
+            CREATE INDEX IF NOT EXISTS idx_exp_cases_err ON experience_cases(error_signature);
+
+            CREATE VIRTUAL TABLE IF NOT EXISTS experience_cases_fts USING fts5(
+                case_id UNINDEXED,
+                entity_tags,
+                error_signature,
+                symptom_keywords,
+                scene_summary,
+                root_cause,
+                verified_solution,
+                tokenize='trigram'
+            );
+
+            CREATE TRIGGER IF NOT EXISTS trg_exp_cases_ai AFTER INSERT ON experience_cases BEGIN
+                INSERT INTO experience_cases_fts (
+                    case_id, entity_tags, error_signature, symptom_keywords,
+                    scene_summary, root_cause, verified_solution
+                ) VALUES (
+                    new.id, new.entity_tags, new.error_signature, new.symptom_keywords,
+                    new.scene_summary, new.root_cause, new.verified_solution
+                );
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_exp_cases_ad AFTER DELETE ON experience_cases BEGIN
+                DELETE FROM experience_cases_fts WHERE case_id = old.id;
+            END;
+
+            CREATE TRIGGER IF NOT EXISTS trg_exp_cases_au AFTER UPDATE OF
+                id, entity_tags, error_signature, symptom_keywords,
+                scene_summary, root_cause, verified_solution
+            ON experience_cases BEGIN
+                DELETE FROM experience_cases_fts WHERE case_id = old.id;
+                INSERT INTO experience_cases_fts (
+                    case_id, entity_tags, error_signature, symptom_keywords,
+                    scene_summary, root_cause, verified_solution
+                ) VALUES (
+                    new.id, new.entity_tags, new.error_signature, new.symptom_keywords,
+                    new.scene_summary, new.root_cause, new.verified_solution
+                );
+            END;
+
+            -- 22. 双回滚时光机检查点表 (Session Checkpoints)
+            CREATE TABLE IF NOT EXISTS session_checkpoints (
+                ckpt_id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                git_hash TEXT NOT NULL,
+                turn_id INTEGER NOT NULL DEFAULT 0,
+                scratchpad_snapshot TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_checkpoints_conv
+                ON session_checkpoints(conversation_id, turn_id DESC, created_at DESC);
+            """)
+
             await conn.commit()
             logger.info(
-                "SQLite 全景架构表 (conversations/messages/long_term_memories/memory_facts/event_ledger/session_summaries/experience_proposals/task_loop_runs/workspace_artifacts/scheduled_tasks) 初始化完成"
+                "SQLite 全景架构表 (conversations/messages/long_term_memories/memory_facts/event_ledger/session_summaries/experience_proposals/task_loop_runs/workspace_artifacts/scheduled_tasks/experience_cases/session_checkpoints) 初始化完成"
             )
 
 

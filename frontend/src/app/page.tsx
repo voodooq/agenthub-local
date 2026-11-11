@@ -1372,6 +1372,7 @@ export default function WorkbenchPage() {
       const decoder = new TextDecoder('utf-8');
       let partialText = '';
       let partialThinking = '';
+      let rollbackTargetConvId: string | null = null;
       let currentStreamStepIndex = 0;
       let isRelayed = false;
       let executorAccount = statusPill?.active_account_name || 'AgentHub';
@@ -1781,6 +1782,13 @@ export default function WorkbenchPage() {
               }
               return updated;
             });
+          } else if (parsed.type === 'control' && parsed.action === 'rollback_completed') {
+            const targetCid = String(parsed.conversation_id || effectiveConvId || '').trim();
+            if (targetCid) {
+              rollbackTargetConvId = targetCid;
+            }
+            const targetTurn = Number(parsed.target_turn_id ?? 0);
+            showFloatingToast(`已回滚至 Turn ${targetTurn}，正在同步会话界面状态...`, 'success', 3600);
           }
         } catch (err) {
           console.warn('SSE 解析异常:', err, rawData);
@@ -1818,6 +1826,9 @@ export default function WorkbenchPage() {
       clearWatchdogs();
       fetchConversations();
       fetchStatusPill();
+      if (rollbackTargetConvId) {
+        await fetchMessagesAndState(rollbackTargetConvId);
+      }
     } catch (err) {
       clearWatchdogs();
       const reason = getAbortReason();

@@ -17,6 +17,7 @@ from ..core.logging_config import logger
 from ..repository.conversation_repository import ConversationRepository
 from ..repository.message_repository import MessageRepository
 from ..repository.search_repository import SearchRepository
+from ..memory.experience_store import episodic_experience_store
 from ..memory.fact_manager import fact_manager
 from ..memory.long_term import long_term_memory
 from ..memory.policy_guard import MemoryPolicyGuard
@@ -149,6 +150,7 @@ class ContextBuilder:
                 "referenced_memories": [],
                 "active_facts": [],
                 "cold_history_hits": [],
+                "injected_case_ids": [],
                 "collapse_anchor_turn_id": 0,
                 "collapsed_triggered": False,
                 "matched_skill_id": None,
@@ -213,6 +215,7 @@ class ContextBuilder:
         active_facts: list[dict[str, Any]] = []
         referenced_memories: list[dict[str, Any]] = []
         cold_history_hits: list[dict[str, Any]] = []
+        injected_case_ids: list[str] = []
         matched_skills: list[dict[str, Any]] = []
         matched_skill: dict[str, Any] | None = None
 
@@ -367,6 +370,38 @@ class ContextBuilder:
                             f"- [{m['category']}] (置信度:{float(m['confidence']):.2f}) {safe_content}"
                         )
                     zone3_parts.append("### 💡 用户长期偏好与本机环境记忆 (Long-Term Memory)：\n" + "\n".join(mem_lines))
+
+                # L5 实战微经验分级精准召回 (>=0.80 强指令并纳入赏罚反馈，0.65~0.80 提示参考，<0.65 过滤)
+                try:
+                    matched_cases = await episodic_experience_store.search_for_context(
+                        user_query,
+                        workspace_id=workspace_id,
+                        limit=3,
+                        min_score=0.65,
+                    )
+                    if matched_cases:
+                        exp_lines: list[str] = []
+                        for c in matched_cases:
+                            safe_scene, _ = MemoryPolicyGuard.sanitize_text(c.scene_summary)
+                            safe_root, _ = MemoryPolicyGuard.sanitize_text(c.root_cause)
+                            safe_sol, _ = MemoryPolicyGuard.sanitize_text(c.verified_solution)
+                            if c.match_score >= 0.80:
+                                injected_case_ids.append(c.id)
+                                exp_lines.append(
+                                    f"- 🔴 **【历史高匹配避坑指南】(匹配度:{c.match_score:.2f}, 复用{c.hit_count}次)** {safe_scene}\n"
+                                    f"  - 核心根因：{safe_root or '见历史排查记录'}\n"
+                                    f"  - 已验证最优解法：{safe_sol}"
+                                )
+                            else:
+                                exp_lines.append(
+                                    f"- 🟡 **【相关实战经验参考】(匹配度:{c.match_score:.2f})** {safe_scene} -> {safe_sol[:160]}"
+                                )
+                        if exp_lines:
+                            zone3_parts.append(
+                                "### ⚡ L5 实战微经验与避坑先验 (Episodic Experience)：\n" + "\n".join(exp_lines)
+                            )
+                except Exception as exp_exc:
+                    logger.warning(f"[ContextBuilder] 检索 L5 实战微经验失败（已跳过）: {exp_exc}")
 
                 # 冷区 FTS5 召回（仅针对 turn_id <= collapse_anchor_turn_id 的已归档冷记忆）
                 if collapse_anchor_turn_id > 0:
@@ -617,6 +652,7 @@ class ContextBuilder:
             "referenced_memories": referenced_memories,
             "active_facts": active_facts,
             "cold_history_hits": cold_history_hits,
+            "injected_case_ids": injected_case_ids,
             "collapse_anchor_turn_id": final_anchor_turn,
             "collapsed_triggered": collapsed_triggered,
             "compression_policy": policy,

@@ -20,11 +20,14 @@ import uuid
 
 from ..core.logging_config import logger
 from ..extensions.skill_loader import bump_semver, normalize_version_str, skill_loader
+from ..memory.experience_store import ExperienceCase, episodic_experience_store
 from ..memory.fact_manager import fact_manager
 from ..memory.ledger import event_ledger
 from ..memory.policy_guard import MemoryPolicyGuard
 from ..repository.db import db_manager
 from ..repository.workspace_repository import WorkspaceRepository
+from ..security.skill_auditor import audit_skill_package
+from ..tools.ast_skeleton import validate_syntax_before_write
 from .skill_service import SkillService, invalidate_skill_file_cache
 
 
@@ -979,6 +982,543 @@ class ExperienceDistiller:
         except Exception as e:
             logger.warning(f"[ExperienceDistiller] 任务后经验提炼异常（不影响主交付）: {e}")
             return None
+
+    async def _invoke_light_json(
+        self,
+        *,
+        conversation_id: str,
+        system_prompt: str,
+        user_prompt: str,
+        timeout: float = 15.0,
+    ) -> dict[str, Any] | None:
+        """统一轻量模型 JSON 调用封装（自动检测轻算力池并在超时/故障时优雅降级返回 None）。"""
+        if not await self._has_active_llm_account():
+            return None
+
+        from ..service.engine_pool import engine_pool
+
+        async def _consume() -> str:
+            out = ""
+            async for evt in engine_pool.execute_stream_with_failover(
+                conversation_id=conversation_id,
+                user_prompt=user_prompt,
+                model_name="",
+                thinking_level="low",
+                system_override=system_prompt,
+                temperature=0.2,
+                pre_built_history=[],
+                task_role="light",
+            ):
+                etype = evt.get("type")
+                if etype == "chunk":
+                    out += str(evt.get("content") or "")
+                elif etype == "done":
+                    out = str(evt.get("full_content") or out)
+                    break
+                elif etype == "error":
+                    return ""
+            return out
+
+        try:
+            raw = await asyncio.wait_for(_consume(), timeout=timeout)
+        except (asyncio.TimeoutError, Exception) as exc:
+            logger.debug("[ExperienceDistiller] _invoke_light_json 超时或异常，回退启发式提取: %s", exc)
+            return None
+
+        match = re.search(r"\{[\s\S]*\}", raw or "")
+        if not match:
+            return None
+        try:
+            parsed = json.loads(match.group(0))
+            return parsed if isinstance(parsed, dict) else None
+        except (json.JSONDecodeError, TypeError):
+            return None
+
+    @staticmethod
+    def _build_heuristic_micro_fields(
+        trace: ExecutionTrace,
+        extracted: dict[str, Any],
+    ) -> dict[str, Any]:
+        """不依赖 LLM 的确定性三路正交微经验字段构建器。"""
+        effective_tools: list[dict[str, Any]] = extracted.get("effective_tools", [])
+        recoveries: list[dict[str, str]] = extracted.get("recoveries", [])
+        interventions: list[str] = extracted.get("interventions", [])
+        skill_hints: list[str] = list(dict.fromkeys([*(trace.active_skill_ids or []), *(extracted.get("skill_hints") or [])]))
+
+        # 1. 提取实体标签（文件名、工具名、命令行首词、技能名）
+        entities: list[str] = []
+        for s_id in skill_hints[:3]:
+            if s_id:
+                entities.append(s_id)
+        for step in effective_tools[-6:]:
+            t_name = str(step.get("tool") or "").strip()
+            args = step.get("args") if isinstance(step.get("args"), dict) else {}
+            for key in ("file_path", "path", "target_file", "script"):
+                fp = str(args.get(key) or "").strip()
+                if fp:
+                    entities.append(Path(fp).name)
+            cmd = str(args.get("command") or args.get("cmd") or "").strip()
+            if cmd:
+                head = cmd.split()[0]
+                if head:
+                    entities.append(Path(head).name)
+            if t_name and t_name not in ("execute_local_command",):
+                entities.append(t_name)
+
+        # 去重保序
+        uniq_entities = list(dict.fromkeys([e for e in entities if e]))[:8]
+
+        # 2. 提取核心错误签名
+        error_signature = ""
+        if recoveries:
+            failed_txt = str(recoveries[0].get("failed_summary") or "").strip()
+            sig_match = re.search(r"([A-Za-z_][\w.]*(?:Error|Exception|Warning)[:：][^\n]{1,90})", failed_txt)
+            error_signature = (sig_match.group(1) if sig_match else failed_txt)[:140]
+
+        # 3. 提取症状同义词
+        symptoms: list[str] = []
+        if trace.user_goal:
+            symptoms.extend(re.findall(r"[\u4e00-\u9fff]{2,8}|[A-Za-z0-9_.-]{3,24}", trace.user_goal)[:6])
+        if error_signature:
+            symptoms.extend(re.findall(r"[\u4e00-\u9fff]{2,8}", error_signature)[:3])
+        if interventions:
+            symptoms.extend(re.findall(r"[\u4e00-\u9fff]{2,8}", interventions[0])[:4])
+        uniq_symptoms = list(dict.fromkeys(symptoms))[:10]
+
+        # 4. 组装场景、根因与方案
+        scene_summary = (trace.user_goal or trace.final_summary or "实战任务异常修复与避坑").strip()[:60]
+        if recoveries:
+            root_cause = str(recoveries[0].get("failed_summary") or "执行工具异常中断").strip()[:160]
+            rec_tool = str(recoveries[0].get("recovery_tool") or "").strip()
+            rec_comp = str(recoveries[0].get("recovery_compressed") or "").strip()
+            verified_solution = (
+                f"改用/调整 `{rec_tool}` 修复成功：{rec_comp}" if rec_comp else f"使用 `{rec_tool}` 重试并验证通过"
+            )
+            if interventions:
+                verified_solution += f"；人工约束：{interventions[0][:120]}"
+        elif interventions:
+            root_cause = "初始执行路径偏离用户真实约束"
+            verified_solution = "严格遵守人工纠偏约束：" + "；".join(interventions[:2])[:260]
+        else:
+            root_cause = "多步骤复杂任务需要固定有序调用链路"
+            verified_solution = (trace.final_summary or "按有效工具序列分阶段验证交付")[:260]
+
+        effective_cmds = [
+            f"{s['tool']}: {str(s.get('compressed') or '')[:80]}".strip(": ")
+            for s in effective_tools[-5:]
+        ]
+
+        task_category = "bug_fix" if recoveries else ("user_rule" if interventions else "workflow")
+        origin_type = "user_correction" if len(interventions) > 0 or trace.had_user_intervention else "auto_recover"
+
+        return {
+            "task_category": task_category,
+            "entity_tags": ", ".join(uniq_entities),
+            "error_signature": error_signature,
+            "symptom_keywords": ", ".join(uniq_symptoms),
+            "scene_summary": scene_summary,
+            "root_cause": root_cause,
+            "verified_solution": verified_solution,
+            "effective_commands": effective_cmds,
+            "origin_type": origin_type,
+        }
+
+    async def distill_micro_case_silently(
+        self,
+        trace: ExecutionTrace,
+        *,
+        turn_id: int | None = None,
+    ) -> ExperienceCase | None:
+        """盘后静默萃取 L5 实战微经验（默认零侵入且支持无轻模型下的纯规则降级）。"""
+        if trace.incognito or trace.scene_mode in ("oneshot", "plan_first"):
+            return None
+        if not trace.final_success or trace.circuit_breaker_triggered:
+            return None
+
+        ledger_events = await event_ledger.get_trace_for_distillation(
+            trace.conversation_id,
+            loop_id=trace.loop_id,
+            turn_id=turn_id,
+            limit=120,
+        )
+        if not ledger_events and turn_id is not None:
+            ledger_events = await event_ledger.get_trace_for_distillation(
+                trace.conversation_id,
+                loop_id=trace.loop_id,
+                turn_id=None,
+                limit=80,
+            )
+
+        if self._detect_mock_antipattern(trace=trace, ledger_events=ledger_events):
+            logger.info("[ExperienceDistiller] 轨迹命中造假反模式红线，静默跳过 L5 沉淀")
+            return None
+
+        extracted = self._extract_effective_steps(ledger_events)
+        recovered_cnt = max(trace.recovered_error_count, len(extracted["recoveries"]))
+        intervene_cnt = (1 if trace.had_user_intervention else 0) + len(extracted["interventions"])
+        effective_tools = extracted["effective_tools"]
+        skill_hints = trace.active_skill_ids or extracted["skill_hints"]
+
+        # 水位控制：无报错自愈、无人工纠偏且少于 4 步有效复杂调用的普通问答直接跳过
+        if recovered_cnt < 1 and intervene_cnt < 1 and not (not skill_hints and len(effective_tools) >= 4):
+            return None
+
+        fields = self._build_heuristic_micro_fields(trace, extracted)
+
+        # 若轻算力池可用，尝试用 LLM 精炼泛化三路正交锚点
+        safe_brief, _ = MemoryPolicyGuard.sanitize_payload(
+            {
+                "goal": trace.user_goal[:300],
+                "summary": trace.final_summary[:300],
+                "recoveries": extracted["recoveries"][:3],
+                "interventions": extracted["interventions"][:3],
+                "steps": fields["effective_commands"],
+            }
+        )
+        llm_prompt = (
+            "请从下列已验证成功的执行轨迹中提纯一条可复用的微经验 JSON（严禁输出 Markdown 以外的解释）：\n"
+            '{"task_category": "bug_fix|env_setup|data_audit|build_test|tool_usage", '
+            '"entity_tags": "逗号分隔的文件名/库名/命令/模块硬锚点", '
+            '"error_signature": "精准报错类名或关键错误码(无报错留空)", '
+            '"symptom_keywords": "5~8个口语化同义症状词，逗号分隔", '
+            '"scene_summary": "一句话场景描述(<=60字)", '
+            '"root_cause": "一句话核心根因(<=120字)", '
+            '"verified_solution": "已验证的最短避坑解法与关键命令", '
+            '"effective_commands": ["步骤1", "步骤2"]}\n\n'
+            f"轨迹摘要：\n{json.dumps(safe_brief, ensure_ascii=False)}"
+        )
+        llm_data = await self._invoke_light_json(
+            conversation_id=trace.conversation_id,
+            system_prompt="你是精准的 L5 实战微经验萃取器，仅输出严格 JSON。",
+            user_prompt=llm_prompt,
+            timeout=12.0,
+        )
+        if llm_data and not self._detect_mock_antipattern(
+            trace=trace, ledger_events=ledger_events, llm_data=llm_data
+        ):
+            fields["task_category"] = str(llm_data.get("task_category") or fields["task_category"])
+            fields["entity_tags"] = str(llm_data.get("entity_tags") or fields["entity_tags"])
+            fields["error_signature"] = str(llm_data.get("error_signature") or fields["error_signature"])
+            fields["symptom_keywords"] = str(llm_data.get("symptom_keywords") or fields["symptom_keywords"])
+            fields["scene_summary"] = str(llm_data.get("scene_summary") or fields["scene_summary"])
+            fields["root_cause"] = str(llm_data.get("root_cause") or fields["root_cause"])
+            fields["verified_solution"] = str(llm_data.get("verified_solution") or fields["verified_solution"])
+            if isinstance(llm_data.get("effective_commands"), list):
+                fields["effective_commands"] = [str(c) for c in llm_data["effective_commands"]][:8]
+
+        saved_case = await episodic_experience_store.upsert_case(
+            workspace_id=trace.workspace_id or "GLOBAL",
+            task_category=fields["task_category"],
+            entity_tags=fields["entity_tags"],
+            error_signature=fields["error_signature"],
+            symptom_keywords=fields["symptom_keywords"],
+            scene_summary=fields["scene_summary"],
+            root_cause=fields["root_cause"],
+            verified_solution=fields["verified_solution"],
+            effective_commands=fields["effective_commands"],
+            origin_type=fields["origin_type"],
+            source_conversation_id=trace.conversation_id,
+        )
+
+        # 若绑定了工作区私有 Skill，将避坑记录增量追加至该 Skill 的 experience_playbook.md
+        if skill_hints and trace.workspace_root:
+            primary_skill = skill_hints[0]
+            try:
+                sk_dir, scope = skill_loader.resolve_skill_dir_with_scope(
+                    primary_skill, workspace_root=trace.workspace_root
+                )
+                if sk_dir and scope == "workspace":
+                    kb_dir = sk_dir / "knowledge"
+                    kb_dir.mkdir(parents=True, exist_ok=True)
+                    pb_file = kb_dir / "experience_playbook.md"
+                    safe_sol, _ = MemoryPolicyGuard.sanitize_text(fields["verified_solution"])
+                    safe_scene, _ = MemoryPolicyGuard.sanitize_text(fields["scene_summary"])
+                    entry = (
+                        f"\n## [{datetime.now(timezone.utc).strftime('%Y-%m-%d')}] {safe_scene}\n"
+                        f"- **根因**：{fields['root_cause']}\n"
+                        f"- **避坑方案**：{safe_sol}\n"
+                    )
+                    existing = pb_file.read_text(encoding="utf-8", errors="replace") if pb_file.exists() else "# 实战避坑手册 (Experience Playbook)\n"
+                    if safe_sol[:40] not in existing:
+                        pb_file.write_text(existing.rstrip() + "\n" + entry, encoding="utf-8")
+                        skill_loader.invalidate_cache()
+                        invalidate_skill_file_cache()
+            except OSError as exc:
+                logger.warning("[ExperienceDistiller] 追加 Skill playbook 失败: %s", exc)
+
+        logger.info(
+            "[ExperienceDistiller] 静默沉淀 L5 微经验成功: id=%s origin=%s ws=%s",
+            saved_case.id,
+            saved_case.origin_type,
+            saved_case.workspace_id,
+        )
+        return saved_case
+
+    @staticmethod
+    def _build_safe_default_pipeline_py(skill_id: str, description: str) -> str:
+        """构建默认幂等安全的三阶段 Gate Skill 执行脚手架（确保 100% 通过 AST 与 SkillAuditor 门禁）。"""
+        safe_desc = description.replace('"', "'")[:120]
+        return (
+            '"""'
+            f'{skill_id} - 幂等三阶段流水线脚本 (extract -> validate -> deliver)\n'
+            f'说明: {safe_desc}\n'
+            '"""\n\n'
+            "from __future__ import annotations\n\n"
+            "import argparse\n"
+            "import json\n"
+            "from pathlib import Path\n"
+            "from typing import Any\n\n\n"
+            "def extract(workspace: Path) -> dict[str, Any]:\n"
+            '    """Phase 1: 从工作区只读采集输入清单与元信息。"""\n'
+            '    return {"workspace": str(workspace), "exists": workspace.exists(), "files": []}\n\n\n'
+            "def validate(payload: dict[str, Any]) -> tuple[bool, list[str]]:\n"
+            '    """Phase 2: 校验结构边界与必备条件。"""\n'
+            "    errors: list[str] = []\n"
+            '    if not payload.get("exists"):\n'
+            '        errors.append("工作区目录不存在")\n'
+            "    return len(errors) == 0, errors\n\n\n"
+            "def deliver(payload: dict[str, Any], *, dry_run: bool = False) -> dict[str, Any]:\n"
+            '    """Phase 3: 幂等输出交付报告。"""\n'
+            '    return {"status": "dry_run" if dry_run else "ok", "summary": payload}\n\n\n'
+            "def main() -> int:\n"
+            '    parser = argparse.ArgumentParser(description="Three-stage idempotent skill pipeline")\n'
+            '    parser.add_argument("--workspace", default=".", help="目标工作区路径")\n'
+            '    parser.add_argument("--dry-run", action="store_true", help="仅预演不写入最终产物")\n'
+            "    args = parser.parse_args()\n\n"
+            "    ws = Path(args.workspace).resolve()\n"
+            "    extracted = extract(ws)\n"
+            "    ok, errs = validate(extracted)\n"
+            "    if not ok:\n"
+            '        print(json.dumps({"ok": False, "errors": errs}, ensure_ascii=False))\n'
+            "        return 1\n"
+            "    res = deliver(extracted, dry_run=args.dry_run)\n"
+            "    print(json.dumps(res, ensure_ascii=False, indent=2))\n"
+            "    return 0\n\n\n"
+            'if __name__ == "__main__":\n'
+            "    raise SystemExit(main())\n"
+        )
+
+    async def dual_distill_skill_and_memory(
+        self,
+        *,
+        skill_name: str,
+        conversation_id: str,
+        workspace_id: str,
+        workspace_root: str,
+        user_instruction: str = "",
+    ) -> dict[str, Any]:
+        """响应 `/distill` 执行正交双提纯：
+        1. 通用三阶段 SOP 规范 (`SKILL.md`) 与安全脚手架 (`scripts/pipeline.py`) -> 工作区 `.agenthub/skills/<id>/`；
+        2. 私有业务规则与路径契约 -> L4 `FactManager`；
+        3. 踩坑避坑微经验 -> L5 `EpisodicExperienceStore`。
+        """
+        kebab_id = _normalize_kebab_id(skill_name, fallback="distilled-workflow")
+        ws_path = Path(workspace_root).resolve()
+        ledger_events = await event_ledger.get_trace_for_distillation(conversation_id, limit=120)
+
+        dummy_trace = ExecutionTrace(
+            workspace_id=workspace_id,
+            conversation_id=conversation_id,
+            user_goal=user_instruction or f"提纯技能 {kebab_id}",
+            workspace_root=str(ws_path),
+        )
+        anti_reason = self._detect_mock_antipattern(trace=dummy_trace, ledger_events=ledger_events)
+        if anti_reason:
+            return {"ok": False, "error": f"安全门禁拒绝提纯：{anti_reason}"}
+
+        extracted = self._extract_effective_steps(ledger_events)
+        heuristic = self._build_heuristic_micro_fields(dummy_trace, extracted)
+
+        # 构造正交默认产出
+        skill_desc = (user_instruction or heuristic["scene_summary"] or f"{kebab_id} 标准工作流").strip()[:120]
+        steps: list[str] = [
+            "Phase 1 (Extract): 先只读盘点输入上下文与目标文件边界，严禁篡改原始输入或构造模拟数据兜底",
+            "Phase 2 (Validate): 校验参数契约、路径规范与前置依赖状态",
+            "Phase 3 (Deliver): 执行幂等生成或变更，完成后校验输出产物",
+        ]
+        if heuristic["effective_commands"]:
+            steps.extend([f"参考实操命令：{cmd}" for cmd in heuristic["effective_commands"][:3]])
+
+        fact_rules: list[dict[str, str]] = []
+        if extracted["interventions"]:
+            fact_rules.append(
+                {
+                    "fact_key": f"skill.{kebab_id}.constraint",
+                    "fact_value": str(extracted["interventions"][0])[:200],
+                }
+            )
+        if user_instruction:
+            fact_rules.append(
+                {
+                    "fact_key": f"skill.{kebab_id}.scope_rule",
+                    "fact_value": user_instruction[:200],
+                }
+            )
+
+        micro_cases: list[dict[str, Any]] = []
+        if heuristic["error_signature"] or extracted["recoveries"]:
+            micro_cases.append(heuristic)
+
+        pipeline_code = self._build_safe_default_pipeline_py(kebab_id, skill_desc)
+
+        # 若轻算力模型可用，尝试正交三路智能分离
+        safe_events, _ = MemoryPolicyGuard.sanitize_payload(
+            {
+                "skill_id": kebab_id,
+                "user_instruction": user_instruction,
+                "recoveries": extracted["recoveries"][:4],
+                "interventions": extracted["interventions"][:4],
+                "steps": heuristic["effective_commands"],
+            }
+        )
+        llm_prompt = (
+            "请将以下执行上下文严格执行【正交双提纯】并输出 JSON（禁止输出多余说明文字）：\n"
+            "【正交原则】：通用流程进 skill_steps；私有路径/团队契约进 fact_rules；报错避坑进 micro_cases。\n"
+            "【安全红线】：pipeline_py 禁止调用 os.remove/shutil.rmtree/subprocess/eval/exec。\n"
+            'JSON 结构：\n'
+            '{"skill_description": "一句话技能描述", '
+            '"skill_steps": ["Phase 1...", "Phase 2...", "Phase 3..."], '
+            '"pipeline_py": "可选的合法 Python 三阶段脚本(仅用标准库且幂等)", '
+            '"fact_rules": [{"fact_key": "英文点分键名", "fact_value": "业务规则契约"}], '
+            '"micro_cases": [{"task_category": "bug_fix|tool_usage", "entity_tags": "...", '
+            '"error_signature": "...", "symptom_keywords": "...", "scene_summary": "...", '
+            '"root_cause": "...", "verified_solution": "..."}]}\n\n'
+            f"上下文：\n{json.dumps(safe_events, ensure_ascii=False)}"
+        )
+        llm_res = await self._invoke_light_json(
+            conversation_id=conversation_id,
+            system_prompt="你是正交知识工程提纯引擎，只返回合法 JSON。",
+            user_prompt=llm_prompt,
+            timeout=15.0,
+        )
+        if llm_res:
+            if llm_res.get("skill_description"):
+                skill_desc = _sanitize_text_val(str(llm_res["skill_description"]))[:160]
+            if isinstance(llm_res.get("skill_steps"), list) and llm_res["skill_steps"]:
+                steps = [_sanitize_text_val(str(s)) for s in llm_res["skill_steps"] if str(s).strip()][:8]
+            if isinstance(llm_res.get("fact_rules"), list):
+                for fr in llm_res["fact_rules"]:
+                    if isinstance(fr, dict) and fr.get("fact_key") and fr.get("fact_value"):
+                        fact_rules.append(
+                            {
+                                "fact_key": str(fr["fact_key"]).strip()[:80],
+                                "fact_value": str(fr["fact_value"]).strip()[:300],
+                            }
+                        )
+            if isinstance(llm_res.get("micro_cases"), list):
+                for mc in llm_res["micro_cases"]:
+                    if isinstance(mc, dict) and mc.get("verified_solution"):
+                        micro_cases.append(mc)
+            candidate_py = str(llm_res.get("pipeline_py") or "").strip()
+            if candidate_py and len(candidate_py) > 40:
+                syn_ok, _ = validate_syntax_before_write(".py", candidate_py)
+                if syn_ok:
+                    pipeline_code = candidate_py
+
+        # 1. 在临时 Staging 目录生成 Skill 包并执行 AST + SkillAuditor 安全门禁
+        safe_desc, _ = MemoryPolicyGuard.sanitize_text(skill_desc)
+        steps_md = "\n".join(f"{idx}. {MemoryPolicyGuard.sanitize_text(step)[0]}" for idx, step in enumerate(steps, 1))
+        skill_md_text = (
+            "---\n"
+            f"name: {kebab_id}\n"
+            f"description: {safe_desc}\n"
+            f"command: /{kebab_id}\n"
+            "version: 1.0.0\n"
+            "---\n\n"
+            f"# {kebab_id} 标准作业规范\n\n"
+            "## 执行门控流程 (Three-Stage Gate)\n\n"
+            f"{steps_md}\n\n"
+            "## 可执行流水线脚手架\n\n"
+            f"- 脚手架脚本：`scripts/pipeline.py`（支持 `--workspace` 与 `--dry-run` 参数）\n"
+        )
+
+        # 确保 pipeline_code 语法绝对正确，否则自动退回确定性安全模板
+        syn_ok, _ = validate_syntax_before_write(".py", pipeline_code)
+        if not syn_ok:
+            pipeline_code = self._build_safe_default_pipeline_py(kebab_id, safe_desc)
+
+        staging_dir = ws_path / ".agenthub" / ".staging_skills" / f"{kebab_id}_{uuid.uuid4().hex[:6]}"
+        target_skill_dir = ws_path / ".agenthub" / "skills" / kebab_id
+        try:
+            (staging_dir / "scripts").mkdir(parents=True, exist_ok=True)
+            (staging_dir / "SKILL.md").write_text(skill_md_text, encoding="utf-8")
+            (staging_dir / "scripts" / "pipeline.py").write_text(pipeline_code, encoding="utf-8")
+
+            audit_res = audit_skill_package(staging_dir)
+            if not audit_res.get("passed", False):
+                # 若是 LLM 生成的脚本触碰了敏感 AST 黑名单，替换为安全标准脚手架再审
+                fallback_py = self._build_safe_default_pipeline_py(kebab_id, safe_desc)
+                (staging_dir / "scripts" / "pipeline.py").write_text(fallback_py, encoding="utf-8")
+                audit_res = audit_skill_package(staging_dir)
+                if not audit_res.get("passed", False):
+                    return {
+                        "ok": False,
+                        "error": f"Skill 安全审计未通过: {audit_res.get('summary')}",
+                    }
+
+            target_skill_dir.parent.mkdir(parents=True, exist_ok=True)
+            if target_skill_dir.exists():
+                shutil.rmtree(target_skill_dir)
+            shutil.copytree(staging_dir, target_skill_dir)
+        finally:
+            if staging_dir.exists():
+                shutil.rmtree(staging_dir, ignore_errors=True)
+
+        # 2. 写入 L4 私有事实规则（严格对齐 FactManager.upsert_fact 异步契约）
+        facts_saved = 0
+        for fr in fact_rules[:6]:
+            fk, _ = MemoryPolicyGuard.sanitize_text(fr["fact_key"])
+            fv, _ = MemoryPolicyGuard.sanitize_text(fr["fact_value"])
+            if not fk or not fv:
+                continue
+            await fact_manager.upsert_fact(
+                fact_key=fk[:80],
+                fact_value=fv[:300],
+                workspace_id=workspace_id or "GLOBAL",
+                category="biz_rule",
+                source_type="explicit_cmd",
+                verified=True,
+            )
+            facts_saved += 1
+
+        # 3. 写入 L5 实战微经验案例
+        cases_saved = 0
+        for mc in micro_cases[:4]:
+            if self._detect_mock_antipattern(trace=dummy_trace, ledger_events=[], llm_data=mc):
+                continue
+            await episodic_experience_store.upsert_case(
+                workspace_id=workspace_id or "GLOBAL",
+                task_category=str(mc.get("task_category") or "tool_usage"),
+                entity_tags=str(mc.get("entity_tags") or kebab_id),
+                error_signature=str(mc.get("error_signature") or ""),
+                symptom_keywords=str(mc.get("symptom_keywords") or kebab_id),
+                scene_summary=str(mc.get("scene_summary") or safe_desc),
+                root_cause=str(mc.get("root_cause") or ""),
+                verified_solution=str(mc.get("verified_solution") or ""),
+                effective_commands=mc.get("effective_commands") or [],
+                origin_type="distill",
+                source_conversation_id=conversation_id,
+            )
+            cases_saved += 1
+
+        # 4. 0ms 热更新 Skill 注册缓存
+        skill_loader.invalidate_cache()
+        invalidate_skill_file_cache()
+
+        return {
+            "ok": True,
+            "skill_id": kebab_id,
+            "skill_dir": str(target_skill_dir),
+            "facts_saved": facts_saved,
+            "cases_saved": cases_saved,
+            "audit_summary": str(audit_res.get("summary") or "SAFE"),
+        }
+
+
+def _sanitize_text_val(raw: str) -> str:
+    """便捷提取脱敏后文本字符串。"""
+    clean, _ = MemoryPolicyGuard.sanitize_text(raw)
+    return clean.strip()
 
 
 class SkillExperienceService:

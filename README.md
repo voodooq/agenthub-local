@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.3.1-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.3.2-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,14 @@
 
 ## 🧭 版本演进总览
 
-### ⚡ v1.3.0（最新 v1.3.1）— 工程感知、精准代码手术刀与健壮性修复（Code Surgery & Git Checkpoint）
+### 🧠 v1.3.2（最新）— L5 静默实战微经验库、影子 Git 双回滚时光机与正交双提纯 (Episodic Memory & Shadow Rollback)
+- **L5 个人实战微经验引擎 (`EpisodicExperienceStore`)**：采用 SQLite `FTS5 trigram`（纯 Trigger 触发器自同步，消除重复索引计数）与**三路正交锚点（实体标签 + 报错特征码 + 口语同义词簇）**，支持中文 3-gram 滑窗与跨口语表达检索，结合当前工作区亲和度实现归一化匹配度计算与 `MemoryPolicyGuard` 全程敏感凭据脱敏。
+- **上下文分级注入与盘中报错急救 (`ContextBuilder` & `AgentRuntime`)**：Zone 3 严格在非无痕态按阈值分级注入（`>= 0.80` 强指令采纳、`0.65~0.80` 参考提示、`< 0.65` 彻底过滤零干扰）；工具执行遇到报错异常（`is_step_abnormal`）时即时检索 L5 历史避坑解法直接喂给下一步推理加速自愈。
+- **盘后静默复盘与闭环进化 (`ExperienceDistiller`)**：回合正常收尾时基于 `event_ledger` 自动静默提炼微经验（集成 `_detect_mock_antipattern` 反造假拦截与纯规则降级零 Token 兜底），并对当轮引用案例自动执行复用加权（`hit_count + 1`、`+0.03`）或失败降权（`fail_count + 1`、`-0.15`）达尔文淘汰机制。
+- **全会话影子 Git 双回滚时光机 (`ShadowCheckpointManager`)**：在 `<workspace>/.agenthub/shadow_git` 维护完全独立于用户原生 `.git` 的隔离镜像仓库（带工作区互斥异步锁、僵尸 `index.lock` 自动清理及附件/数据库目录强制保护），在写盘与终端命令前自动生成无感检查点，并级联绑定会话生命周期。
+- **0-Token 斜杠工作流指令集与正交双提纯 (`/ckpt` · `/rollback` · `/remember` · `/distill`)**：Pre-Turn 即时拦截斜杠管理命令；`/rollback` 原子回滚磁盘源码、草稿纸、SQLite 消息与行为账本并回推 `control/rollback_completed` SSE 事件同步刷新前端气泡；`/distill` 将实战轨迹正交分离写入 Skill（经 AST + `SkillAuditor` 过审）、L4 `FactManager` 与 L5 微经验库并 0ms 热加载。
+
+### ⚡ v1.3.0（包含 v1.3.1）— 工程感知、精准代码手术刀与健壮性修复（Code Surgery & Git Checkpoint）
 - **健壮性与兼容性修复（v1.3.1）**：
   - **仓储层方法名对齐与别名兼容**：修复工作区回滚 API 路由对 `WorkspaceRepository.get_by_id` 的调用，并在仓储层增设 `get_workspace_by_id` 别名映射，消除类型检查与属性不存在异常。
   - **静态分析与作用域安全**：对 `replace_in_file` 局域变量 `unified_diff`、`ok`、`syntax_ok` 实施前置初始化，确保在极端读盘异常或中断分支下变量 100% 明确绑定。
