@@ -64,6 +64,12 @@ class ArtifactOpenRequest(BaseModel):
     mode: Literal["launch", "reveal"] = Field("reveal", description="launch=系统默认应用直接打开; reveal=在文件夹中选中定位")
 
 
+class ArtifactRestoreSnapshotRequest(BaseModel):
+    workspace_id: str = Field(..., description="当前工作区 ID")
+    file_path: str = Field(..., description="目标主文件相对路径（如 output/xxx.xlsx）")
+    snapshot_path: str = Field(..., description="要还原的目标快照相对路径（如 output/.history/xxx_bak_...xlsx）")
+
+
 class SaveToDesktopRequest(BaseModel):
     """将工作区成果文件一键保存到系统桌面"""
     workspace_id: str = Field(default="default", description="当前工作区 ID")
@@ -306,8 +312,28 @@ async def _resolve_workspace_target_file(
 
         base_name = Path(rel_clean).name
         if base_name and base_name not in (".", ".."):
-            for folder in ("output", "reports", ".agenthub/attachments", "attachments"):
+            for folder in ("output", "reports", ".agenthub/attachments", "attachments", "output/output"):
                 sub_candidates.append((ws_root / folder / base_name).resolve())
+
+            # 智能模糊与去重后缀容错探测（例如处理 output/ 下带有重复后缀或单双层嵌套的交付物）
+            out_dir = ws_root / "output"
+            if out_dir.exists() and out_dir.is_dir():
+                stem = Path(base_name).stem.lower()
+                clean_stem = re.sub(r'[\(\)（）\-_—\s]', '', stem)
+                try:
+                    for entry in out_dir.rglob("*"):
+                        if entry.is_file() and entry.suffix.lower() == Path(base_name).suffix.lower():
+                            entry_stem = entry.stem.lower()
+                            entry_clean = re.sub(r'[\(\)（）\-_—\s]', '', entry_stem)
+                            if (
+                                clean_stem in entry_clean
+                                or entry_clean in clean_stem
+                                or entry_stem.startswith(stem[:12])
+                            ):
+                                sub_candidates.append(entry.resolve())
+                                break
+                except Exception:
+                    pass
 
         for cand in sub_candidates:
             if not _is_within_workspace(cand, ws_root):
@@ -555,6 +581,15 @@ async def verify_artifact_paths(req: ArtifactVerifyPathsRequest):
                 allow_directory=False,
             )
             st = target.stat()
+            snap_count = 0
+            hist_dir = target.parent / ".history"
+            if hist_dir.exists() and hist_dir.is_dir():
+                try:
+                    pattern = f"{target.stem}_bak_*{target.suffix}"
+                    snap_count = sum(1 for p in hist_dir.glob(pattern) if p.is_file())
+                except Exception:
+                    snap_count = 0
+
             results.append({
                 "raw_path": raw_p,
                 "exists": True,
@@ -563,6 +598,7 @@ async def verify_artifact_paths(req: ArtifactVerifyPathsRequest):
                 "file_name": target.name,
                 "file_size": st.st_size,
                 "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+                "snapshot_count": snap_count,
             })
         except (HTTPException, ValueError, OSError):
             results.append({
@@ -691,3 +727,99 @@ async def get_artifact_content(artifact_id: str):
     except Exception as exc:
         logger.error(f"读取资产文件内容异常: {exc}")
         raise HTTPException(status_code=500, detail=f"读取文件失败: {exc}")
+
+
+@router.get("/snapshots")
+async def list_artifact_snapshots(
+    workspace_id: str = Query(..., description="工作区 ID"),
+    file_path: str = Query(..., description="目标主文件路径（如 output/xxx.xlsx）"),
+):
+    """查询指定产出物在工作区 .history 目录中的所有历史快照版本。"""
+    source_file, ws_root, eff_ws_id, rel_path_posix = await _resolve_workspace_target_file(
+        workspace_id,
+        file_path,
+        allow_directory=False,
+    )
+    history_dir = source_file.parent / ".history"
+    if not history_dir.exists() or not history_dir.is_dir():
+        return {"workspace_id": eff_ws_id, "file_path": rel_path_posix, "snapshots": []}
+
+    stem = source_file.stem
+    ext = source_file.suffix
+    pattern = f"{stem}_bak_*{ext}"
+    snapshots: list[dict[str, Any]] = []
+
+    for bak_file in history_dir.glob(pattern):
+        if not bak_file.is_file():
+            continue
+        try:
+            st = bak_file.stat()
+            m = re.search(r"_bak_(\d{8})_(\d{6})", bak_file.name)
+            if m:
+                ds, ts = m.group(1), m.group(2)
+                time_display = f"{ds[:4]}-{ds[4:6]}-{ds[6:8]} {ts[:2]}:{ts[2:4]}:{ts[4:6]}"
+            else:
+                time_display = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M:%S")
+
+            rel_bak = bak_file.relative_to(ws_root).as_posix()
+            snapshots.append({
+                "snapshot_name": bak_file.name,
+                "snapshot_path": rel_bak,
+                "timestamp": time_display,
+                "file_size": st.st_size,
+                "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+            })
+        except Exception:
+            continue
+
+    snapshots.sort(key=lambda x: x["mtime"], reverse=True)
+    return {"workspace_id": eff_ws_id, "file_path": rel_path_posix, "snapshots": snapshots}
+
+
+@router.post("/restore-snapshot")
+async def restore_artifact_snapshot(req: ArtifactRestoreSnapshotRequest):
+    """将指定的历史快照安全还原为主文件（原主文件自动打最新快照备份）。"""
+    source_file, ws_root, eff_ws_id, rel_path_posix = await _resolve_workspace_target_file(
+        req.workspace_id,
+        req.file_path,
+        allow_directory=False,
+    )
+    snapshot_file, _, _, rel_bak_posix = await _resolve_workspace_target_file(
+        req.workspace_id,
+        req.snapshot_path,
+        allow_directory=False,
+    )
+    if not snapshot_file.exists() or not snapshot_file.is_file():
+        raise HTTPException(status_code=404, detail="指定的历史快照文件不存在")
+
+    history_dir = source_file.parent / ".history"
+    history_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. 还原前先为主文件当前状态自动打一个新快照
+    if source_file.exists() and source_file.is_file() and source_file.stat().st_size > 0:
+        stem = source_file.stem
+        ext = source_file.suffix
+        curr_ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        pre_restore_bak = history_dir / f"{stem}_bak_{curr_ts}{ext}"
+        try:
+            shutil.copy2(source_file, pre_restore_bak)
+        except Exception as e:
+            logger.warning(f"还原前自动备份当前主文件失败: {e}")
+
+    # 2. 将快照文件复制覆盖回主文件
+    try:
+        shutil.copy2(snapshot_file, source_file)
+    except Exception as e:
+        logger.error(f"还原快照失败: {snapshot_file} -> {source_file}: {e}")
+        raise HTTPException(status_code=500, detail=f"还原快照文件失败: {e}")
+
+    st = source_file.stat()
+    return {
+        "success": True,
+        "workspace_id": eff_ws_id,
+        "file_path": rel_path_posix,
+        "restored_from": rel_bak_posix,
+        "file_size": st.st_size,
+        "mtime": datetime.fromtimestamp(st.st_mtime).isoformat(timespec="seconds"),
+        "message": f"已成功将 {source_file.name} 还原为快照版本 ({snapshot_file.name})",
+    }

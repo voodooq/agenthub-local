@@ -14,6 +14,7 @@ export interface VerifiedFileEntry {
   fileName: string;
   fileSize: number;
   mtime: string | null;
+  snapshotCount?: number;
 }
 
 const VERIFY_BATCH_LIMIT = 50;
@@ -113,6 +114,7 @@ export function useVerifiedWorkspacePaths(
               fileName: String(rawItem?.file_name || ''),
               fileSize: Number(rawItem?.file_size || 0),
               mtime: rawItem?.mtime ? String(rawItem.mtime) : null,
+              snapshotCount: Number(rawItem?.snapshot_count || 0),
             };
             const primaryKey = normalizeFileVerifyKey(rawPath);
             if (primaryKey) {

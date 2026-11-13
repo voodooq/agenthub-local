@@ -3174,32 +3174,11 @@ export default function WorkbenchPage() {
                         (() => {
                           const rawTrimmed = (msg.content || '').trim();
 
-                          // 过程步骤分支：轻量无边框流水点阵，杜绝嵌套折叠与沉重大黑框
+                          // 过程步骤分支：轻量无边框自然呈现，保留标准 Markdown 结构与代码块，杜绝强拆散落段落
                           if (isProcessStep) {
                             if (!rawTrimmed) return null;
-                            const hasCodeBlock = rawTrimmed.includes('```');
-                            if (!hasCodeBlock) {
-                              const lines = rawTrimmed
-                                .split('\n')
-                                .map((l) => l.trim())
-                                .filter(Boolean);
-                              return (
-                                <div className="text-[11.5px] leading-relaxed text-muted-foreground/85 font-mono space-y-1 py-0.5 px-0.5 max-w-[94%] md:max-w-[88%]">
-                                  {lines.map((line, lIdx) => {
-                                    const cleanLine = line.replace(/^[•\-\*]\s*/, '');
-                                    return (
-                                      <div key={lIdx} className="flex items-start space-x-1.5 animate-fade-in">
-                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/60 shrink-0 mt-1.5"></span>
-                                        <span className="break-anywhere text-foreground/85 font-sans">{cleanLine}</span>
-                                      </div>
-                                    );
-                                  })}
-                                </div>
-                              );
-                            }
-
                             return (
-                              <div className="max-w-[94%] md:max-w-[88%] text-[11.5px] text-foreground/90 py-0.5 px-1">
+                              <div className="max-w-[94%] md:max-w-[88%] text-[12.5px] text-foreground/85 py-0.5 px-1">
                                 <AssistantMarkdownMessage
                                   content={rawTrimmed}
                                   isStreaming={isCurrentStreamingMsg}

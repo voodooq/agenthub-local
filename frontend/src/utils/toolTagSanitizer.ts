@@ -143,6 +143,9 @@ export function sanitizeAssistantContent(
     .replace(DIRECT_TOOL_UNCLOSED_TAIL_PATTERN, '')
     .replace(/<\/?tool_call\b[^>]*>/gi, '')
     .replace(/\[\/?tool_call\b[^\]]*\]/gi, '')
+    .replace(/<\/?tool_result\b[^>]*>/gi, '')
+    .replace(/\[\/?tool_result\b[^\]]*\]/gi, '')
+    .replace(/<\/?function_results?\b[^>]*>/gi, '')
     .replace(/<\/?slot\b[^>]*>/gi, '')
     .replace(/<\/?tool_code\b[^>]*>/gi, '')
     .replace(/\[调用工具:\s*[^\]]+\]/gi, '');
