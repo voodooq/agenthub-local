@@ -5,7 +5,12 @@ import json
 import uuid
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
-from ...schema.conversation_schema import ConversationCreate, ConversationUpdate, MessageResponse
+from ...schema.conversation_schema import (
+    BranchConversationRequest,
+    ConversationCreate,
+    ConversationUpdate,
+    MessageResponse,
+)
 from ...repository.conversation_repository import ConversationRepository
 from ...repository.message_repository import MessageRepository
 from ...repository.token_usage_repository import TokenUsageRepository
@@ -25,9 +30,15 @@ class AgentStateUpdateRequest(BaseModel):
 
 
 @router.get("")
-async def list_conversations(workspace_id: str | None = None):
-    """获取会话列表，支持按工作区过滤"""
-    return await ConversationRepository.get_all(workspace_id=workspace_id)
+async def list_conversations(
+    workspace_id: str | None = None,
+    all_workspaces: bool = Query(default=False, description="是否返回全部工作区下的会话供左侧项目树渲染"),
+):
+    """获取会话列表，支持按工作区过滤或返回全量工作区会话"""
+    return await ConversationRepository.get_all(
+        workspace_id=workspace_id,
+        include_all_workspaces=all_workspaces,
+    )
 
 
 @router.post("")
@@ -69,8 +80,28 @@ async def get_conversation_detail(conv_id: str):
         "working_memory": wm,
         "current_cwd": conv.current_cwd,
         "workspace_id": getattr(conv, "workspace_id", "default"),
+        "parent_conversation_id": getattr(conv, "parent_conversation_id", None),
+        "branched_from_message_id": getattr(conv, "branched_from_message_id", None),
+        "branched_from_turn_id": getattr(conv, "branched_from_turn_id", None),
         "updated_at": conv.updated_at,
     }
+
+
+@router.post("/{conv_id}/branch")
+async def branch_conversation(conv_id: str, req: BranchConversationRequest | None = None):
+    """从当前会话的指定消息或轮次创建分叉分支会话"""
+    body = req or BranchConversationRequest()
+    new_conv_id = str(uuid.uuid4())
+    branched = await ConversationRepository.branch_conversation(
+        source_conv_id=conv_id,
+        new_conv_id=new_conv_id,
+        up_to_message_id=body.up_to_message_id,
+        up_to_turn_id=body.up_to_turn_id,
+        custom_title=body.title,
+    )
+    if not branched:
+        raise HTTPException(status_code=404, detail="源会话不存在，无法创建分支")
+    return branched
 
 
 @router.put("/{conv_id}/agent-state")

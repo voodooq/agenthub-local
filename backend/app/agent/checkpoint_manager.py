@@ -473,3 +473,161 @@ class ShadowCheckpointManager:
             "restore_message": restore_msg,
         }
 
+    @classmethod
+    def _revert_files_from_shadow_sync(
+        cls,
+        workspace_root: Path,
+        target_hash: str,
+        file_paths: list[str],
+    ) -> dict[str, Any]:
+        """同步从影子 Git 指定 commit 恢复一组文件，若为新增文件则安全删除。"""
+        cls._ensure_shadow_repo_sync(workspace_root)
+        reverted_files: list[str] = []
+        deleted_new_files: list[str] = []
+        failed_files: list[str] = []
+
+        if not file_paths:
+            cls._run_git_sync(workspace_root, ["checkout", target_hash, "--", "."])
+            return {
+                "ok": True,
+                "reverted_files": ["."],
+                "deleted_new_files": [],
+                "failed_files": [],
+                "git_hash": target_hash,
+            }
+
+        ws_resolved = workspace_root.resolve()
+        for raw_fp in file_paths:
+            clean_fp = str(raw_fp or "").strip()
+            if not clean_fp:
+                continue
+            cand = Path(clean_fp)
+            if not cand.is_absolute():
+                cand = (ws_resolved / clean_fp).resolve()
+            else:
+                cand = cand.resolve()
+
+            try:
+                rel_posix = cand.relative_to(ws_resolved).as_posix()
+            except ValueError:
+                failed_files.append(clean_fp)
+                continue
+
+            ls_res = cls._run_git_sync(
+                workspace_root,
+                ["ls-tree", "-r", "--name-only", target_hash, "--", rel_posix],
+                check=False,
+            )
+            exists_in_snapshot = ls_res.returncode == 0 and bool((ls_res.stdout or "").strip())
+
+            if exists_in_snapshot:
+                co_res = cls._run_git_sync(
+                    workspace_root,
+                    ["checkout", target_hash, "--", rel_posix],
+                    check=False,
+                )
+                if co_res.returncode == 0:
+                    reverted_files.append(rel_posix)
+                else:
+                    failed_files.append(rel_posix)
+            else:
+                # NOTE: 该文件不在检查点快照中，说明属于本轮新建文件，撤销修改时将其安全移除
+                try:
+                    if cand.exists() and cand.is_file():
+                        cand.unlink()
+                    deleted_new_files.append(rel_posix)
+                except OSError:
+                    failed_files.append(rel_posix)
+
+        return {
+            "ok": len(failed_files) == 0 and (len(reverted_files) > 0 or len(deleted_new_files) > 0),
+            "reverted_files": reverted_files,
+            "deleted_new_files": deleted_new_files,
+            "failed_files": failed_files,
+            "git_hash": target_hash,
+        }
+
+    @classmethod
+    async def revert_files_from_shadow(
+        cls,
+        workspace_root: str,
+        *,
+        conversation_id: str | None = None,
+        file_paths: list[str] | None = None,
+        ckpt_id: str | None = None,
+        turn_id: int | None = None,
+    ) -> dict[str, Any]:
+        """在不回退会话消息历史的前提下，利用影子仓库对指定文件列表执行局部撤销修改。"""
+        ws_path = Path(workspace_root).resolve()
+        shadow_git_dir = cls._shadow_git_dir(ws_path)
+        if not shadow_git_dir.exists():
+            return {"ok": False, "error": "工作区尚无影子仓库快照"}
+
+        target_hash: str | None = None
+        async with db_manager.get_connection() as conn:
+            if ckpt_id:
+                cur = await conn.execute(
+                    "SELECT git_hash FROM session_checkpoints WHERE ckpt_id = ? LIMIT 1",
+                    (ckpt_id.strip(),),
+                )
+                row = await cur.fetchone()
+                if row:
+                    target_hash = str(row["git_hash"])
+            elif conversation_id and turn_id is not None:
+                # 取该轮次之前（turn_id < current_turn_id）最近的一个检查点，保证撤销后回到本轮开始前状态
+                cur = await conn.execute(
+                    """
+                    SELECT git_hash FROM session_checkpoints
+                    WHERE conversation_id = ? AND turn_id < ?
+                    ORDER BY turn_id DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (conversation_id, int(turn_id)),
+                )
+                row = await cur.fetchone()
+                if not row:
+                    cur = await conn.execute(
+                        """
+                        SELECT git_hash FROM session_checkpoints
+                        WHERE conversation_id = ?
+                        ORDER BY created_at DESC, rowid DESC
+                        LIMIT 1
+                        """,
+                        (conversation_id,),
+                    )
+                    row = await cur.fetchone()
+                if row:
+                    target_hash = str(row["git_hash"])
+            elif conversation_id:
+                cur = await conn.execute(
+                    """
+                    SELECT git_hash FROM session_checkpoints
+                    WHERE conversation_id = ?
+                    ORDER BY created_at DESC, rowid DESC
+                    LIMIT 1
+                    """,
+                    (conversation_id,),
+                )
+                row = await cur.fetchone()
+                if row:
+                    target_hash = str(row["git_hash"])
+
+        if not target_hash:
+            head_res = await asyncio.to_thread(
+                cls._run_git_sync, ws_path, ["rev-parse", "--verify", "HEAD"], check=False
+            )
+            if head_res.returncode == 0 and (head_res.stdout or "").strip():
+                target_hash = head_res.stdout.strip()
+
+        if not target_hash:
+            return {"ok": False, "error": "未找到可用于撤销修改的影子快照"}
+
+        lock = cls._get_workspace_lock(str(ws_path))
+        async with lock:
+            return await asyncio.to_thread(
+                cls._revert_files_from_shadow_sync,
+                ws_path,
+                target_hash,
+                file_paths or [],
+            )
+

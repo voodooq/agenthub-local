@@ -63,6 +63,9 @@ class ConversationModel:
     collapse_anchor_turn_id: int = 0
     anchored_summary: str = ""
     collapsed_tokens_saved: int = 0
+    parent_conversation_id: str | None = None
+    branched_from_message_id: int | None = None
+    branched_from_turn_id: int | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> "ConversationModel":

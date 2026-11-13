@@ -194,56 +194,56 @@ function SingleEventCard({ ev }: { ev: ToolExecutionCardItem }) {
 
   return (
     <div
-      className={`rounded-xl border overflow-hidden text-xs transition-all ${
+      className={`rounded-lg border overflow-hidden text-[11px] transition-all ${
         isRunning
-          ? 'border-emerald-500/40 bg-surface-100/90 shadow-sm'
+          ? 'border-emerald-500/35 bg-surface-100/70 shadow-sm'
           : isDenied
-            ? 'border-rose-500/35 bg-surface-100/85'
-            : 'border-border/75 bg-surface-100/75 hover:border-border transition-colors'
+            ? 'border-rose-500/30 bg-surface-100/60'
+            : 'border-border/40 bg-surface-100/40 dark:bg-zinc-900/35 hover:border-border/60 transition-colors'
       }`}
     >
       {/* 卡片头部行 */}
-      <div className="px-3.5 py-2 flex items-center justify-between border-b border-border/40 bg-surface-200/40 dark:bg-surface-200/20">
-        <div className="flex items-center space-x-2 min-w-0 flex-1">
-          <div className={`p-1 rounded-md shrink-0 ${meta.badgeBg}`}>
-            <Icon className={`w-3.5 h-3.5 ${meta.colorClass}`} />
+      <div className="px-2.5 py-1.5 flex items-center justify-between border-b border-border/30 bg-surface-200/25">
+        <div className="flex items-center space-x-1.5 min-w-0 flex-1">
+          <div className={`p-0.5 rounded shrink-0 ${meta.badgeBg}`}>
+            <Icon className={`w-3 h-3 ${meta.colorClass}`} />
           </div>
-          <span className="font-semibold text-foreground text-xs shrink-0">
+          <span className="font-semibold text-foreground text-[11px] shrink-0">
             {meta.label}
           </span>
           {meta.target ? (
-            <code className="font-mono text-[11px] px-1.5 py-0.5 rounded bg-surface-300/40 dark:bg-surface-300/20 text-foreground truncate max-w-[280px] sm:max-w-[420px]">
+            <code className="font-mono text-[10.5px] px-1 py-0.2 rounded bg-surface-300/30 dark:bg-surface-300/15 text-foreground truncate max-w-[260px] sm:max-w-[400px]">
               {meta.target}
             </code>
           ) : (
-            <span className="font-mono text-[11px] text-muted-foreground truncate">
+            <span className="font-mono text-[10.5px] text-muted-foreground truncate">
               {meta.actionText}
             </span>
           )}
         </div>
 
         {/* 右侧状态指示器 */}
-        <div className="flex items-center space-x-1.5 shrink-0 ml-2">
+        <div className="flex items-center space-x-1 shrink-0 ml-1.5">
           {isRunning ? (
             <div className="flex items-center space-x-1 text-emerald-600 dark:text-emerald-400 font-medium">
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-              <span className="text-[11px]">执行中...</span>
+              <Loader2 className="w-3 h-3 animate-spin" />
+              <span className="text-[10.5px]">执行中...</span>
             </div>
           ) : isDenied ? (
             <div className="flex items-center space-x-1 text-rose-500 font-medium">
-              <ShieldAlert className="w-3.5 h-3.5" />
-              <span className="text-[11px]">已拦截</span>
+              <ShieldAlert className="w-3 h-3" />
+              <span className="text-[10.5px]">已拦截</span>
             </div>
           ) : isCompleted ? (
-            <div className="flex items-center space-x-1.5 text-muted-foreground">
+            <div className="flex items-center space-x-1 text-muted-foreground">
               {typeof ev.exit_code === 'number' && ev.exit_code !== 0 ? (
-                <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30">
+                <span className="text-[9.5px] font-mono px-1 py-0.1 rounded bg-rose-500/15 text-rose-600 dark:text-rose-400 border border-rose-500/30">
                   退出码: {ev.exit_code}
                 </span>
               ) : (
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />
+                <CheckCircle2 className="w-3 h-3 text-emerald-500" />
               )}
-              <span className="text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">完成</span>
+              <span className="text-[10.5px] text-emerald-600 dark:text-emerald-400 font-medium">完成</span>
             </div>
           ) : null}
         </div>
@@ -251,9 +251,9 @@ function SingleEventCard({ ev }: { ev: ToolExecutionCardItem }) {
 
       {/* 命令行区 (如果存在独立终端命令) */}
       {ev.command && (meta.type === 'command' || ev.command !== meta.target) && (
-        <div className="px-3.5 py-1.5 bg-black/85 dark:bg-zinc-950/90 text-zinc-200 font-mono text-[11px] flex items-center justify-between border-b border-zinc-800/80">
-          <div className="flex items-center space-x-2 truncate flex-1 min-w-0 mr-2">
-            <span className="text-emerald-400 font-bold select-none">$</span>
+        <div className="px-2.5 py-1 bg-black/65 dark:bg-zinc-950/70 text-zinc-200 font-mono text-[10.5px] flex items-center justify-between border-b border-zinc-800/50">
+          <div className="flex items-center space-x-1.5 truncate flex-1 min-w-0 mr-1.5">
+            <span className="text-emerald-400 font-bold select-none text-[10px]">$</span>
             <span className="truncate select-all text-zinc-100">{ev.command}</span>
           </div>
           <button
@@ -280,15 +280,15 @@ function SingleEventCard({ ev }: { ev: ToolExecutionCardItem }) {
 
       {/* 输出内容呈现区 */}
       {rawOutput && !ev.unified_diff && !rawOutput.includes('```diff\n') ? (
-        <div className="px-3.5 py-2 bg-black/80 dark:bg-zinc-950/80 text-zinc-300 font-mono text-[11px] leading-relaxed">
-          <div className="whitespace-pre-wrap break-all max-h-56 overflow-y-auto selection:bg-emerald-500/30">
+        <div className="px-2.5 py-1.5 bg-black/60 dark:bg-zinc-950/60 text-zinc-300 font-mono text-[10.5px] leading-relaxed">
+          <div className="whitespace-pre-wrap break-all max-h-48 overflow-y-auto selection:bg-emerald-500/30">
             {visibleOutput}
           </div>
           {isLongOutput && (
             <button
               type="button"
               onClick={() => setIsOutputExpanded(!isOutputExpanded)}
-              className="mt-1.5 text-[10px] text-emerald-400 hover:text-emerald-300 inline-flex items-center space-x-1 font-sans font-medium"
+              className="mt-1 text-[10px] text-emerald-400 hover:text-emerald-300 inline-flex items-center space-x-1 font-sans font-medium"
             >
               {isOutputExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
               <span>{isOutputExpanded ? '收起输出' : `展开完整输出 (共 ${outputLines.length} 行)`}</span>
@@ -296,7 +296,7 @@ function SingleEventCard({ ev }: { ev: ToolExecutionCardItem }) {
           )}
         </div>
       ) : ev.compressed && meta.type !== 'command' && !ev.unified_diff && !rawOutput.includes('```diff\n') ? (
-        <div className="px-3.5 py-1.5 bg-surface-100/60 text-[11px] text-muted-foreground font-mono">
+        <div className="px-2.5 py-1 bg-surface-100/50 text-[10.5px] text-muted-foreground font-mono">
           {ev.compressed}
         </div>
       ) : null}
@@ -321,7 +321,7 @@ export function InlineToolCard({ events, onApprove }: InlineToolCardProps) {
   const [isGroupExpanded, setIsGroupExpanded] = useState<boolean>(runningCount > 0);
 
   return (
-    <div className="w-full max-w-[94%] md:max-w-[88%] space-y-2 my-1">
+    <div className="w-full max-w-[94%] md:max-w-[88%] space-y-1.5 my-0.5">
       {/* 1. 待人工审批项：独立显眼高危警告卡片 */}
       {pendingApprovals.map((ev) => (
         <div
@@ -377,32 +377,32 @@ export function InlineToolCard({ events, onApprove }: InlineToolCardProps) {
       ) : regularEvents.length > 1 ? (
         // 多步场景：总览汇总栏 + 可展开分步明细列表
         <div
-          className={`rounded-xl border overflow-hidden text-xs transition-all ${
+          className={`rounded-lg border overflow-hidden text-[11.5px] transition-all ${
             runningCount > 0
-              ? 'border-emerald-500/35 bg-surface-100/90'
+              ? 'border-emerald-500/30 bg-surface-100/70'
               : deniedCount > 0
-                ? 'border-rose-500/30 bg-surface-100/85'
-                : 'border-border/75 bg-surface-100/75'
+                ? 'border-rose-500/25 bg-surface-100/60'
+                : 'border-border/40 bg-surface-100/40 dark:bg-zinc-900/35 hover:border-border/55'
           }`}
         >
           {/* 顶部总览栏 */}
           <button
             type="button"
             onClick={() => setIsGroupExpanded((prev) => !prev)}
-            className="w-full px-3.5 py-2 flex items-center justify-between hover:bg-surface-200/50 transition-colors text-left"
+            className="w-full px-3 py-1.5 flex items-center justify-between hover:bg-surface-200/40 transition-colors text-left"
           >
-            <div className="flex items-center space-x-2 min-w-0 flex-1">
+            <div className="flex items-center space-x-1.5 min-w-0 flex-1">
               {runningCount > 0 ? (
-                <Loader2 className="w-3.5 h-3.5 text-emerald-500 animate-spin shrink-0" />
+                <Loader2 className="w-3 h-3 text-emerald-500 animate-spin shrink-0" />
               ) : deniedCount > 0 ? (
-                <ShieldAlert className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                <ShieldAlert className="w-3 h-3 text-rose-500 shrink-0" />
               ) : (
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+                <CheckCircle2 className="w-3 h-3 text-emerald-500 shrink-0" />
               )}
 
-              <span className="font-medium text-foreground truncate">
+              <span className="font-medium text-foreground truncate text-[11.5px]">
                 执行步骤详情 · 共 {regularEvents.length} 步
-                <span className="text-muted-foreground font-mono ml-2">
+                <span className="text-muted-foreground font-mono ml-1.5 text-[10.5px]">
                   (完成 {completedCount}
                   {runningCount > 0 ? ` · 运行 ${runningCount}` : ''}
                   {deniedCount > 0 ? ` · 拦截 ${deniedCount}` : ''})
@@ -410,21 +410,21 @@ export function InlineToolCard({ events, onApprove }: InlineToolCardProps) {
               </span>
             </div>
 
-            <div className="flex items-center space-x-1.5 shrink-0 ml-2 text-muted-foreground">
-              <span className="text-[11px] font-medium">
+            <div className="flex items-center space-x-1 shrink-0 ml-1.5 text-muted-foreground">
+              <span className="text-[10.5px] font-medium">
                 {isGroupExpanded ? '收起步骤' : `展开步骤 (${regularEvents.length})`}
               </span>
-              {isGroupExpanded ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+              {isGroupExpanded ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
             </div>
           </button>
 
           {/* 展开后的分步清单 */}
           {isGroupExpanded && (
-            <div className="border-t border-border/50 divide-y divide-border/40 p-2 space-y-2 bg-background/30 max-h-[420px] overflow-y-auto">
+            <div className="border-t border-border/30 divide-y divide-border/25 p-1.5 space-y-1.5 bg-background/20 max-h-[400px] overflow-y-auto">
               {regularEvents.map((ev, stepIdx) => (
-                <div key={ev.call_id || stepIdx} className="space-y-1">
-                  <div className="flex items-center space-x-2 px-1 text-[11px] text-muted-foreground font-mono">
-                    <span className="px-1.5 py-0.2 rounded bg-surface-200 text-muted-foreground/80 font-bold">
+                <div key={ev.call_id || stepIdx} className="space-y-0.5">
+                  <div className="flex items-center space-x-1.5 px-1 text-[10px] text-muted-foreground font-mono">
+                    <span className="px-1.5 py-0.1 rounded bg-surface-200/60 text-muted-foreground/90 font-medium">
                       步骤 #{stepIdx + 1}
                     </span>
                   </div>

@@ -310,7 +310,7 @@ export function SessionTimelineRail({ messages, containerRef }: SessionTimelineR
     setHoveredNode(null);
   };
 
-  // 只要有 2 条及以上用户提问，就始终在左侧常驻显示
+  // 只要有 2 条及以上用户提问，就始终在右侧边缘常驻显示
   if (userTurns.length < 2) {
     return null;
   }
@@ -318,7 +318,7 @@ export function SessionTimelineRail({ messages, containerRef }: SessionTimelineR
   return (
     <div
       ref={railContainerRef}
-      className="absolute left-2 top-10 bottom-16 z-30 hidden md:flex flex-col items-center select-none group/rail"
+      className="absolute right-3 top-14 bottom-16 z-30 hidden md:flex flex-col items-center select-none group/rail"
       style={{ width: '28px' }}
       title="会话快速定位轨（鼠标移至节点预览，点击快速跳转）"
     >
@@ -374,12 +374,12 @@ export function SessionTimelineRail({ messages, containerRef }: SessionTimelineR
         })}
       </div>
 
-      {/* 悬停详情浮窗 (Popover)：紧贴小圆点右侧，点击浮窗本身也能跳转 */}
+      {/* 悬停详情浮窗 (Popover)：紧贴小圆点左侧，点击浮窗本身也能跳转 */}
       {hoveredNode && (
         <div
           onMouseEnter={handlePopoverMouseEnter}
           onMouseLeave={handlePopoverMouseLeave}
-          className="absolute left-8 z-50 w-72 rounded-xl bg-surface-100/95 dark:bg-surface-200/95 text-foreground border border-border shadow-2xl backdrop-blur-xl p-3 text-xs animate-scale-in origin-left transition-all duration-150 pointer-events-auto"
+          className="absolute right-8 z-50 w-72 rounded-xl bg-surface-100/95 dark:bg-surface-200/95 text-foreground border border-border shadow-2xl backdrop-blur-xl p-3 text-xs animate-scale-in origin-right transition-all duration-150 pointer-events-auto"
           style={{
             top: Math.max(0, Math.min(window.innerHeight - 360, hoveredNode.anchorTop - 28)),
           }}

@@ -4,6 +4,7 @@
 """
 import os
 import re
+import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -61,6 +62,37 @@ class ArtifactVerifyPathsRequest(BaseModel):
 
 class ArtifactOpenRequest(BaseModel):
     mode: Literal["launch", "reveal"] = Field("reveal", description="launch=系统默认应用直接打开; reveal=在文件夹中选中定位")
+
+
+class SaveToDesktopRequest(BaseModel):
+    """将工作区成果文件一键保存到系统桌面"""
+    workspace_id: str = Field(default="default", description="当前工作区 ID")
+    file_path: str = Field(..., min_length=1, description="工作区相对路径、绝对路径或 file:// URI")
+    overwrite: bool = Field(default=False, description="目标桌面存在同名文件时是否直接覆盖")
+
+
+def _resolve_system_desktop_dir() -> Path:
+    """跨平台解析当前登录用户的桌面目录路径（兼容 Windows OneDrive 重定向场景）。"""
+    if os.name == "nt":
+        # 优先读取 Windows Shell User Shell Folders 注册表，精准识别 OneDrive 或自定义桌面路径
+        try:
+            import winreg  # type: ignore
+            with winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r"Software\Microsoft\Windows\CurrentVersion\Explorer\User Shell Folders",
+            ) as key:
+                desktop_val, _ = winreg.QueryValueEx(key, "Desktop")
+                expanded = os.path.expandvars(str(desktop_val))
+                cand = Path(expanded)
+                if cand.exists() or cand.parent.exists():
+                    cand.mkdir(parents=True, exist_ok=True)
+                    return cand
+        except Exception:
+            pass
+
+    home_desktop = Path.home() / "Desktop"
+    home_desktop.mkdir(parents=True, exist_ok=True)
+    return home_desktop
 
 
 def _launch_with_default_app(target: Path) -> None:
@@ -560,6 +592,45 @@ async def register_artifact(req: ArtifactRegisterRequest):
         summary=req.summary,
     )
     return item
+
+
+@router.post("/save-to-desktop")
+async def save_artifact_to_desktop(req: SaveToDesktopRequest):
+    """将工作区内生成的成果文件安全复制到用户系统桌面"""
+    source_file, _, eff_ws_id, rel_path_posix = await _resolve_workspace_target_file(
+        req.workspace_id,
+        req.file_path,
+        allow_directory=False,
+    )
+    if not source_file.exists() or not source_file.is_file():
+        raise HTTPException(status_code=404, detail="目标文件不存在，无法保存到桌面")
+
+    desktop_dir = _resolve_system_desktop_dir()
+    dest_file = desktop_dir / source_file.name
+    if dest_file.exists() and not req.overwrite:
+        stem = source_file.stem
+        suffix = source_file.suffix
+        counter = 1
+        while dest_file.exists():
+            dest_file = desktop_dir / f"{stem} ({counter}){suffix}"
+            counter += 1
+
+    try:
+        shutil.copy2(source_file, dest_file)
+        file_size = dest_file.stat().st_size
+    except Exception as exc:
+        logger.error(f"保存成果到桌面失败 ({source_file} -> {dest_file}): {exc}")
+        raise HTTPException(status_code=500, detail=f"保存到桌面失败: {exc}")
+
+    return {
+        "success": True,
+        "workspace_id": eff_ws_id,
+        "source_rel_path": rel_path_posix,
+        "file_name": dest_file.name,
+        "desktop_path": str(dest_file),
+        "file_size": file_size,
+        "message": f"已保存到桌面：{dest_file.name}",
+    }
 
 
 @router.post("/{artifact_id}/open")

@@ -19,6 +19,13 @@ class ConversationUpdate(BaseModel):
     workspace_id: str | None = None
 
 
+class BranchConversationRequest(BaseModel):
+    """从指定消息或轮次分叉新建会话"""
+    up_to_message_id: int | None = Field(default=None, description="截止克隆的消息 ID")
+    up_to_turn_id: int | None = Field(default=None, description="截止克隆的轮次 turn_id")
+    title: str | None = Field(default=None, description="自定义分支会话标题")
+
+
 class MessageResponse(BaseModel):
     """消息详情响应"""
     id: int
@@ -47,3 +54,6 @@ class ConversationResponse(BaseModel):
     created_at: str
     updated_at: str
     message_count: int = 0
+    parent_conversation_id: str | None = None
+    branched_from_message_id: int | None = None
+    branched_from_turn_id: int | None = None

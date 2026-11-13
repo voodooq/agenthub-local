@@ -18,7 +18,8 @@ from ...schema.workspace_schema import (
 )
 from ...core.logging_config import logger
 from ...core.runtime_paths import get_silent_subprocess_kwargs
-from ...tools.git_checkpoint import restore_shadow_snapshot
+from ...tools.git_checkpoint import restore_shadow_snapshot, is_file_in_tree_snapshot
+from ...agent.checkpoint_manager import ShadowCheckpointManager
 
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
 
@@ -197,36 +198,121 @@ async def open_workspace_in_explorer(ws_id: str, subpath: str | None = Query(Non
 
 
 class RollbackRequest(BaseModel):
-    snapshot_tree_hash: str
+    snapshot_tree_hash: Optional[str] = None
     file_path: Optional[str] = None
+    file_paths: Optional[list[str]] = None
+    created_files: Optional[list[str]] = None
+    conversation_id: Optional[str] = None
+    turn_id: Optional[int] = None
+    ckpt_id: Optional[str] = None
 
 
 @router.post("/{workspace_id}/rollback")
 async def rollback_workspace_snapshot(workspace_id: str, req: RollbackRequest):
-    """一键将工作区单文件或整体回滚到指定 Git Shadow 快照"""
+    """一键将工作区单文件、多文件或整轮变更无损撤销至修改前状态（支持 .git 树快照与影子仓库双引擎）"""
     ws = await WorkspaceRepository.get_by_id(workspace_id)
     if not ws or not ws.get("root_path"):
         raise HTTPException(status_code=404, detail="未找到工作区物理路径")
 
     root_path = Path(ws["root_path"]).resolve()
-    success = restore_shadow_snapshot(
-        root_path,
-        tree_hash=req.snapshot_tree_hash,
-        target_file=req.file_path,
-    )
-    if not success:
-        raise HTTPException(
-            status_code=400,
-            detail=f"撤销修改失败：无法将文件恢复到快照 {req.snapshot_tree_hash[:8]}",
-        )
+    target_files: list[str] = []
+    if req.file_paths:
+        target_files.extend([str(p).strip() for p in req.file_paths if str(p).strip()])
+    if req.file_path and str(req.file_path).strip() not in target_files:
+        target_files.append(str(req.file_path).strip())
 
-    logger.info(f"工作区 [{workspace_id}] 文件已无损回滚: {req.file_path or '全部文件'}")
-    return {
-        "success": True,
-        "message": f"已成功将 {req.file_path or '工作区'} 恢复至快照状态",
-        "snapshot_tree_hash": req.snapshot_tree_hash,
-        "file_path": req.file_path,
-    }
+    # 1. 优先尝试原生 .git tree snapshot 回滚
+    if req.snapshot_tree_hash and (root_path / ".git").exists():
+        if not target_files:
+            if restore_shadow_snapshot(root_path, tree_hash=req.snapshot_tree_hash, target_file=None):
+                return {
+                    "success": True,
+                    "message": "已成功将工作区恢复至快照状态",
+                    "snapshot_tree_hash": req.snapshot_tree_hash,
+                    "reverted_files": ["."],
+                    "deleted_new_files": [],
+                }
+        else:
+            reverted_git: list[str] = []
+            deleted_git: list[str] = []
+            all_ok = True
+            for fp in target_files:
+                cand = Path(fp)
+                if not cand.is_absolute():
+                    cand = (root_path / fp).resolve()
+                else:
+                    cand = cand.resolve()
+                try:
+                    rel_posix = cand.relative_to(root_path).as_posix()
+                except ValueError:
+                    all_ok = False
+                    continue
+
+                if is_file_in_tree_snapshot(root_path, req.snapshot_tree_hash, rel_posix):
+                    if restore_shadow_snapshot(root_path, tree_hash=req.snapshot_tree_hash, target_file=rel_posix):
+                        reverted_git.append(rel_posix)
+                    else:
+                        all_ok = False
+                elif req.created_files and (fp in req.created_files or rel_posix in req.created_files):
+                    if cand.exists() and cand.is_file():
+                        cand.unlink()
+                    deleted_git.append(rel_posix)
+                else:
+                    all_ok = False
+            if all_ok and (reverted_git or deleted_git):
+                return {
+                    "success": True,
+                    "message": f"已撤销 {len(reverted_git) + len(deleted_git)} 个文件的修改",
+                    "snapshot_tree_hash": req.snapshot_tree_hash,
+                    "reverted_files": reverted_git,
+                    "deleted_new_files": deleted_git,
+                }
+
+    # 2. 影子仓库 (.agenthub/shadow_git) 双态还原引擎（适用于普通文件夹或沙盒工作区）
+    shadow_res = await ShadowCheckpointManager.revert_files_from_shadow(
+        str(root_path),
+        conversation_id=req.conversation_id,
+        file_paths=target_files or None,
+        ckpt_id=req.ckpt_id,
+        turn_id=req.turn_id,
+    )
+    if shadow_res.get("ok"):
+        rev = shadow_res.get("reverted_files", [])
+        dels = shadow_res.get("deleted_new_files", [])
+        return {
+            "success": True,
+            "message": f"已撤销 {len(rev) + len(dels)} 个文件的修改",
+            "git_hash": shadow_res.get("git_hash"),
+            "reverted_files": rev,
+            "deleted_new_files": dels,
+        }
+
+    # 3. 兜底清理：若无快照但明确指定了本轮新创建的 created_files，安全删除这些新建文件
+    if req.created_files:
+        deleted_only: list[str] = []
+        for raw_cf in req.created_files:
+            cand = Path(raw_cf)
+            if not cand.is_absolute():
+                cand = (root_path / raw_cf).resolve()
+            else:
+                cand = cand.resolve()
+            try:
+                rel_posix = cand.relative_to(root_path).as_posix()
+            except ValueError:
+                continue
+            if cand.exists() and cand.is_file():
+                cand.unlink()
+                deleted_only.append(rel_posix)
+        if deleted_only:
+            return {
+                "success": True,
+                "message": f"已撤销并清理 {len(deleted_only)} 个本轮新建文件",
+                "reverted_files": [],
+                "deleted_new_files": deleted_only,
+            }
+
+    err_detail = shadow_res.get("error") or "未找到可用的历史快照或无可撤销文件"
+    raise HTTPException(status_code=400, detail=f"撤销修改失败：{err_detail}")
 
 
 

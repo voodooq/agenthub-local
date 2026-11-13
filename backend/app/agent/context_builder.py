@@ -199,12 +199,19 @@ class ContextBuilder:
                 "   - 若遇到预期输入文件缺失、路径报错、Sheet 名称不匹配或解析异常，**绝对严禁私自生成任何 Mock / 模拟 / 测试样例输入文件来“兜底”完成分析**！编写的数据处理脚本必须坚持 Fail-Fast 原则（缺失即抛 `FileNotFoundError` 并以非零码退出），严禁内嵌“不存在就造默认测试数据继续运行”的伪分支；\n"
                 "   - 确系真实文件缺失或无法解析时，必须立即停机并向用户如实报告预期路径与缺失原因。\n"
                 "7. 【⚡ 极速执行与代码规范（强制遵循，违者终止任务）】：\n"
+                "   - 【Skill 封装脚本与成熟工具优先复用（严禁重复造轮子）】：当激活的 Skill、工作区或参考案例中已存在封装好的 Python/Shell 算子或流水线脚本时（如 `scripts/*.py`、`tools/*.py`），【必须优先直接执行该既有脚本】（通过 `run_skill_tool` 或 `execute_local_command python <脚本绝对路径> [参数]`），绝对严禁盲目编写新的临时 `.py` 脚本来替代它！只有当运行已有脚本遇到报错、缺失必要子功能且无法通过参数调节时，才允许基于错误堆栈对既有脚本进行最小化修复或编写补充适配逻辑；\n"
                 "   - 【已有文件修改首选 replace_in_file】：修改已有代码或脚本时，【必须优先且强烈推荐使用 `replace_in_file`】提交标准的 `SEARCH/REPLACE` 补丁，绝对严禁对数百行的已有代码调用 `write_local_file` 全量重写！对于超长文件先调用 `get_repo_skeleton` 获取结构大纲或用 `read_local_file` 切片读取！\n"
                 "   - 【单步多工具并行调用】：若一个步骤需要执行多项操作（如读取多个文件、写入多个配置或串行多个命令），你必须在【同一次回复】中连续并列输出多个 `<tool_call>` 标签一次性并发提交系统执行，严禁一次只调用一个工具来回拉扯 5~10 轮！\n"
                 "   - 【原地修改文件，严禁创建副本】：必须原地覆盖原有文件名（如 `render.py`），绝对严禁创建类似 `render_v1.py`、`render_v2.py`、`render_fixed.py` 等衍生副本，违者判定为严重的代码污染；\n"
                 "   - 【大文件落盘首选 write_local_file】：创建或重写完整代码、HTML 游戏等较长文本文件时，必须直接调用 `write_local_file` 落盘，严禁将数千上万字符的源码通过 `python -c \"...\"` 塞入单条 `execute_local_command` 命令行中；\n"
                 "   - 【Python 一次性诊断】：面对数据探索或环境探测，禁止写一个脚本看 Sheet1、再写一个脚本看 Sheet2、再看列名；必须在一个紧凑的 Python 脚本中一次性打印出所有元信息与关键样例，一步完成诊断！\n"
-                "   - 【过程调用与最终交付分离】：在需要调用 `<tool_call>` 的执行步骤中，仅可输出简短行动旁白，严禁在同一条工具调用步骤里提前撰写最终完整交付报告；也严禁自行编造 `[终端/工具输出]:` 或 `[Gemini]:` 标签；请等全部工具执行并返回真实结果后，再在最终无工具步骤独立向用户汇报完整成果。"
+                "   - 【过程调用与最终交付分离】：在需要调用 `<tool_call>` 的执行步骤中，仅可输出简短行动旁白，严禁在同一条工具调用步骤里提前撰写最终完整交付报告；也严禁自行编造 `[终端/工具输出]:` 或 `[Gemini]:` 标签；请等全部工具执行并返回真实结果后，再在最终无工具步骤独立向用户汇报完整成果。\n"
+                "8. 【⚡ 最新上传附件数据作为唯一起始基准（严禁沿用旧记忆与历史数据）】:\n"
+                "   - **最新附件绝对优先原则**：若当前轮次用户附带上传了新附件，系统必须默认且强制以【该最新上传的附件】作为本次任务的核心基准输入数据（Base Data Source）；\n"
+                "   - **严格限定旧数据场景**：仅当用户在【未上传新附件的前提下】明确发出「用我之前的数据再次进行分析 / 基于上一次的数据继续」等特指指令时，才允许基于历史会话中提取的旧数据或旧附件推进；\n"
+                "   - **严禁数据滞后与记忆幻觉**：只要用户本轮上传了新附件，历史轮次中针对旧文件提取的中间数据、统计结果以及 Working Memory（工作记忆）中记录的上一份文件摘要【在此刻一律全部失效作废】！严禁将旧附件的数据当成本次分析的基础；\n"
+                "   - **脚本复用路径必须重新对准**：若复用既有 Python 处理脚本（如 `process_*.py` / `generate_*.py`），在执行前【必须检查并更新脚本中的输入文件路径】，确保其读取的是本轮最新附件（位于 `./attachments/` 或 `.agenthub/attachments/` 下最新落盘的物理文件），严禁直接执行内部硬编码了历史旧文件名或旧路径的脚本！\n"
+                "   - **全量重新解析与推演**：必须针对最新上传的附件重新执行数据提取、列名核验与业务逻辑推演，确保所有生成的图表、代码、排程甘特图和报告结论 100% 来源于最新附件。"
             )
             if tools:
                 protocol_prompt = ToolProtocolAdapter.build_xml_protocol_prompt(tools)
@@ -481,6 +488,29 @@ class ContextBuilder:
                 )
                 zone3_parts.append("\n\n".join(combo_sections))
 
+            # 自动探测当前最新轮次用户是否附带了新上传附件，以及用户是否显式要求使用历史旧数据
+            latest_uploaded_att_names: list[str] = []
+            try:
+                latest_user_msgs = await MessageRepository.get_by_conversation(conversation_id, limit=5, from_latest=True)
+                for lu_m in latest_user_msgs:
+                    if lu_m.role == "user" and lu_m.content:
+                        m_anc = attachment_service.ANCHOR_PATTERN.search(lu_m.content)
+                        if m_anc:
+                            parsed_anc = json.loads(m_anc.group(1))
+                            if isinstance(parsed_anc, list) and parsed_anc:
+                                latest_uploaded_att_names = [
+                                    str(item.get("name") or "附件") for item in parsed_anc if item.get("name")
+                                ]
+                        break
+            except Exception as scan_att_err:
+                logger.debug(f"[ContextBuilder] 检测最新用户附件跳过: {scan_att_err}")
+
+            user_q_lower = (user_query or "").lower()
+            user_explicitly_requests_prior = any(
+                k in user_q_lower
+                for k in ["之前的数据", "历史数据", "上一次的数据", "上次的数据", "上次传的", "之前传的", "原有数据", "沿用之前", "基于上一次"]
+            )
+
             # 当前工作区沙盒真实附件清单
             effective_ws_root = current_cwd
             if not effective_ws_root and workspace_id:
@@ -498,9 +528,15 @@ class ContextBuilder:
                         15,
                     )
                     if sandbox_atts:
-                        att_lines = [
-                            "### 📎 当前工作区沙盒已有真实附件清单（只读原料区，严禁写入或伪造）:"
-                        ]
+                        if latest_uploaded_att_names and not user_explicitly_requests_prior:
+                            att_header = (
+                                f"### 📎 当前工作区沙盒已有真实附件清单（⚡ 本轮最新上传基准附件: `{', '.join(latest_uploaded_att_names)}`，所有分析推演必须以此最新文件为唯一输入原料）:"
+                            )
+                        else:
+                            att_header = (
+                                "### 📎 当前工作区沙盒已有真实附件清单（只读原料区，若未指定且无新上传则以按修改时间倒序排列的第一份为默认输入）:"
+                            )
+                        att_lines = [att_header]
                         for item in sandbox_atts:
                             att_lines.append(
                                 f"- `{item['rel_path']}` ({item['size_str']}) — 绝对路径: `{item['file_path']}`"
@@ -516,11 +552,24 @@ class ContextBuilder:
 
             # Working Memory 工作记忆草稿纸
             if scene_mode == "agent" and working_memory and working_memory != {}:
+                if latest_uploaded_att_names and not user_explicitly_requests_prior:
+                    wm_prefix = (
+                        "### 📌 当前多步任务工作草稿纸 (Working Memory Scratchpad)：\n"
+                        f"⚠️【最新附件基准变更警示】：检测到用户最新上传了全新附件（`{', '.join(latest_uploaded_att_names)}`）！\n"
+                        "以下此前记录的工作记忆中，凡涉及历史旧文件的提取字段、数据统计与中间结论已全面作废！请严格以最新附件为准重新执行真实读取并覆盖更新工作记忆；切勿将旧数据当成本次分析的基础！\n"
+                        "任务取得新进展时请调用 `update_working_memory` 更新，任务彻底完成时传 `task_completed=true` 清空：\n"
+                    )
+                else:
+                    wm_prefix = (
+                        "### 📌 当前多步任务工作草稿纸 (Working Memory Scratchpad)：\n"
+                        "以下为你在此前步骤中记录的关键状态，请直接参考，切勿重复询问用户已知信息；"
+                        "任务取得新进展时请调用 `update_working_memory` 更新，任务彻底完成时传 `task_completed=true` 清空：\n"
+                    )
+                zone3_parts.append(f"{wm_prefix}```json\n{json.dumps(working_memory, ensure_ascii=False, indent=2)}\n```")
+
+            if not latest_uploaded_att_names and user_explicitly_requests_prior:
                 zone3_parts.append(
-                    "### 📌 当前多步任务工作草稿纸 (Working Memory Scratchpad)：\n"
-                    "以下为你在此前步骤中记录的关键状态，请直接参考，切勿重复询问用户已知信息；"
-                    "任务取得新进展时请调用 `update_working_memory` 更新，任务彻底完成时传 `task_completed=true` 清空：\n"
-                    f"```json\n{json.dumps(working_memory, ensure_ascii=False, indent=2)}\n```"
+                    "### 💡 数据基准指引：用户明确指示使用历史已有数据或上一轮分析结果，请基于历史对话与工作记忆中的数据推进后续分析。"
                 )
 
             tail_injection_prompt = "\n\n".join(p for p in zone3_parts if p and p.strip())

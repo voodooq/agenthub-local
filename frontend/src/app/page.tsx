@@ -28,6 +28,10 @@ import {
   Minimize2,
   ChevronDown,
   ChevronRight,
+  GitBranch,
+  ArrowUpRight,
+  FolderGit2,
+  Box,
 } from 'lucide-react';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
@@ -63,6 +67,8 @@ import { TokenStatsModal } from '@/components/TokenStatsModal';
 import { SessionTimelineRail } from '@/components/SessionTimelineRail';
 
 import { GeneratedFileChip } from '@/components/GeneratedFileChip';
+import { EditedFilesCard } from '@/components/EditedFilesCard';
+import { DeliverablesCard } from '@/components/DeliverablesCard';
 import { useVerifiedWorkspacePaths } from '@/hooks/useVerifiedWorkspacePaths';
 import { buildActiveSystemOverride } from '@/utils/personalityHelper';
 import { generateScenarioThinking } from '@/utils/scenarioThinking';
@@ -87,6 +93,7 @@ import {
   ConfirmedFactItem,
   MemoryFactItem,
   TurnTokenMetrics,
+  EditedFileItem,
 } from '@/types';
 import { apiFetch, getAccessToken } from '@/utils/apiClient';
 import {
@@ -141,6 +148,13 @@ export default function WorkbenchPage() {
     reason: StreamAbortReason;
   }
   const activeStreamMetaRef = useRef<ActiveStreamMeta | null>(null);
+  // 按会话隔离的后台活跃流索引，确保会话切换时不中断后台推理与工具执行
+  const activeStreamsMapRef = useRef<Map<string, ActiveStreamMeta>>(new Map());
+  // 会话消息内存缓存：用于多会话平滑切换保活，彻底杜绝切出会话导致过程数据丢失
+  const convMessagesCacheRef = useRef<Map<string, Message[]>>(new Map());
+  // 会话长程任务 HUD 状态缓存
+  const convLoopCacheRef = useRef<Map<string, TaskLoopResponse | null>>(new Map());
+
   const lastStreamErrorNoticeRef = useRef<{ convId: string; message: string } | null>(null);
   const lastStatusPillSigRef = useRef<string>('');
   const lastActiveLoopSigRef = useRef<string>('');
@@ -181,30 +195,115 @@ export default function WorkbenchPage() {
     []
   );
   const stopActiveStream = useCallback(
-    async (reason: 'user' | 'switch' = 'user') => {
-      const meta = activeStreamMetaRef.current;
+    async (reason: 'user' | 'switch' = 'user', targetConvId?: string) => {
+      // 关键：切换视图或会话时绝不中断后台执行，确保生成与过程状态完整保活
+      if (reason === 'switch') {
+        return;
+      }
+      const cid = targetConvId || activeConvIdRef.current;
+      const meta = (cid && activeStreamsMapRef.current.get(cid)) || activeStreamMetaRef.current;
       if (!meta && !isStreamingRef.current) return;
       if (meta) {
         meta.reason = reason;
         meta.controller.abort();
       }
-      const targetConvId = meta?.convId || activeConvIdRef.current;
-      if (targetConvId) {
+      if (cid) {
+        activeStreamsMapRef.current.delete(cid);
         try {
           await apiFetch('/api/v1/chat/stop', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ conversation_id: targetConvId }),
+            body: JSON.stringify({ conversation_id: cid }),
           });
         } catch {
           // 忽略停止接口的瞬时网络波动，前端已先中止读取连接
         }
+      }
+      if (!cid || cid === activeConvIdRef.current) {
+        setIsStreaming(false);
+        isStreamingRef.current = false;
       }
       if (reason === 'user') {
         showFloatingToast('已发起停止生成请求', 'warning', 2500);
       }
     },
     [showFloatingToast]
+  );
+
+  // 聊天流视口滚动容器与平滑置底控制器
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const scrollRafRef = useRef<number | null>(null);
+  const scrollForceRef = useRef<boolean>(false);
+  const shouldForceScrollOnLoadRef = useRef<boolean>(false);
+  const forceScrollUntilRef = useRef<number>(0);
+
+  // 强制全量贴底：当切换聊天窗口或加载会话数据时，锁定时间窗口并多阶段触发置底，确保定位到最新最底部内容
+  const forceScrollChatToBottom = useCallback(() => {
+    forceScrollUntilRef.current = Date.now() + 650;
+    shouldForceScrollOnLoadRef.current = true;
+    scrollForceRef.current = true;
+
+    const performScroll = () => {
+      const container = messagesContainerRef.current;
+      if (container) {
+        container.scrollTop = container.scrollHeight;
+      }
+      messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
+    };
+
+    performScroll();
+    requestAnimationFrame(performScroll);
+    setTimeout(performScroll, 30);
+    setTimeout(performScroll, 80);
+    setTimeout(performScroll, 160);
+    setTimeout(performScroll, 300);
+    setTimeout(performScroll, 500);
+  }, []);
+
+  // 会话平滑切换：保活原会话内存与过程状态，恢复目标会话最新进度
+  const switchConversation = useCallback(
+    (targetId: string | null) => {
+      // 1. 保活当前离开会话的内存状态
+      const currentCid = activeConvIdRef.current;
+      if (currentCid) {
+        convMessagesCacheRef.current.set(currentCid, messages);
+        convLoopCacheRef.current.set(currentCid, activeLoop);
+      }
+
+      // 2. 切换当前会话指针与主枢纽
+      activeConvIdRef.current = targetId;
+      setActiveConvId(targetId);
+      setActiveNavHub('chat');
+      lastStreamErrorNoticeRef.current = null;
+      lastActiveLoopSigRef.current = 'null';
+
+      // 3. 若为新建空会话
+      if (!targetId) {
+        setActiveLoop(null);
+        setMessages([]);
+        setIsStreaming(false);
+        isStreamingRef.current = false;
+        return;
+      }
+
+      // 4. 同步目标会话的流式运行态
+      const isTargetStreaming = activeStreamsMapRef.current.has(targetId);
+      setIsStreaming(isTargetStreaming);
+      isStreamingRef.current = isTargetStreaming;
+
+      // 5. 恢复目标会话的长程任务 HUD
+      const cachedLoop = convLoopCacheRef.current.get(targetId) || null;
+      setActiveLoop(cachedLoop);
+
+      // 6. 优先从内存缓存中恢复目标会话的完整过程数据（包含生成中的步骤、思考与工具卡片）
+      if (convMessagesCacheRef.current.has(targetId)) {
+        setMessages(convMessagesCacheRef.current.get(targetId)!);
+      }
+      // 关键体验保障：切换聊天窗口后立即锁定置底，确保第一时间看到最新最下面的对话内容
+      forceScrollChatToBottom();
+    },
+    [messages, activeLoop, forceScrollChatToBottom]
   );
   const [workMode, setWorkMode] = useState<WorkMode>('dev');
   const [isHudOpen, setIsHudOpen] = useState(false);
@@ -250,11 +349,6 @@ export default function WorkbenchPage() {
   const [sceneMode, setSceneMode] = useState<SceneMode>('agent');
   const [incognito, setIncognito] = useState<boolean>(false);
   const [workingMemory, setWorkingMemory] = useState<Record<string, any>>({});
-  // 控制超长 ReAct 过程步骤文字折叠/展开的局部状态映射
-  const [expandedProcessMsgKeys, setExpandedProcessMsgKeys] = useState<Record<string, boolean>>({});
-  const toggleProcessMsgExpanded = useCallback((msgKey: string) => {
-    setExpandedProcessMsgKeys((prev) => ({ ...prev, [msgKey]: !prev[msgKey] }));
-  }, []);
 
   // v1.1.2 执行策略与交互对齐状态
   const [executionStrategy, setExecutionStrategy] = useState<ExecutionStrategy>('direct');
@@ -382,18 +476,15 @@ export default function WorkbenchPage() {
     type: 'html' | 'mermaid' | 'code' | 'image';
   }>({ isOpen: false, title: '', content: '', type: 'code' });
 
-  const messagesContainerRef = useRef<HTMLDivElement>(null);
-  const messagesEndRef = useRef<HTMLDivElement>(null);
-  const scrollRafRef = useRef<number | null>(null);
-  const scrollForceRef = useRef<boolean>(false);
-  const shouldForceScrollOnLoadRef = useRef<boolean>(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingJumpTargetRef = useRef<{ convId: string; messageId?: number } | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<number | null>(null);
   const highlightTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const scrollToBottom = useCallback((force = false) => {
-    scrollForceRef.current = scrollForceRef.current || force;
+    const isWithinForceWindow = Date.now() < forceScrollUntilRef.current;
+    const shouldForceEffective = force || scrollForceRef.current || isWithinForceWindow;
+    scrollForceRef.current = shouldForceEffective;
     if (scrollRafRef.current !== null) return;
     scrollRafRef.current = requestAnimationFrame(() => {
       const shouldForce = scrollForceRef.current;
@@ -403,6 +494,7 @@ export default function WorkbenchPage() {
       if (container) {
         const distanceFromBottom =
           container.scrollHeight - container.scrollTop - container.clientHeight;
+        // 若在切换会话的置底锁定期内，或显式要求置底，则无条件滚动到底部
         if (!shouldForce && distanceFromBottom > 160) {
           return;
         }
@@ -412,6 +504,22 @@ export default function WorkbenchPage() {
       messagesEndRef.current?.scrollIntoView({ behavior: 'auto' });
     });
   }, []);
+
+  // 监听容器内容高度变化：在会话切换锁定期内，无论异步渲染多少图表/代码块，始终动态贴底
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    const observer = new ResizeObserver(() => {
+      if (Date.now() < forceScrollUntilRef.current) {
+        container.scrollTop = container.scrollHeight;
+      }
+    });
+    observer.observe(container);
+    if (container.firstElementChild) {
+      observer.observe(container.firstElementChild);
+    }
+    return () => observer.disconnect();
+  }, [activeConvId]);
 
   useEffect(() => {
     return () => {
@@ -458,7 +566,8 @@ export default function WorkbenchPage() {
         pendingJumpTargetRef.current = null;
       }
     }
-    const shouldForce = shouldForceScrollOnLoadRef.current;
+    const isWithinForceWindow = Date.now() < forceScrollUntilRef.current;
+    const shouldForce = shouldForceScrollOnLoadRef.current || isWithinForceWindow;
     shouldForceScrollOnLoadRef.current = false;
     scrollToBottom(shouldForce);
   }, [messages, scrollToBottom]);
@@ -571,11 +680,9 @@ export default function WorkbenchPage() {
     }
   };
 
-  const fetchConversations = async (wsId?: string) => {
+  const fetchConversations = async () => {
     try {
-      const targetWsId = wsId !== undefined ? wsId : activeWorkspaceId;
-      const url = targetWsId ? `/api/v1/conversations?workspace_id=${targetWsId}` : '/api/v1/conversations';
-      const res = await apiFetch(url);
+      const res = await apiFetch('/api/v1/conversations?all_workspaces=true');
       if (res.ok) {
         const data = await res.json();
         setConversations(data);
@@ -785,8 +892,55 @@ export default function WorkbenchPage() {
     requestAnimationFrame(() => textareaRef.current?.focus());
   }, []);
 
+  // 顶部输入栏归拢：模式与策略下拉 / 独立思考深度下拉
+  const [isStrategyMenuOpen, setIsStrategyMenuOpen] = useState(false);
+  const [isThinkingDropdownOpen, setIsThinkingDropdownOpen] = useState(false);
+  const strategyDropdownRef = useRef<HTMLDivElement>(null);
+  const thinkingDropdownRef = useRef<HTMLDivElement>(null);
+
   useEffect(() => {
-    fetchConversations(activeWorkspaceId);
+    const handleOutsideDropdown = (e: MouseEvent) => {
+      if (strategyDropdownRef.current && !strategyDropdownRef.current.contains(e.target as Node)) {
+        setIsStrategyMenuOpen(false);
+      }
+      if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
+        setIsThinkingDropdownOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideDropdown);
+    return () => document.removeEventListener('mousedown', handleOutsideDropdown);
+  }, []);
+
+  // 从任意消息或轮次创建多版本分支会话
+  const handleBranchConversation = useCallback(
+    async (upToMessageId?: number, upToTurnId?: number) => {
+      if (!activeConvId) return;
+      try {
+        const res = await apiFetch(`/api/v1/conversations/${activeConvId}/branch`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            up_to_message_id: upToMessageId ?? null,
+            up_to_turn_id: upToTurnId ?? null,
+          }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok || !data?.id) {
+          showFloatingToast(data?.detail || '创建分支会话失败', 'error', 3600);
+          return;
+        }
+        await fetchConversations();
+        switchConversation(data.id);
+        showFloatingToast(`已创建分支会话：${data.title}`, 'success', 3800);
+      } catch (err: any) {
+        showFloatingToast(err?.message || '创建分支会话异常', 'error', 3600);
+      }
+    },
+    [activeConvId, showFloatingToast, switchConversation]
+  );
+
+  useEffect(() => {
+    fetchConversations();
     const curr = workspaces.find((w) => w.id === activeWorkspaceId);
     if (curr) {
       setWorkspacePath(curr.root_path);
@@ -907,12 +1061,14 @@ export default function WorkbenchPage() {
             content: pendingErrNotice.message,
           });
         }
+        convMessagesCacheRef.current.set(cid, normalizedMerged);
         setMessages(normalizedMerged);
+        forceScrollChatToBottom();
       }
     } catch (e) {
       console.warn('获取消息失败:', e);
     }
-  }, [activeConvId]);
+  }, [activeConvId, forceScrollChatToBottom]);
 
   useEffect(() => {
     if (!activeConvId) {
@@ -921,14 +1077,15 @@ export default function WorkbenchPage() {
       return;
     }
 
-    // 关键防冲刷保护：若当前正在流式接收新会话的消息，绝不能拉取未写完的后端空记录覆盖当前正在渲染的内容！
-    if (isStreamingRef.current) {
+    // 关键防冲刷保护：若目标会话正在流式接收中，绝不能拉取未写完的后端空记录覆盖当前正在渲染的内容！
+    if (activeConvId && activeStreamsMapRef.current.has(activeConvId)) {
+      forceScrollChatToBottom();
       return;
     }
 
-    shouldForceScrollOnLoadRef.current = true;
+    forceScrollChatToBottom();
     fetchMessagesAndState();
-  }, [activeConvId, fetchMessagesAndState]);
+  }, [activeConvId, fetchMessagesAndState, forceScrollChatToBottom]);
 
   const handleSelectSearchResult = useCallback(
     async (result: SearchResult) => {
@@ -963,13 +1120,10 @@ export default function WorkbenchPage() {
           }
         }
       } else {
-        void stopActiveStream('switch');
-        lastStreamErrorNoticeRef.current = null;
-        activeConvIdRef.current = result.conversation_id;
-        setActiveConvId(result.conversation_id);
+        switchConversation(result.conversation_id);
       }
     },
-    [activeWorkspaceId, activeConvId, fetchMessagesAndState, messages, stopActiveStream]
+    [activeWorkspaceId, activeConvId, fetchMessagesAndState, messages, switchConversation]
   );
 
   const handleSwitchSceneMode = async (nextMode: SceneMode) => {
@@ -1212,7 +1366,13 @@ export default function WorkbenchPage() {
     };
     const getAbortReason = (): StreamAbortReason => streamMeta.reason;
     activeStreamMetaRef.current = streamMeta;
+    if (activeConvId) {
+      activeStreamsMapRef.current.set(activeConvId, streamMeta);
+    }
     lastStreamErrorNoticeRef.current = null;
+
+    let boundConvId = activeConvId;
+    const initialBaseMsgs = (boundConvId && convMessagesCacheRef.current.get(boundConvId)) || messages;
 
     const tempUserMsg: Message = {
       id: Date.now(),
@@ -1231,8 +1391,23 @@ export default function WorkbenchPage() {
       executed_by_account: statusPill?.active_account_name,
     };
 
-    setMessages((prev) => [...prev, tempUserMsg, tempAssistantMsg]);
+    let currentConvMessages: Message[] = [...initialBaseMsgs, tempUserMsg, tempAssistantMsg];
+    if (boundConvId) {
+      convMessagesCacheRef.current.set(boundConvId, currentConvMessages);
+    }
+    setMessages(currentConvMessages);
     scrollToBottom(true);
+
+    const updateStreamMessages = (updater: (prev: Message[]) => Message[]) => {
+      currentConvMessages = updater(currentConvMessages);
+      const targetCid = boundConvId || effectiveConvId || activeConvId;
+      if (targetCid) {
+        convMessagesCacheRef.current.set(targetCid, currentConvMessages);
+      }
+      if (activeConvIdRef.current === targetCid || (!activeConvIdRef.current && !targetCid)) {
+        setMessages(currentConvMessages);
+      }
+    };
 
     const isExecuteUnlock = Boolean(
       (approvedStepsForRequest && approvedStepsForRequest.length > 0) ||
@@ -1427,11 +1602,17 @@ export default function WorkbenchPage() {
               } catch { }
             }
             // 关键：收到会话初始化事件，立即绑定 conversation_id，防止后续生成重复会话并保证继承上下文记忆
-            if (parsed.conversation_id && getAbortReason() !== 'switch') {
-              effectiveConvId = parsed.conversation_id;
-              streamMeta.convId = parsed.conversation_id;
-              activeConvIdRef.current = parsed.conversation_id;
-              setActiveConvId(parsed.conversation_id);
+            if (parsed.conversation_id) {
+              const newCid = parsed.conversation_id;
+              effectiveConvId = newCid;
+              boundConvId = newCid;
+              streamMeta.convId = newCid;
+              activeStreamsMapRef.current.set(newCid, streamMeta);
+              convMessagesCacheRef.current.set(newCid, currentConvMessages);
+              if (activeConvIdRef.current === null || activeConvIdRef.current === newCid) {
+                activeConvIdRef.current = newCid;
+                setActiveConvId(newCid);
+              }
               fetchConversations();
             }
           } else if (parsed.type === 'start') {
@@ -1441,7 +1622,7 @@ export default function WorkbenchPage() {
               currentStreamStepIndex = parsed.step_index;
               partialText = '';
               partialThinking = '';
-              setMessages((prev) => {
+              updateStreamMessages((prev) => {
                 const updated = [...prev];
                 const prevLast = updated[updated.length - 1];
                 const canReusePrevEmptyStep =
@@ -1492,7 +1673,7 @@ export default function WorkbenchPage() {
                 return updated;
               });
             } else {
-              setMessages((prev) => {
+              updateStreamMessages((prev) => {
                 const updated = [...prev];
                 const last = updated[updated.length - 1];
                 if (last && last.role === 'model') {
@@ -1510,7 +1691,7 @@ export default function WorkbenchPage() {
             if (effectiveConvId) {
               lastStreamFactRefsRef.current = { convId: effectiveConvId, facts: incomingFacts };
             }
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1519,7 +1700,7 @@ export default function WorkbenchPage() {
               return updated;
             });
           } else if (parsed.type === 'memory_refs') {
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1531,14 +1712,16 @@ export default function WorkbenchPage() {
             setWorkingMemory(parsed.working_memory || {});
           } else if (parsed.type === 'loop_step') {
             const evtConvId = parsed.conversation_id || effectiveConvId || activeConvId;
-            if (!evtConvId || evtConvId !== activeConvIdRef.current) return;
             const nextStatus = parsed.status ?? 'executing';
             if (nextStatus === 'idle') {
               lastActiveLoopSigRef.current = 'null';
-              setActiveLoop(null);
+              if (evtConvId) convLoopCacheRef.current.delete(evtConvId);
+              if (evtConvId === activeConvIdRef.current) {
+                setActiveLoop(null);
+              }
               return;
             }
-            setActiveLoop((prev) => {
+            const updateLoopFn = (prev: TaskLoopResponse | null): TaskLoopResponse => {
               const effStatus = parsed.status ?? prev?.loop_status ?? 'executing';
               const nextPendingApproval =
                 'pending_approval_call' in parsed
@@ -1550,7 +1733,7 @@ export default function WorkbenchPage() {
                 return {
                   id: parsed.loop_id,
                   workspace_id: activeWorkspaceId || 'default',
-                  conversation_id: evtConvId,
+                  conversation_id: evtConvId || '',
                   goal_prompt: rawPrompt,
                   scratchpad_md: parsed.scratchpad_md,
                   loop_status: effStatus,
@@ -1567,17 +1750,22 @@ export default function WorkbenchPage() {
               return {
                 ...prev,
                 id: parsed.loop_id ?? prev.id,
-                conversation_id: evtConvId,
+                conversation_id: evtConvId || prev.conversation_id,
                 current_iteration: parsed.iteration ?? prev.current_iteration,
                 loop_status: effStatus,
                 pending_approval_call: nextPendingApproval,
                 scratchpad_md: parsed.scratchpad_md ?? prev.scratchpad_md,
               };
-            });
+            };
+            const currentLoop = (evtConvId && convLoopCacheRef.current.get(evtConvId)) || activeLoop;
+            const updatedLoop = updateLoopFn(currentLoop);
+            if (evtConvId) convLoopCacheRef.current.set(evtConvId, updatedLoop);
+            if (evtConvId === activeConvIdRef.current) {
+              setActiveLoop(updatedLoop);
+            }
           } else if (parsed.type === 'loop_completed') {
             const evtConvId = parsed.conversation_id || effectiveConvId || activeConvId;
-            if (!evtConvId || evtConvId !== activeConvIdRef.current) return;
-            setActiveLoop((prev) => {
+            const updateCompletedFn = (prev: TaskLoopResponse | null): TaskLoopResponse | null => {
               const nextDistillable =
                 typeof parsed.distillable === 'boolean'
                   ? parsed.distillable
@@ -1591,7 +1779,7 @@ export default function WorkbenchPage() {
                 return {
                   id: parsed.loop_id,
                   workspace_id: activeWorkspaceId || 'default',
-                  conversation_id: evtConvId,
+                  conversation_id: evtConvId || '',
                   goal_prompt: rawPrompt.split('\n')[0].slice(0, 120),
                   scratchpad_md: parsed.scratchpad_md,
                   loop_status: 'completed',
@@ -1608,7 +1796,7 @@ export default function WorkbenchPage() {
               return {
                 ...prev,
                 id: parsed.loop_id ?? prev.id,
-                conversation_id: evtConvId,
+                conversation_id: evtConvId || prev.conversation_id,
                 loop_status: 'completed',
                 current_iteration: parsed.iteration ?? prev.current_iteration,
                 max_iterations: parsed.max_iterations ?? prev.max_iterations,
@@ -1617,17 +1805,22 @@ export default function WorkbenchPage() {
                 distillable: nextDistillable,
                 distill_reason: nextDistillReason,
               };
-            });
+            };
+            const currentLoop = (evtConvId && convLoopCacheRef.current.get(evtConvId)) || activeLoop;
+            const updatedLoop = updateCompletedFn(currentLoop);
+            if (evtConvId && updatedLoop) convLoopCacheRef.current.set(evtConvId, updatedLoop);
+            if (evtConvId === activeConvIdRef.current) {
+              setActiveLoop(updatedLoop);
+            }
           } else if (parsed.type === 'loop_failed') {
             const evtConvId = parsed.conversation_id || effectiveConvId || activeConvId;
-            if (!evtConvId || evtConvId !== activeConvIdRef.current) return;
-            setActiveLoop((prev) => {
+            const updateFailedFn = (prev: TaskLoopResponse | null): TaskLoopResponse | null => {
               if (!prev) {
                 if (!parsed.loop_id) return null;
                 return {
                   id: parsed.loop_id,
                   workspace_id: activeWorkspaceId || 'default',
-                  conversation_id: evtConvId,
+                  conversation_id: evtConvId || '',
                   goal_prompt: rawPrompt.split('\n')[0].slice(0, 120),
                   scratchpad_md: parsed.scratchpad_md ?? null,
                   loop_status: 'failed',
@@ -1644,18 +1837,24 @@ export default function WorkbenchPage() {
               return {
                 ...prev,
                 id: parsed.loop_id ?? prev.id,
-                conversation_id: evtConvId,
+                conversation_id: evtConvId || prev.conversation_id,
                 loop_status: 'failed',
                 distillable: false,
                 distill_reason: parsed.error || '流程执行报错',
               };
-            });
+            };
+            const currentLoop = (evtConvId && convLoopCacheRef.current.get(evtConvId)) || activeLoop;
+            const updatedLoop = updateFailedFn(currentLoop);
+            if (evtConvId && updatedLoop) convLoopCacheRef.current.set(evtConvId, updatedLoop);
+            if (evtConvId === activeConvIdRef.current) {
+              setActiveLoop(updatedLoop);
+            }
           } else if (
             parsed.type === 'require_approval' ||
             parsed.type === 'tool_start' ||
             parsed.type === 'tool_end'
           ) {
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1678,6 +1877,12 @@ export default function WorkbenchPage() {
                   exit_code: parsed.exit_code,
                   output: parsed.output,
                   compressed: parsed.compressed,
+                  file_path: parsed.file_path,
+                  edit_action: parsed.edit_action,
+                  file_size: parsed.file_size,
+                  edit_time: parsed.edit_time,
+                  unified_diff: parsed.unified_diff,
+                  snapshot_tree_hash: parsed.snapshot_tree_hash,
                 };
 
                 if (idx >= 0) {
@@ -1694,8 +1899,11 @@ export default function WorkbenchPage() {
               }
               return updated;
             });
-            // 收到需要审批时立即自动滚动到底部聚焦卡片
-            if (parsed.type === 'require_approval') {
+            // 收到需要审批且当前正停留在该会话时立即自动滚动到底部聚焦卡片
+            if (
+              parsed.type === 'require_approval' &&
+              (activeConvIdRef.current === effectiveConvId || !effectiveConvId)
+            ) {
               setTimeout(() => scrollToBottom(true), 50);
             }
             if (parsed.type === 'tool_end') {
@@ -1704,7 +1912,7 @@ export default function WorkbenchPage() {
           } else if (parsed.type === 'thinking_chunk') {
             partialThinking += parsed.content || '';
             executorAccount = parsed.account || executorAccount;
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1723,7 +1931,7 @@ export default function WorkbenchPage() {
             executorAccount = parsed.account || executorAccount;
             const sanitized = sanitizeAssistantContent(partialText, { isStreaming: true });
             const inlineThinking = sanitized.thinkingParts.join('\n\n').trim();
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1746,7 +1954,7 @@ export default function WorkbenchPage() {
             const downgradeMsg = parsed.message || `检测到原模型「${origModel}」当前配额或容量受限，已自动无缝切换至「${targetModel}」`;
 
             // 1. 在当前正在生成的 model 消息上挂载降级通知条
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1770,7 +1978,7 @@ export default function WorkbenchPage() {
             }
           } else if (parsed.type === 'step_extend') {
             const extMsg = parsed.message || `任务正在深度自主推演中，步数已自动扩展至第 ${parsed.max_steps} 步`;
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1788,7 +1996,7 @@ export default function WorkbenchPage() {
           } else if (parsed.type === 'stream_reset') {
             partialText = '';
             partialThinking = '';
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1806,7 +2014,7 @@ export default function WorkbenchPage() {
             const turnStats = parsed.stats as TurnTokenMetrics;
             const targetConvId = effectiveConvId || activeConvIdRef.current || '';
             lastStreamTokenStatsRef.current = { convId: targetConvId, stats: turnStats };
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1830,7 +2038,7 @@ export default function WorkbenchPage() {
               strippedDoneText.includes('"inquiry_id"')
                 ? normalizeInteractiveInquiryMarkdown(strippedDoneText)
                 : strippedDoneText;
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1862,7 +2070,7 @@ export default function WorkbenchPage() {
               lastStreamErrorNoticeRef.current = { convId: effectiveConvId, message: errNotice };
             }
             partialText = partialText ? `${partialText}\n\n${errNotice}` : errNotice;
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1884,7 +2092,7 @@ export default function WorkbenchPage() {
               lastStreamErrorNoticeRef.current = { convId: effectiveConvId, message: cancelNotice };
             }
             partialText = partialText ? `${partialText}\n\n${cancelNotice}` : cancelNotice;
-            setMessages((prev) => {
+            updateStreamMessages((prev) => {
               const updated = [...prev];
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
@@ -1972,7 +2180,7 @@ export default function WorkbenchPage() {
       if (targetConvId && notice) {
         lastStreamErrorNoticeRef.current = { convId: targetConvId, message: notice };
       }
-      setMessages((prev) => {
+      updateStreamMessages((prev) => {
         const updated = [...prev];
         const last = updated[updated.length - 1];
         if (last && last.role === 'model') {
@@ -1993,21 +2201,34 @@ export default function WorkbenchPage() {
       });
     } finally {
       clearWatchdogs();
-      const wasSwitchedAway =
-        getAbortReason() === 'switch' ||
-        Boolean(effectiveConvId && activeConvIdRef.current && activeConvIdRef.current !== effectiveConvId);
+      const finalCid = effectiveConvId || activeConvId;
+      if (finalCid) {
+        activeStreamsMapRef.current.delete(finalCid);
+      }
       if (activeStreamMetaRef.current === streamMeta) {
         activeStreamMetaRef.current = null;
+      }
+      const isViewingThisConv =
+        Boolean(finalCid && activeConvIdRef.current === finalCid) ||
+        (!finalCid && !activeConvIdRef.current);
+
+      // 仅当用户当前还在看这个会话时，才重置前台 isStreaming 并重新校准后端落库消息
+      if (isViewingThisConv) {
         setIsStreaming(false);
         isStreamingRef.current = false;
-      }
-      // 仅当未切换至其它会话时才同步后端消息、Loop 与滚动条，彻底杜绝异步并发串话冲刷
-      if (!wasSwitchedAway) {
-        if (effectiveConvId) {
-          await fetchMessagesAndState(effectiveConvId);
+        if (finalCid) {
+          await fetchMessagesAndState(finalCid);
         }
         await fetchActiveLoop();
         setTimeout(() => scrollToBottom(true), 60);
+      } else {
+        // 用户已切换至其它会话，后台执行自然落盘，静默刷新侧边栏标题与时间
+        fetchConversations();
+        const currentStillActive = activeConvIdRef.current
+          ? activeStreamsMapRef.current.has(activeConvIdRef.current)
+          : false;
+        setIsStreaming(currentStillActive);
+        isStreamingRef.current = currentStillActive;
       }
     }
   };
@@ -2502,9 +2723,14 @@ export default function WorkbenchPage() {
         workspaces={workspaces}
         activeWorkspaceId={activeWorkspaceId}
         activeNavHub={activeNavHub}
+        statusPill={statusPill}
+        pendingProposalCount={pendingActionCount}
         onSelectNavHub={(hub) => setActiveNavHub(hub)}
         onSelectWorkspace={(wsId) => {
-          void stopActiveStream('switch');
+          if (activeConvIdRef.current) {
+            convMessagesCacheRef.current.set(activeConvIdRef.current, messages);
+            convLoopCacheRef.current.set(activeConvIdRef.current, activeLoop);
+          }
           lastStreamFactRefsRef.current = null;
           lastStreamErrorNoticeRef.current = null;
           lastActiveLoopSigRef.current = 'null';
@@ -2513,6 +2739,8 @@ export default function WorkbenchPage() {
           setActiveConvId(null);
           setActiveLoop(null);
           setMessages([]);
+          setIsStreaming(false);
+          isStreamingRef.current = false;
         }}
         onRefreshWorkspaces={fetchWorkspaces}
         onMoveConvWorkspace={async (convId, targetWsId) => {
@@ -2521,41 +2749,36 @@ export default function WorkbenchPage() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ workspace_id: targetWsId }),
           });
-          fetchConversations(activeWorkspaceId);
+          fetchConversations();
         }}
         onSelectConv={(id) => {
-          if (id !== activeConvId) {
-            void stopActiveStream('switch');
-            lastStreamErrorNoticeRef.current = null;
-            lastActiveLoopSigRef.current = 'null';
-            setActiveLoop(null);
-          }
-          activeConvIdRef.current = id;
-          setActiveConvId(id);
+          switchConversation(id);
         }}
-        onNewChat={() => {
-          void stopActiveStream('switch');
-          lastStreamFactRefsRef.current = null;
-          lastStreamErrorNoticeRef.current = null;
-          lastActiveLoopSigRef.current = 'null';
-          activeConvIdRef.current = null;
-          setActiveConvId(null);
-          setActiveLoop(null);
-          setMessages([]);
+        onNewChat={(targetWsId) => {
+          if (targetWsId && targetWsId !== activeWorkspaceId) {
+            setActiveWorkspaceId(targetWsId);
+          }
+          switchConversation(null);
         }}
         onDeleteConv={async (id) => {
-          if (activeConvId === id || activeStreamMetaRef.current?.convId === id) {
-            await stopActiveStream('switch');
+          if (activeStreamsMapRef.current.has(id)) {
+            const meta = activeStreamsMapRef.current.get(id);
+            meta?.controller.abort();
+            activeStreamsMapRef.current.delete(id);
+            try {
+              await apiFetch('/api/v1/chat/stop', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ conversation_id: id }),
+              });
+            } catch { }
           }
+          convMessagesCacheRef.current.delete(id);
+          convLoopCacheRef.current.delete(id);
           await apiFetch('/api/v1/conversations/' + id, { method: 'DELETE' });
           fetchConversations();
           if (activeConvId === id) {
-            lastStreamErrorNoticeRef.current = null;
-            lastActiveLoopSigRef.current = 'null';
-            activeConvIdRef.current = null;
-            setActiveConvId(null);
-            setActiveLoop(null);
-            setMessages([]);
+            switchConversation(null);
           }
         }}
         onTogglePin={async (id, isPinned) => {
@@ -2575,12 +2798,18 @@ export default function WorkbenchPage() {
           fetchConversations();
         }}
         onOpenSearch={() => setIsSearchOpen(true)}
+        onOpenMemoryHub={() => {
+          setMemoryHubInitialTab('memories');
+          setIsMemoryHubOpen(true);
+        }}
         onOpenAccounts={() => setIsAccountOpen(true)}
         onOpenSync={() => setIsSyncOpen(true)}
         onOpenSettings={() => {
           setSettingsInitialTab('models');
           setIsSettingsOpen(true);
         }}
+        onOpenTokenStats={() => setIsTokenStatsModalOpen(true)}
+        onOpenSystemMonitor={() => setIsActionDrawerOpen((prev) => !prev)}
         onCleanupDuplicates={async () => {
           await apiFetch('/api/v1/conversations/cleanup-duplicates', { method: 'POST' });
           fetchConversations();
@@ -2622,26 +2851,60 @@ export default function WorkbenchPage() {
             </div>
           </div>
         )}
-        {/* 顶部极简状态栏 */}
-        <header className="h-13 py-2 border-b border-border/80 px-4 md:px-6 flex items-center justify-between bg-surface-100/50 backdrop-blur-md z-10 select-none">
-          <div className="flex items-center space-x-3">
-            <StatusPill data={statusPill} onOpenAccounts={() => setIsAccountOpen(true)} />
-          </div>
+        {/* 顶部紧凑上下文微顶栏 */}
+        <header className="h-11 py-1.5 border-b border-border/80 px-4 md:px-6 flex items-center justify-between bg-surface-100/50 backdrop-blur-md z-10 select-none">
+          {(() => {
+            const activeWs = workspaces.find((w) => w.id === activeWorkspaceId);
+            const activeConvObj = conversations.find((c) => c.id === activeConvId);
+            const parentConvObj = activeConvObj?.parent_conversation_id
+              ? conversations.find((c) => c.id === activeConvObj.parent_conversation_id)
+              : undefined;
 
-          <div className="flex items-center space-x-1.5">
-            {/* 记忆中枢与扩展插件入口 */}
-            <button
-              onClick={() => {
-                setMemoryHubInitialTab('memories');
-                setIsMemoryHubOpen(true);
-              }}
-              className="flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs text-muted-foreground hover:text-foreground hover:bg-surface-200/70 transition-all"
-              title="打开长期记忆画像与 Skill/MCP 扩展中枢"
-            >
-              <Brain className="w-3.5 h-3.5 text-emerald-500" />
-              <span className="text-[12px]">记忆中枢</span>
-            </button>
+            return (
+              <div className="flex items-center space-x-2 min-w-0 flex-1 pr-3">
+                <div className="inline-flex items-center space-x-1.5 px-2 py-0.5 rounded-lg bg-surface-200/70 border border-border/70 text-[11px] text-muted-foreground shrink-0">
+                  {activeWs?.type === 'physical' ? (
+                    <FolderGit2 className="w-3 h-3 text-emerald-500" />
+                  ) : (
+                    <Box className="w-3 h-3 text-sky-400" />
+                  )}
+                  <span className="max-w-[140px] truncate font-medium text-foreground/90">
+                    {activeWs?.name || '默认工作区'}
+                  </span>
+                </div>
 
+                {activeConvObj && (
+                  <>
+                    <span className="text-muted-foreground/50 text-xs">/</span>
+                    <span className="text-xs font-semibold text-foreground truncate max-w-[260px]" title={activeConvObj.title}>
+                      {activeConvObj.title}
+                    </span>
+                  </>
+                )}
+
+                {activeConvObj?.parent_conversation_id && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const pid = activeConvObj.parent_conversation_id;
+                      if (!pid) return;
+                      switchConversation(pid);
+                    }}
+                    className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-full bg-emerald-500/10 hover:bg-emerald-500/20 border border-emerald-500/30 text-[11px] text-emerald-600 dark:text-emerald-400 transition-colors shrink-0"
+                    title={`点击返回父会话：${parentConvObj?.title || activeConvObj.parent_conversation_id}`}
+                  >
+                    <GitBranch className="w-3 h-3" />
+                    <span className="max-w-[140px] truncate">
+                      源自: {parentConvObj?.title || '主干会话'}
+                    </span>
+                    <ArrowUpRight className="w-3 h-3" />
+                  </button>
+                )}
+              </div>
+            );
+          })()}
+
+          <div className="flex items-center space-x-1.5 shrink-0">
             {/* Canvas 画布极简入口 */}
             <button
               onClick={() => setCanvasState((prev) => ({ ...prev, isOpen: !prev.isOpen }))}
@@ -2653,18 +2916,6 @@ export default function WorkbenchPage() {
             >
               <PanelRight className="w-3.5 h-3.5" />
               <span className="text-[12px]">画布</span>
-            </button>
-
-            {/* 快速进入设置与模型测试 */}
-            <button
-              onClick={() => {
-                setSettingsInitialTab('models');
-                setIsSettingsOpen(true);
-              }}
-              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200/70 transition-colors"
-              title="设置与模型一键测试"
-            >
-              <Sliders className="w-4 h-4" />
             </button>
 
             {/* 多语种切换器（默认跟随系统语言） */}
@@ -2778,21 +3029,17 @@ export default function WorkbenchPage() {
                       );
                     const isContinuousProcessStep = isProcessStep && Boolean(isPrevProcessStep);
                     const msgKey = String(msg.id ?? `idx_${index}`);
-                    const rawBody = msg.content || '';
-                    const isLongProcessText =
-                      isProcessStep && (rawBody.length > 360 || rawBody.split('\n').length > 6);
-                    const isProcessExpanded = Boolean(expandedProcessMsgKeys[msgKey]) || isCurrentStreamingMsg;
                     const isSearchHighlighted = Boolean(msg.id && highlightedMessageId === msg.id);
                     return (
                       <div
                         key={msgKey}
                         id={msg.id ? `chat-msg-${msg.id}` : `chat-msg-${msgKey}`}
                         data-message-id={msg.id ? String(msg.id) : msgKey}
-                        className={`flex flex-col group transition-all duration-300 ${
+                        className={`flex flex-col group transition-all duration-200 ${
                         isContinuousProcessStep
-                          ? 'space-y-1 pl-3.5 border-l-2 border-border/40 ml-1.5 mt-1'
+                          ? 'space-y-0.5 pl-3 border-l border-border/25 ml-1 mt-0.5'
                           : isProcessStep
-                            ? 'space-y-1.5 pl-3.5 border-l-2 border-emerald-500/30 ml-1.5 mt-2.5'
+                            ? 'space-y-1 pl-3 border-l border-border/35 dark:border-border/25 ml-1 mt-1.5'
                             : 'space-y-2.5'
                       } ${isUser ? 'items-end' : 'items-start'} ${
                         isSearchHighlighted
@@ -2919,33 +3166,68 @@ export default function WorkbenchPage() {
                         </div>
                       )}
 
-                      {/* 消息正文主体：正式交付回复保留高清晰卡片，中间过程步骤降权为柔和旁白或微提示 */}
+                      {/* 消息正文主体：
+                          1. 过程步骤（isProcessStep）：去除沉重黑边框与多余二级折叠，作为极简流水旁白点阵呈现
+                          2. 正式交付回复与用户消息：保留标准卡片气泡与完整排版
+                      */}
                       {(isUser || msg.content || (isCurrentStreamingMsg && (!msg.tool_events || msg.tool_events.length === 0))) && (
                         (() => {
                           const rawTrimmed = (msg.content || '').trim();
-                          const isBriefProcessNarrative =
-                            isProcessStep &&
-                            Boolean(rawTrimmed) &&
-                            rawTrimmed.length < 120 &&
-                            !rawTrimmed.includes('```');
 
-                          if (isBriefProcessNarrative) {
+                          // 过程步骤分支：轻量无边框流水点阵，杜绝嵌套折叠与沉重大黑框
+                          if (isProcessStep) {
+                            if (!rawTrimmed) return null;
+                            const hasCodeBlock = rawTrimmed.includes('```');
+                            if (!hasCodeBlock) {
+                              const lines = rawTrimmed
+                                .split('\n')
+                                .map((l) => l.trim())
+                                .filter(Boolean);
+                              return (
+                                <div className="text-[11.5px] leading-relaxed text-muted-foreground/85 font-mono space-y-1 py-0.5 px-0.5 max-w-[94%] md:max-w-[88%]">
+                                  {lines.map((line, lIdx) => {
+                                    const cleanLine = line.replace(/^[•\-\*]\s*/, '');
+                                    return (
+                                      <div key={lIdx} className="flex items-start space-x-1.5 animate-fade-in">
+                                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/60 shrink-0 mt-1.5"></span>
+                                        <span className="break-anywhere text-foreground/85 font-sans">{cleanLine}</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              );
+                            }
+
                             return (
-                              <div className="text-[11px] text-muted-foreground/70 font-mono italic px-1 py-0.5 flex items-center space-x-1.5 animate-fade-in">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500/50 shrink-0"></span>
-                                <span>{rawTrimmed}</span>
+                              <div className="max-w-[94%] md:max-w-[88%] text-[11.5px] text-foreground/90 py-0.5 px-1">
+                                <AssistantMarkdownMessage
+                                  content={rawTrimmed}
+                                  isStreaming={isCurrentStreamingMsg}
+                                  muted={true}
+                                  inquiryKey={'proc_' + String(msg.id ?? index)}
+                                  isInquirySubmitted={false}
+                                  isExecutionContext={sceneMode === 'agent'}
+                                  onMarkInquirySubmitted={stableMarkInquirySubmitted}
+                                  onSendInquiryFeedback={stableSendInquiryFeedback}
+                                  onFillTemplate={stableFillTemplate}
+                                  onApprovePlan={stableApprovePlan}
+                                  onOpenCanvas={stableOpenCanvas}
+                                  onSaveToWorkspace={stableSaveToWorkspace}
+                                  onOpenGeneratedFile={stableOpenGeneratedFile}
+                                  onPreviewGeneratedFile={stablePreviewGeneratedFile}
+                                  getVerifiedFile={getVerifiedFile}
+                                />
                               </div>
                             );
                           }
 
+                          // 正式答复与用户发言卡片气泡
                           return (
                             <div
                               className={`max-w-[88%] md:max-w-[82%] break-anywhere ${
                                 isUser
                                   ? 'rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] shadow-sm bg-emerald-100 dark:bg-emerald-950/70 text-emerald-950 dark:text-emerald-100 border border-emerald-300/60 dark:border-emerald-500/30 rounded-tr-none shadow-emerald-500/5'
-                                  : isProcessStep
-                                    ? 'ml-0.5 pl-3.5 pr-3 py-2 border-l-2 border-border/65 bg-surface-200/20 dark:bg-surface-200/10 rounded-r-xl text-[12px] leading-[1.58] text-muted-foreground/75'
-                                    : 'rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] shadow-sm bg-surface-card text-foreground rounded-tl-none border border-border/80'
+                                  : 'rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] shadow-sm bg-surface-card text-foreground rounded-tl-none border border-border/80'
                               }`}
                             >
                           {isUser ? (
@@ -3064,11 +3346,11 @@ export default function WorkbenchPage() {
                                 msgInquiryKey,
                                 submittedInquiryKeys
                               );
-                              const mdNode = (
+                              return (
                                 <AssistantMarkdownMessage
                                   content={msg.content || ''}
                                   isStreaming={isCurrentStreamingMsg}
-                                  muted={isProcessStep}
+                                  muted={false}
                                   inquiryKey={msgInquiryKey}
                                   isInquirySubmitted={isMsgInquiryLocked}
                                   isExecutionContext={sceneMode === 'agent'}
@@ -3083,43 +3365,6 @@ export default function WorkbenchPage() {
                                   getVerifiedFile={getVerifiedFile}
                                 />
                               );
-
-                              if (!isLongProcessText) {
-                                return mdNode;
-                              }
-
-                              return (
-                                <div className="space-y-1.5">
-                                  <div
-                                    className={
-                                      isProcessExpanded
-                                        ? 'max-h-[420px] overflow-y-auto pr-1'
-                                        : 'max-h-36 overflow-hidden relative'
-                                    }
-                                  >
-                                    {mdNode}
-                                    {!isProcessExpanded && (
-                                      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-[var(--bg-main)]/85 to-transparent" />
-                                    )}
-                                  </div>
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleProcessMsgExpanded(msgKey)}
-                                    className="inline-flex items-center space-x-1 text-[11px] text-muted-foreground/75 hover:text-foreground transition-colors"
-                                  >
-                                    {isProcessExpanded ? (
-                                      <ChevronDown className="w-3 h-3" />
-                                    ) : (
-                                      <ChevronRight className="w-3 h-3" />
-                                    )}
-                                    <span>
-                                      {isProcessExpanded
-                                        ? '收起过程内容'
-                                        : `展开完整过程内容 (${rawBody.length} 字)`}
-                                    </span>
-                                  </button>
-                                </div>
-                              );
                             })()
                           )}
                         </div>
@@ -3127,37 +3372,129 @@ export default function WorkbenchPage() {
                     })()
                   )}
 
-                      {/* 生成文件快捷直达栏（点击默认程序直接打开 / 预览 / 所在目录定位；过程步骤、待确认卡、或报错中断/零落盘气泡不显示交付栏） */}
+                      {/* 文件变更台账卡（• 已编辑 N 个文件 + ↶ 撤销修改）与 本次成果交付卡（打开 / 保存到桌面 / 资源管理器打开） */}
                       {!isUser &&
                         !isProcessStep &&
                         msg.content &&
                         !isCurrentStreamingMsg &&
                         !isInteractiveCard &&
-                        !isAbortedOrErrorMessage(msg.content) &&
                         (() => {
-                          const deliverablePaths = extractGeneratedFilePaths(msg.content);
-                          const verifiedDeliverables = deliverablePaths
-                            .map((fp) => ({ fp, info: getVerifiedFile(fp) }))
-                            .filter((item) => item.info?.exists === true);
-                          if (verifiedDeliverables.length === 0) return null;
+                          // 从当前轮次（上一条 user 消息之后至当前消息为止）聚合所有 write_local_file / replace_in_file 事件
+                          const editedMap = new Map<string, EditedFileItem>();
+                          let turnStartIdx = 0;
+                          for (let k = index - 1; k >= 0; k--) {
+                            if (messages[k]?.role === 'user') {
+                              turnStartIdx = k + 1;
+                              break;
+                            }
+                          }
+                          const turnSlice = messages.slice(turnStartIdx, index + 1);
+                          for (const tm of turnSlice) {
+                            // 1) 从实时 tool_events 中提取
+                            for (const ev of tm.tool_events || []) {
+                              if (ev.status === 'rejected' || ev.status === 'denied') continue;
+                              const isWriteTool =
+                                ev.name === 'write_local_file' ||
+                                ev.name === 'replace_in_file' ||
+                                Boolean(ev.file_path && ev.edit_action);
+                              let fp = (ev.file_path || '').trim();
+                              if (!fp && ev.compressed) {
+                                const m = ev.compressed.match(/`([^`]+)`/);
+                                if (m && (ev.compressed.includes('落盘') || ev.compressed.includes('局部修改'))) {
+                                  fp = m[1].trim();
+                                }
+                              }
+                              if (!fp || (!isWriteTool && !ev.edit_action)) continue;
+                              const fileName = fp.split(/[\\/]/).pop() || fp;
+                              const prev = editedMap.get(fp);
+                              editedMap.set(fp, {
+                                filePath: fp,
+                                fileName,
+                                action:
+                                  prev?.action === 'created'
+                                    ? 'created'
+                                    : ev.edit_action === 'created'
+                                      ? 'created'
+                                      : 'modified',
+                                fileSize: ev.file_size ?? getVerifiedFile(fp)?.fileSize ?? prev?.fileSize,
+                                editTime: ev.edit_time || getVerifiedFile(fp)?.mtime || prev?.editTime,
+                                snapshotTreeHash: ev.snapshot_tree_hash || prev?.snapshotTreeHash,
+                              });
+                            }
+                            // 2) 从历史入库 tool_calls_json 中兜底还原文件变更台账
+                            if (tm.tool_calls_json && tm.tool_calls_json !== '[]') {
+                              try {
+                                const parsedCalls = JSON.parse(tm.tool_calls_json);
+                                if (Array.isArray(parsedCalls)) {
+                                  for (const tc of parsedCalls) {
+                                    const fn = tc?.function?.name;
+                                    if (fn !== 'write_local_file' && fn !== 'replace_in_file') continue;
+                                    const rawArgs = tc?.function?.arguments;
+                                    const parsedArgs =
+                                      typeof rawArgs === 'string' ? JSON.parse(rawArgs || '{}') : (rawArgs || {});
+                                    const fp = String(parsedArgs.file_path || parsedArgs.path || '').trim();
+                                    if (!fp) continue;
+                                    const fileName = fp.split(/[\\/]/).pop() || fp;
+                                    const verifiedInfo = getVerifiedFile(fp);
+                                    if (!editedMap.has(fp)) {
+                                      editedMap.set(fp, {
+                                        filePath: fp,
+                                        fileName,
+                                        action: fn === 'replace_in_file' ? 'modified' : 'created',
+                                        fileSize: verifiedInfo?.fileSize,
+                                        editTime: verifiedInfo?.mtime || undefined,
+                                      });
+                                    }
+                                  }
+                                }
+                              } catch {
+                                // 忽略历史 JSON 解析容错
+                              }
+                            }
+                          }
+
+                          const editedFiles = Array.from(editedMap.values());
+                          const deliverablePaths = !isAbortedOrErrorMessage(msg.content)
+                            ? extractGeneratedFilePaths(msg.content)
+                            : [];
+                          const verifiedMap: Record<string, any> = {};
+                          const verifiedDeliverablePaths: string[] = [];
+                          for (const fp of deliverablePaths) {
+                            const info = getVerifiedFile(fp);
+                            if (info?.exists === true) {
+                              verifiedMap[fp] = info;
+                              verifiedDeliverablePaths.push(fp);
+                            }
+                          }
+
+                          if (editedFiles.length === 0 && verifiedDeliverablePaths.length === 0) {
+                            return null;
+                          }
+
                           return (
-                            <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-xl border border-emerald-500/20 bg-emerald-500/5 max-w-[92%] md:max-w-[85%] animate-fade-in">
-                              <div className="inline-flex items-center space-x-1.5 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 shrink-0 mr-1">
-                                <PackageOpen className="w-3.5 h-3.5 text-emerald-500" />
-                                <span>生成文件直达</span>
-                              </div>
-                              {verifiedDeliverables.map(({ fp, info }) => (
-                                <GeneratedFileChip
-                                  key={fp}
-                                  filePath={fp}
-                                  fileSize={info?.fileSize}
-                                  mtime={info?.mtime || undefined}
-                                  variant="card"
-                                  onLaunch={(targetPath) => handleOpenGeneratedFile(targetPath, 'launch')}
-                                  onReveal={(targetPath) => handleOpenGeneratedFile(targetPath, 'reveal')}
-                                  onPreview={(targetPath) => handlePreviewGeneratedFile(targetPath)}
+                            <div className="w-full max-w-[92%] md:max-w-[85%] space-y-2 animate-fade-in">
+                              {editedFiles.length > 0 && (
+                                <EditedFilesCard
+                                  files={editedFiles}
+                                  workspaceId={activeWorkspaceId}
+                                  conversationId={activeConvId}
+                                  turnId={msg.turn_id}
+                                  onPreviewFile={(targetPath) => handlePreviewGeneratedFile(targetPath)}
+                                  onReverted={(toastText) => {
+                                    invalidateVerification();
+                                    showFloatingToast(toastText, 'success', 3600);
+                                  }}
                                 />
-                              ))}
+                              )}
+
+                              {verifiedDeliverablePaths.length > 0 && (
+                                <DeliverablesCard
+                                  filePaths={verifiedDeliverablePaths}
+                                  workspaceId={activeWorkspaceId}
+                                  verifiedMap={verifiedMap}
+                                  onSavedToast={(toastText) => showFloatingToast(toastText, 'success', 3800)}
+                                />
+                              )}
                             </div>
                           );
                         })()}
@@ -3178,12 +3515,18 @@ export default function WorkbenchPage() {
                         />
                       )}
 
-                      {/* AI 消息交互底栏：过程步骤默认半隐弱化，悬停时显露，保持主线阅读清爽 */}
-                      {!isUser && msg.content && (
-                        <div className={isProcessStep ? 'opacity-25 group-hover:opacity-90 transition-opacity origin-left scale-95' : ''}>
+                      {/* AI 消息交互底栏：过程步骤不展示操作栏，保持步骤流紧凑极简；仅在最终答复展示 */}
+                      {!isUser && !isProcessStep && msg.content && (
+                        <div>
                           <MessageActions
                             content={msg.content}
+                            executedByAccount={msg.executed_by_account}
                             onModifyTone={handleModifyTone}
+                            onBranchFromHere={
+                              !isProcessStep && activeConvId
+                                ? () => handleBranchConversation(msg.id, msg.turn_id)
+                                : undefined
+                            }
                             onRegenerate={() => {
                               const lastUserMsg = [...messages].reverse().find((m) => m.role === 'user');
                               if (lastUserMsg) {
@@ -3506,8 +3849,8 @@ export default function WorkbenchPage() {
                     </button>
                   </div>
 
-                  <div className="flex items-center justify-between pt-1 px-1 select-none">
-                    <div className="flex items-center space-x-1.5">
+                  <div className="flex items-center justify-between pt-1.5 px-1 select-none gap-2 flex-wrap sm:flex-nowrap">
+                    <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
                       <label
                         className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-surface-200/80 rounded-lg cursor-pointer transition-colors"
                         title="添加常见图片 (PNG/JPG/WebP/GIF ≤10MB)、文档 (PDF ≤10MB · Word/Excel/PPT ≤5MB) 或代码/文本文件（≤5MB）；支持拖拽放置与 Ctrl+V 粘贴，最多 5 个"
@@ -3522,104 +3865,255 @@ export default function WorkbenchPage() {
                         <Plus className="w-4 h-4" />
                       </label>
 
-                      {/* 模式双态药丸切换：[对话] 与 [任务] */}
-                      <div className="flex items-center rounded-xl bg-surface-100 border border-border/70 p-0.5 text-xs">
-                        {(
-                          [
-                            { id: 'chat', label: '对话', tip: '对话模式：纯思维链探讨与知识推演，不执行写盘与命令' },
-                            { id: 'agent', label: '任务', tip: '任务模式：具身执行与自主自愈，真实读写当前工作区文件并运行 Shell' },
-                          ] as const
-                        ).map((m) => (
-                          <button
-                            key={m.id}
-                            type="button"
-                            onClick={() => handleSwitchSceneMode(m.id)}
-                            title={m.tip}
-                            className={`px-3 py-1 rounded-lg transition-all ${sceneMode === m.id
-                                ? 'bg-emerald-600 text-white font-semibold shadow-sm'
-                                : 'text-muted-foreground hover:text-foreground'
-                              }`}
-                          >
-                            {m.label}
-                          </button>
-                        ))}
-                      </div>
-
-                      {/* 执行策略降维切换：任务模式下 [直接执行 | 谋定而动]，对话模式下 [需求澄清] */}
-                      {sceneMode === 'agent' ? (
-                        <div className="flex items-center rounded-xl bg-surface-100 border border-border/70 p-0.5 text-xs">
-                          <button
-                            type="button"
-                            onClick={() => handleSwitchExecStrategy('direct')}
-                            title="直接执行：立即执行意图与工具操作"
-                            className={`px-2.5 py-1 rounded-lg transition-all flex items-center space-x-1 ${executionStrategy === 'direct'
-                                ? 'bg-emerald-600 text-white font-semibold shadow-sm'
-                                : 'text-muted-foreground hover:text-foreground'
-                              }`}
-                          >
-                            <span>⚡ 直接执行</span>
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => handleSwitchExecStrategy('plan_first')}
-                            title="谋定而动：动工前先梳理方案与分步清单，确认后自愈执行，彻底杜绝返工"
-                            className={`px-2.5 py-1 rounded-lg transition-all flex items-center space-x-1 ${executionStrategy === 'plan_first'
-                                ? 'bg-emerald-600 text-white font-semibold shadow-sm'
-                                : 'text-muted-foreground hover:text-foreground'
-                              }`}
-                          >
-                            <span>📋 谋定而动</span>
-                          </button>
-                        </div>
-                      ) : (
+                      {/* 整合型「模式与策略」下拉菜单（合并 对话/任务、直接执行/谋定而动、需求澄清） */}
+                      <div className="relative" ref={strategyDropdownRef}>
                         <button
                           type="button"
-                          onClick={handleToggleClarifyMode}
-                          title={clarifyMode ? '需求澄清模式已开启：遇到模糊问题先生成交互卡片对齐' : '点击开启需求前置澄清模式'}
-                          className={`flex items-center space-x-1 px-2.5 py-1 rounded-xl text-xs border transition-all ${clarifyMode
-                              ? 'bg-emerald-500/15 border-emerald-500/40 text-emerald-600 dark:text-emerald-400 font-semibold'
-                              : 'border-border bg-surface-100 text-muted-foreground hover:text-foreground'
-                            }`}
+                          onClick={() => setIsStrategyMenuOpen((prev) => !prev)}
+                          className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-surface-100 hover:bg-surface-200/80 border border-border/80 text-xs font-medium text-foreground transition-colors"
+                          title="切换工作模式与执行策略"
                         >
-                          <Compass className="w-3.5 h-3.5" />
-                          <span>需求澄清</span>
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                          <span>
+                            {sceneMode === 'chat'
+                              ? clarifyMode
+                                ? '对话 · 需求澄清'
+                                : '纯对话模式'
+                              : executionStrategy === 'plan_first'
+                                ? '逐步确认 (谋定而动)'
+                                : '自动执行'}
+                          </span>
+                          <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
                         </button>
-                      )}
+
+                        {isStrategyMenuOpen && (
+                          <div className="absolute left-0 bottom-full mb-2 w-64 rounded-2xl glass-modal p-1.5 shadow-2xl border border-border z-50 animate-scale-in text-xs space-y-1">
+                            <div className="px-2.5 py-1 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b border-border/60">
+                              模式与执行策略
+                            </div>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleSwitchSceneMode('agent');
+                                handleSwitchExecStrategy('direct');
+                                setIsStrategyMenuOpen(false);
+                              }}
+                              className={`w-full text-left px-2.5 py-2 rounded-xl transition-colors ${
+                                sceneMode === 'agent' && executionStrategy === 'direct'
+                                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold border border-emerald-500/30'
+                                  : 'hover:bg-foreground/5 text-foreground'
+                              }`}
+                            >
+                              <div>⚡ 自动执行（任务模式）</div>
+                              <div className="text-[10px] text-muted-foreground mt-0.5 font-normal">
+                                具身读写当前工作区文件并运行终端工具
+                              </div>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleSwitchSceneMode('agent');
+                                handleSwitchExecStrategy('plan_first');
+                                setIsStrategyMenuOpen(false);
+                              }}
+                              className={`w-full text-left px-2.5 py-2 rounded-xl transition-colors ${
+                                sceneMode === 'agent' && executionStrategy === 'plan_first'
+                                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold border border-emerald-500/30'
+                                  : 'hover:bg-foreground/5 text-foreground'
+                              }`}
+                            >
+                              <div>📋 逐步确认 / 谋定而动</div>
+                              <div className="text-[10px] text-muted-foreground mt-0.5 font-normal">
+                                动工前先输出方案与步骤清单，确认后再执行
+                              </div>
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleSwitchSceneMode('chat');
+                                setIsStrategyMenuOpen(false);
+                              }}
+                              className={`w-full text-left px-2.5 py-2 rounded-xl transition-colors ${
+                                sceneMode === 'chat'
+                                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold border border-emerald-500/30'
+                                  : 'hover:bg-foreground/5 text-foreground'
+                              }`}
+                            >
+                              <div>💬 纯对话推演</div>
+                              <div className="text-[10px] text-muted-foreground mt-0.5 font-normal">
+                                仅做思维探讨与知识回答，不修改本地磁盘
+                              </div>
+                            </button>
+
+                            {sceneMode === 'chat' && (
+                              <button
+                                type="button"
+                                onClick={() => handleToggleClarifyMode()}
+                                className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-xl border transition-colors ${
+                                  clarifyMode
+                                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400 font-medium'
+                                    : 'border-border/60 text-muted-foreground hover:text-foreground'
+                                }`}
+                              >
+                                <span className="flex items-center space-x-1.5">
+                                  <Compass className="w-3.5 h-3.5" />
+                                  <span>开启需求前置澄清</span>
+                                </span>
+                                <span className="text-[10px]">{clarifyMode ? '已开' : '关闭'}</span>
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 快捷技能与扩展呼出 */}
+                      <button
+                        type="button"
+                        onClick={() => setIsSkillPickerOpen(true)}
+                        title="浏览或呼出当前工作区专属技能与扩展 (/)"
+                        className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl text-xs border border-border/80 bg-surface-100 hover:bg-surface-200/80 text-foreground transition-all"
+                      >
+                        <span className="font-mono text-emerald-500">/</span>
+                        <span>技能</span>
+                      </button>
 
                       {/* 无痕模式开关 */}
                       <button
                         type="button"
                         onClick={handleToggleIncognito}
                         title={incognito ? '当前为无痕模式（不读取也不保存长期记忆）' : '点击开启无痕对话模式'}
-                        className={`flex items-center space-x-1 px-2 py-1 rounded-lg text-[11px] border transition-all ${incognito
+                        className={`flex items-center space-x-1 px-2 py-1.5 rounded-xl text-[11px] border transition-all ${incognito
                             ? 'bg-purple-500/15 border-purple-500/40 text-purple-600 dark:text-purple-400 font-medium'
                             : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-surface-200/60'
                           }`}
                       >
-                        <EyeOff className="w-3 h-3" />
+                        <EyeOff className="w-3.5 h-3.5" />
                         <span className="hidden sm:inline">无痕</span>
-                      </button>
-
-                      {/* 快捷技能呼出 */}
-                      <button
-                        type="button"
-                        onClick={() => setIsSkillPickerOpen(true)}
-                        title="浏览或呼出当前工作区专属技能与全局底座技能 (/)"
-                        className="flex items-center space-x-1 px-2.5 py-1 rounded-xl text-[11px] border border-border bg-surface-100 hover:bg-surface-200 text-foreground transition-all font-mono"
-                      >
-                        <span>/ 技能</span>
                       </button>
 
                       {/* 字数提示微标（半屏展开或输入内容后展示） */}
                       {(isInputExpanded || inputPrompt.length > 0) && (
-                        <span className="text-[10px] font-mono text-muted-foreground/80 px-1.5">
+                        <span className="text-[10px] font-mono text-muted-foreground/80 px-1">
                           {inputPrompt.length} 字
                         </span>
                       )}
                     </div>
 
-                    <div className="flex items-center space-x-2">
-                      {/* 模型选择器：动态根据当前账号属性识别可用模型，并提供一键测试入口 */}
+                    <div className="flex items-center space-x-2 shrink-0">
+                      {/* ◔ XX% 上下文水位环 */}
+                      {(() => {
+                        const latestStats = [...messages]
+                          .reverse()
+                          .find((m) => m.role === 'model' && m.token_stats)?.token_stats;
+                        const usagePct = latestStats ? Math.min(100, Math.max(0, Math.round(latestStats.context_usage_pct || 0))) : 0;
+                        const ringColor =
+                          usagePct >= 85
+                            ? 'text-rose-500'
+                            : usagePct >= 65
+                              ? 'text-amber-500'
+                              : 'text-emerald-500';
+                        const r = 6;
+                        const c = 2 * Math.PI * r;
+                        const dashOffset = c - (usagePct / 100) * c;
+
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => setIsTokenStatsModalOpen(true)}
+                            className="flex items-center space-x-1.5 px-2 py-1 rounded-xl hover:bg-surface-200/80 text-[11px] font-mono text-muted-foreground hover:text-foreground transition-colors"
+                            title={
+                              latestStats
+                                ? `上下文水位 ${usagePct}% (${latestStats.context_tokens.toLocaleString()} / ${latestStats.context_limit.toLocaleString()} Tokens · 缓存命中 ${latestStats.cache_hit_pct.toFixed(0)}%) — 点击查看详情`
+                                : '查看本会话 Token 消耗与上下文统计'
+                            }
+                          >
+                            <svg className="w-4 h-4 -rotate-90" viewBox="0 0 16 16">
+                              <circle
+                                cx="8"
+                                cy="8"
+                                r={r}
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                className="opacity-20"
+                              />
+                              <circle
+                                cx="8"
+                                cy="8"
+                                r={r}
+                                fill="none"
+                                stroke="currentColor"
+                                strokeWidth="2"
+                                strokeDasharray={c}
+                                strokeDashoffset={dashOffset}
+                                strokeLinecap="round"
+                                className={ringColor}
+                              />
+                            </svg>
+                            <span>{usagePct}%</span>
+                          </button>
+                        );
+                      })()}
+
+                      {/* 独立「思考·高/中/低」下拉按钮（当前模型支持思考时展示） */}
+                      {(() => {
+                        const selOpt = availableModels.find((m) => m.id === currentModel) || availableModels[0];
+                        const supportsThink = Boolean(selOpt && (selOpt.hasThinking ?? selOpt.has_thinking));
+                        if (!supportsThink) return null;
+                        const thinkLabelMap: Record<ThinkingLevel, string> = {
+                          low: '思考 · 低',
+                          medium: '思考 · 中',
+                          high: '思考 · 高',
+                        };
+                        return (
+                          <div className="relative" ref={thinkingDropdownRef}>
+                            <button
+                              type="button"
+                              onClick={() => setIsThinkingDropdownOpen((prev) => !prev)}
+                              className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl bg-surface-100 hover:bg-surface-200/80 border border-border/80 text-xs font-medium text-foreground transition-colors"
+                              title="独立调节思维链推理深度"
+                            >
+                              <Brain className="w-3.5 h-3.5 text-purple-500" />
+                              <span>{thinkLabelMap[thinkingLevel]}</span>
+                              <ChevronDown className="w-3 h-3 text-muted-foreground" />
+                            </button>
+
+                            {isThinkingDropdownOpen && (
+                              <div className="absolute right-0 bottom-full mb-2 w-48 rounded-2xl glass-modal p-1.5 shadow-2xl border border-border z-50 animate-scale-in text-xs space-y-0.5">
+                                {(
+                                  [
+                                    { id: 'low', name: '思考 · 低', desc: '快速直出，短思维链' },
+                                    { id: 'medium', name: '思考 · 中', desc: '推理与响应平衡' },
+                                    { id: 'high', name: '思考 · 高', desc: '深度复杂推理与验算' },
+                                  ] as { id: ThinkingLevel; name: string; desc: string }[]
+                                ).map((opt) => (
+                                  <button
+                                    key={opt.id}
+                                    type="button"
+                                    onClick={() => {
+                                      setThinkingLevel(opt.id);
+                                      setIsThinkingDropdownOpen(false);
+                                    }}
+                                    className={`w-full text-left px-2.5 py-1.5 rounded-xl transition-colors ${
+                                      thinkingLevel === opt.id
+                                        ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold'
+                                        : 'hover:bg-foreground/5 text-foreground'
+                                    }`}
+                                  >
+                                    <div>{opt.name}</div>
+                                    <div className="text-[10px] text-muted-foreground">{opt.desc}</div>
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })()}
+
+                      {/* 模型选择器（精简触发文案） */}
                       <ModelSelector
                         currentModel={currentModel}
                         thinkingLevel={thinkingLevel}
@@ -3627,6 +4121,7 @@ export default function WorkbenchPage() {
                         accountName={modelAccountInfo.accountName}
                         authLabel={modelAccountInfo.authLabel}
                         isTested={modelAccountInfo.isTested}
+                        compactTrigger={true}
                         onSelectModel={(m) => {
                           hasUserSelectedModelRef.current = true;
                           setCurrentModel(m);

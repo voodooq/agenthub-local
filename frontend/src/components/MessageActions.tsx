@@ -1,16 +1,23 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Copy, Check, ThumbsUp, ThumbsDown, RotateCcw, Share2, MoreHorizontal, SlidersHorizontal, Download } from 'lucide-react';
+import { Copy, Check, ThumbsUp, ThumbsDown, RotateCcw, MoreHorizontal, SlidersHorizontal, Download, GitBranch } from 'lucide-react';
 
 interface MessageActionsProps {
   content: string;
   executedByAccount?: string | null;
   onRegenerate?: () => void;
   onModifyTone?: (tone: 'shorter' | 'longer' | 'simpler' | 'professional') => void;
+  onBranchFromHere?: () => void;
 }
 
-export function MessageActions({ content, executedByAccount, onRegenerate, onModifyTone }: MessageActionsProps) {
+export function MessageActions({
+  content,
+  executedByAccount,
+  onRegenerate,
+  onModifyTone,
+  onBranchFromHere,
+}: MessageActionsProps) {
   const [copied, setCopied] = useState(false);
   const [feedback, setFeedback] = useState<'up' | 'down' | null>(null);
   const [showModifyMenu, setShowModifyMenu] = useState(false);
@@ -122,6 +129,17 @@ export function MessageActions({ content, executedByAccount, onRegenerate, onMod
       >
         <Download className="w-3.5 h-3.5" />
       </button>
+
+      {/* 从此处创建多版本分支 */}
+      {onBranchFromHere && (
+        <button
+          onClick={onBranchFromHere}
+          className="p-1.5 rounded-full hover:bg-emerald-500/15 hover:text-emerald-500 transition-colors"
+          title="从此处创建分支会话（保留截至当前轮次的上下文）"
+        >
+          <GitBranch className="w-3.5 h-3.5" />
+        </button>
+      )}
 
       {/* 更多信息 */}
       <div className="relative">

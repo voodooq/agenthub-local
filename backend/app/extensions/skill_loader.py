@@ -265,22 +265,55 @@ class SkillLoader:
 
     @staticmethod
     def _inspect_four_tuple(skill_dir: Path, load_schema_content: bool = True) -> dict[str, Any]:
-        """检查技能目录的四元组组件挂载情况 (tools/, knowledge/, schema.json)"""
-        tools_dir = skill_dir / "tools"
+        """检查技能目录的四元组组件挂载情况 (tools/, scripts/, knowledge/, schema.json)"""
         knowledge_dir = skill_dir / "knowledge"
         schema_file = skill_dir / "schema.json"
 
+        # 全面扫描 tools/、scripts/ 目录及根目录下的可执行脚本 (Python/Node/Shell/PowerShell)
         tool_files: list[str] = []
-        if tools_dir.is_dir():
-            try:
-                with os.scandir(tools_dir) as it:
-                    tool_files = sorted(
-                        entry.name
-                        for entry in it
-                        if entry.is_file() and Path(entry.name).suffix.lower() in (".py", ".js", ".ps1", ".sh", ".pyd")
-                    )
-            except OSError:
-                pass
+        tool_details: list[dict[str, str]] = []
+        valid_exts = (".py", ".js", ".ps1", ".sh", ".pyd")
+
+        for sub_dir_name in ("scripts", "tools"):
+            sub_dir = skill_dir / sub_dir_name
+            if sub_dir.is_dir():
+                try:
+                    for root, _, files in os.walk(sub_dir):
+                        for f in files:
+                            if f.startswith("__") or f.startswith("."):
+                                continue
+                            if Path(f).suffix.lower() in valid_exts:
+                                full_p = Path(root) / f
+                                rel_p = full_p.relative_to(skill_dir).as_posix()
+                                if rel_p not in tool_files:
+                                    tool_files.append(rel_p)
+                                    tool_details.append({
+                                        "name": f,
+                                        "rel_path": rel_p,
+                                        "abs_path": str(full_p.resolve()),
+                                    })
+                except OSError:
+                    pass
+
+        # 扫描 Skill 根目录下直接放置的可执行脚本
+        try:
+            with os.scandir(skill_dir) as it:
+                for entry in it:
+                    if entry.is_file() and not entry.name.startswith("__") and not entry.name.startswith("."):
+                        if Path(entry.name).suffix.lower() in valid_exts:
+                            rel_p = entry.name
+                            if rel_p not in tool_files:
+                                tool_files.append(rel_p)
+                                tool_details.append({
+                                    "name": entry.name,
+                                    "rel_path": rel_p,
+                                    "abs_path": str(Path(entry.path).resolve()),
+                                })
+        except OSError:
+            pass
+
+        tool_files.sort()
+        tool_details.sort(key=lambda x: x["rel_path"])
 
         knowledge_files: list[str] = []
         if knowledge_dir.is_dir():
@@ -311,6 +344,7 @@ class SkillLoader:
         return {
             "has_tools": len(tool_files) > 0,
             "tools": tool_files,
+            "tool_details": tool_details,
             "has_knowledge": len(knowledge_files) > 0,
             "knowledge_files": knowledge_files,
             "has_schema": has_schema,
@@ -321,7 +355,7 @@ class SkillLoader:
     def _get_skill_cache_signature(skill_dir: Path, skill_md_stat: os.stat_result) -> tuple[Any, ...]:
         """采集 SKILL.md 与四元组子目录/契约文件的时间戳签名用于增量缓存"""
         sig_parts: list[Any] = [skill_md_stat.st_mtime_ns, skill_md_stat.st_size]
-        for sub in ("tools", "knowledge", "schema.json"):
+        for sub in ("tools", "scripts", "knowledge", "schema.json"):
             try:
                 st = os.stat(skill_dir / sub)
                 sig_parts.append((st.st_mtime_ns, st.st_size))
@@ -1040,18 +1074,38 @@ class SkillLoader:
         if not skill_dir:
             return f"Error: 未找到名为 '{skill_name}' 的 Skill。"
 
-        safe_script = os.path.basename((script_name or "").strip())
-        if not safe_script:
+        raw_scr = (script_name or "").strip().replace("\\", "/")
+        if not raw_scr:
             return "Error: 未指定有效的算子文件名 script_name。"
 
-        tools_dir = skill_dir / "tools"
-        target_script = tools_dir / safe_script
-        if not target_script.exists() and not safe_script.endswith(".py"):
-            if (tools_dir / f"{safe_script}.py").exists():
-                target_script = tools_dir / f"{safe_script}.py"
+        # 智能匹配脚本位置：支持直接传入相对路径 (如 scripts/pipeline.py, tools/validator.py)、或者仅文件名
+        target_script: Path | None = None
+        base_name = os.path.basename(raw_scr)
+        candidates: list[Path] = [
+            skill_dir / raw_scr,
+            skill_dir / "scripts" / raw_scr,
+            skill_dir / "tools" / raw_scr,
+            skill_dir / "scripts" / base_name,
+            skill_dir / "tools" / base_name,
+            skill_dir / base_name,
+        ]
+        if not raw_scr.endswith(".py"):
+            candidates.extend([
+                skill_dir / f"{raw_scr}.py",
+                skill_dir / "scripts" / f"{raw_scr}.py",
+                skill_dir / "tools" / f"{raw_scr}.py",
+                skill_dir / "scripts" / f"{base_name}.py",
+                skill_dir / "tools" / f"{base_name}.py",
+                skill_dir / f"{base_name}.py",
+            ])
 
-        if not target_script.exists() or not target_script.is_file():
-            return f"Error: 在 `{skill_dir.name}/tools/` 下未找到算子脚本 `{safe_script}`。"
+        for c in candidates:
+            if c.is_file():
+                target_script = c.resolve()
+                break
+
+        if not target_script or not target_script.is_file():
+            return f"Error: 在 Skill `{skill_dir.name}` 下未找到算子脚本 `{script_name}`（已检索 scripts/、tools/ 与根目录）。"
 
         args_json = json.dumps(arguments or {}, ensure_ascii=False)
         merged_env = os.environ.copy()
@@ -1468,12 +1522,27 @@ class SkillLoader:
                 addon_sections.append(
                     f"> 🏷️ 当前激活为 **工作区私有 Skill (`{skill_dir.name}`)**，优先覆盖同名的全局底座技能。"
                 )
-            if four_tuple["has_tools"]:
+            if four_tuple.get("has_tools"):
+                tool_lines = []
+                for t in four_tuple.get("tool_details", []):
+                    tool_lines.append(f"- `{t['rel_path']}` (物理绝对路径: `{t['abs_path']}`)")
+                first_tool_rel = four_tuple["tools"][0] if four_tuple.get("tools") else "pipeline.py"
+                first_tool_abs = (
+                    four_tuple["tool_details"][0]["abs_path"]
+                    if four_tuple.get("tool_details")
+                    else str((skill_dir / first_tool_rel).resolve())
+                )
                 addon_sections.append(
-                    f"### 🔧 已挂载的随包专属确定性算子 (`{skill_dir.name}/tools/`)\n"
-                    f"- 可用算子脚本: `{', '.join(four_tuple['tools'])}`\n"
-                    f"- 调用方式: 请优先使用 `<tool_call name=\"run_skill_tool\">"
-                    f"{{\"skill_name\": \"{skill_dir.name}\", \"script_name\": \"{four_tuple['tools'][0]}\", \"arguments\": {{...}}}}</tool_call>` 执行精确计算或核验。"
+                    f"### 🔧 已封装的高可靠专属算子脚本（必须优先直接执行，严禁重复编写）：\n"
+                    f"当前 Skill 已随包封装了以下开箱即用的成熟执行脚本：\n"
+                    + "\n".join(tool_lines) + "\n\n"
+                    f"**执行方式（两种均可，推荐首选专用工具）：**\n"
+                    f"1. **专用工具调用**：`<tool_call name=\"run_skill_tool\">{{\"skill_name\": \"{skill_dir.name}\", \"script_name\": \"{first_tool_rel}\", \"arguments\": {{...}}}}</tool_call>`\n"
+                    f"2. **本地终端命令调用**：`<tool_call name=\"execute_local_command\"><command>python \"{first_tool_abs}\" [参数]</command></tool_call>`\n\n"
+                    f"⚠️ **【铁律红线 —— 优先复用既有脚本，严禁重复造轮子】**：\n"
+                    f"当前 Skill 已经封装了成熟的执行脚本，处理本次任务时**必须优先直接调用上述已有脚本**！\n"
+                    f"**绝对严禁**在当前工作区内私自调用 `write_local_file` 重写一个同名或相同功能的临时 `.py` 脚本！\n"
+                    f"只有当执行已有脚本遇到异常、报错或确需修补特定参数时，才允许基于错误堆栈对原脚本进行定向排查自愈或编写补充适配逻辑。"
                 )
             if four_tuple["has_knowledge"]:
                 addon_sections.append(

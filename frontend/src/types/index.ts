@@ -43,8 +43,20 @@ export interface ToolExecutionCardItem {
   output?: string;
   compressed?: string;
   file_path?: string;
+  edit_action?: 'created' | 'modified' | '';
+  file_size?: number;
+  edit_time?: string;
   unified_diff?: string;
   snapshot_tree_hash?: string;
+}
+
+export interface EditedFileItem {
+  filePath: string;
+  fileName: string;
+  action: 'created' | 'modified';
+  fileSize?: number;
+  editTime?: string;
+  snapshotTreeHash?: string;
 }
 
 export interface MemoryRefItem {
@@ -196,6 +208,9 @@ export interface Conversation {
   working_memory_json?: string;
   current_cwd?: string | null;
   workspace_id?: string;
+  parent_conversation_id?: string | null;
+  branched_from_message_id?: number | null;
+  branched_from_turn_id?: number | null;
 }
 
 export interface Message {

@@ -88,3 +88,22 @@ def restore_shadow_snapshot(
     except Exception:
         return False
 
+
+def is_file_in_tree_snapshot(
+    workspace_dir: Path, tree_hash: str, target_file: str
+) -> bool:
+    """检查指定文件在 Tree Hash 快照中是否存在。"""
+    if not (workspace_dir / ".git").exists() or not tree_hash or not target_file:
+        return False
+    try:
+        res = subprocess.run(
+            ["git", "ls-tree", "-r", "--name-only", tree_hash, "--", target_file],
+            cwd=workspace_dir,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        return res.returncode == 0 and bool(res.stdout.strip())
+    except Exception:
+        return False
+

@@ -40,6 +40,7 @@ interface ModelSelectorProps {
   accountName?: string;
   authLabel?: string;
   isTested?: boolean;
+  compactTrigger?: boolean;
   onSelectModel: (modelId: string) => void;
   onSelectThinking: (level: ThinkingLevel) => void;
   onOpenModelTest?: () => void;
@@ -126,6 +127,7 @@ export function ModelSelector({
   accountName,
   authLabel,
   isTested,
+  compactTrigger = false,
   onSelectModel,
   onSelectThinking,
   onOpenModelTest,
@@ -157,7 +159,7 @@ export function ModelSelector({
 
   const getButtonLabel = () => {
     if (!selectedOpt) return currentModel || '未配置模型';
-    if (supportsThinking(selectedOpt)) {
+    if (!compactTrigger && supportsThinking(selectedOpt)) {
       const levelMap: Record<ThinkingLevel, string> = { low: '低', medium: '中', high: '高' };
       return `${selectedOpt.name} (${levelMap[thinkingLevel]})`;
     }

@@ -680,6 +680,14 @@ async def run_cli_stream(
                     if res.get("status") == "ERROR" or res.get("error"):
                         err_msg = res.get("error") or "CLI 执行异常失败"
                         logger.error(f"agy 返回 ERROR 状态: {err_msg}")
+                        if "copyrighted works" in err_msg.lower() or "safety filter" in err_msg.lower():
+                            friendly_msg = (
+                                "内容触发了 Google 官方安全策略与版权材料审查（Safety Filter: Copyrighted Works）。"
+                                "生成的部分文本因与现有公开文献或已有著作高度重合而被上游过滤阻断。"
+                                "建议优化提示词（例如要求「用自己的语言改写转述」、「列出核心要点」或「按步骤分批生成」），避免直接输出大段原文。"
+                            )
+                            yield {"type": "error", "message": friendly_msg}
+                            return
                         yield {"type": "error", "message": err_msg}
                         return
                     # NOTE: agy 非增量结尾优先填充 response 字段，其次回退 text/content
@@ -725,6 +733,14 @@ async def run_cli_stream(
                 elif evt_name == "error":
                     err_msg = event.get("error", {}).get("message", "CLI 执行出错")
                     logger.error(f"agy 返回错误事件: {err_msg}")
+                    if "copyrighted works" in err_msg.lower() or "safety filter" in err_msg.lower():
+                        friendly_msg = (
+                            "内容触发了 Google 官方安全策略与版权材料审查（Safety Filter: Copyrighted Works）。"
+                            "生成的部分文本因与现有公开文献或已有著作高度重合而被上游过滤阻断。"
+                            "建议优化提示词（例如要求「用自己的语言改写转述」、「列出核心要点」或「按步骤分批生成」），避免直接输出大段原文。"
+                        )
+                        yield {"type": "error", "message": friendly_msg}
+                        return
                     yield {"type": "error", "message": err_msg}
 
             # 2. 适配 Gemini CLI 事件格式

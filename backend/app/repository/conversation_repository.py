@@ -13,11 +13,15 @@ class ConversationRepository:
     """会话数据访问对象"""
     
     @staticmethod
-    async def get_all(workspace_id: str | None = None) -> list[dict[str, Any]]:
-        """获取所有会话列表（置顶优先，时间降序），附带消息条数统计，支持按工作区过滤"""
+    async def get_all(
+        workspace_id: str | None = None,
+        include_all_workspaces: bool = False,
+    ) -> list[dict[str, Any]]:
+        """获取所有会话列表（置顶优先，时间降序），附带消息条数统计，支持按工作区或全工作区查询"""
         async with db_manager.get_connection() as conn:
-            where_clause = "WHERE c.workspace_id = ?" if workspace_id else ""
-            params = (workspace_id,) if workspace_id else ()
+            effective_all = include_all_workspaces or (workspace_id == "__all__")
+            where_clause = "WHERE c.workspace_id = ?" if (workspace_id and not effective_all) else ""
+            params = (workspace_id,) if (workspace_id and not effective_all) else ()
             sql = f"""
             SELECT c.*, COUNT(m.id) as message_count
             FROM conversations c
@@ -47,7 +51,7 @@ class ConversationRepository:
 
     @staticmethod
     async def create(data: dict[str, Any]) -> None:
-        """创建新会话记录，支持指定工作区与工作目录"""
+        """创建新会话记录，支持指定工作区、工作目录及分支来源信息"""
         import os
         default_cwd = data.get("current_cwd") or os.getcwd()
         workspace_id = data.get("workspace_id", "default")
@@ -56,9 +60,10 @@ class ConversationRepository:
                 """
                 INSERT INTO conversations (
                     id, title, source_type, source_account, model_name,
-                    is_pinned, scene_mode, incognito, working_memory_json, current_cwd, workspace_id
+                    is_pinned, scene_mode, incognito, working_memory_json, current_cwd, workspace_id,
+                    parent_conversation_id, branched_from_message_id, branched_from_turn_id
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     data["id"],
@@ -72,9 +77,129 @@ class ConversationRepository:
                     data.get("working_memory_json", "{}"),
                     default_cwd,
                     workspace_id,
+                    data.get("parent_conversation_id"),
+                    data.get("branched_from_message_id"),
+                    data.get("branched_from_turn_id"),
                 )
             )
             await conn.commit()
+
+    @staticmethod
+    async def branch_conversation(
+        source_conv_id: str,
+        new_conv_id: str,
+        up_to_message_id: int | None = None,
+        up_to_turn_id: int | None = None,
+        custom_title: str | None = None,
+    ) -> dict[str, Any] | None:
+        """从指定会话的某个消息或轮次处分叉克隆为一个独立的新分支会话"""
+        source_conv = await ConversationRepository.get_by_id(source_conv_id)
+        if not source_conv:
+            return None
+
+        raw_title = (custom_title or "").strip()
+        if raw_title:
+            branch_title = raw_title
+        else:
+            base_title = (source_conv.title or "新会话").strip()
+            branch_title = base_title if base_title.startswith("分支 · ") else f"分支 · {base_title}"
+
+        async with db_manager.get_connection() as conn:
+            async with conn.execute(
+                "SELECT * FROM messages WHERE conversation_id = ? ORDER BY id ASC",
+                (source_conv_id,),
+            ) as cursor:
+                all_rows = [dict(r) for r in await cursor.fetchall()]
+
+            if up_to_message_id is not None:
+                cloned_rows = [r for r in all_rows if int(r["id"]) <= int(up_to_message_id)]
+            elif up_to_turn_id is not None:
+                cloned_rows = [r for r in all_rows if int(r.get("turn_id") or 1) <= int(up_to_turn_id)]
+            else:
+                cloned_rows = all_rows
+
+            actual_branch_msg_id = (
+                int(cloned_rows[-1]["id"])
+                if cloned_rows
+                else up_to_message_id
+            )
+            actual_branch_turn_id = (
+                int(cloned_rows[-1].get("turn_id") or 1)
+                if cloned_rows
+                else up_to_turn_id
+            )
+
+            await conn.execute(
+                """
+                INSERT INTO conversations (
+                    id, title, source_type, source_account, model_name,
+                    is_pinned, scene_mode, incognito, working_memory_json, rolling_summary,
+                    current_cwd, workspace_id, parent_conversation_id,
+                    branched_from_message_id, branched_from_turn_id
+                )
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_conv_id,
+                    branch_title,
+                    "local",
+                    source_conv.source_account,
+                    source_conv.model_name,
+                    source_conv.scene_mode,
+                    int(source_conv.incognito or 0),
+                    source_conv.working_memory_json or "{}",
+                    source_conv.rolling_summary or "",
+                    source_conv.current_cwd,
+                    getattr(source_conv, "workspace_id", "default") or "default",
+                    source_conv_id,
+                    actual_branch_msg_id,
+                    actual_branch_turn_id,
+                ),
+            )
+
+            for row in cloned_rows:
+                await conn.execute(
+                    """
+                    INSERT INTO messages (
+                        conversation_id, role, content, executed_by_account,
+                        token_count, turn_id, compressed_content, tool_calls_json,
+                        tool_call_id, created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        new_conv_id,
+                        row.get("role", "model"),
+                        row.get("content", ""),
+                        row.get("executed_by_account"),
+                        int(row.get("token_count") or 0),
+                        int(row.get("turn_id") or 1),
+                        row.get("compressed_content"),
+                        row.get("tool_calls_json"),
+                        row.get("tool_call_id"),
+                        row.get("created_at"),
+                    ),
+                )
+
+            await conn.commit()
+
+            async with conn.execute(
+                """
+                SELECT c.*, COUNT(m.id) as message_count
+                FROM conversations c
+                LEFT JOIN messages m ON c.id = m.conversation_id
+                WHERE c.id = ?
+                GROUP BY c.id
+                """,
+                (new_conv_id,),
+            ) as cursor:
+                created_row = await cursor.fetchone()
+                if not created_row:
+                    return None
+                item = dict(created_row)
+                item["is_pinned"] = bool(item.get("is_pinned", 0))
+                item["incognito"] = bool(item.get("incognito", 0))
+                return item
 
     @staticmethod
     async def update_agent_state(

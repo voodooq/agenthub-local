@@ -79,6 +79,9 @@ class DatabaseManager:
             "collapse_anchor_turn_id": "INTEGER DEFAULT 0",
             "anchored_summary": "TEXT DEFAULT ''",
             "collapsed_tokens_saved": "INTEGER DEFAULT 0",
+            "parent_conversation_id": "TEXT",
+            "branched_from_message_id": "INTEGER",
+            "branched_from_turn_id": "INTEGER",
         }
         for col, col_type in new_columns.items():
             if col not in columns:

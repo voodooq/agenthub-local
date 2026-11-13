@@ -9,6 +9,7 @@ import json
 import os
 import re
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any, AsyncGenerator, Awaitable, Callable
 
@@ -832,6 +833,37 @@ class AgentRuntime:
                 )
             except Exception as sync_att_err:
                 logger.warning(f"[AgentRuntime] 同步工作区沙盒附件异常: {sync_att_err}")
+
+            # ⚡ 关键基准重置：用户上传新附件时，自动净化与新附件冲突的历史旧工作记忆
+            user_msg_lower = (user_message or "").lower()
+            user_explicit_prior = any(
+                k in user_msg_lower
+                for k in [
+                    "之前的数据", "历史数据", "上一次的数据", "上次的数据",
+                    "上次传的", "之前传的", "原有数据", "沿用之前", "基于上一次"
+                ]
+            )
+            if not user_explicit_prior and conv_obj:
+                try:
+                    att_names = [
+                        str(a.get("name") if isinstance(a, dict) else getattr(a, "name", "") or "")
+                        for a in attachments
+                    ]
+                    att_names_clean = [n for n in att_names if n]
+                    clean_att_desc = ", ".join(att_names_clean) if att_names_clean else "新附件"
+
+                    fresh_wm = {
+                        "active_baseline_file": clean_att_desc,
+                        "status": "fresh_attachment_uploaded_awaiting_analysis",
+                        "updated_reason": "用户上传了最新附件，旧文件数据缓存已自动归档重置",
+                    }
+                    await ConversationRepository.update_agent_state(
+                        conv_id,
+                        working_memory_json=json.dumps(fresh_wm, ensure_ascii=False),
+                    )
+                    logger.info(f"[AgentRuntime] 检测到用户上传新附件 {clean_att_desc}，已自动刷新重置历史 working_memory")
+                except Exception as wm_reset_err:
+                    logger.debug(f"[AgentRuntime] 刷新 working_memory 异常: {wm_reset_err}")
 
         # 2.5 先检查既往历史轮次是否已完成方案审批或进入执行态，再落盘本轮 user 消息
         has_prior_execution_unlock = False
@@ -2291,13 +2323,28 @@ class AgentRuntime:
                                     "reason": f"真实落盘本地文件 {rel_display}",
                                     "security": "AUTO_CONFIRMED",
                                 }
+                                write_snapshot_hash = None
+                                existed_before = False
+                                edit_file_size = 0
+                                edit_time_str = datetime.now().strftime("%H:%M:%S")
+                                write_succeeded = False
                                 try:
-                                    if target_file.exists() and not overwrite:
+                                    existed_before = target_file.exists()
+                                    if existed_before and not overwrite:
                                         tool_output = f"Error: 文件 `{rel_display}` 已存在且 overwrite=False，取消写入。"
                                         compressed = f"[写入取消: 文件已存在 `{rel_display}`]"
                                     else:
+                                        if existed_before:
+                                            write_snapshot_hash = create_shadow_snapshot(current_work_dir)
                                         target_file.parent.mkdir(parents=True, exist_ok=True)
                                         target_file.write_text(file_content, encoding="utf-8")
+                                        write_succeeded = True
+                                        try:
+                                            st = target_file.stat()
+                                            edit_file_size = int(st.st_size)
+                                            edit_time_str = datetime.fromtimestamp(st.st_mtime).strftime("%H:%M:%S")
+                                        except Exception:
+                                            edit_file_size = len(file_content.encode("utf-8"))
                                         hotplug_note = ""
                                         if target_file.name.upper() == "SKILL.MD":
                                             target_file = skill_loader.normalize_skill_file(target_file)
@@ -2309,7 +2356,7 @@ class AgentRuntime:
                                             hotplug_note = f"\n🔌 [MCP 热插拔已重载]: 已重新扫描 mcp_servers.json，当前可用工具总数: {len(active_tools)}{doc_tip}。"
                                         tool_output = (
                                             f"✅ 成功物理落盘文件: `{target_file}`\n"
-                                            f"文件大小: {len(file_content.encode('utf-8'))} 字节\n"
+                                            f"文件大小: {edit_file_size} 字节\n"
                                             f"状态: 真实写入磁盘已验证完成。{hotplug_note}"
                                         )
                                         compressed = f"[已真实物理落盘文件 `{rel_display}` ({len(file_content)} 字符)]"
@@ -2323,7 +2370,7 @@ class AgentRuntime:
                                                 file_path=str(target_file),
                                                 file_name=target_file.name,
                                                 file_type=f_type,
-                                                file_size=len(file_content.encode("utf-8")),
+                                                file_size=edit_file_size,
                                                 conversation_id=conv_id,
                                                 source="ai_generated",
                                                 summary=f"AI 自主编写落盘: {target_file.name}",
@@ -2344,6 +2391,11 @@ class AgentRuntime:
                                     "output": tool_output,
                                     "compressed": compressed,
                                     "cwd": str(current_work_dir),
+                                    "file_path": rel_display if write_succeeded else "",
+                                    "edit_action": ("modified" if existed_before else "created") if write_succeeded else "",
+                                    "file_size": edit_file_size if write_succeeded else 0,
+                                    "edit_time": edit_time_str if write_succeeded else "",
+                                    "snapshot_tree_hash": write_snapshot_hash or "",
                                 }
 
                     # ── 工具: 精准局部补丁修改 (replace_in_file - 代码手术刀与语法门禁) ──
@@ -2472,6 +2524,16 @@ class AgentRuntime:
                                     tool_output = f"Error: 局部修改执行异常: {e}"
                                     compressed = f"[修改异常: {str(e)[:40]}]"
 
+                                replace_file_size = 0
+                                replace_edit_time = datetime.now().strftime("%H:%M:%S")
+                                if ok and syntax_ok and target_file.exists():
+                                    try:
+                                        st = target_file.stat()
+                                        replace_file_size = int(st.st_size)
+                                        replace_edit_time = datetime.fromtimestamp(st.st_mtime).strftime("%H:%M:%S")
+                                    except Exception:
+                                        replace_file_size = 0
+
                                 yield {
                                     "type": "tool_end",
                                     "call_id": call_id,
@@ -2483,6 +2545,9 @@ class AgentRuntime:
                                     "compressed": compressed,
                                     "cwd": str(current_work_dir),
                                     "file_path": rel_display,
+                                    "edit_action": "modified" if (ok and syntax_ok) else "",
+                                    "file_size": replace_file_size,
+                                    "edit_time": replace_edit_time,
                                     "unified_diff": unified_diff if (ok and syntax_ok) else "",
                                     "snapshot_tree_hash": snapshot_hash or "",
                                 }
