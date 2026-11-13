@@ -60,6 +60,7 @@ import { SopDrawer } from '@/components/SopDrawer';
 import { AssistantMarkdownMessage } from '@/components/AssistantMarkdownMessage';
 import { TokenMetricsFooterBar } from '@/components/TokenMetricsFooterBar';
 import { TokenStatsModal } from '@/components/TokenStatsModal';
+import { SessionTimelineRail } from '@/components/SessionTimelineRail';
 
 import { GeneratedFileChip } from '@/components/GeneratedFileChip';
 import { useVerifiedWorkspacePaths } from '@/hooks/useVerifiedWorkspacePaths';
@@ -2742,49 +2743,52 @@ export default function WorkbenchPage() {
               </div>
             )}
 
-            {/* 聊天气泡列表 / 欢迎卡片 */}
-            <div
-              ref={messagesContainerRef}
-              className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-6 space-y-6"
-            >
-              {messages.length === 0 ? (
-                <PromptStarterCards onSelectPrompt={(text) => handleSendMessage(text)} />
-              ) : (
-                messages.map((msg, index) => {
-                  const isUser = msg.role === 'user';
-                  const isCurrentStreamingMsg = isStreaming && index === messages.length - 1;
-                  const isInteractiveCard = !isUser && hasInteractiveInquiryBlock(msg.content || '');
-                  const isProcessStep =
-                    !isUser &&
-                    !isInteractiveCard &&
-                    Boolean(
-                      (msg.tool_events && msg.tool_events.length > 0) ||
-                      (msg.tool_calls_json && msg.tool_calls_json !== '[]') ||
-                      msg.is_process_step
-                    );
-                  // 检查上一条消息是否也是同一发言序列中的中间过程步骤，用于去噪聚合
-                  const prevMsg = index > 0 ? messages[index - 1] : null;
-                  const isPrevProcessStep =
-                    prevMsg &&
-                    prevMsg.role !== 'user' &&
-                    !hasInteractiveInquiryBlock(prevMsg.content || '') &&
-                    Boolean(
-                      (prevMsg.tool_events && prevMsg.tool_events.length > 0) ||
-                      (prevMsg.tool_calls_json && prevMsg.tool_calls_json !== '[]') ||
-                      prevMsg.is_process_step
-                    );
-                  const isContinuousProcessStep = isProcessStep && Boolean(isPrevProcessStep);
-                  const msgKey = String(msg.id ?? `idx_${index}`);
-                  const rawBody = msg.content || '';
-                  const isLongProcessText =
-                    isProcessStep && (rawBody.length > 360 || rawBody.split('\n').length > 6);
-                  const isProcessExpanded = Boolean(expandedProcessMsgKeys[msgKey]) || isCurrentStreamingMsg;
-                  const isSearchHighlighted = Boolean(msg.id && highlightedMessageId === msg.id);
-                  return (
-                    <div
-                      key={msgKey}
-                      id={msg.id ? `chat-msg-${msg.id}` : undefined}
-                      className={`flex flex-col group transition-all duration-300 ${
+            {/* 聊天气泡列表 / 欢迎卡片（带左侧时间轴微缩导航轨） */}
+            <div className="relative flex-1 flex flex-col min-h-0 overflow-hidden">
+              <SessionTimelineRail messages={messages} containerRef={messagesContainerRef} />
+              <div
+                ref={messagesContainerRef}
+                className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-6 space-y-6"
+              >
+                {messages.length === 0 ? (
+                  <PromptStarterCards onSelectPrompt={(text) => handleSendMessage(text)} />
+                ) : (
+                  messages.map((msg, index) => {
+                    const isUser = msg.role === 'user';
+                    const isCurrentStreamingMsg = isStreaming && index === messages.length - 1;
+                    const isInteractiveCard = !isUser && hasInteractiveInquiryBlock(msg.content || '');
+                    const isProcessStep =
+                      !isUser &&
+                      !isInteractiveCard &&
+                      Boolean(
+                        (msg.tool_events && msg.tool_events.length > 0) ||
+                        (msg.tool_calls_json && msg.tool_calls_json !== '[]') ||
+                        msg.is_process_step
+                      );
+                    // 检查上一条消息是否也是同一发言序列中的中间过程步骤，用于去噪聚合
+                    const prevMsg = index > 0 ? messages[index - 1] : null;
+                    const isPrevProcessStep =
+                      prevMsg &&
+                      prevMsg.role !== 'user' &&
+                      !hasInteractiveInquiryBlock(prevMsg.content || '') &&
+                      Boolean(
+                        (prevMsg.tool_events && prevMsg.tool_events.length > 0) ||
+                        (prevMsg.tool_calls_json && prevMsg.tool_calls_json !== '[]') ||
+                        prevMsg.is_process_step
+                      );
+                    const isContinuousProcessStep = isProcessStep && Boolean(isPrevProcessStep);
+                    const msgKey = String(msg.id ?? `idx_${index}`);
+                    const rawBody = msg.content || '';
+                    const isLongProcessText =
+                      isProcessStep && (rawBody.length > 360 || rawBody.split('\n').length > 6);
+                    const isProcessExpanded = Boolean(expandedProcessMsgKeys[msgKey]) || isCurrentStreamingMsg;
+                    const isSearchHighlighted = Boolean(msg.id && highlightedMessageId === msg.id);
+                    return (
+                      <div
+                        key={msgKey}
+                        id={msg.id ? `chat-msg-${msg.id}` : `chat-msg-${msgKey}`}
+                        data-message-id={msg.id ? String(msg.id) : msgKey}
+                        className={`flex flex-col group transition-all duration-300 ${
                         isContinuousProcessStep
                           ? 'space-y-1 pl-3.5 border-l-2 border-border/40 ml-1.5 mt-1'
                           : isProcessStep
@@ -3201,6 +3205,7 @@ export default function WorkbenchPage() {
               )}
               <div ref={messagesEndRef} />
             </div>
+          </div>
 
             {/* 底部折叠式硬件 HUD 仪表盘 */}
             <HardwareHud
