@@ -311,47 +311,90 @@ def build_windows_exe_update_script(
     source_exe: Path,
     target_exe: Path,
     wait_pids: list[int],
+    log_file: Path | None = None,
 ) -> str:
     """生成 Windows 单文件 EXE 脱离进程更新并自动重启的 PowerShell 脚本内容。
 
-    由于 Windows 会锁定正在运行的可执行文件句柄，必须由外部独立脚本等待原进程退出后完成替换与拉起。
+    由于 Windows 与 PyInstaller --onefile Bootloader 会锁定正在运行的可执行文件句柄，
+    必须等待所有关联进程彻底退出后，先移走旧文件再落位新文件并重新拉起。
     """
     unique_pids = [str(pid) for pid in dict.fromkeys(wait_pids) if isinstance(pid, int) and pid > 0]
     pids_literal = ", ".join(unique_pids) if unique_pids else "0"
     src_str = str(source_exe.resolve()).replace("'", "''")
     dst_str = str(target_exe.resolve()).replace("'", "''")
+    bak_str = f"{dst_str}.old"
     work_dir = str(target_exe.resolve().parent).replace("'", "''")
+    log_path = log_file if log_file is not None else (source_exe.resolve().parent / "apply_update.log")
+    log_str = str(log_path).replace("'", "''")
 
-    return f"""$ErrorActionPreference = 'Stop'
+    return f"""$ErrorActionPreference = 'Continue'
 $SourceExe = '{src_str}'
 $TargetExe = '{dst_str}'
+$BackupExe = '{bak_str}'
 $WorkDir = '{work_dir}'
+$LogFile = '{log_str}'
 $WaitPids = @({pids_literal})
+
+function Write-UpdateLog($msg) {{
+    try {{
+        $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+        Add-Content -LiteralPath $LogFile -Value "[$ts] $msg" -Encoding UTF8
+    }} catch {{}}
+}}
+
+Write-UpdateLog "Update script started. Source=$SourceExe Target=$TargetExe"
 
 foreach ($pidVal in $WaitPids) {{
     if ($pidVal -le 0) {{ continue }}
-    for ($i = 0; $i -lt 40; $i++) {{
+    for ($i = 0; $i -lt 60; $i++) {{
         $proc = Get-Process -Id $pidVal -ErrorAction SilentlyContinue
         if (-not $proc) {{ break }}
-        Start-Sleep -Milliseconds 400
+        Start-Sleep -Milliseconds 300
     }}
 }}
 
+# 等待 PyInstaller --onefile 外层 Bootloader 及所有占用该路径的进程彻底退出
+for ($i = 0; $i -lt 60; $i++) {{
+    $holders = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq $TargetExe }})
+    if ($holders.Count -eq 0) {{ break }}
+    Write-UpdateLog "Waiting for $($holders.Count) process(es) holding TargetExe..."
+    Start-Sleep -Milliseconds 400
+}}
+
 $replaced = $false
-for ($attempt = 0; $attempt -lt 10; $attempt++) {{
+for ($attempt = 1; $attempt -le 30; $attempt++) {{
     try {{
-        if (Test-Path -LiteralPath $SourceExe) {{
-            Move-Item -LiteralPath $SourceExe -Destination $TargetExe -Force
-            $replaced = $true
+        if (-not (Test-Path -LiteralPath $SourceExe)) {{
+            Write-UpdateLog "ERROR: SourceExe does not exist."
             break
         }}
+        if (Test-Path -LiteralPath $TargetExe) {{
+            if (Test-Path -LiteralPath $BackupExe) {{
+                Remove-Item -LiteralPath $BackupExe -Force -ErrorAction SilentlyContinue
+            }}
+            Move-Item -LiteralPath $TargetExe -Destination $BackupExe -Force -ErrorAction Stop
+        }}
+        Move-Item -LiteralPath $SourceExe -Destination $TargetExe -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $BackupExe) {{
+            Remove-Item -LiteralPath $BackupExe -Force -ErrorAction SilentlyContinue
+        }}
+        $replaced = $true
+        Write-UpdateLog "Replaced TargetExe successfully on attempt $attempt."
+        break
     }} catch {{
+        Write-UpdateLog "Attempt $attempt failed: $($_.Exception.Message)"
+        if ((-not (Test-Path -LiteralPath $TargetExe)) -and (Test-Path -LiteralPath $BackupExe)) {{
+            try {{ Move-Item -LiteralPath $BackupExe -Destination $TargetExe -Force -ErrorAction SilentlyContinue }} catch {{}}
+        }}
         Start-Sleep -Milliseconds 500
     }}
 }}
 
 if ($replaced -and (Test-Path -LiteralPath $TargetExe)) {{
+    Write-UpdateLog "Launching updated executable: $TargetExe"
     Start-Process -FilePath $TargetExe -WorkingDirectory $WorkDir
+}} else {{
+    Write-UpdateLog "Update failed: TargetExe was not replaced."
 }}
 
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
@@ -737,9 +780,20 @@ class AutoUpdaterService:
 
     @staticmethod
     def _spawn_detached_command(cmd: list[str], cwd: Path) -> None:
-        """跨平台启动完全脱离当前进程生命期的子进程，确保父进程退出后不被级联杀掉。"""
+        """跨平台启动完全脱离当前进程生命期的子进程，并剥离父进程与 PyInstaller 临时环境变量。"""
+        clean_env = os.environ.copy()
+        for env_key in (
+            "DESKTOP_PARENT_PID",
+            "TAURI_PARENT_PID",
+            "_MEIPASS2",
+            "PYTHONHOME",
+            "PYTHONPATH",
+        ):
+            clean_env.pop(env_key, None)
+
         kwargs: dict[str, Any] = {
             "cwd": str(cwd),
+            "env": clean_env,
             "stdout": subprocess.DEVNULL,
             "stderr": subprocess.DEVNULL,
             "stdin": subprocess.DEVNULL,

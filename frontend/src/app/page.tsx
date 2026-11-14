@@ -799,6 +799,33 @@ export default function WorkbenchPage() {
     return () => clearTimeout(timer);
   }, [showFloatingToast]);
 
+  // 当弹窗关闭但后台仍在下载更新包时，持续轮询刷新外部顶部进度条
+  useEffect(() => {
+    if (updateState?.status !== 'downloading' || isUpdateModalOpen) {
+      return;
+    }
+    const timer = setInterval(async () => {
+      try {
+        const res = await apiFetch('/api/v1/system/update/status');
+        if (!res.ok) return;
+        const data: UpdateStatusData = await res.json();
+        setUpdateState(data);
+        if (data.status === 'downloaded') {
+          showFloatingToast(
+            `新版本 v${data.latest_version} 已下载完毕，点击顶部“重启升级”即可加载新版本`,
+            'success',
+            6000
+          );
+        } else if (data.status === 'error' && data.error_message) {
+          showFloatingToast(data.error_message, 'error', 5000);
+        }
+      } catch {
+        // 忽略后台进度轮询的偶发网络波动
+      }
+    }, 450);
+    return () => clearInterval(timer);
+  }, [updateState?.status, isUpdateModalOpen, showFloatingToast]);
+
   const syncSkillCatalog = useCallback(async (wsId?: string) => {
     try {
       const [wsSkills, extSkills] = await Promise.all([
