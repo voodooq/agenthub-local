@@ -392,7 +392,7 @@ for ($attempt = 1; $attempt -le 30; $attempt++) {{
 
 if ($replaced -and (Test-Path -LiteralPath $TargetExe)) {{
     Write-UpdateLog "Launching updated executable: $TargetExe"
-    Start-Process -FilePath $TargetExe -WorkingDirectory $WorkDir
+    Start-Process -FilePath $TargetExe -WorkingDirectory $WorkDir -WindowStyle Normal
 }} else {{
     Write-UpdateLog "Update failed: TargetExe was not replaced."
 }}
@@ -439,10 +439,10 @@ env.pop('TAURI_PARENT_PID', None)
 kwargs = {{'cwd': cwd, 'env': env}}
 if sys.platform == 'win32':
     kwargs['creationflags'] = (
-        getattr(subprocess, 'DETACHED_PROCESS', 0x00000008)
-        | getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200)
+        getattr(subprocess, 'CREATE_NEW_PROCESS_GROUP', 0x00000200)
         | getattr(subprocess, 'CREATE_NO_WINDOW', 0x08000000)
     )
+    kwargs['close_fds'] = True
 else:
     kwargs['start_new_session'] = True
 
@@ -799,11 +799,12 @@ class AutoUpdaterService:
             "stdin": subprocess.DEVNULL,
         }
         if sys.platform == "win32":
+            # 注意：Windows 下 DETACHED_PROCESS 与 CREATE_NO_WINDOW 互斥，同时传入会导致子进程静默启动失败
             kwargs["creationflags"] = (
-                getattr(subprocess, "DETACHED_PROCESS", 0x00000008)
-                | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+                getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
                 | getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
             )
+            kwargs["close_fds"] = True
         else:
             kwargs["start_new_session"] = True
         subprocess.Popen(cmd, **kwargs)
