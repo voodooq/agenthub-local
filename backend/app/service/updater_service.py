@@ -392,6 +392,13 @@ for ($attempt = 1; $attempt -le 30; $attempt++) {{
 
 if ($replaced -and (Test-Path -LiteralPath $TargetExe)) {{
     Write-UpdateLog "Launching updated executable: $TargetExe"
+    # 清理 PyInstaller 6.x (_PYI_*) 与旧进程父级环境变量，强制新 EXE 独立解压运行
+    Get-ChildItem Env: | Where-Object {{
+        $_.Name -like '_PYI_*' -or $_.Name -in @('_MEIPASS2', 'DESKTOP_PARENT_PID', 'TAURI_PARENT_PID', 'PYTHONHOME', 'PYTHONPATH')
+    }} | ForEach-Object {{
+        Remove-Item "Env:\\$($_.Name)" -ErrorAction SilentlyContinue
+    }}
+    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
     Start-Process -FilePath $TargetExe -WorkingDirectory $WorkDir -WindowStyle Normal
 }} else {{
     Write-UpdateLog "Update failed: TargetExe was not replaced."
@@ -782,14 +789,16 @@ class AutoUpdaterService:
     def _spawn_detached_command(cmd: list[str], cwd: Path) -> None:
         """跨平台启动完全脱离当前进程生命期的子进程，并剥离父进程与 PyInstaller 临时环境变量。"""
         clean_env = os.environ.copy()
-        for env_key in (
-            "DESKTOP_PARENT_PID",
-            "TAURI_PARENT_PID",
-            "_MEIPASS2",
-            "PYTHONHOME",
-            "PYTHONPATH",
-        ):
-            clean_env.pop(env_key, None)
+        for env_key in list(clean_env.keys()):
+            if env_key.startswith("_PYI_") or env_key in (
+                "DESKTOP_PARENT_PID",
+                "TAURI_PARENT_PID",
+                "_MEIPASS2",
+                "PYTHONHOME",
+                "PYTHONPATH",
+            ):
+                clean_env.pop(env_key, None)
+        clean_env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
 
         kwargs: dict[str, Any] = {
             "cwd": str(cwd),
