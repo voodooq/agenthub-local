@@ -539,6 +539,52 @@ class ToolProtocolAdapter:
                     "required": ["ref_id"],
                 },
             },
+            {
+                "name": "mcp_upload_workspace_file",
+                "description": (
+                    "将当前工作区沙盒内的本地文件（如 ./attachments/ 或 ./.agenthub/attachments/ 中的附件及产出文件）"
+                    "安全流式上传至已启用并配置 upload_endpoint 的远程 MCP 服务，返回远端 fileId 等轻量引用而不泄露密钥。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server_name": {
+                            "type": "string",
+                            "description": "目标远程 MCP 服务在配置中的名称。",
+                        },
+                        "local_file_path": {
+                            "type": "string",
+                            "description": "工作区沙盒内的本地文件路径（如 ./attachments/data.xlsx）。",
+                        },
+                    },
+                    "required": ["server_name", "local_file_path"],
+                },
+            },
+            {
+                "name": "mcp_download_artifact_to_workspace",
+                "description": (
+                    "将已启用远程 MCP 服务同源（或 download_origins 白名单内）生成的文件产物链接安全流式下载至"
+                    "工作区指定产出子目录（如 ./output/report.html），并自动登记工作区交付资产。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server_name": {
+                            "type": "string",
+                            "description": "对应远程 MCP 服务名称。",
+                        },
+                        "artifact_url": {
+                            "type": "string",
+                            "description": "远程 MCP 返回的同源（或白名单域）产物下载地址。",
+                        },
+                        "save_rel_path": {
+                            "type": "string",
+                            "description": "工作区相对保存路径（推荐 ./output/xxx.html 或 ./output/result.xlsx）。",
+                        },
+                    },
+                    "required": ["server_name", "artifact_url", "save_rel_path"],
+                },
+            },
         ]
 
     @classmethod
@@ -654,6 +700,8 @@ class ToolProtocolAdapter:
         "web_fetch",
         "update_working_memory",
         "load_skill_detail",
+        "mcp_upload_workspace_file",
+        "mcp_download_artifact_to_workspace",
     )
 
     _ATTR_PATTERN = re.compile(
@@ -1017,7 +1065,15 @@ class ToolProtocolAdapter:
             clean_text = pattern_pair.sub("", clean_text)
 
         # ── 模式 3: 隐式工具调用容错自愈（捕获裸 JSON、带有 </slot> 或嵌套花括号脚本块的工具调用） ──
-        if not tool_calls and ('"command"' in clean_text or '"file_path"' in clean_text or '"skill_name"' in clean_text or '"url"' in clean_text):
+        if not tool_calls and (
+            '"command"' in clean_text
+            or '"file_path"' in clean_text
+            or '"skill_name"' in clean_text
+            or '"url"' in clean_text
+            or '"local_file_path"' in clean_text
+            or '"artifact_url"' in clean_text
+            or '"save_rel_path"' in clean_text
+        ):
             raw_json_blocks = cls._extract_balanced_json_objects(clean_text)
             for block in raw_json_blocks:
                 try:
@@ -1089,6 +1145,31 @@ class ToolProtocolAdapter:
                                 "function": {
                                     "name": "load_skill_detail",
                                     "arguments": json.dumps(obj, ensure_ascii=False),
+                                },
+                            })
+                            clean_text = clean_text.replace(block, "")
+                        elif "server_name" in obj and "local_file_path" in obj:
+                            tool_calls.append({
+                                "id": call_id,
+                                "function": {
+                                    "name": "mcp_upload_workspace_file",
+                                    "arguments": json.dumps({
+                                        "server_name": str(obj.get("server_name") or "").strip(),
+                                        "local_file_path": str(obj.get("local_file_path") or "").strip(),
+                                    }, ensure_ascii=False),
+                                },
+                            })
+                            clean_text = clean_text.replace(block, "")
+                        elif "server_name" in obj and "artifact_url" in obj and "save_rel_path" in obj:
+                            tool_calls.append({
+                                "id": call_id,
+                                "function": {
+                                    "name": "mcp_download_artifact_to_workspace",
+                                    "arguments": json.dumps({
+                                        "server_name": str(obj.get("server_name") or "").strip(),
+                                        "artifact_url": str(obj.get("artifact_url") or "").strip(),
+                                        "save_rel_path": str(obj.get("save_rel_path") or "").strip(),
+                                    }, ensure_ascii=False),
                                 },
                             })
                             clean_text = clean_text.replace(block, "")

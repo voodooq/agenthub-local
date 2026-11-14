@@ -65,6 +65,9 @@ interface SettingsModalProps {
   onSettingsSaved?: () => void;
   onModelsUpdated?: (state: ActiveModelsState) => void;
   initialTab?: 'models' | 'appearance' | 'personality';
+  hasUpdate?: boolean;
+  latestVersion?: string;
+  onOpenUpdateModal?: () => void;
 }
 
 export function SettingsModal({
@@ -73,6 +76,9 @@ export function SettingsModal({
   onSettingsSaved,
   onModelsUpdated,
   initialTab = 'models',
+  hasUpdate = false,
+  latestVersion,
+  onOpenUpdateModal,
 }: SettingsModalProps) {
   const onCloseRef = useRef(onClose);
   useEffect(() => {
@@ -424,7 +430,12 @@ export function SettingsModal({
                   badge: modelState ? `${modelState.models.length}/${modelState.candidates.length}` : undefined,
                 },
                 { id: 'context', label: '上下文与会话', icon: Layers },
-                { id: 'about', label: '关于', icon: Shield },
+                {
+                  id: 'about',
+                  label: '关于',
+                  icon: Shield,
+                  badge: hasUpdate ? '新版本' : undefined,
+                },
               ].map((item) => {
                 const Icon = item.icon;
                 const isSelected = activeTab === item.id;
@@ -892,6 +903,21 @@ export function SettingsModal({
                     </p>
                   </div>
                 </div>
+
+                {onOpenUpdateModal && (
+                  <button
+                    type="button"
+                    onClick={onOpenUpdateModal}
+                    className={`px-3.5 py-2 rounded-xl text-xs font-semibold transition-all flex items-center space-x-1.5 shrink-0 ${
+                      hasUpdate
+                        ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm shadow-emerald-600/25'
+                        : 'bg-surface-200 hover:bg-surface-50 border border-border text-foreground'
+                    }`}
+                  >
+                    <RefreshCw className="w-3.5 h-3.5" />
+                    <span>{hasUpdate && latestVersion ? `发现新版本 v${latestVersion}` : '检查更新'}</span>
+                  </button>
+                )}
               </div>
 
               {/* 开源仓库与版本信息 */}

@@ -30,6 +30,10 @@ from ..memory.session_summary import session_summary_manager
 from ..memory.workspace_fts import WorkspaceFTSEngine
 from ..extensions.skill_loader import skill_loader
 from ..extensions.mcp_manager import mcp_manager
+from ..extensions.mcp_file_bridge import (
+    download_mcp_artifact_to_workspace,
+    upload_workspace_file_to_mcp,
+)
 from ..skills.experience_distiller import ExecutionTrace, experience_distiller
 from .checkpoint_manager import ShadowCheckpointManager
 from .shell_executor import shell_executor
@@ -2903,14 +2907,137 @@ class AgentRuntime:
                             "compressed": compressed,
                         }
 
+                    # ── 工具 4.1: 安全上传工作区沙盒文件至远程 MCP ──
+                    elif func_name == "mcp_upload_workspace_file":
+                        srv_name = str(args.get("server_name") or "").strip()
+                        raw_local_fp = str(args.get("local_file_path") or "").strip()
+                        current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
+                        ws_guard_root = Path(target_cwd or current_work_dir).resolve()
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"mcp_upload({srv_name}: {raw_local_fp})",
+                            "reason": f"安全流式上传工作区文件至远程 MCP [{srv_name}]",
+                            "security": "SAFE",
+                        }
+                        tool_output, bridge_meta = await upload_workspace_file_to_mcp(
+                            server_name=srv_name,
+                            local_file_path=raw_local_fp,
+                            guard_root=ws_guard_root,
+                            current_cwd=current_work_dir,
+                        )
+                        bridge_status = str(bridge_meta.get("status") or "error")
+                        if bridge_status == "denied":
+                            await audit_service.log(
+                                event_type="mcp_file_upload_denied",
+                                actor="agent",
+                                detail={"server_name": srv_name, "local_file_path": raw_local_fp, "reason": tool_output[:200]},
+                                approved=False,
+                            )
+                            compressed = f"[安全拦截上传 `{raw_local_fp}` -> `{srv_name}`]"
+                        elif bridge_status == "completed":
+                            compressed = f"[已上传 `{bridge_meta.get('file_name', raw_local_fp)}` 至 MCP `{srv_name}`]"
+                        else:
+                            compressed = f"[上传至 MCP `{srv_name}` 失败]"
+
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"mcp_upload({srv_name}: {raw_local_fp})",
+                            "reason": f"上传工作区文件至 MCP [{srv_name}]",
+                            "status": bridge_status,
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具 4.2: 安全下载远程 MCP 产物至工作区输出目录 ──
+                    elif func_name == "mcp_download_artifact_to_workspace":
+                        srv_name = str(args.get("server_name") or "").strip()
+                        dl_url = str(args.get("artifact_url") or "").strip()
+                        save_rel = str(args.get("save_rel_path") or "").strip()
+                        current_work_dir = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
+                        ws_guard_root = Path(target_cwd or current_work_dir).resolve()
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"mcp_download({srv_name} -> {save_rel})",
+                            "reason": f"安全下载远程 MCP 产物至工作区 `{save_rel}`",
+                            "security": "AUTO_CONFIRMED",
+                        }
+                        tool_output, bridge_meta = await download_mcp_artifact_to_workspace(
+                            server_name=srv_name,
+                            artifact_url=dl_url,
+                            save_rel_path=save_rel,
+                            guard_root=ws_guard_root,
+                            current_cwd=current_work_dir,
+                        )
+                        bridge_status = str(bridge_meta.get("status") or "error")
+                        downloaded_abs = str(bridge_meta.get("abs_path") or "")
+                        downloaded_rel = str(bridge_meta.get("rel_path") or save_rel)
+
+                        if bridge_status == "denied":
+                            await audit_service.log(
+                                event_type="mcp_artifact_download_denied",
+                                actor="agent",
+                                detail={"server_name": srv_name, "artifact_url": dl_url[:240], "save_rel_path": save_rel},
+                                approved=False,
+                            )
+                            compressed = f"[安全拦截下载远程产物 `{save_rel}`]"
+                        elif bridge_status == "completed" and downloaded_abs:
+                            downloaded_size = int(bridge_meta.get("file_size") or 0)
+                            downloaded_name = str(bridge_meta.get("file_name") or Path(downloaded_abs).name)
+                            try:
+                                from ..repository.artifact_repository import ArtifactRepository
+                                f_type = ArtifactRepository._detect_file_type(Path(downloaded_abs))
+                                await ArtifactRepository.register_artifact(
+                                    workspace_id=ws_id,
+                                    file_path=downloaded_abs,
+                                    file_name=downloaded_name,
+                                    file_type=f_type,
+                                    file_size=downloaded_size,
+                                    conversation_id=conv_id,
+                                    source="mcp_generated",
+                                    summary=f"远程 MCP [{srv_name}] 产物落盘: {downloaded_name}",
+                                )
+                            except Exception as art_err:
+                                logger.warning(f"MCP 产物资产库登记异常: {art_err}")
+                            compressed = f"[已安全下载 MCP 产物 `{downloaded_rel}` ({downloaded_size} 字节)]"
+                        else:
+                            compressed = f"[下载 MCP 产物 `{save_rel}` 失败]"
+
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"mcp_download({downloaded_rel})",
+                            "reason": f"下载远程 MCP 产物 {downloaded_rel}",
+                            "status": bridge_status,
+                            "output": tool_output,
+                            "compressed": compressed,
+                            "file_path": downloaded_rel if bridge_status == "completed" else "",
+                            "edit_action": "created" if bridge_status == "completed" else "",
+                            "file_size": int(bridge_meta.get("file_size") or 0) if bridge_status == "completed" else 0,
+                        }
+
                     else:
                         tool_output = f"Error: 未知的工具名称 `{func_name}`。"
                         compressed = f"[未知工具调用 `{func_name}`]"
 
                     # 智能异常探测：判断该步骤是否遇到报错，并为下一步自愈循环激活调度器
                     if (
-                        func_name in ("execute_local_command", "write_local_file", "replace_in_file", "run_skill_tool")
-                        and not str(tool_output or "").startswith("Denied:")
+                        func_name in (
+                            "execute_local_command",
+                            "write_local_file",
+                            "replace_in_file",
+                            "run_skill_tool",
+                            "mcp_download_artifact_to_workspace",
+                        )
+                        and not str(tool_output or "").startswith(("Denied:", "Error:"))
                     ):
                         has_workspace_mutations = True
                     prev_step_error = last_step_error_info
@@ -2983,10 +3110,14 @@ class AgentRuntime:
                             if self._WRITE_SHELL_HINT_RE.search(cmd_entry):
                                 executed_mutating_shell = True
                         last_step_error_info = None
-                        if not str(tool_output or "").startswith("Error:"):
+                        if not str(tool_output or "").startswith(("Error:", "Denied:")):
                             total_tool_steps += 1
                             if func_name in ("write_local_file", "replace_in_file"):
                                 fp = str(args.get("file_path") or args.get("path") or "").strip()
+                                if fp and fp not in produced_artifacts:
+                                    produced_artifacts.append(fp)
+                            elif func_name == "mcp_download_artifact_to_workspace":
+                                fp = str(args.get("save_rel_path") or "").strip()
                                 if fp and fp not in produced_artifacts:
                                     produced_artifacts.append(fp)
                             if prev_step_error is not None:
@@ -3120,10 +3251,15 @@ class AgentRuntime:
                                 incognito=False,
                             )
                             if (
-                                func_name in ("write_local_file", "replace_in_file")
+                                func_name in ("write_local_file", "replace_in_file", "mcp_download_artifact_to_workspace")
                                 and not is_step_abnormal
-                                and not str(tool_output).startswith("Error:")
+                                and not str(tool_output).startswith(("Error:", "Denied:"))
                             ):
+                                ledger_fp = (
+                                    str(args.get("save_rel_path") or "")
+                                    if func_name == "mcp_download_artifact_to_workspace"
+                                    else str(args.get("file_path") or args.get("path") or "")
+                                )
                                 await event_ledger.append_event(
                                     workspace_id=ws_id,
                                     conversation_id=conv_id,
@@ -3133,7 +3269,7 @@ class AgentRuntime:
                                     actor="agent",
                                     skill_id=step_skill_id,
                                     payload={
-                                        "file_path": str(args.get("file_path") or args.get("path") or ""),
+                                        "file_path": ledger_fp,
                                         "compressed": compressed,
                                     },
                                     incognito=False,

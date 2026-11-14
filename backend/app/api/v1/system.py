@@ -14,6 +14,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from ...probe.collector import hardware_probe
 from ...service.hardware_skills import hardware_skills, proposal_manager
+from ...service.updater_service import auto_updater
 from ...core.config import settings
 
 router = APIRouter(prefix="/system", tags=["System & Hardware"])
@@ -145,3 +146,37 @@ async def open_external_url(req: OpenExternalUrlRequest) -> dict[str, Any]:
 
     opened = await asyncio.to_thread(webbrowser.open, clean_url, 2)
     return {"status": "ok", "opened": bool(opened), "url": clean_url}
+
+
+class UpdateDownloadRequest(BaseModel):
+    """触发下载新版本客户端的请求体"""
+
+    force: bool = False
+
+
+@router.get("/update/check")
+async def check_system_update(force: bool = Query(False, description="是否跳过本地缓存强制联网检查")) -> dict[str, Any]:
+    """检查 GitHub Releases 最新版本、升级日志及对应平台客户端产物。"""
+    return await auto_updater.check_for_updates(force=force)
+
+
+@router.get("/update/status")
+async def get_system_update_status() -> dict[str, Any]:
+    """获取当前版本检查与客户端下载实时进度快照。"""
+    return auto_updater.get_status()
+
+
+@router.post("/update/download")
+async def start_system_update_download(req: UpdateDownloadRequest | None = Body(default=None)) -> dict[str, Any]:
+    """触发后台流式下载已检测到的新版本客户端安装包。"""
+    force_download = bool(req.force) if req else False
+    return await auto_updater.start_download(force=force_download)
+
+
+@router.post("/update/apply-and-restart")
+async def apply_system_update_and_restart() -> dict[str, Any]:
+    """应用已下载完毕的新版本安装包并自动重启客户端以加载新版本。"""
+    try:
+        return await auto_updater.apply_update_and_restart(trigger_exit=True)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

@@ -73,7 +73,17 @@ def resolve_scrub_char_threshold(
             return 10_000
         return 20_000
 
-    # 命令执行、脚本工具与 MCP 外部工具：容易刷屏无用日志，下探至 600~1,000 字符实现紧凑脱水
+    # MCP 外部扩展工具及跨网协同工具：常返回含长签名 URL 或结构化元信息的 JSON，区分于噪音 Shell 命令放宽脱水阈值
+    if tname.startswith("mcp__") or tname in ("mcp_upload_workspace_file", "mcp_download_artifact_to_workspace"):
+        if primary_provider_info is None:
+            return 3_000
+        if local_mode or max_ctx <= 16_384:
+            return 2_400
+        if max_ctx <= 32_768:
+            return 4_000
+        return 8_000
+
+    # 命令执行、脚本工具等：容易刷屏无用日志，下探至 600~1,000 字符实现紧凑脱水
     if primary_provider_info is None:
         return SCRUB_CHAR_THRESHOLD
     if local_mode or max_ctx <= 16_384:
@@ -277,27 +287,43 @@ def read_ephemeral_tool_ref(
 
 
 def _deterministic_scrub(tool_name: str, raw_output: str, max_chars: int = 460) -> str:
-    """确定性高密度规则脱水提取器（跳过无意义分隔线，优先提取报错、标题、表头与实质性首尾摘要）"""
+    """确定性高密度规则脱水提取器（跳过无意义分隔线，优先提取报错、标题、表头、URL 与关键 ID 摘要）"""
     raw_lines = [ln.strip() for ln in raw_output.splitlines() if ln.strip()]
     if not raw_lines:
         return "工具执行完成（输出为空白）。"
+
+    tname_lower = (tool_name or "").strip().lower()
+    is_mcp_tool = tname_lower.startswith("mcp__") or tname_lower in (
+        "mcp_upload_workspace_file",
+        "mcp_download_artifact_to_workspace",
+    )
+
+    # 提取结构化结果中完整的 http(s) URL（防止签名参数或长路径在常规行裁剪中被腰斩）
+    preserved_urls: list[str] = []
+    for m in re.finditer(r"https?://[^\s\"'<>`\]\)]+", raw_output):
+        u = m.group(0).rstrip(",;.")
+        if u and u not in preserved_urls:
+            preserved_urls.append(u[:500])
+        if len(preserved_urls) >= 3:
+            break
 
     # 过滤纯符号分隔行（如 YAML frontmatter 的 `---`、`===`、`***` 等，防止出现 `首行: ---`）
     meaningful_lines = [
         ln for ln in raw_lines if not re.fullmatch(r"[-=*_~`#|\s]{2,}", ln)
     ] or raw_lines
 
-    # 1. 优先捕捉错误堆栈、退出码、结构化文档头、Sheet 名或 Markdown 表头/标题
+    # 1. 优先捕捉错误堆栈、退出码、结构化文档头、Sheet 名、URL 与关键 ID 行
     priority_patterns = re.compile(
-        r"(error|exception|traceback|failed|fatal|warning|exit_code|passed|total|inserted|updated|created|deleted|saved|http\s+\d{3}|status[:=]\s*\d+|sheet|工作表|【结构化|^#{1,3}\s+|^\|[^|]+\||^(?:name|description|title)\s*:)",
+        r"(error|exception|traceback|failed|fatal|warning|exit_code|passed|total|inserted|updated|created|deleted|saved|http\s+\d{3}|status[:=]\s*\d+|sheet|工作表|【结构化|https?://|fileid|file_id|artifact_url|save_rel_path|^#{1,3}\s+|^\|[^|]+\||^(?:name|description|title)\s*:)",
         re.IGNORECASE,
     )
     key_lines: list[str] = []
+    line_cap = 360 if (is_mcp_tool or preserved_urls) else 110
     for ln in meaningful_lines:
         if priority_patterns.search(ln):
             compact = re.sub(r"\s+", " ", ln)
             if compact not in key_lines:
-                key_lines.append(compact[:110])
+                key_lines.append(compact[:line_cap])
         if len(key_lines) >= 4:
             break
 
@@ -307,6 +333,9 @@ def _deterministic_scrub(tool_name: str, raw_output: str, max_chars: int = 460) 
     parts: list[str] = []
     if key_lines:
         parts.append("关键摘要: " + " ; ".join(key_lines))
+    for u in preserved_urls:
+        if not any(u in p for p in parts):
+            parts.append(f"完整链接: {u}")
     for hp in head_preview:
         if hp and not any(hp in p for p in parts):
             parts.append(hp)
@@ -315,8 +344,9 @@ def _deterministic_scrub(tool_name: str, raw_output: str, max_chars: int = 460) 
         parts.append(f"末行: {tail_line}")
 
     summary = f"[{tool_name} 共 {len(raw_lines)} 行] " + " | ".join(parts)
-    if len(summary) > max_chars:
-        summary = summary[: max_chars - 3] + "..."
+    effective_max = max(max_chars, 960) if (is_mcp_tool or preserved_urls) else max_chars
+    if len(summary) > effective_max:
+        summary = summary[: effective_max - 3] + "..."
     return summary
 
 

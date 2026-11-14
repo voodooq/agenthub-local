@@ -63,6 +63,9 @@ interface SidebarProps {
   onOpenSystemMonitor?: () => void;
   onOpenWorkspaceContract?: (workspace: Workspace) => void;
   onCleanupDuplicates?: () => void;
+  hasUpdate?: boolean;
+  latestVersion?: string;
+  onOpenUpdateModal?: () => void;
 }
 
 /**
@@ -119,6 +122,9 @@ export function Sidebar({
   onOpenSystemMonitor,
   onOpenWorkspaceContract,
   onCleanupDuplicates,
+  hasUpdate = false,
+  latestVersion,
+  onOpenUpdateModal,
 }: SidebarProps) {
   const { tag: appVersionTag } = useAppVersion();
   const [isCollapsed, setIsCollapsed] = useState(false);
@@ -326,15 +332,37 @@ export function Sidebar({
       <div className="p-2.5 border-b border-border space-y-2">
         <div className="flex items-center justify-between">
           {!isCollapsed && (
-            <span className="text-xs font-bold tracking-wider text-muted-foreground font-mono flex items-center space-x-1.5 pl-1">
+            <div className="flex items-center space-x-1.5 pl-1 min-w-0">
               <img
                 src="/icon.png"
                 alt="AgentHub Logo"
                 className="w-5 h-5 rounded-md object-contain shrink-0"
               />
-              <span>AGENT-HUB</span>
-              <span className="text-[10px] text-muted-foreground/70 font-normal">{appVersionTag}</span>
-            </span>
+              <span className="text-xs font-bold tracking-wider text-muted-foreground font-mono">AGENT-HUB</span>
+              {onOpenUpdateModal ? (
+                <button
+                  type="button"
+                  onClick={onOpenUpdateModal}
+                  className="text-[10px] text-muted-foreground/80 hover:text-emerald-500 font-mono transition-colors"
+                  title="点击检查客户端版本更新"
+                >
+                  {appVersionTag}
+                </button>
+              ) : (
+                <span className="text-[10px] text-muted-foreground/70 font-normal font-mono">{appVersionTag}</span>
+              )}
+              {hasUpdate && onOpenUpdateModal && (
+                <button
+                  type="button"
+                  onClick={onOpenUpdateModal}
+                  className="px-1.5 py-0.5 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-[9px] font-semibold text-emerald-600 dark:text-emerald-300 flex items-center space-x-1 shrink-0 transition-colors"
+                  title={latestVersion ? `发现新版本 v${latestVersion}，点击查看更新日志并升级` : '发现新版本'}
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  <span>新版本</span>
+                </button>
+              )}
+            </div>
           )}
           <button
             onClick={() => setIsCollapsed(!isCollapsed)}
@@ -857,11 +885,14 @@ export function Sidebar({
             <button
               type="button"
               onClick={onOpenSettings}
-              className="flex items-center justify-center space-x-1 px-1.5 py-1.5 rounded-lg hover:bg-surface-100 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+              className="relative flex items-center justify-center space-x-1 px-1.5 py-1.5 rounded-lg hover:bg-surface-100 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
               title="系统偏好、外观与模型路由设置"
             >
               <Sliders className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate">设置</span>
+              {hasUpdate && (
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+              )}
             </button>
           </div>
         )}

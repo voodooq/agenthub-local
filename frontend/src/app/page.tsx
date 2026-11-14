@@ -48,6 +48,7 @@ import { SearchModal } from '@/components/SearchModal';
 import { AccountModal } from '@/components/AccountModal';
 import { SyncModal } from '@/components/SyncModal';
 import { SettingsModal, ActiveModelsState } from '@/components/SettingsModal';
+import { UpdateModal } from '@/components/UpdateModal';
 import { WorkMode } from '@/components/TopModeSwitcher';
 import { HardwareHud } from '@/components/HardwareHud';
 import { RightActionDrawer } from '@/components/RightActionDrawer';
@@ -94,6 +95,7 @@ import {
   MemoryFactItem,
   TurnTokenMetrics,
   EditedFileItem,
+  UpdateStatusData,
 } from '@/types';
 import { apiFetch, getAccessToken } from '@/utils/apiClient';
 import {
@@ -344,6 +346,8 @@ export default function WorkbenchPage() {
   const [isMemoryHubOpen, setIsMemoryHubOpen] = useState(false);
   const [memoryHubInitialTab, setMemoryHubInitialTab] = useState<MemoryHubTab>('memories');
   const [isTokenStatsModalOpen, setIsTokenStatsModalOpen] = useState(false);
+  const [isUpdateModalOpen, setIsUpdateModalOpen] = useState(false);
+  const [updateState, setUpdateState] = useState<UpdateStatusData | null>(null);
 
   // 三层记忆与微内核 Agent 状态
   const [sceneMode, setSceneMode] = useState<SceneMode>('agent');
@@ -767,6 +771,33 @@ export default function WorkbenchPage() {
       document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, []);
+
+  // 客户端挂载后自动静默检查 GitHub 新版本发布
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      try {
+        const res = await apiFetch('/api/v1/system/update/check');
+        if (!res.ok) return;
+        const data: UpdateStatusData = await res.json();
+        setUpdateState(data);
+        if (data?.has_update && data.latest_version) {
+          const notifiedKey = 'agenthub_notified_update_ver';
+          const lastNotified = sessionStorage.getItem(notifiedKey);
+          if (lastNotified !== data.latest_version) {
+            sessionStorage.setItem(notifiedKey, data.latest_version);
+            showFloatingToast(
+              `检测到新版本 v${data.latest_version}，可点击顶部“发现新版本”按钮查看升级日志并升级`,
+              'success',
+              6000
+            );
+          }
+        }
+      } catch {
+        // 离线或无网络环境下静默跳过版本检查
+      }
+    }, 1800);
+    return () => clearTimeout(timer);
+  }, [showFloatingToast]);
 
   const syncSkillCatalog = useCallback(async (wsId?: string) => {
     try {
@@ -2810,6 +2841,9 @@ export default function WorkbenchPage() {
         }}
         onOpenTokenStats={() => setIsTokenStatsModalOpen(true)}
         onOpenSystemMonitor={() => setIsActionDrawerOpen((prev) => !prev)}
+        hasUpdate={Boolean(updateState?.has_update)}
+        latestVersion={updateState?.latest_version}
+        onOpenUpdateModal={() => setIsUpdateModalOpen(true)}
         onCleanupDuplicates={async () => {
           await apiFetch('/api/v1/conversations/cleanup-duplicates', { method: 'POST' });
           fetchConversations();
@@ -2905,6 +2939,24 @@ export default function WorkbenchPage() {
           })()}
 
           <div className="flex items-center space-x-1.5 shrink-0">
+            {updateState?.has_update && (
+              <button
+                type="button"
+                onClick={() => setIsUpdateModalOpen(true)}
+                className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-[11px] font-semibold text-emerald-700 dark:text-emerald-300 transition-colors animate-fade-in"
+                title={`点击查看 v${updateState.latest_version} 升级日志与升级`}
+              >
+                <Sparkles className="w-3 h-3 text-emerald-500 shrink-0" />
+                <span>
+                  {updateState.status === 'downloading'
+                    ? `下载更新 ${Math.round(updateState.progress_percent || 0)}%`
+                    : updateState.status === 'downloaded'
+                    ? `重启升级 v${updateState.latest_version}`
+                    : `发现新版本 v${updateState.latest_version}`}
+                </span>
+              </button>
+            )}
+
             {/* Canvas 画布极简入口 */}
             <button
               onClick={() => setCanvasState((prev) => ({ ...prev, isOpen: !prev.isOpen }))}
@@ -4212,6 +4264,17 @@ export default function WorkbenchPage() {
         onClose={handleCloseSettings}
         initialTab={settingsInitialTab}
         onModelsUpdated={(state) => applyActiveModelsState(state)}
+        hasUpdate={Boolean(updateState?.has_update)}
+        latestVersion={updateState?.latest_version}
+        onOpenUpdateModal={() => setIsUpdateModalOpen(true)}
+      />
+
+      {/* 客户端自动版本检测、升级日志与进度条升级弹窗 */}
+      <UpdateModal
+        isOpen={isUpdateModalOpen}
+        onClose={() => setIsUpdateModalOpen(false)}
+        initialUpdateState={updateState}
+        onUpdateStateChange={(next) => setUpdateState(next)}
       />
 
       {/* 记忆中枢、多源大模型 API 与 Skill/MCP 扩展管理模态框 */}

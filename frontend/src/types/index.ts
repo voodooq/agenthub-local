@@ -522,3 +522,34 @@ export interface InteractiveInquiryPayload {
   template?: string;
 }
 
+export type AutoUpdateStatusType =
+  | 'idle'
+  | 'checking'
+  | 'available'
+  | 'up_to_date'
+  | 'downloading'
+  | 'downloaded'
+  | 'applying'
+  | 'error';
+
+export interface UpdateStatusData {
+  status: AutoUpdateStatusType;
+  has_update: boolean;
+  current_version: string;
+  latest_version: string;
+  release_name: string;
+  release_notes: string;
+  published_at: string;
+  html_url: string;
+  install_mode: string;
+  asset_name: string;
+  download_url: string;
+  total_bytes: number;
+  downloaded_bytes: number;
+  progress_percent: number;
+  speed_bps: number;
+  downloaded_path: string;
+  error_message: string;
+  checked_at: number;
+}
+

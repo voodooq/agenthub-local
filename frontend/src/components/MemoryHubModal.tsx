@@ -27,9 +27,13 @@ import {
   History,
   ChevronLeft,
   ChevronRight,
+  ChevronDown,
+  ChevronUp,
   Globe,
   FolderGit2,
   BookOpen,
+  Activity,
+  SlidersHorizontal,
 } from 'lucide-react';
 import { EventLedgerItem, LongTermMemoryItem, MemoryFactItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
@@ -63,6 +67,77 @@ interface SkillInfo {
   is_builtin?: boolean;
   has_knowledge?: boolean;
   knowledge_files?: string[];
+}
+
+type McpTransportType = 'stdio' | 'streamable-http' | 'sse';
+
+interface McpServerConfigItem {
+  transport?: McpTransportType | 'http' | 'streamableHttp' | string;
+  type?: string;
+  command?: string;
+  args?: string[];
+  env?: Record<string, string>;
+  url?: string;
+  serverUrl?: string;
+  headers?: Record<string, string>;
+  timeout_seconds?: number;
+  upload_endpoint?: string;
+  upload_file_field?: string;
+  download_origins?: string[];
+  description?: string;
+  enabled?: boolean;
+}
+
+interface McpTestResult {
+  ok: boolean;
+  server: string;
+  transport: string;
+  tool_count: number;
+  tools: string[];
+  latency_ms: number;
+  error?: string | null;
+}
+
+function resolveMcpTransport(cfg?: McpServerConfigItem): McpTransportType {
+  const raw = String(cfg?.transport || cfg?.type || '')
+    .trim()
+    .toLowerCase();
+  if (raw === 'sse') return 'sse';
+  if (raw === 'streamable-http' || raw === 'streamablehttp' || raw === 'streamable_http' || raw === 'http') {
+    return 'streamable-http';
+  }
+  const hasUrl = Boolean((cfg?.url || cfg?.serverUrl || '').trim());
+  const hasCmd = Boolean((cfg?.command || '').trim());
+  if (hasUrl && !hasCmd) return 'streamable-http';
+  return 'stdio';
+}
+
+function getMcpTransportBadge(cfg?: McpServerConfigItem): { label: string; colorClass: string } {
+  const transport = resolveMcpTransport(cfg);
+  if (transport === 'sse') {
+    return {
+      label: 'REMOTE SSE',
+      colorClass: 'bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30',
+    };
+  }
+  if (transport === 'streamable-http') {
+    return {
+      label: 'REMOTE HTTP',
+      colorClass: 'bg-sky-500/15 text-sky-600 dark:text-sky-400 border-sky-500/30',
+    };
+  }
+  return {
+    label: 'LOCAL STDIO',
+    colorClass: 'bg-purple-500/15 text-purple-600 dark:text-purple-400 border-purple-500/30',
+  };
+}
+
+function getMcpEndpointSummary(cfg?: McpServerConfigItem): string {
+  const transport = resolveMcpTransport(cfg);
+  if (transport === 'stdio') {
+    return `${cfg?.command || ''} ${(cfg?.args || []).join(' ')}`.trim();
+  }
+  return (cfg?.url || cfg?.serverUrl || '').trim();
 }
 
 const CATEGORY_MAP: Record<string, { label: string; colorClass: string }> = {
@@ -216,7 +291,8 @@ export function MemoryHubModal({
 
   // ──────────── Workspace Skills & MCP 扩展总线状态 ────────────
   const [skills, setSkills] = useState<SkillInfo[]>([]);
-  const [mcpServers, setMcpServers] = useState<Record<string, any>>({});
+  const [mcpServers, setMcpServers] = useState<Record<string, McpServerConfigItem>>({});
+  const [mcpConfigPath, setMcpConfigPath] = useState<string>('');
   const [extFeedback, setExtFeedback] = useState<{ success: boolean; msg: string } | null>(null);
   const [previewSkillId, setPreviewSkillId] = useState<string | null>(null);
   const [loadingPreviewId, setLoadingPreviewId] = useState<string | null>(null);
@@ -230,13 +306,26 @@ export function MemoryHubModal({
   const [importSkillFilename, setImportSkillFilename] = useState('SKILL.md');
   const skillFileInputRef = useRef<HTMLInputElement>(null);
 
-  // 新建/导入 MCP Server 状态
-  const [mcpFormMode, setMcpFormMode] = useState<'none' | 'create' | 'import'>('none');
+  // 新建/编辑/导入 MCP Server 状态
+  const [mcpFormMode, setMcpFormMode] = useState<'none' | 'create' | 'edit' | 'import'>('none');
+  const [editingMcpName, setEditingMcpName] = useState<string | null>(null);
+  const [mcpConnTab, setMcpConnTab] = useState<'stdio' | 'remote'>('stdio');
   const [newMcpName, setNewMcpName] = useState('');
   const [newMcpCommand, setNewMcpCommand] = useState('npx');
   const [newMcpArgs, setNewMcpArgs] = useState('-y @modelcontextprotocol/server-filesystem .');
   const [newMcpDesc, setNewMcpDesc] = useState('');
   const [newMcpEnvJson, setNewMcpEnvJson] = useState('');
+  const [newMcpRemoteTransport, setNewMcpRemoteTransport] = useState<'streamable-http' | 'sse'>('streamable-http');
+  const [newMcpUrl, setNewMcpUrl] = useState('');
+  const [newMcpHeadersJson, setNewMcpHeadersJson] = useState('');
+  const [newMcpTimeout, setNewMcpTimeout] = useState('60');
+  const [newMcpUploadEndpoint, setNewMcpUploadEndpoint] = useState('');
+  const [newMcpUploadFileField, setNewMcpUploadFileField] = useState('file');
+  const [newMcpDownloadOriginsText, setNewMcpDownloadOriginsText] = useState('');
+  const [showMcpAdvancedFileBridge, setShowMcpAdvancedFileBridge] = useState(false);
+  const [mcpTestResults, setMcpTestResults] = useState<Record<string, McpTestResult>>({});
+  const [testingMcpName, setTestingMcpName] = useState<string | null>(null);
+  const [formTestResult, setFormTestResult] = useState<McpTestResult | null>(null);
   const [importMcpJson, setImportMcpJson] = useState('');
   const mcpFileInputRef = useRef<HTMLInputElement>(null);
 
@@ -349,8 +438,11 @@ export function MemoryHubModal({
       if (mRes.ok) {
         const mData = await mRes.json();
         setMcpServers(mData.mcpServers || {});
+        if (mData.config_path) {
+          setMcpConfigPath(mData.config_path);
+        }
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   // 独立监听 ESC 关闭事件，避免父组件轮询引起 onClose 引用变化时连带重置用户输入
@@ -433,8 +525,8 @@ export function MemoryHubModal({
         msg: hasRedacted
           ? '✅ 事实已写入并触发双时间轴更新，其中的敏感凭据已自动脱敏'
           : data.action === 'updated'
-          ? '✅ 已触发双时间轴覆盖更新，旧版本已自动归档留痕'
-          : '✅ 已新增工作区/全局确定性事实',
+            ? '✅ 已触发双时间轴覆盖更新，旧版本已自动归档留痕'
+            : '✅ 已新增工作区/全局确定性事实',
       });
       await fetchFacts(true);
     } catch (e: any) {
@@ -552,7 +644,7 @@ export function MemoryHubModal({
         setIsAdding(false);
         fetchMemories();
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   const handleTogglePin = async (item: LongTermMemoryItem) => {
@@ -566,7 +658,7 @@ export function MemoryHubModal({
       if (res.ok) {
         fetchMemories();
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   const handleSaveEdit = async (memId: string) => {
@@ -581,7 +673,7 @@ export function MemoryHubModal({
         setEditingId(null);
         fetchMemories();
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   const handleDeleteMemory = async (memId: string) => {
@@ -590,7 +682,7 @@ export function MemoryHubModal({
       if (res.ok) {
         setMemories((prev) => prev.filter((m) => m.id !== memId));
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   const handleClearAll = async () => {
@@ -600,7 +692,7 @@ export function MemoryHubModal({
       if (res.ok) {
         setMemories([]);
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   // ──────────── 回复性格与 SKILL 定制操作 ────────────
@@ -767,7 +859,7 @@ export function MemoryHubModal({
         onSkillsUpdated?.();
         setExtFeedback({ success: true, msg: `已卸载技能包 [${skillId}]` });
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   const handleToggleSkillPreview = async (sk: SkillInfo) => {
@@ -793,51 +885,266 @@ export function MemoryHubModal({
     }
   };
 
-  const handleAddMcpServer = async () => {
-    if (!newMcpName.trim() || !newMcpCommand.trim()) {
-      setExtFeedback({ success: false, msg: 'MCP 服务名称与启动命令不能为空' });
+  const resetMcpForm = () => {
+    setEditingMcpName(null);
+    setMcpConnTab('stdio');
+    setNewMcpName('');
+    setNewMcpCommand('npx');
+    setNewMcpArgs('-y @modelcontextprotocol/server-filesystem .');
+    setNewMcpDesc('');
+    setNewMcpEnvJson('');
+    setNewMcpRemoteTransport('streamable-http');
+    setNewMcpUrl('');
+    setNewMcpHeadersJson('');
+    setNewMcpTimeout('60');
+    setNewMcpUploadEndpoint('');
+    setNewMcpUploadFileField('file');
+    setNewMcpDownloadOriginsText('');
+    setShowMcpAdvancedFileBridge(false);
+    setFormTestResult(null);
+  };
+
+  const handleStartCreateMcp = () => {
+    if (mcpFormMode === 'create') {
+      resetMcpForm();
+      setMcpFormMode('none');
       return;
     }
-    let parsedEnv: Record<string, string> = {};
-    if (newMcpEnvJson.trim()) {
+    resetMcpForm();
+    setMcpFormMode('create');
+  };
+
+  const handleStartEditMcpServer = (srvName: string, cfg: McpServerConfigItem) => {
+    const resolvedTransport = resolveMcpTransport(cfg);
+    setEditingMcpName(srvName);
+    setNewMcpName(srvName);
+    setNewMcpDesc(cfg.description || '');
+    setNewMcpTimeout(String(cfg.timeout_seconds ?? (resolvedTransport === 'stdio' ? 35 : 60)));
+    setFormTestResult(null);
+
+    if (resolvedTransport === 'stdio') {
+      setMcpConnTab('stdio');
+      setNewMcpCommand(cfg.command || 'npx');
+      setNewMcpArgs((cfg.args || []).join(' '));
+      setNewMcpEnvJson(cfg.env && Object.keys(cfg.env).length > 0 ? JSON.stringify(cfg.env, null, 2) : '');
+      setNewMcpUrl('');
+      setNewMcpHeadersJson('');
+      setNewMcpUploadEndpoint('');
+      setNewMcpUploadFileField('file');
+      setNewMcpDownloadOriginsText('');
+      setShowMcpAdvancedFileBridge(false);
+    } else {
+      setMcpConnTab('remote');
+      setNewMcpRemoteTransport(resolvedTransport === 'sse' ? 'sse' : 'streamable-http');
+      setNewMcpUrl(cfg.url || cfg.serverUrl || '');
+      setNewMcpHeadersJson(
+        cfg.headers && Object.keys(cfg.headers).length > 0 ? JSON.stringify(cfg.headers, null, 2) : ''
+      );
+      const hasAdv = Boolean(cfg.upload_endpoint || (cfg.download_origins && cfg.download_origins.length > 0));
+      setNewMcpUploadEndpoint(cfg.upload_endpoint || '');
+      setNewMcpUploadFileField(cfg.upload_file_field || 'file');
+      setNewMcpDownloadOriginsText((cfg.download_origins || []).join(', '));
+      setShowMcpAdvancedFileBridge(hasAdv);
+    }
+    setMcpFormMode('edit');
+  };
+
+  const buildMcpPayloadFromForm = (): Record<string, any> | null => {
+    const cleanName = newMcpName.trim();
+    if (!cleanName) {
+      setExtFeedback({ success: false, msg: 'MCP 服务名称不能为空' });
+      return null;
+    }
+    if (cleanName.includes('__')) {
+      setExtFeedback({ success: false, msg: 'MCP 服务名称严禁包含双下划线 `__`（避免工具命名冲突）' });
+      return null;
+    }
+
+    const parsedTimeout = Number(newMcpTimeout);
+    const timeoutVal = Number.isFinite(parsedTimeout) ? Math.max(5, Math.min(600, parsedTimeout)) : undefined;
+
+    if (mcpConnTab === 'stdio') {
+      if (!newMcpCommand.trim()) {
+        setExtFeedback({ success: false, msg: '本地 stdio 模式必须填写启动命令（如 npx / uvx / python）' });
+        return null;
+      }
+      let parsedEnv: Record<string, string> = {};
+      if (newMcpEnvJson.trim()) {
+        try {
+          const obj = JSON.parse(newMcpEnvJson.trim());
+          if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+            throw new Error('not object');
+          }
+          parsedEnv = obj;
+        } catch {
+          setExtFeedback({ success: false, msg: '环境变量必须为合法的 JSON 对象（如 {"GITHUB_TOKEN": "xxx"}）' });
+          return null;
+        }
+      }
+      const argsList = newMcpArgs
+        .split(/\s+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+
+      return {
+        name: cleanName,
+        transport: 'stdio',
+        command: newMcpCommand.trim(),
+        args: argsList,
+        env: parsedEnv,
+        timeout_seconds: timeoutVal,
+        description: newMcpDesc.trim(),
+        enabled: editingMcpName ? Boolean(mcpServers[editingMcpName]?.enabled ?? true) : true,
+      };
+    }
+
+    const cleanUrl = newMcpUrl.trim();
+    if (!cleanUrl.startsWith('http://') && !cleanUrl.startsWith('https://')) {
+      setExtFeedback({ success: false, msg: '远程 MCP 端点 URL 必须以 http:// 或 https:// 开头' });
+      return null;
+    }
+    let parsedHeaders: Record<string, string> = {};
+    if (newMcpHeadersJson.trim()) {
       try {
-        parsedEnv = JSON.parse(newMcpEnvJson.trim());
+        const obj = JSON.parse(newMcpHeadersJson.trim());
+        if (!obj || typeof obj !== 'object' || Array.isArray(obj)) {
+          throw new Error('not object');
+        }
+        parsedHeaders = obj;
       } catch {
-        setExtFeedback({ success: false, msg: '环境变量必须为合法的 JSON 对象（如 {"GITHUB_TOKEN": "xxx"}）' });
-        return;
+        setExtFeedback({ success: false, msg: '请求头 Headers 必须为合法的 JSON 对象（如 {"Authorization": "Bearer ${TOKEN}"}）' });
+        return null;
       }
     }
-    const argsList = newMcpArgs
-      .split(/\s+/)
+
+    const downloadOrigins = newMcpDownloadOriginsText
+      .split(/[\n,;]+/)
       .map((s) => s.trim())
       .filter(Boolean);
+
+    return {
+      name: cleanName,
+      transport: newMcpRemoteTransport,
+      url: cleanUrl,
+      headers: parsedHeaders,
+      timeout_seconds: timeoutVal ?? 60,
+      upload_endpoint: newMcpUploadEndpoint.trim(),
+      upload_file_field: newMcpUploadFileField.trim() || 'file',
+      download_origins: downloadOrigins,
+      description: newMcpDesc.trim(),
+      enabled: editingMcpName ? Boolean(mcpServers[editingMcpName]?.enabled ?? true) : true,
+    };
+  };
+
+  const handleSaveMcpServer = async () => {
+    const payload = buildMcpPayloadFromForm();
+    if (!payload) return;
 
     try {
       const res = await apiFetch('/api/v1/extensions/mcp/server', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          name: newMcpName.trim(),
-          command: newMcpCommand.trim(),
-          args: argsList,
-          env: parsedEnv,
-          description: newMcpDesc.trim(),
-          enabled: true,
-        }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (res.ok) {
         setMcpServers(data.mcpServers || {});
-        setNewMcpName('');
-        setNewMcpDesc('');
-        setNewMcpEnvJson('');
+        if (data.config_path) setMcpConfigPath(data.config_path);
+        const savedName = payload.name;
+        const isEdit = Boolean(editingMcpName);
+        resetMcpForm();
         setMcpFormMode('none');
-        setExtFeedback({ success: true, msg: `✅ 已成功添加并启用 MCP 服务：${newMcpName.trim()}` });
+        invalidateWorkspaceSkills(workspaceId);
+        onSkillsUpdated?.();
+        setExtFeedback({
+          success: true,
+          msg: isEdit ? `✅ 已保存 MCP 服务 [${savedName}] 修改` : `✅ 已成功添加并启用 MCP 服务：${savedName}`,
+        });
       } else {
-        setExtFeedback({ success: false, msg: data.detail || '添加 MCP 服务失败' });
+        setExtFeedback({ success: false, msg: data.detail || '保存 MCP 服务失败' });
       }
     } catch (e: any) {
       setExtFeedback({ success: false, msg: e.message || '网络异常' });
+    }
+  };
+
+  const handleTestMcpFromForm = async () => {
+    const payload = buildMcpPayloadFromForm();
+    if (!payload) return;
+    const targetName = editingMcpName || payload.name || 'form-test';
+    setTestingMcpName(`__form__:${targetName}`);
+    setFormTestResult(null);
+    try {
+      const res = await apiFetch('/api/v1/extensions/mcp/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          server_name: editingMcpName || undefined,
+          transport: payload.transport,
+          command: payload.command,
+          args: payload.args,
+          env: payload.env,
+          url: payload.url,
+          headers: payload.headers,
+          timeout_seconds: payload.timeout_seconds,
+        }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setFormTestResult(data);
+        if (editingMcpName) {
+          setMcpTestResults((prev) => ({ ...prev, [editingMcpName]: data }));
+        }
+      } else {
+        setFormTestResult({
+          ok: false,
+          server: targetName,
+          transport: payload.transport,
+          tool_count: 0,
+          tools: [],
+          latency_ms: 0,
+          error: data.detail || '连接探测失败',
+        });
+      }
+    } catch (e: any) {
+      setFormTestResult({
+        ok: false,
+        server: targetName,
+        transport: payload.transport,
+        tool_count: 0,
+        tools: [],
+        latency_ms: 0,
+        error: e.message || '网络异常',
+      });
+    } finally {
+      setTestingMcpName(null);
+    }
+  };
+
+  const handleTestSavedMcpServer = async (srvName: string) => {
+    setTestingMcpName(srvName);
+    try {
+      const res = await apiFetch('/api/v1/extensions/mcp/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ server_name: srvName }),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setMcpTestResults((prev) => ({ ...prev, [srvName]: data }));
+        setExtFeedback({
+          success: Boolean(data.ok),
+          msg: data.ok
+            ? `✅ [${srvName}] 连接成功（${data.transport} · ${data.tool_count} 个工具 · ${data.latency_ms}ms）`
+            : `❌ [${srvName}] 连接失败：${data.error || '未知错误'}`,
+        });
+      } else {
+        setExtFeedback({ success: false, msg: data.detail || `测试 [${srvName}] 失败` });
+      }
+    } catch (e: any) {
+      setExtFeedback({ success: false, msg: e.message || '网络异常' });
+    } finally {
+      setTestingMcpName(null);
     }
   };
 
@@ -855,8 +1162,11 @@ export function MemoryHubModal({
       const data = await res.json();
       if (res.ok) {
         setMcpServers(data.mcpServers || {});
+        if (data.config_path) setMcpConfigPath(data.config_path);
         setImportMcpJson('');
         setMcpFormMode('none');
+        invalidateWorkspaceSkills(workspaceId);
+        onSkillsUpdated?.();
         setExtFeedback({
           success: true,
           msg: `✅ 成功导入 ${data.imported_count || 1} 个 MCP 服务节点！`,
@@ -881,21 +1191,27 @@ export function MemoryHubModal({
   };
 
   const handleToggleMcpServer = async (srvName: string) => {
-    const nextServers = {
-      ...mcpServers,
+    const nextEnabled = !mcpServers[srvName]?.enabled;
+    setMcpServers((prev) => ({
+      ...prev,
       [srvName]: {
-        ...mcpServers[srvName],
-        enabled: !mcpServers[srvName]?.enabled,
+        ...prev[srvName],
+        enabled: nextEnabled,
       },
-    };
-    setMcpServers(nextServers);
+    }));
     try {
-      await apiFetch('/api/v1/extensions/mcp', {
-        method: 'PUT',
+      const res = await apiFetch(`/api/v1/extensions/mcp/${encodeURIComponent(srvName)}/toggle`, {
+        method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mcpServers: nextServers }),
+        body: JSON.stringify({ enabled: nextEnabled }),
       });
-    } catch (e) {}
+      if (res.ok) {
+        const data = await res.json();
+        if (data.mcpServers) setMcpServers(data.mcpServers);
+        invalidateWorkspaceSkills(workspaceId);
+        onSkillsUpdated?.();
+      }
+    } catch (e) { }
   };
 
   const handleDeleteMcpServer = async (srvName: string) => {
@@ -906,9 +1222,20 @@ export function MemoryHubModal({
       const data = await res.json();
       if (res.ok) {
         setMcpServers(data.mcpServers || {});
+        setMcpTestResults((prev) => {
+          const next = { ...prev };
+          delete next[srvName];
+          return next;
+        });
+        if (editingMcpName === srvName) {
+          resetMcpForm();
+          setMcpFormMode('none');
+        }
+        invalidateWorkspaceSkills(workspaceId);
+        onSkillsUpdated?.();
         setExtFeedback({ success: true, msg: `已移除 MCP 服务 [${srvName}]` });
       }
-    } catch (e) {}
+    } catch (e) { }
   };
 
   const customSkillIdSet = new Set(customPromptSkills.map((s) => s.id));
@@ -953,11 +1280,10 @@ export function MemoryHubModal({
           <div className="flex items-center space-x-4 whitespace-nowrap shrink-0">
             <button
               onClick={() => setActiveTab('memories')}
-              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
-                activeTab === 'memories'
+              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'memories'
                   ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
-              }`}
+                }`}
             >
               <Sparkles className="w-3.5 h-3.5" />
               <span>长期记忆画像 ({memories.length})</span>
@@ -965,11 +1291,10 @@ export function MemoryHubModal({
 
             <button
               onClick={() => setActiveTab('facts')}
-              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
-                activeTab === 'facts'
+              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'facts'
                   ? 'border-teal-500 text-teal-600 dark:text-teal-400'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
-              }`}
+                }`}
             >
               <Clock className="w-3.5 h-3.5 text-teal-500" />
               <span>精确事实视图 ({activeFactsCount})</span>
@@ -977,11 +1302,10 @@ export function MemoryHubModal({
 
             <button
               onClick={() => setActiveTab('ledger')}
-              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
-                activeTab === 'ledger'
+              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'ledger'
                   ? 'border-amber-500 text-amber-600 dark:text-amber-400'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
-              }`}
+                }`}
             >
               <History className="w-3.5 h-3.5 text-amber-500" />
               <span>事件账本追溯</span>
@@ -989,11 +1313,10 @@ export function MemoryHubModal({
 
             <button
               onClick={() => setActiveTab('personality')}
-              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
-                activeTab === 'personality'
+              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'personality'
                   ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
-              }`}
+                }`}
             >
               <Brain className="w-3.5 h-3.5 text-purple-500" />
               <span>回复性格与 SKILL</span>
@@ -1001,11 +1324,10 @@ export function MemoryHubModal({
 
             <button
               onClick={() => setActiveTab('extensions')}
-              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
-                activeTab === 'extensions'
+              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'extensions'
                   ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
                   : 'border-transparent text-muted-foreground hover:text-foreground'
-              }`}
+                }`}
             >
               <Puzzle className="w-3.5 h-3.5 text-teal-500" />
               <span>Skill 与 MCP ({skills.length + Object.keys(mcpServers).length})</span>
@@ -1061,11 +1383,10 @@ export function MemoryHubModal({
                           key={cat}
                           type="button"
                           onClick={() => setNewCategory(cat)}
-                          className={`px-2.5 py-1 rounded-lg text-xs border transition-all ${
-                            newCategory === cat
+                          className={`px-2.5 py-1 rounded-lg text-xs border transition-all ${newCategory === cat
                               ? CATEGORY_MAP[cat].colorClass + ' font-semibold'
                               : 'border-border text-muted-foreground hover:text-foreground'
-                          }`}
+                            }`}
                         >
                           {CATEGORY_MAP[cat].label}
                         </button>
@@ -1170,11 +1491,10 @@ export function MemoryHubModal({
                         <div className="flex items-center space-x-1 shrink-0">
                           <button
                             onClick={() => handleTogglePin(item)}
-                            className={`p-1.5 rounded-lg transition-colors ${
-                              item.is_pinned
+                            className={`p-1.5 rounded-lg transition-colors ${item.is_pinned
                                 ? 'text-amber-500 bg-amber-500/10'
                                 : 'text-muted-foreground hover:text-foreground hover:bg-surface-200'
-                            }`}
+                              }`}
                             title={item.is_pinned ? '取消置顶' : '置顶此条记忆（豁免 30 天衰减）'}
                           >
                             <Pin className="w-3.5 h-3.5" />
@@ -1210,11 +1530,10 @@ export function MemoryHubModal({
             <div className="space-y-4">
               {factFeedback && (
                 <div
-                  className={`p-3 rounded-xl text-xs flex items-center justify-between animate-fadeIn ${
-                    factFeedback.success
+                  className={`p-3 rounded-xl text-xs flex items-center justify-between animate-fadeIn ${factFeedback.success
                       ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border border-emerald-500/20'
                       : 'bg-rose-500/10 text-rose-600 dark:text-rose-300 border border-rose-500/20'
-                  }`}
+                    }`}
                 >
                   <span>{factFeedback.msg}</span>
                   <button
@@ -1241,11 +1560,10 @@ export function MemoryHubModal({
                       key={opt.id}
                       type="button"
                       onClick={() => setFactScopeFilter(opt.id)}
-                      className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors ${
-                        factScopeFilter === opt.id
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-medium border transition-colors ${factScopeFilter === opt.id
                           ? 'bg-teal-600 text-white border-teal-600'
                           : 'bg-surface-card border-border text-muted-foreground hover:text-foreground'
-                      }`}
+                        }`}
                     >
                       {opt.label}
                     </button>
@@ -1290,11 +1608,10 @@ export function MemoryHubModal({
                           key={cat}
                           type="button"
                           onClick={() => setNewFactCategory(cat)}
-                          className={`px-2.5 py-1 rounded-lg text-xs border transition-all ${
-                            newFactCategory === cat
+                          className={`px-2.5 py-1 rounded-lg text-xs border transition-all ${newFactCategory === cat
                               ? FACT_CATEGORY_MAP[cat].colorClass + ' font-semibold'
                               : 'border-border text-muted-foreground hover:text-foreground'
-                          }`}
+                            }`}
                         >
                           {FACT_CATEGORY_MAP[cat].label}
                         </button>
@@ -1305,11 +1622,10 @@ export function MemoryHubModal({
                       <button
                         type="button"
                         onClick={() => setNewFactScope('workspace')}
-                        className={`px-2 py-0.5 rounded-md flex items-center space-x-1 transition-colors ${
-                          newFactScope === 'workspace'
+                        className={`px-2 py-0.5 rounded-md flex items-center space-x-1 transition-colors ${newFactScope === 'workspace'
                             ? 'bg-teal-600 text-white font-medium'
                             : 'text-muted-foreground hover:text-foreground'
-                        }`}
+                          }`}
                       >
                         <FolderGit2 className="w-3 h-3" />
                         <span>当前工作区</span>
@@ -1317,11 +1633,10 @@ export function MemoryHubModal({
                       <button
                         type="button"
                         onClick={() => setNewFactScope('global')}
-                        className={`px-2 py-0.5 rounded-md flex items-center space-x-1 transition-colors ${
-                          newFactScope === 'global'
+                        className={`px-2 py-0.5 rounded-md flex items-center space-x-1 transition-colors ${newFactScope === 'global'
                             ? 'bg-teal-600 text-white font-medium'
                             : 'text-muted-foreground hover:text-foreground'
-                        }`}
+                          }`}
                       >
                         <Globe className="w-3 h-3" />
                         <span>全局 GLOBAL</span>
@@ -1393,29 +1708,26 @@ export function MemoryHubModal({
                     return (
                       <div
                         key={item.fact_id}
-                        className={`p-3.5 rounded-xl border flex items-start justify-between gap-3 transition-colors ${
-                          item.is_active
+                        className={`p-3.5 rounded-xl border flex items-start justify-between gap-3 transition-colors ${item.is_active
                             ? 'bg-surface-100/75 border-border hover:bg-surface-100'
                             : 'bg-surface-100/35 border-border/50 opacity-75'
-                        }`}
+                          }`}
                       >
                         <div className="flex-1 min-w-0 space-y-1.5">
                           <div className="flex items-center flex-wrap gap-1.5">
                             <span
-                              className={`px-2 py-0.5 rounded-md text-[10px] border font-semibold ${
-                                item.is_active
+                              className={`px-2 py-0.5 rounded-md text-[10px] border font-semibold ${item.is_active
                                   ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border-emerald-500/30'
                                   : 'bg-surface-200 text-muted-foreground border-border'
-                              }`}
+                                }`}
                             >
                               {item.is_active ? '生效中' : '历史已归档'}
                             </span>
                             <span
-                              className={`px-2 py-0.5 rounded-md text-[10px] border font-medium ${
-                                isGlobal
+                              className={`px-2 py-0.5 rounded-md text-[10px] border font-medium ${isGlobal
                                   ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/25'
                                   : 'bg-teal-500/15 text-teal-600 dark:text-teal-300 border-teal-500/30'
-                              }`}
+                                }`}
                             >
                               {isGlobal ? '🌐 GLOBAL 全局' : `📁 工作区 (${item.workspace_id})`}
                             </span>
@@ -1551,11 +1863,10 @@ export function MemoryHubModal({
                       setLedgerWorkspaceOnly((prev) => !prev);
                       setLedgerOffset(0);
                     }}
-                    className={`px-2.5 py-1 rounded-lg text-[11px] border font-medium transition-colors ${
-                      ledgerWorkspaceOnly
+                    className={`px-2.5 py-1 rounded-lg text-[11px] border font-medium transition-colors ${ledgerWorkspaceOnly
                         ? 'bg-amber-500/15 border-amber-500/35 text-amber-700 dark:text-amber-300'
                         : 'bg-surface-card border-border text-muted-foreground hover:text-foreground'
-                    }`}
+                      }`}
                   >
                     {ledgerWorkspaceOnly ? `仅当前工作区 (${workspaceId})` : '全部工作区'}
                   </button>
@@ -1701,11 +2012,10 @@ export function MemoryHubModal({
             <div className="space-y-6">
               {personalityFeedback && (
                 <div
-                  className={`p-3.5 rounded-xl text-xs flex items-center space-x-2 animate-fadeIn ${
-                    personalityFeedback.success
+                  className={`p-3.5 rounded-xl text-xs flex items-center space-x-2 animate-fadeIn ${personalityFeedback.success
                       ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border border-emerald-500/20'
                       : 'bg-rose-500/10 text-rose-600 dark:text-rose-300 border border-rose-500/20'
-                  }`}
+                    }`}
                 >
                   {personalityFeedback.success ? (
                     <CheckCircle2 className="w-4 h-4 text-emerald-500 shrink-0" />
@@ -1733,11 +2043,10 @@ export function MemoryHubModal({
                       <div
                         key={persona.id}
                         onClick={() => setSelectedPersonaId(persona.id)}
-                        className={`p-3.5 rounded-2xl border transition-all cursor-pointer relative ${
-                          isSelected
+                        className={`p-3.5 rounded-2xl border transition-all cursor-pointer relative ${isSelected
                             ? 'bg-emerald-600/10 border-emerald-500/60 shadow-lg shadow-emerald-500/10'
                             : 'bg-surface-100 border-border hover:border-border-hover'
-                        }`}
+                          }`}
                       >
                         <div className="flex items-start justify-between">
                           <div className="flex items-center space-x-2">
@@ -1845,11 +2154,10 @@ export function MemoryHubModal({
                       <div
                         key={skill.id}
                         onClick={() => handleTogglePromptSkill(skill.id)}
-                        className={`p-3 rounded-2xl border transition-all cursor-pointer flex items-start space-x-3 ${
-                          isActive
+                        className={`p-3 rounded-2xl border transition-all cursor-pointer flex items-start space-x-3 ${isActive
                             ? 'bg-teal-500/10 border-teal-500/50'
                             : 'bg-surface-100 border-border hover:border-border-hover'
-                        }`}
+                          }`}
                       >
                         <span className="text-xl shrink-0 mt-0.5">{skill.icon}</span>
                         <div className="flex-1 min-w-0">
@@ -1871,7 +2179,7 @@ export function MemoryHubModal({
                               <input
                                 type="checkbox"
                                 checked={isActive}
-                                onChange={() => {}}
+                                onChange={() => { }}
                                 className="rounded border-border bg-surface-200 text-teal-500 focus:ring-0"
                               />
                             </div>
@@ -1924,11 +2232,10 @@ export function MemoryHubModal({
             <div className="space-y-6">
               {extFeedback && (
                 <div
-                  className={`p-3 rounded-xl text-xs flex items-center justify-between animate-fadeIn ${
-                    extFeedback.success
+                  className={`p-3 rounded-xl text-xs flex items-center justify-between animate-fadeIn ${extFeedback.success
                       ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border border-emerald-500/20'
                       : 'bg-rose-500/10 text-rose-600 dark:text-rose-300 border border-rose-500/20'
-                  }`}
+                    }`}
                 >
                   <span>{extFeedback.msg}</span>
                   <button
@@ -2157,21 +2464,27 @@ export function MemoryHubModal({
               <div className="space-y-3 pt-3 border-t border-border">
                 <div className="flex items-center justify-between flex-wrap gap-2">
                   <div>
-                    <h3 className="text-xs font-bold text-foreground flex items-center space-x-1.5">
+                    <h3 className="text-xs font-bold text-foreground flex items-center flex-wrap gap-1.5">
                       <ShieldCheck className="w-3.5 h-3.5 text-purple-500" />
-                      <span>MCP 外部扩展服务池 (data/mcp_servers.json)</span>
+                      <span>MCP 外部扩展服务池</span>
+                      {mcpConfigPath && (
+                        <span
+                          className="text-[10px] font-mono font-normal px-1.5 py-0.5 rounded bg-surface-200 text-muted-foreground max-w-xs truncate"
+                          title={mcpConfigPath}
+                        >
+                          {mcpConfigPath}
+                        </span>
+                      )}
                     </h3>
                     <p className="text-[11px] text-muted-foreground mt-0.5">
-                      常驻 JSON-RPC 连接池 · 支持手动添加或直接导入 Claude Desktop / Cursor MCP JSON 配置
+                      兼容本地 stdio 与远程 Streamable HTTP / SSE 协议 · 支持导入 Claude Desktop / Cursor / VS Code JSON
                     </p>
                   </div>
 
                   <div className="flex items-center space-x-2">
                     <button
                       type="button"
-                      onClick={() =>
-                        setMcpFormMode(mcpFormMode === 'create' ? 'none' : 'create')
-                      }
+                      onClick={handleStartCreateMcp}
                       className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium transition-colors"
                     >
                       <Plus className="w-3.5 h-3.5" />
@@ -2179,9 +2492,14 @@ export function MemoryHubModal({
                     </button>
                     <button
                       type="button"
-                      onClick={() =>
-                        setMcpFormMode(mcpFormMode === 'import' ? 'none' : 'import')
-                      }
+                      onClick={() => {
+                        if (mcpFormMode === 'import') {
+                          setMcpFormMode('none');
+                        } else {
+                          resetMcpForm();
+                          setMcpFormMode('import');
+                        }
+                      }}
                       className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-surface-100 hover:bg-surface-200 border border-border text-foreground text-xs font-medium transition-colors"
                     >
                       <Upload className="w-3.5 h-3.5 text-purple-500" />
@@ -2190,27 +2508,59 @@ export function MemoryHubModal({
                   </div>
                 </div>
 
-                {/* 手动添加 MCP 服务表单 */}
-                {mcpFormMode === 'create' && (
+                {/* 新建 / 编辑 MCP 服务表单 */}
+                {(mcpFormMode === 'create' || mcpFormMode === 'edit') && (
                   <div className="p-4 rounded-xl bg-surface-100 border border-purple-500/30 space-y-3">
-                    <div className="text-xs font-bold text-foreground">
-                      添加自定义 stdio MCP 服务节点
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <div className="text-xs font-bold text-foreground">
+                        {mcpFormMode === 'edit'
+                          ? `编辑 MCP 服务节点：${editingMcpName}`
+                          : '添加自定义 MCP 服务节点'}
+                      </div>
+                      <div className="inline-flex rounded-lg bg-surface-card border border-border p-0.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMcpConnTab('stdio');
+                            setFormTestResult(null);
+                          }}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors flex items-center space-x-1 ${mcpConnTab === 'stdio'
+                              ? 'bg-purple-600 text-white'
+                              : 'text-muted-foreground hover:text-foreground'
+                            }`}
+                        >
+                          <Terminal className="w-3 h-3" />
+                          <span>本地进程 stdio</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setMcpConnTab('remote');
+                            setFormTestResult(null);
+                          }}
+                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors flex items-center space-x-1 ${mcpConnTab === 'remote'
+                              ? 'bg-sky-600 text-white'
+                              : 'text-muted-foreground hover:text-foreground'
+                            }`}
+                        >
+                          <Globe className="w-3 h-3" />
+                          <span>远程服务 HTTP / SSE</span>
+                        </button>
+                      </div>
                     </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                      <input
-                        type="text"
-                        value={newMcpName}
-                        onChange={(e) => setNewMcpName(e.target.value)}
-                        placeholder="服务名称 (如 github / sqlite)"
-                        className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                      />
-                      <input
-                        type="text"
-                        value={newMcpCommand}
-                        onChange={(e) => setNewMcpCommand(e.target.value)}
-                        placeholder="启动命令 (如 npx / uvx / python)"
-                        className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                      />
+
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                      <div>
+                        <input
+                          type="text"
+                          value={newMcpName}
+                          readOnly={mcpFormMode === 'edit'}
+                          onChange={(e) => setNewMcpName(e.target.value)}
+                          placeholder="服务名称 (如 context7 / github，严禁含 __)"
+                          className={`w-full px-3 py-2 rounded-lg border border-border text-xs text-foreground outline-none font-mono ${mcpFormMode === 'edit' ? 'bg-surface-200/70 opacity-80 cursor-not-allowed' : 'bg-surface-card'
+                            }`}
+                        />
+                      </div>
                       <input
                         type="text"
                         value={newMcpDesc}
@@ -2219,34 +2569,169 @@ export function MemoryHubModal({
                         className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none"
                       />
                     </div>
-                    <input
-                      type="text"
-                      value={newMcpArgs}
-                      onChange={(e) => setNewMcpArgs(e.target.value)}
-                      placeholder="启动参数（空格分隔，如 -y @modelcontextprotocol/server-github）"
-                      className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                    />
-                    <input
-                      type="text"
-                      value={newMcpEnvJson}
-                      onChange={(e) => setNewMcpEnvJson(e.target.value)}
-                      placeholder='环境变量 JSON（选填，如 {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}）'
-                      className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                    />
-                    <div className="flex justify-end space-x-2">
+
+                    {mcpConnTab === 'stdio' ? (
+                      <div className="space-y-2.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                          <input
+                            type="text"
+                            value={newMcpCommand}
+                            onChange={(e) => setNewMcpCommand(e.target.value)}
+                            placeholder="启动命令 (如 npx / uvx / python)"
+                            className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                          />
+                          <input
+                            type="text"
+                            value={newMcpArgs}
+                            onChange={(e) => setNewMcpArgs(e.target.value)}
+                            placeholder="启动参数（空格分隔，如 -y @modelcontextprotocol/server-github）"
+                            className="sm:col-span-2 px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                          />
+                        </div>
+                        <textarea
+                          rows={2}
+                          value={newMcpEnvJson}
+                          onChange={(e) => setNewMcpEnvJson(e.target.value)}
+                          placeholder='环境变量 JSON（选填，如 {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}）'
+                          className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-y"
+                        />
+                      </div>
+                    ) : (
+                      <div className="space-y-2.5">
+                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
+                          <select
+                            value={newMcpRemoteTransport}
+                            onChange={(e) => setNewMcpRemoteTransport(e.target.value as 'streamable-http' | 'sse')}
+                            className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none"
+                          >
+                            <option value="streamable-http">Streamable HTTP (推荐)</option>
+                            <option value="sse">SSE (旧版兼容)</option>
+                          </select>
+                          <input
+                            type="url"
+                            value={newMcpUrl}
+                            onChange={(e) => setNewMcpUrl(e.target.value)}
+                            placeholder="服务端点 URL (如 https://mcp.context7.com/mcp)"
+                            className="sm:col-span-2 px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                          />
+                          <div className="flex items-center space-x-1.5">
+                            <span className="text-[11px] text-muted-foreground shrink-0">Timeout(s)</span>
+                            <input
+                              type="number"
+                              min={5}
+                              max={600}
+                              value={newMcpTimeout}
+                              onChange={(e) => setNewMcpTimeout(e.target.value)}
+                              className="w-full px-2.5 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <textarea
+                            rows={2}
+                            value={newMcpHeadersJson}
+                            onChange={(e) => setNewMcpHeadersJson(e.target.value)}
+                            placeholder='请求头 Headers JSON（可留空适配公开免鉴权服务，支持 ${ENV_VAR} 如 {"Authorization": "Bearer ${MCP_TOKEN}"}）'
+                            className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-y"
+                          />
+                          {mcpFormMode === 'edit' && newMcpHeadersJson.includes('****') && (
+                            <p className="text-[11px] text-sky-600 dark:text-sky-400 mt-1">
+                              提示：包含 `****` 的脱敏字段在保持原样或留空时会自动沿用已存储的真实密钥；如需更换请填入完整新值或 {'${ENV_VAR}'}。
+                            </p>
+                          )}
+                        </div>
+
+                        {/* 可选高级折叠区：跨网文件协同配置 */}
+                        <div className="rounded-lg border border-border bg-surface-card/60 overflow-hidden">
+                          <button
+                            type="button"
+                            onClick={() => setShowMcpAdvancedFileBridge((v) => !v)}
+                            className="w-full px-3 py-2 flex items-center justify-between text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <span className="flex items-center space-x-1.5">
+                              <SlidersHorizontal className="w-3 h-3" />
+                              <span>高级：跨网文件协同配置（可选，标准公共 MCP 无需填写）</span>
+                            </span>
+                            {showMcpAdvancedFileBridge ? (
+                              <ChevronUp className="w-3.5 h-3.5" />
+                            ) : (
+                              <ChevronDown className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                          {showMcpAdvancedFileBridge && (
+                            <div className="px-3 pb-3 pt-1 space-y-2 border-t border-border/60">
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                                <input
+                                  type="url"
+                                  value={newMcpUploadEndpoint}
+                                  onChange={(e) => setNewMcpUploadEndpoint(e.target.value)}
+                                  placeholder="Upload URL (可选，如 http://127.0.0.1:8000/api/v1/files/upload)"
+                                  className="sm:col-span-2 px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                                />
+                                <input
+                                  type="text"
+                                  value={newMcpUploadFileField}
+                                  onChange={(e) => setNewMcpUploadFileField(e.target.value)}
+                                  placeholder="Upload File Field (默认 file)"
+                                  className="px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                                />
+                              </div>
+                              <input
+                                type="text"
+                                value={newMcpDownloadOriginsText}
+                                onChange={(e) => setNewMcpDownloadOriginsText(e.target.value)}
+                                placeholder="允许下载源 download_origins（可选，逗号分隔如 https://cdn.example.com；主 URL 同源已自动放行）"
+                                className="w-full px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
+                              />
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {formTestResult && (
+                      <div
+                        className={`px-3 py-2 rounded-lg text-xs border ${formTestResult.ok
+                            ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
+                            : 'bg-rose-500/10 border-rose-500/30 text-rose-700 dark:text-rose-300'
+                          }`}
+                      >
+                        {formTestResult.ok
+                          ? `✅ 探测成功 (${formTestResult.transport})：发现 ${formTestResult.tool_count} 个工具，耗时 ${formTestResult.latency_ms}ms${formTestResult.tools.length > 0
+                            ? ` · 示例: ${formTestResult.tools.slice(0, 5).join(', ')}`
+                            : ''
+                          }`
+                          : `❌ 探测失败：${formTestResult.error || '连接异常'}`}
+                      </div>
+                    )}
+
+                    <div className="flex justify-end items-center space-x-2">
                       <button
                         type="button"
-                        onClick={() => setMcpFormMode('none')}
+                        onClick={handleTestMcpFromForm}
+                        disabled={Boolean(testingMcpName)}
+                        className="px-3 py-1.5 rounded-lg border border-border bg-surface-card hover:bg-surface-200 text-xs font-medium text-foreground flex items-center space-x-1 disabled:opacity-50"
+                      >
+                        <Activity className="w-3.5 h-3.5 text-sky-500" />
+                        <span>{testingMcpName?.startsWith('__form__:') ? '测试中...' : '测试连接'}</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          resetMcpForm();
+                          setMcpFormMode('none');
+                        }}
                         className="px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:bg-surface-200"
                       >
                         取消
                       </button>
                       <button
                         type="button"
-                        onClick={handleAddMcpServer}
+                        onClick={handleSaveMcpServer}
                         className="px-4 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold"
                       >
-                        保存并接入 MCP
+                        {mcpFormMode === 'edit' ? '保存修改' : '保存并接入 MCP'}
                       </button>
                     </div>
                   </div>
@@ -2257,7 +2742,7 @@ export function MemoryHubModal({
                   <div className="p-4 rounded-xl bg-surface-100 border border-purple-500/30 space-y-3">
                     <div className="flex items-center justify-between">
                       <span className="text-xs font-bold text-foreground">
-                        导入 mcp_servers.json / claude_desktop_config.json 配置
+                        导入本地 / 远程 MCP JSON 配置（支持 Claude Desktop / Cursor / VS Code / Windsurf）
                       </span>
                       <div>
                         <input
@@ -2282,7 +2767,7 @@ export function MemoryHubModal({
                       value={importMcpJson}
                       onChange={(e) => setImportMcpJson(e.target.value)}
                       placeholder={
-                        '{\n  "mcpServers": {\n    "memory": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-memory"]\n    }\n  }\n}'
+                        '{\n  "mcpServers": {\n    "context7": {\n      "transport": "streamable-http",\n      "url": "https://mcp.context7.com/mcp"\n    },\n    "memory": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-memory"]\n    }\n  }\n}'
                       }
                       className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-y"
                     />
@@ -2306,50 +2791,106 @@ export function MemoryHubModal({
                 )}
 
                 <div className="space-y-2">
-                  {Object.entries(mcpServers).map(([srvName, cfg]: [string, any]) => (
-                    <div
-                      key={srvName}
-                      className="p-3.5 rounded-xl bg-surface-100/70 border border-border flex items-center justify-between gap-3"
-                    >
-                      <div className="space-y-1 flex-1 min-w-0">
-                        <div className="flex items-center flex-wrap gap-2">
-                          <span className="text-xs font-bold text-foreground font-mono">
-                            {srvName}
-                          </span>
-                          <span className="text-[11px] text-muted-foreground font-mono bg-surface-200 px-1.5 py-0.5 rounded truncate max-w-md">
-                            {cfg.command} {(cfg.args || []).join(' ')}
-                          </span>
+                  {Object.entries(mcpServers).map(([srvName, cfg]) => {
+                    const badge = getMcpTransportBadge(cfg);
+                    const summary = getMcpEndpointSummary(cfg);
+                    const testRes = mcpTestResults[srvName];
+                    const isTesting = testingMcpName === srvName;
+                    return (
+                      <div
+                        key={srvName}
+                        className="p-3.5 rounded-xl bg-surface-100/70 border border-border space-y-2"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="space-y-1 flex-1 min-w-0">
+                            <div className="flex items-center flex-wrap gap-2">
+                              <span className="text-xs font-bold text-foreground font-mono">
+                                {srvName}
+                              </span>
+                              <span
+                                className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${badge.colorClass}`}
+                              >
+                                {badge.label}
+                              </span>
+                              {cfg.upload_endpoint && (
+                                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30">
+                                  文件协同
+                                </span>
+                              )}
+                              {summary && (
+                                <span
+                                  className="text-[11px] text-muted-foreground font-mono bg-surface-200 px-1.5 py-0.5 rounded truncate max-w-md"
+                                  title={summary}
+                                >
+                                  {summary}
+                                </span>
+                              )}
+                            </div>
+                            {cfg.description && (
+                              <p className="text-xs text-muted-foreground break-anywhere">
+                                {cfg.description}
+                              </p>
+                            )}
+                          </div>
+
+                          <div className="flex items-center space-x-1.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleTestSavedMcpServer(srvName)}
+                              disabled={Boolean(testingMcpName)}
+                              className="px-2.5 py-1 rounded-lg bg-surface-card hover:bg-surface-200 border border-border text-xs font-medium text-foreground flex items-center space-x-1 transition-colors disabled:opacity-50"
+                              title="测试 MCP 连通性与拉取工具列表"
+                            >
+                              <Activity className="w-3 h-3 text-sky-500" />
+                              <span>{isTesting ? '测试中...' : '测试连接'}</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleStartEditMcpServer(srvName, cfg)}
+                              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
+                              title="编辑此 MCP 服务配置"
+                            >
+                              <Edit3 className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleMcpServer(srvName)}
+                              className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${cfg.enabled
+                                  ? 'bg-emerald-600 text-white'
+                                  : 'bg-surface-200 text-muted-foreground hover:text-foreground'
+                                }`}
+                            >
+                              {cfg.enabled ? '已启用' : '未启用'}
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleDeleteMcpServer(srvName)}
+                              className="p-1.5 rounded-lg text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
+                              title="删除此 MCP 服务"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
                         </div>
-                        {cfg.description && (
-                          <p className="text-xs text-muted-foreground break-anywhere">
-                            {cfg.description}
-                          </p>
+
+                        {testRes && (
+                          <div
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] border ${testRes.ok
+                                ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-700 dark:text-emerald-300'
+                                : 'bg-rose-500/10 border-rose-500/25 text-rose-700 dark:text-rose-300'
+                              }`}
+                          >
+                            {testRes.ok
+                              ? `探测成功 (${testRes.transport})：发现 ${testRes.tool_count} 个工具 · 耗时 ${testRes.latency_ms}ms${testRes.tools.length > 0
+                                ? ` · [${testRes.tools.slice(0, 6).join(', ')}${testRes.tools.length > 6 ? '...' : ''}]`
+                                : ''
+                              }`
+                              : `探测失败：${testRes.error || '连接异常'}`}
+                          </div>
                         )}
                       </div>
-
-                      <div className="flex items-center space-x-2 shrink-0">
-                        <button
-                          type="button"
-                          onClick={() => handleToggleMcpServer(srvName)}
-                          className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${
-                            cfg.enabled
-                              ? 'bg-emerald-600 text-white'
-                              : 'bg-surface-200 text-muted-foreground hover:text-foreground'
-                          }`}
-                        >
-                          {cfg.enabled ? '已启用' : '未启用'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteMcpServer(srvName)}
-                          className="p-1.5 rounded-lg text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
-                          title="删除此 MCP 服务"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </div>
             </div>

@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.3.6-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.4.0-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,18 @@
 
 ## 🧭 版本演进总览
 
-### 🛡️ v1.3.6（最新）— 反伪落盘幻觉、WinError 206 兜底、CLI 长流扩容与磁盘物理核验
+### 🚀 v1.4.0（最新）— 远程 MCP 协议全栈支持、跨网文件协同与 GitHub 自动升级加载
+- **远程 MCP 协议原生接入（`MCPManager` · `MemoryHubModal` · `SkillLoader`）**：
+  - 全面支持 `Streamable HTTP`（含可选 `Mcp-Session-Id` 有/无状态连接、404 会话自动重连与 `close()` 异步 `DELETE` 清理）及 `Legacy HTTP + SSE`（强制同源校验与禁止跨站重定向防凭据泄露）。
+  - 全面兼容公共与第三方标准 MCP 服务及多格式配置导入（Claude Desktop `mcpServers` / VS Code `servers` / Windsurf `serverUrl`）；新增服务名规范校验、Headers 密钥脱敏掩码保护与 `${ENV_VAR}` 运行时环境变量展开；全链路异步化 `shutdown_all()`。
+- **跨网安全文件协同桥接（`mcp_file_bridge` · `LocalContextCompressor` · `ToolProtocolAdapter`）**：
+  - 新增 `mcp_upload_workspace_file` 与 `mcp_download_artifact_to_workspace` 通用跨网协同工具：上传支持可配置表单字段名 `upload_file_field`（默认 `file`）与大小校验；下载采用 `aiter_bytes()` 真流式体积熔断、严格 `2xx` 与反误写校验，落盘后自动注册资产库。
+  - 上下文旁路压缩对 `mcp__*` 工具放宽脱水阈值并保护结构化 URL 不被误截断；同步将协同工具纳入 `ToolProtocolAdapter` 核心工具与裸 JSON 兜底匹配。
+- **GitHub Releases 自动检查升级、进度条下载与重启加载（`AutoUpdaterService` · `UpdateModal`）**：
+  - 客户端启动自动静默检查 `voodooq/agenthub-local` 最新 Release 并支持手动检查；发现新版本时在侧栏与顶栏展示提醒徽标，并在弹窗中渲染 Markdown 升级日志（Release Notes）。
+  - 点击「立即升级」自动匹配当前平台产物（Windows 单文件 EXE / macOS DMG / Portable 便携包）流式下载，实时展示百分比进度条、已下载体积与速率；下载完毕后提示并支持一键重启替换加载新版本（严格保护 `data/` 与个人配置不被覆写）。
+
+### 🛡️ v1.3.6 — 反伪落盘幻觉、WinError 206 兜底、CLI 长流扩容与磁盘物理核验
 - **Windows 超长命令回退与 CLI 流式长输出防护（`LocalShellExecutor` · `agent_runner` · `AgentRuntime`）**：
   - `LocalShellExecutor` 对超过编码安全阈值的脚本（Windows `-EncodedCommand` > 24 KB / POSIX > 64 KB）自动切换临时 `.ps1`/`.sh` 文件执行并自动清理，捕获底层 `Popen` `OSError` 结构化回传，彻底消除 `[WinError 206]` 进程崩溃。
   - 新增 `_AsyncLineReader` 与 16 MiB 子进程缓冲区上限，消除超长单行 NDJSON 导致的 `LimitOverrunError / ValueError`；同步将 `MAX_CHUNKS_PER_SESSION` 扩容至 `30000` 并接入 `300,000` 字符双指标安全限流。

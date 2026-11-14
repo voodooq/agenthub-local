@@ -412,19 +412,58 @@ class SkillLoader:
             logger.warning(f"规范化 SKILL.md 失败: {e}")
             return file_path
 
+    def _get_mcp_config_path(self) -> Path:
+        """统一获取与 MCPManager 完全一致的 mcp_servers.json 物理路径（消除容器/桌面多路径分裂）。"""
+        from .mcp_manager import mcp_manager
+        return Path(mcp_manager.config_path)
+
+    @staticmethod
+    def _build_mcp_transport_markdown(srv_name: str, srv_info: dict[str, Any]) -> tuple[dict[str, Any], list[str], str]:
+        """根据配置生成统一兼容 stdio 与远程 HTTP/SSE 的 Markdown 元信息行与调用引导。"""
+        from .mcp_manager import parse_mcp_server_entry
+
+        norm = parse_mcp_server_entry(srv_name, srv_info)
+        transport = norm["transport"]
+        if transport in ("streamable-http", "sse"):
+            header_count = len(norm["headers"])
+            auth_desc = f"已配置请求头 ({header_count} 项，敏感凭证已隐藏)" if header_count > 0 else "公开免鉴权（无自定义请求头）"
+            lines = [
+                f"- **传输协议**：`{transport}`（远程 MCP 服务）",
+                f"- **服务端点**：`{norm['url']}`",
+                f"- **鉴权配置**：{auth_desc}",
+            ]
+        else:
+            cmd_exec = norm["command"] or "python"
+            cmd_args = " ".join(norm["args"])
+            lines = [
+                f"- **传输协议**：`stdio`（本地进程 MCP 服务）",
+                f"- **底层启动命令**：`{cmd_exec} {cmd_args}`".rstrip(),
+            ]
+
+        usage_extra = ""
+        if norm.get("upload_endpoint"):
+            usage_extra = (
+                f"\n- 若需将本地工作区文件（如 `./attachments/...`）传至远程服务处理，"
+                f"请调用 `mcp_upload_workspace_file(server_name=\"{srv_name}\", local_file_path=...)`；"
+                f"拿到产物下载链接后调用 `mcp_download_artifact_to_workspace` 落盘至 `./output/...`。"
+            )
+        return norm, lines, usage_extra
+
     def ensure_mcp_companion_skills(self) -> int:
         """
-        扫描 mcp_servers.json，确保每一个注册的 MCP 服务都有对应的标准化 SKILL 说明文件，
+        扫描 mcp_manager.config_path 指向的配置文件，确保每个注册的 MCP 服务都有标准化 SKILL 说明文件，
         从而在输入框 `/` 菜单中都能查看完整调用说明。
         """
-        mcp_cfg_path = self.base_dir / "mcp_servers.json"
+        from .mcp_manager import extract_mcp_servers_map
+
+        mcp_cfg_path = self._get_mcp_config_path()
         if not mcp_cfg_path.exists():
             return 0
 
         created_count = 0
         try:
-            cfg = json.loads(mcp_cfg_path.read_text(encoding="utf-8"))
-            servers = cfg.get("mcpServers", {}) if isinstance(cfg, dict) else {}
+            cfg = json.loads(mcp_cfg_path.read_text(encoding="utf-8-sig"))
+            servers = extract_mcp_servers_map(cfg)
             if not isinstance(servers, dict):
                 return 0
 
@@ -448,11 +487,11 @@ class SkillLoader:
                             break
 
                 if not already_bound and srv_name not in ("playwright-cdp",):
-                    cmd_exec = srv_info.get("command", "python")
-                    cmd_args = " ".join(str(a) for a in (srv_info.get("args") or []))
-                    desc = srv_info.get("description") or f"MCP 扩展服务 ({srv_name}) 封装技能说明"
+                    norm, transport_lines, usage_extra = self._build_mcp_transport_markdown(srv_name, srv_info)
+                    desc = norm["description"] or f"MCP 扩展服务 ({srv_name}) 封装技能说明"
                     companion_dir = self.skills_dir / safe_id
                     companion_dir.mkdir(parents=True, exist_ok=True)
+                    detail_block = "\n".join(transport_lines)
                     companion_md = (
                         f"---\n"
                         f"name: {safe_id}\n"
@@ -464,10 +503,11 @@ class SkillLoader:
                         f"# MCP 封装技能说明：{srv_name}\n\n"
                         f"## 1. 服务概述\n"
                         f"- **绑定的 MCP 服务标识**：`{srv_name}`\n"
-                        f"- **底层启动命令**：`{cmd_exec} {cmd_args}`\n"
+                        f"{detail_block}\n"
                         f"- **功能说明**：{desc}\n\n"
                         f"## 2. 调用方式与协议规范\n"
-                        f"- 在输入框输入 `/{safe_id}` 加自然语言指令，Agent 将自动加载本规程并调用 `mcp__{srv_name}__<tool_name>` 工具完成任务。\n"
+                        f"- 在输入框输入 `/{safe_id}` 加自然语言指令，Agent 将自动加载本规程并直接调用 `mcp__{srv_name}__<tool_name>` 标准工具完成任务。"
+                        f"{usage_extra}\n"
                     )
                     (companion_dir / "SKILL.md").write_text(companion_md, encoding="utf-8")
                     created_count += 1
@@ -575,8 +615,10 @@ class SkillLoader:
         return None
 
     def _load_mcp_servers_config(self) -> tuple[dict[str, Any], Path]:
-        """带 (mtime_ns, size) 缓存地读取 mcp_servers.json 配置"""
-        mcp_cfg_path = self.base_dir / "mcp_servers.json"
+        """带 (mtime_ns, size) 缓存地读取与 MCPManager 一致的 mcp_servers.json 配置"""
+        from .mcp_manager import extract_mcp_servers_map
+
+        mcp_cfg_path = self._get_mcp_config_path()
         try:
             st = os.stat(mcp_cfg_path)
         except OSError:
@@ -592,9 +634,8 @@ class SkillLoader:
 
         mcp_servers: dict[str, Any] = {}
         try:
-            raw_mcp = json.loads(mcp_cfg_path.read_text(encoding="utf-8"))
-            if isinstance(raw_mcp, dict) and isinstance(raw_mcp.get("mcpServers"), dict):
-                mcp_servers = raw_mcp["mcpServers"]
+            raw_mcp = json.loads(mcp_cfg_path.read_text(encoding="utf-8-sig"))
+            mcp_servers = extract_mcp_servers_map(raw_mcp)
         except Exception:
             pass
 
@@ -716,10 +757,11 @@ class SkillLoader:
         mcp_cfg_path: Path,
         include_content: bool,
     ) -> dict[str, Any]:
-        """构建未绑定独立 SKILL.md 的按需 MCP 服务封装条目"""
+        """构建未绑定独立 SKILL.md 的按需 MCP 服务封装条目（兼容 stdio 与远程 HTTP/SSE）"""
+        norm, transport_lines, usage_extra = self._build_mcp_transport_markdown(srv_name, srv_info)
         safe_id = self._sanitize_skill_id(srv_name)
         enabled = bool(srv_info.get("enabled", False))
-        desc = srv_info.get("description") or f"MCP 外部扩展服务 ({srv_name})"
+        desc = norm["description"] or f"MCP 外部扩展服务 ({srv_name})"
         item: dict[str, Any] = {
             "id": safe_id,
             "name": safe_id,
@@ -729,6 +771,7 @@ class SkillLoader:
             "tier": "community",
             "mcp_server": srv_name,
             "mcp_enabled": enabled,
+            "transport": norm["transport"],
             "has_tools": False,
             "tools": [],
             "has_knowledge": False,
@@ -740,15 +783,15 @@ class SkillLoader:
             "has_content": True,
         }
         if include_content:
-            cmd_exec = srv_info.get("command", "")
-            cmd_args = " ".join(str(a) for a in (srv_info.get("args") or []))
+            detail_block = "\n".join(transport_lines)
             synth_body = (
                 f"# MCP 服务封装说明：{srv_name}\n\n"
                 f"- **服务状态**：{'🟢 已启用' if enabled else '⚪ 按需启用（可在设置或通过 Agent 设为 enabled: true）'}\n"
-                f"- **启动命令**：`{cmd_exec} {cmd_args}`\n"
+                f"{detail_block}\n"
                 f"- **功能概述**：{desc}\n\n"
                 f"## 使用方法\n"
-                f"直接输入 `/{safe_id} <你的需求>`，若服务已启用则自动调用 `mcp__{srv_name}__*` 系列工具执行。"
+                f"直接输入 `/{safe_id} <你的需求>`，若服务已启用则自动调用 `mcp__{srv_name}__*` 系列标准工具执行。"
+                f"{usage_extra}"
             )
             item["content"] = synth_body
             item["body"] = synth_body
@@ -762,7 +805,7 @@ class SkillLoader:
                 sig.append(os.stat(root_dir).st_mtime_ns)
             except OSError:
                 sig.append(0)
-        mcp_cfg_path = self.base_dir / "mcp_servers.json"
+        mcp_cfg_path = self._get_mcp_config_path()
         try:
             st = os.stat(mcp_cfg_path)
             sig.append((st.st_mtime_ns, st.st_size))

@@ -2,7 +2,10 @@
 长期记忆画像管理 (Memory Hub)、多协议算力池 (LLM Providers)、四步跨平台导入向导 (Unified Importer) 与 Skill/MCP 扩展 API
 """
 import asyncio
-from typing import Any
+import copy
+import json
+import re
+from typing import Any, Literal
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from pydantic import BaseModel, Field
 
@@ -11,7 +14,14 @@ from ...memory.fact_manager import fact_manager
 from ...memory.ledger import event_ledger
 from ...memory.policy_guard import MemoryAdmissionError
 from ...extensions.skill_loader import skill_loader
-from ...extensions.mcp_manager import mcp_manager
+from ...extensions.mcp_manager import (
+    extract_mcp_servers_map,
+    extract_origin,
+    is_valid_mcp_server_name,
+    mcp_manager,
+    normalize_transport_name,
+    parse_mcp_server_entry,
+)
 from ...core.provider_adapter import provider_adapter
 from ...core.oauth_google import google_oauth_manager
 from ...service.unified_importer import unified_importer
@@ -226,18 +236,48 @@ class SkillRepoInstallRequest(BaseModel):
 
 
 class MCPServerSaveRequest(BaseModel):
-    """添加或更新单个 MCP Server"""
-    name: str = Field(..., description="MCP 服务唯一标识，如 github / sqlite / fetch")
-    command: str = Field(..., description="启动命令，如 npx / uvx / python / node")
-    args: list[str] = Field(default_factory=list, description="启动参数列表")
-    env: dict[str, str] = Field(default_factory=dict, description="附加环境变量字典")
+    """添加或更新单个 MCP Server（兼容本地 stdio 与远程 Streamable HTTP / SSE）"""
+    name: str = Field(..., description="MCP 服务唯一标识，如 github / sqlite / context7（严禁含 __）")
+    transport: Literal["stdio", "streamable-http", "streamableHttp", "streamable_http", "http", "sse"] | None = Field(
+        default=None,
+        description="传输协议类型：stdio | streamable-http | sse（缺省时根据 url/command 自动推断）",
+    )
+    command: str = Field(default="", description="本地 stdio 启动命令，如 npx / uvx / python / node")
+    args: list[str] = Field(default_factory=list, description="本地 stdio 启动参数列表")
+    env: dict[str, str] = Field(default_factory=dict, description="本地 stdio 附加环境变量字典")
+    url: str = Field(default="", description="远程 MCP 服务端点 URL (http:// 或 https://)")
+    headers: dict[str, str] = Field(default_factory=dict, description="远程请求头（可为空 {}，支持 ${ENV_VAR}）")
+    timeout_seconds: float | None = Field(default=None, ge=5.0, le=600.0, description="单次工具调用超时秒数（远程默认 60s）")
+    upload_endpoint: str = Field(default="", description="可选：跨网文件协同上传端点 URL")
+    upload_file_field: str = Field(default="file", description="可选：multipart 上传文件字段名，默认 file")
+    download_origins: list[str] = Field(default_factory=list, description="可选：允许下载产物 URL 的额外同源白名单")
     description: str = Field(default="", description="服务说明")
     enabled: bool = Field(default=True, description="是否立即启用")
 
 
+class MCPServerToggleRequest(BaseModel):
+    """单项切换 MCP Server 启用状态"""
+    enabled: bool | None = Field(default=None, description="目标启用状态；不传则自动取反")
+
+
+class MCPServerTestRequest(BaseModel):
+    """实时探测单个 MCP Server 连通性与工具数量"""
+    server_name: str | None = Field(default=None, description="已保存服务名称；仅传此项时直接按库中已落盘配置测试")
+    transport: str | None = None
+    command: str | None = None
+    args: list[str] | None = None
+    env: dict[str, str] | None = None
+    url: str | None = None
+    headers: dict[str, str] | None = None
+    timeout_seconds: float | None = Field(default=None, ge=5.0, le=600.0)
+    upload_endpoint: str | None = None
+    upload_file_field: str | None = None
+    download_origins: list[str] | None = None
+
+
 class MCPImportRequest(BaseModel):
     """通过 JSON 配置批量导入 MCP Servers"""
-    raw_json: str = Field(..., description="兼容 mcp_servers.json 或 claude_desktop_config.json 的 JSON 字符串")
+    raw_json: str = Field(..., description="兼容 mcp_servers.json / Claude Desktop / Cursor / VS Code 的 JSON 字符串")
 
 
 @router.get("/extensions/skills")
@@ -314,44 +354,407 @@ async def delete_installed_skill(skill_id: str):
     return {"status": "ok", "id": skill_id, "skills": skills}
 
 
+_SENSITIVE_HEADER_KEYWORDS = (
+    "authorization",
+    "token",
+    "key",
+    "secret",
+    "cookie",
+    "password",
+    "credential",
+    "signature",
+    "auth",
+)
+_ENV_PLACEHOLDER_TOKEN_RE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+_AUTH_SCHEME_PREFIXES = ("bearer", "basic", "token", "apikey", "digest")
+_MASK_MARKER = "****"
+
+
+def _is_sensitive_header_key(header_key: str) -> bool:
+    """判断请求头名称是否属于认证凭证等敏感字段。"""
+    lowered = (header_key or "").strip().lower()
+    return any(kw in lowered for kw in _SENSITIVE_HEADER_KEYWORDS)
+
+
+def _is_env_placeholder_only_value(value: str) -> bool:
+    """判断 Header 值是否仅由可选授权前缀与 ${ENV_VAR} 环境变量占位符组成（此类配置应豁免脱敏）。"""
+    stripped = (value or "").strip()
+    if not stripped or not _ENV_PLACEHOLDER_TOKEN_RE.search(stripped):
+        return False
+    without_vars = _ENV_PLACEHOLDER_TOKEN_RE.sub("", stripped).strip()
+    if not without_vars:
+        return True
+    return without_vars.lower() in _AUTH_SCHEME_PREFIXES
+
+
+def _is_masked_secret_value(value: str) -> bool:
+    """判断字符串是否为前端回传的脱敏掩码占位符。"""
+    return _MASK_MARKER in (value or "")
+
+
+def _mask_secret_header_value(value: str) -> str:
+    """对敏感请求头实际明文做局部掩码脱敏，保留 ${ENV_VAR} 占位符原样输出。"""
+    text = str(value or "")
+    if not text or _is_env_placeholder_only_value(text):
+        return text
+    if _is_masked_secret_value(text):
+        return text
+
+    stripped = text.strip()
+    parts = stripped.split(None, 1)
+    if len(parts) == 2 and parts[0].lower() in _AUTH_SCHEME_PREFIXES:
+        scheme, secret = parts[0], parts[1].strip()
+        if len(secret) <= 6:
+            return f"{scheme} {_MASK_MARKER}"
+        return f"{scheme} {secret[:2]}{_MASK_MARKER}{secret[-4:]}"
+
+    if len(stripped) <= 6:
+        return _MASK_MARKER
+    return f"{stripped[:2]}{_MASK_MARKER}{stripped[-4:]}"
+
+
+def _mask_mcp_server_entry(entry: Any) -> Any:
+    """生成单个 MCP 服务配置的安全响应副本，对敏感 Header 执行掩码脱敏。"""
+    if not isinstance(entry, dict):
+        return entry
+    cloned = copy.deepcopy(entry)
+    headers = cloned.get("headers")
+    if isinstance(headers, dict):
+        masked_headers: dict[str, str] = {}
+        for k, v in headers.items():
+            key_str = str(k)
+            val_str = str(v if v is not None else "")
+            masked_headers[key_str] = (
+                _mask_secret_header_value(val_str) if _is_sensitive_header_key(key_str) else val_str
+            )
+        cloned["headers"] = masked_headers
+    return cloned
+
+
+def _mask_mcp_servers_map(servers: dict[str, Any]) -> dict[str, Any]:
+    """批量生成脱敏后的 mcpServers 响应映射。"""
+    if not isinstance(servers, dict):
+        return {}
+    return {k: _mask_mcp_server_entry(v) for k, v in servers.items()}
+
+
+def _merge_masked_headers(
+    incoming_headers: dict[str, Any] | None,
+    existing_headers: dict[str, Any] | None,
+) -> dict[str, str]:
+    """写盘前合并请求头：若敏感 Header 为留空或脱敏掩码格式，沿用旧配置真实值防覆写。"""
+    if not isinstance(incoming_headers, dict):
+        return {}
+    old_map: dict[str, str] = {}
+    old_lower_map: dict[str, str] = {}
+    if isinstance(existing_headers, dict):
+        for ek, ev in existing_headers.items():
+            eks = str(ek).strip()
+            evs = str(ev if ev is not None else "")
+            if eks:
+                old_map[eks] = evs
+                old_lower_map[eks.lower()] = evs
+
+    merged: dict[str, str] = {}
+    for raw_k, raw_v in incoming_headers.items():
+        k = str(raw_k).strip()
+        if not k:
+            continue
+        v = str(raw_v if raw_v is not None else "")
+        if _is_sensitive_header_key(k) and (v.strip() == "" or _is_masked_secret_value(v)):
+            preserved = old_map.get(k) if k in old_map else old_lower_map.get(k.lower())
+            if preserved is not None and not _is_masked_secret_value(preserved):
+                merged[k] = preserved
+            elif not _is_masked_secret_value(v):
+                merged[k] = v
+            # NOTE: 若既无旧明文又是掩码占位符，则丢弃以免把 '****' 写入配置
+            continue
+        merged[k] = v
+    return merged
+
+
+def _validate_and_normalize_server_payload(
+    srv_name: str,
+    raw_payload: dict[str, Any],
+    *,
+    existing_entry: dict[str, Any] | None = None,
+    default_description: str | None = None,
+) -> dict[str, Any]:
+    """统一校验与构建可安全落盘的单个 MCP 服务字典，兼容 stdio 与远程 HTTP/SSE。"""
+    if not is_valid_mcp_server_name(srv_name):
+        raise HTTPException(
+            status_code=400,
+            detail=f"MCP 服务名称 '{srv_name}' 非法：不能为空且严禁包含双下划线 `__`（避免工具路由命名冲突）",
+        )
+
+    existing_headers = existing_entry.get("headers") if isinstance(existing_entry, dict) else None
+    merged_raw = dict(raw_payload)
+    merged_raw["headers"] = _merge_masked_headers(raw_payload.get("headers"), existing_headers)
+
+    norm = parse_mcp_server_entry(srv_name, merged_raw)
+    transport = norm["transport"]
+    desc = norm["description"] or default_description or f"自定义 MCP 服务 ({srv_name})"
+
+    if transport == "stdio":
+        if not norm["command"]:
+            raise HTTPException(status_code=400, detail=f"MCP 服务 [{srv_name}] 为 stdio 模式时启动命令 command 不能为空")
+        entry: dict[str, Any] = {
+            "transport": "stdio",
+            "command": norm["command"],
+            "args": [a.strip() for a in norm["args"] if a.strip()],
+            "env": norm["env"],
+            "description": desc,
+            "enabled": bool(raw_payload.get("enabled", True)),
+        }
+        if raw_payload.get("timeout_seconds") is not None:
+            entry["timeout_seconds"] = norm["timeout_seconds"]
+        return entry
+
+    url = norm["url"]
+    if not url.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400,
+            detail=f"远程 MCP 服务 [{srv_name}] 的 url 必须以 http:// 或 https:// 开头",
+        )
+
+    raw_upload_ep = str(raw_payload.get("upload_endpoint") or "").strip()
+    if raw_upload_ep and not raw_upload_ep.startswith(("http://", "https://")):
+        raise HTTPException(
+            status_code=400,
+            detail=f"远程 MCP 服务 [{srv_name}] 的 upload_endpoint 必须以 http:// 或 https:// 开头",
+        )
+
+    raw_origins = raw_payload.get("download_origins")
+    validated_origins: list[str] = []
+    if isinstance(raw_origins, list):
+        for item in raw_origins:
+            text_item = str(item or "").strip()
+            if not text_item:
+                continue
+            origin = extract_origin(text_item)
+            if not origin:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"download_origins 包含无效源地址 '{text_item}'，示例格式：https://files.example.com",
+                )
+            if origin not in validated_origins:
+                validated_origins.append(origin)
+
+    entry = {
+        "transport": transport,
+        "url": url,
+        "headers": norm["headers"],
+        "timeout_seconds": norm["timeout_seconds"],
+        "description": desc,
+        "enabled": bool(raw_payload.get("enabled", True)),
+    }
+    if norm["upload_endpoint"]:
+        entry["upload_endpoint"] = norm["upload_endpoint"]
+    if norm["upload_file_field"] and norm["upload_file_field"] != "file":
+        entry["upload_file_field"] = norm["upload_file_field"]
+    elif norm["upload_endpoint"]:
+        entry["upload_file_field"] = norm["upload_file_field"] or "file"
+    if validated_origins:
+        entry["download_origins"] = validated_origins
+    return entry
+
+
 @router.get("/extensions/mcp")
 async def get_mcp_servers_config():
-    """获取本地 mcp_servers.json 配置"""
-    return mcp_manager.load_config()
+    """获取 MCP 服务配置（对敏感 Header 脱敏但豁免 ${ENV_VAR}，并附带真实配置路径）"""
+    cfg = mcp_manager.load_config()
+    servers = cfg.get("mcpServers", {}) if isinstance(cfg, dict) else {}
+    return {
+        "mcpServers": _mask_mcp_servers_map(servers),
+        "config_path": str(mcp_manager.config_path),
+    }
 
 
 @router.put("/extensions/mcp")
 async def update_mcp_servers_config(req: MCPConfigUpdateRequest):
-    """保存并更新 mcp_servers.json 配置"""
-    mcp_manager.save_config({"mcpServers": req.mcpServers})
+    """全量保存并更新 MCP 配置（写盘前对掩码/留空敏感 Header 自动沿用原真实密钥）"""
+    old_cfg = mcp_manager.load_config()
+    old_servers = old_cfg.get("mcpServers", {}) if isinstance(old_cfg, dict) else {}
+    new_servers: dict[str, Any] = {}
+
+    for raw_name, raw_entry in (req.mcpServers or {}).items():
+        srv_name = str(raw_name).strip()
+        if not is_valid_mcp_server_name(srv_name):
+            raise HTTPException(
+                status_code=400,
+                detail=f"MCP 服务名称 '{raw_name}' 非法：不能为空且严禁包含双下划线 `__`",
+            )
+        if not isinstance(raw_entry, dict):
+            raise HTTPException(status_code=400, detail=f"MCP 服务 [{srv_name}] 配置项必须为 JSON 对象")
+        merged_entry = copy.deepcopy(raw_entry)
+        existing_entry = old_servers.get(srv_name) if isinstance(old_servers, dict) else None
+        if isinstance(merged_entry.get("headers"), dict):
+            existing_headers = existing_entry.get("headers") if isinstance(existing_entry, dict) else None
+            merged_entry["headers"] = _merge_masked_headers(merged_entry["headers"], existing_headers)
+        new_servers[srv_name] = merged_entry
+
+    mcp_manager.save_config({"mcpServers": new_servers})
     skill_loader.invalidate_cache()
-    return {"status": "ok", "mcpServers": req.mcpServers}
+    return {
+        "status": "ok",
+        "mcpServers": _mask_mcp_servers_map(new_servers),
+        "config_path": str(mcp_manager.config_path),
+    }
 
 
 @router.post("/extensions/mcp/server")
 async def add_or_update_mcp_server(req: MCPServerSaveRequest):
-    """新增或更新单个自定义 MCP 服务节点"""
+    """新增或更新单个自定义 MCP 服务节点（支持 stdio 与远程 Streamable HTTP / SSE）"""
     srv_name = req.name.strip()
-    if not srv_name or not req.command.strip():
-        raise HTTPException(status_code=400, detail="MCP 服务名称与启动命令不能为空")
     cfg = mcp_manager.load_config()
     servers = cfg.setdefault("mcpServers", {})
-    servers[srv_name] = {
-        "command": req.command.strip(),
-        "args": [a.strip() for a in req.args if a.strip()],
-        "env": req.env or {},
-        "description": req.description.strip() or f"自定义 MCP 服务 ({srv_name})",
+    existing_entry = servers.get(srv_name) if isinstance(servers, dict) else None
+
+    raw_payload: dict[str, Any] = {
+        "command": req.command,
+        "args": req.args,
+        "env": req.env,
+        "url": req.url,
+        "headers": req.headers,
+        "upload_endpoint": req.upload_endpoint,
+        "upload_file_field": req.upload_file_field,
+        "download_origins": req.download_origins,
+        "description": req.description,
         "enabled": req.enabled,
     }
+    if req.transport is not None:
+        raw_payload["transport"] = req.transport
+    if req.timeout_seconds is not None:
+        raw_payload["timeout_seconds"] = req.timeout_seconds
+
+    servers[srv_name] = _validate_and_normalize_server_payload(
+        srv_name,
+        raw_payload,
+        existing_entry=existing_entry,
+    )
     mcp_manager.save_config({"mcpServers": servers})
     skill_loader.invalidate_cache()
-    return {"status": "ok", "mcpServers": servers}
+    return {
+        "status": "ok",
+        "mcpServers": _mask_mcp_servers_map(servers),
+        "config_path": str(mcp_manager.config_path),
+    }
+
+
+@router.patch("/extensions/mcp/{server_name}/toggle")
+async def toggle_mcp_server(server_name: str, req: MCPServerToggleRequest | None = None):
+    """单项启停 MCP 服务，避免前端仅开关状态时全表回传覆盖已保存密钥"""
+    cfg = mcp_manager.load_config()
+    servers = cfg.get("mcpServers", {})
+    if server_name not in servers or not isinstance(servers.get(server_name), dict):
+        raise HTTPException(status_code=404, detail=f"未找到 MCP 服务: {server_name}")
+
+    current_enabled = bool(servers[server_name].get("enabled", False))
+    next_enabled = req.enabled if (req is not None and req.enabled is not None) else (not current_enabled)
+    servers[server_name]["enabled"] = next_enabled
+    mcp_manager.save_config({"mcpServers": servers})
+    skill_loader.invalidate_cache()
+    return {
+        "status": "ok",
+        "name": server_name,
+        "enabled": next_enabled,
+        "mcpServers": _mask_mcp_servers_map(servers),
+    }
+
+
+@router.post("/extensions/mcp/test")
+async def test_mcp_server_connection(req: MCPServerTestRequest):
+    """实时探测 MCP 服务连通性，严格隔离临时 URL 与库内已保存敏感密钥"""
+    cfg = mcp_manager.load_config()
+    servers = cfg.get("mcpServers", {}) if isinstance(cfg, dict) else {}
+    req_name = (req.server_name or "").strip()
+    saved_entry = servers.get(req_name) if (req_name and isinstance(servers.get(req_name), dict)) else None
+
+    has_override = any(
+        val is not None
+        for val in (
+            req.transport,
+            req.command,
+            req.args,
+            req.env,
+            req.url,
+            req.headers,
+            req.timeout_seconds,
+            req.upload_endpoint,
+            req.upload_file_field,
+            req.download_origins,
+        )
+    )
+
+    if not has_override:
+        if not saved_entry:
+            raise HTTPException(status_code=404, detail=f"未找到已保存的 MCP 服务: {req_name or '(empty)'}")
+        return await mcp_manager.test_server_connection(req_name, saved_entry)
+
+    target_name = req_name or "test-mcp"
+    if not is_valid_mcp_server_name(target_name):
+        raise HTTPException(status_code=400, detail="MCP 服务名称不能包含双下划线 `__`")
+
+    saved_url = str(saved_entry.get("url") or saved_entry.get("serverUrl") or "").strip() if saved_entry else ""
+    req_url = req.url.strip() if req.url is not None else None
+    # NOTE: 一旦更改了目标 URL，严格禁止复用旧服务已保存的敏感请求头，防止测活接口将库内凭证发往第三方端点
+    url_changed = bool(saved_entry) and (req_url is not None and req_url != saved_url)
+
+    effective_headers: dict[str, str] = {}
+    if url_changed:
+        incoming = req.headers or {}
+        for k, v in incoming.items():
+            ks, vs = str(k).strip(), str(v if v is not None else "")
+            if _is_sensitive_header_key(ks) and _is_masked_secret_value(vs):
+                raise HTTPException(
+                    status_code=400,
+                    detail="修改远程端点 URL 后禁止沿用脱敏凭证测试，请重新填写完整请求头或清空免鉴权字段",
+                )
+            if ks:
+                effective_headers[ks] = vs
+    elif saved_entry:
+        saved_headers = saved_entry.get("headers") if isinstance(saved_entry.get("headers"), dict) else {}
+        if req.headers is not None:
+            effective_headers = _merge_masked_headers(req.headers, saved_headers)
+        else:
+            effective_headers = dict(saved_headers)
+    else:
+        incoming = req.headers or {}
+        for k, v in incoming.items():
+            ks, vs = str(k).strip(), str(v if v is not None else "")
+            if _is_sensitive_header_key(ks) and _is_masked_secret_value(vs):
+                raise HTTPException(status_code=400, detail="测试临时配置时请填写完整未脱敏的请求头")
+            if ks:
+                effective_headers[ks] = vs
+
+    # 若未修改 URL 且存在已存配置，其余未显式传入字段从 saved_entry 安全补齐
+    base_cfg = copy.deepcopy(saved_entry) if (saved_entry and not url_changed) else {}
+    if req.transport is not None:
+        base_cfg["transport"] = req.transport
+    if req.command is not None:
+        base_cfg["command"] = req.command
+    if req.args is not None:
+        base_cfg["args"] = req.args
+    if req.env is not None:
+        base_cfg["env"] = req.env
+    if req_url is not None:
+        base_cfg["url"] = req_url
+    base_cfg["headers"] = effective_headers
+    if req.timeout_seconds is not None:
+        base_cfg["timeout_seconds"] = req.timeout_seconds
+    if req.upload_endpoint is not None:
+        base_cfg["upload_endpoint"] = req.upload_endpoint
+    if req.upload_file_field is not None:
+        base_cfg["upload_file_field"] = req.upload_file_field
+    if req.download_origins is not None:
+        base_cfg["download_origins"] = req.download_origins
+
+    return await mcp_manager.test_server_connection(target_name, base_cfg)
 
 
 @router.post("/extensions/mcp/import")
 async def import_mcp_servers_json(req: MCPImportRequest):
-    """从粘贴或上传的 JSON 配置中批量导入 MCP 服务节点"""
-    import json
+    """从粘贴或上传的 JSON 配置中批量导入 MCP 服务节点（兼容本地 stdio 与主流远程 HTTP/SSE JSON）"""
     try:
         parsed = json.loads(req.raw_json.strip())
     except Exception as e:
@@ -360,31 +763,52 @@ async def import_mcp_servers_json(req: MCPImportRequest):
     if not isinstance(parsed, dict):
         raise HTTPException(status_code=400, detail="MCP 配置必须为 JSON 对象")
 
-    incoming = parsed.get("mcpServers") if isinstance(parsed.get("mcpServers"), dict) else parsed
+    incoming = extract_mcp_servers_map(parsed)
     cfg = mcp_manager.load_config()
     servers = cfg.setdefault("mcpServers", {})
     imported_count = 0
 
     for k, v in incoming.items():
-        if isinstance(v, dict) and v.get("command"):
-            servers[k.strip()] = {
-                "command": str(v.get("command", "")).strip(),
-                "args": [str(a) for a in (v.get("args") or [])],
-                "env": v.get("env") if isinstance(v.get("env"), dict) else {},
-                "description": str(v.get("description") or f"导入的 MCP 服务 ({k})"),
-                "enabled": bool(v.get("enabled", True)),
-            }
-            imported_count += 1
+        if not isinstance(v, dict):
+            continue
+        has_cmd = bool(str(v.get("command") or "").strip())
+        has_url = bool(str(v.get("url") or v.get("serverUrl") or "").strip())
+        if not (has_cmd or has_url):
+            continue
+
+        srv_name = str(k).strip()
+        if not is_valid_mcp_server_name(srv_name):
+            raise HTTPException(
+                status_code=400,
+                detail=f"导入失败：MCP 服务名称 '{k}' 非法（不能为空且严禁包含双下划线 `__`）",
+            )
+
+        candidate = dict(v)
+        if "enabled" not in candidate:
+            candidate["enabled"] = True
+
+        servers[srv_name] = _validate_and_normalize_server_payload(
+            srv_name,
+            candidate,
+            existing_entry=servers.get(srv_name) if isinstance(servers, dict) else None,
+            default_description=f"导入的 MCP 服务 ({srv_name})",
+        )
+        imported_count += 1
 
     if imported_count == 0:
         raise HTTPException(
             status_code=400,
-            detail="未在 JSON 中识别到包含 'command' 字段的有效 MCP 服务配置",
+            detail="未在 JSON 中识别到包含 'command' 或 'url' / 'serverUrl' 字段的有效 MCP 服务配置",
         )
 
     mcp_manager.save_config({"mcpServers": servers})
     skill_loader.invalidate_cache()
-    return {"status": "ok", "imported_count": imported_count, "mcpServers": servers}
+    return {
+        "status": "ok",
+        "imported_count": imported_count,
+        "mcpServers": _mask_mcp_servers_map(servers),
+        "config_path": str(mcp_manager.config_path),
+    }
 
 
 @router.delete("/extensions/mcp/{server_name}")
@@ -396,7 +820,11 @@ async def delete_mcp_server(server_name: str):
         del servers[server_name]
         mcp_manager.save_config({"mcpServers": servers})
         skill_loader.invalidate_cache()
-    return {"status": "ok", "mcpServers": servers}
+    return {
+        "status": "ok",
+        "mcpServers": _mask_mcp_servers_map(servers),
+        "config_path": str(mcp_manager.config_path),
+    }
 
 
 # ──────────────────── 3. 多协议大模型供应商池 (LLM Providers) ────────────────────

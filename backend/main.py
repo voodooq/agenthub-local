@@ -192,7 +192,7 @@ async def lifespan(app: FastAPI):
                     pass
         try:
             from app.extensions.mcp_manager import mcp_manager
-            mcp_manager.shutdown_all()
+            await mcp_manager.shutdown_all()
         except Exception as e:
             logger.debug(f"关闭 MCP 进程池异常: {e}")
 
