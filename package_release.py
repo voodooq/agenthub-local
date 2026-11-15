@@ -23,6 +23,7 @@ for _stream in (sys.stdout, sys.stderr):
         except (AttributeError, OSError, ValueError):
             pass
 
+from build_release_exe import write_clean_mcp_config
 from sync_version import load_version_config, sync_all_manifests
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -105,12 +106,11 @@ def package() -> tuple[Path, Path]:
             ignore=shutil.ignore_patterns(".DS_Store", "Thumbs.db"),
         )
 
-    # 4. 拷贝启动脚本与配置文件
+    # 4. 拷贝启动脚本与配置文件（mcp_servers.json 写入纯净默认配置，避免泄漏宿主机私有 MCP）
     file_list = [
         "version.json",
         "desktop_app.py",
         "requirements.txt",
-        "mcp_servers.json",
         "README.md",
         "LICENSE",
         ".env.example",
@@ -118,6 +118,7 @@ def package() -> tuple[Path, Path]:
         "启动AgentHub_调试模式(带控制台日志).bat",
         "启动AgentHub桌面版.sh",
     ]
+    write_clean_mcp_config(stage_dir / "mcp_servers.json")
     for fname in file_list:
         src = BASE_DIR / fname
         if src.is_file():

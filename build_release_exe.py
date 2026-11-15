@@ -4,14 +4,15 @@ AgentHub Local 独立桌面可执行程序构建脚本 (Windows 单文件 EXE & 
 1. 从根目录唯一配置源 version.json 读取当前版本并自动同步全仓生态清单
 2. 彻底瘦身：强力排除无关重型科学计算与测试库（pandas / numpy / scipy / matplotlib / pytest 等），减负 ~19 MB
 3. 分平台产出独立成品（不与便携源码包混装）：
-   - Windows (--mode onefile，默认)：单文件独立运行 dist/AgentHub-Local-v<ver>-windows-x64.exe
+   - Windows (--mode onefile，默认)：单文件独立运行 dist/AgentHub-Local-windows-x64.exe
    - Windows (--mode onedir)：免解压极速绿包目录 dist/AgentHub/
-   - macOS (--mode macos-dmg)：生成原生 AgentHub.app 并打包为 dist/AgentHub-Local-v<ver>-macos-<arch>.dmg
+   - macOS (--mode macos-dmg)：生成原生 AgentHub.app 并打包为 dist/AgentHub-Local-macos-<arch>.dmg
 4. 严格隔离与断言 0 个人数据/测试代码/冗余依赖泄漏
 """
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import platform
 import shutil
@@ -111,6 +112,43 @@ def prepare_clean_skills_stage() -> Path | None:
     return clean_skills_dir
 
 
+# 发行包内置的纯净默认 MCP 配置（严格不包含开发者本机测试服务与密钥）
+DEFAULT_MCP_SERVERS_CONFIG: dict[str, object] = {
+    "mcpServers": {
+        "playwright-cdp": {
+            "command": "npx",
+            "args": [
+                "-y",
+                "@playwright/mcp@latest",
+                "--cdp-endpoint",
+                "http://127.0.0.1:9222",
+            ],
+            "env": {},
+            "description": "接管本机已开启 --remote-debugging-port=9222 的 Edge/Chrome 浏览器（按需启用）",
+            "enabled": False,
+        }
+    }
+}
+
+
+def write_clean_mcp_config(target_path: Path) -> Path:
+    """将纯净默认 MCP 种子配置写入指定文件路径。"""
+    target_path.parent.mkdir(parents=True, exist_ok=True)
+    target_path.write_text(
+        json.dumps(DEFAULT_MCP_SERVERS_CONFIG, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return target_path
+
+
+def prepare_clean_mcp_config_stage() -> Path:
+    """在临时构建目录生成纯净默认 mcp_servers.json，防止宿主机本地配置进入发行包。"""
+    clean_mcp_dir = BUILD_DIR / "_clean_mcp"
+    if clean_mcp_dir.exists():
+        shutil.rmtree(clean_mcp_dir, ignore_errors=True)
+    return write_clean_mcp_config(clean_mcp_dir / "mcp_servers.json")
+
+
 def ensure_frontend_built() -> None:
     """确保前端静态导出文件存在且可用。"""
     if not (FRONTEND_OUT / "index.html").is_file():
@@ -160,10 +198,17 @@ def build_executable(mode: str, release_version: str) -> Path:
     ensure_frontend_built()
     clean_backend_dir = prepare_clean_backend_stage()
     clean_skills_dir = prepare_clean_skills_stage()
+    clean_mcp_cfg = prepare_clean_mcp_config_stage()
+    arch_tag = _detect_arch_tag()
 
-    # 清理旧同名产物，防止新旧版本残留混淆
+    # 清理旧同名及历史带版本号产物，防止新旧版本残留混淆
     if mode == "onefile":
-        for stale in (DIST_DIR / f"{APP_NAME}.exe", DIST_DIR / f"AgentHub-Local-{release_version}-windows-{_detect_arch_tag()}.exe"):
+        stale_exes = {
+            DIST_DIR / f"{APP_NAME}.exe",
+            DIST_DIR / f"AgentHub-Local-windows-{arch_tag}.exe",
+            *DIST_DIR.glob("AgentHub-Local-*-windows-*.exe"),
+        }
+        for stale in stale_exes:
             if stale.exists():
                 stale.unlink()
     elif mode == "macos-dmg":
@@ -173,6 +218,13 @@ def build_executable(mode: str, release_version: str) -> Path:
         for stale_dir in (DIST_DIR / APP_NAME,):
             if stale_dir.exists():
                 shutil.rmtree(stale_dir, ignore_errors=True)
+        stale_dmgs = {
+            DIST_DIR / f"AgentHub-Local-macos-{arch_tag}.dmg",
+            *DIST_DIR.glob("AgentHub-Local-*-macos-*.dmg"),
+        }
+        for stale_dmg in stale_dmgs:
+            if stale_dmg.exists():
+                stale_dmg.unlink()
 
     print(f"\n>>> 正在使用 PyInstaller 编译桌面应用 ({mode} / {release_version})...")
 
@@ -201,9 +253,8 @@ def build_executable(mode: str, release_version: str) -> Path:
         pyinstaller_cmd.extend(["--add-data", f"{clean_skills_dir}{sep}skills"])
     if ASSETS_DIR.is_dir():
         pyinstaller_cmd.extend(["--add-data", f"{ASSETS_DIR}{sep}assets"])
-    mcp_cfg = BASE_DIR / "mcp_servers.json"
-    if mcp_cfg.is_file():
-        pyinstaller_cmd.extend(["--add-data", f"{mcp_cfg}{sep}."])
+    if clean_mcp_cfg.is_file():
+        pyinstaller_cmd.extend(["--add-data", f"{clean_mcp_cfg}{sep}."])
 
     win_icon = ASSETS_DIR / "app_icon.ico"
     mac_icon = ASSETS_DIR / "app_icon.icns"
@@ -303,7 +354,8 @@ def build_executable(mode: str, release_version: str) -> Path:
             raise FileNotFoundError(f"编译完成，但未找到预期单文件程序: {raw_exe}")
         ext = ".exe" if sys.platform == "win32" else ""
         plat_tag = "windows" if sys.platform == "win32" else sys.platform
-        final_exe = DIST_DIR / f"AgentHub-Local-{release_version}-{plat_tag}-{arch_tag}{ext}"
+        # Windows / Linux 独立桌面程序文件名不携带版本号，避免后续自动升级后残留旧版本名称
+        final_exe = DIST_DIR / f"AgentHub-Local-{plat_tag}-{arch_tag}{ext}"
         if final_exe.exists():
             final_exe.unlink()
         raw_exe.replace(final_exe)
@@ -327,7 +379,8 @@ def build_executable(mode: str, release_version: str) -> Path:
         shutil.copytree(app_bundle, dmg_stage / f"{APP_NAME}.app", symlinks=True)
         os.symlink("/Applications", dmg_stage / "Applications")
 
-        dmg_path = DIST_DIR / f"AgentHub-Local-{release_version}-macos-{arch_tag}.dmg"
+        # macOS DMG 安装镜像及挂载卷标统一不带版本号
+        dmg_path = DIST_DIR / f"AgentHub-Local-macos-{arch_tag}.dmg"
         if dmg_path.exists():
             dmg_path.unlink()
         print(f">>> 正在封装 macOS 安装镜像: {dmg_path.name} ...")
@@ -336,7 +389,7 @@ def build_executable(mode: str, release_version: str) -> Path:
                 "hdiutil",
                 "create",
                 "-volname",
-                f"AgentHub Local {release_version}",
+                "AgentHub Local",
                 "-srcfolder",
                 str(dmg_stage),
                 "-ov",

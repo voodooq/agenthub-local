@@ -12,6 +12,7 @@ import time
 import psutil
 from typing import Any
 from ..core.logging_config import logger
+from ..core.runtime_paths import get_silent_subprocess_kwargs
 
 
 class CrossPlatformHardwareProbe:
@@ -28,6 +29,19 @@ class CrossPlatformHardwareProbe:
         self._nvml_init_lock = threading.Lock()
         self._nvml_init_attempted: bool = False
         self._nvml_module: Any = None
+        # 网络上下行瞬时速率差分基准状态
+        self._net_lock = threading.Lock()
+        self._last_net_ts: float = 0.0
+        self._last_bytes_sent: int = 0
+        self._last_bytes_recv: int = 0
+        try:
+            net_io = psutil.net_io_counters()
+            if net_io is not None:
+                self._last_net_ts = time.monotonic()
+                self._last_bytes_sent = int(net_io.bytes_sent)
+                self._last_bytes_recv = int(net_io.bytes_recv)
+        except Exception:
+            pass
         # 预热非阻塞 CPU 采样
         try:
             psutil.cpu_percent(interval=None)
@@ -82,6 +96,41 @@ class CrossPlatformHardwareProbe:
         except Exception:
             pass
 
+        # 1.5 尝试通过 nvidia-smi CLI 无窗探测 NVIDIA 独显（兼容未安装 pynvml 的常规环境）
+        try:
+            res = subprocess.run(
+                [
+                    "nvidia-smi",
+                    "--query-gpu=name,utilization.gpu,memory.used,memory.total,temperature.gpu",
+                    "--format=csv,noheader,nounits",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=2.5,
+                **get_silent_subprocess_kwargs(),
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                first_line = res.stdout.strip().splitlines()[0]
+                parts = [p.strip() for p in first_line.split(",")]
+                if len(parts) >= 5:
+                    def _safe_float(val: str, default: float = 0.0) -> float:
+                        try:
+                            return float(val)
+                        except (TypeError, ValueError):
+                            return default
+
+                    return {
+                        "detected": True,
+                        "vendor": "NVIDIA",
+                        "name": parts[0] or "NVIDIA GPU",
+                        "load_percent": round(_safe_float(parts[1]), 1),
+                        "vram_used_mb": round(_safe_float(parts[2]), 1),
+                        "vram_total_mb": round(_safe_float(parts[3]), 1),
+                        "temperature_c": round(_safe_float(parts[4])),
+                    }
+        except Exception:
+            pass
+
         # 2. 尝试探测 macOS Apple Silicon 统一内存架构
         if self.os_type == "Darwin":
             try:
@@ -113,6 +162,54 @@ class CrossPlatformHardwareProbe:
             "vram_total_mb": 0.0,
             "temperature_c": None,
         }
+
+    def get_network_metrics(self) -> dict[str, Any]:
+        """采集宿主机实时网络上下行速率（KB/s）与累计收发流量（GB）。"""
+        try:
+            counters = psutil.net_io_counters()
+            if counters is None:
+                return {
+                    "upload_kbps": 0.0,
+                    "download_kbps": 0.0,
+                    "total_sent_gb": 0.0,
+                    "total_recv_gb": 0.0,
+                    "packets_sent": 0,
+                    "packets_recv": 0,
+                }
+
+            now = time.monotonic()
+            with self._net_lock:
+                if self._last_net_ts > 0.0 and now > self._last_net_ts:
+                    dt = max(0.001, now - self._last_net_ts)
+                    delta_sent = max(0, int(counters.bytes_sent) - self._last_bytes_sent)
+                    delta_recv = max(0, int(counters.bytes_recv) - self._last_bytes_recv)
+                    upload_kbps = round(delta_sent / 1024.0 / dt, 1)
+                    download_kbps = round(delta_recv / 1024.0 / dt, 1)
+                else:
+                    upload_kbps = 0.0
+                    download_kbps = 0.0
+                self._last_net_ts = now
+                self._last_bytes_sent = int(counters.bytes_sent)
+                self._last_bytes_recv = int(counters.bytes_recv)
+
+            return {
+                "upload_kbps": max(0.0, upload_kbps),
+                "download_kbps": max(0.0, download_kbps),
+                "total_sent_gb": round(counters.bytes_sent / (1024**3), 2),
+                "total_recv_gb": round(counters.bytes_recv / (1024**3), 2),
+                "packets_sent": int(counters.packets_sent),
+                "packets_recv": int(counters.packets_recv),
+            }
+        except Exception as e:
+            logger.debug(f"网络指标采集受限: {e}")
+            return {
+                "upload_kbps": 0.0,
+                "download_kbps": 0.0,
+                "total_sent_gb": 0.0,
+                "total_recv_gb": 0.0,
+                "packets_sent": 0,
+                "packets_recv": 0,
+            }
 
     def get_disk_metrics(self) -> list[dict[str, Any]]:
         """获取各磁盘挂载分区的使用容量与剩余可用空间"""
@@ -224,6 +321,7 @@ class CrossPlatformHardwareProbe:
                 },
                 "disk": self.get_disk_metrics(),
                 "gpu": self.get_gpu_metrics(),
+                "network": self.get_network_metrics(),
                 "top_processes": self.get_categorized_processes(limit=15),
             }
             self._snapshot_cache_data = snap

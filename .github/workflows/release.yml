@@ -107,7 +107,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-windows-exe
-          path: dist/AgentHub-Local-*-windows-*.exe
+          path: dist/AgentHub-Local-windows-*.exe
           if-no-files-found: error
 
   build-macos-dmg:
@@ -142,7 +142,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: release-macos-dmg
-          path: dist/AgentHub-Local-*-macos-*.dmg
+          path: dist/AgentHub-Local-macos-*.dmg
           if-no-files-found: error
 
   publish-release:

@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.4.1-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.4.2-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,16 @@
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.4.1（最新）— CLI 账号模型动态识别、Gemini 4 Hydrogen / Orchestrator 适配与一键同步
+### 🚀 v1.4.2（最新）— 系统实时硬件监控与治理中枢、NVIDIA/网络吞吐探针及无版本号安装包
+- **实时硬件全景监控与多维度探针（`collector` · `RightActionDrawer`）**：
+  - 将右侧抽屉重构为「系统实时监控与智能治理」面板：打开后每 3 秒自动轮询 `/api/v1/system/snapshot`，实时呈现 CPU 使用率/核数/主频、物理内存占用与 Swap、GPU 负载/显存占用/核心温度、网络实时上/下行吞吐速率及累计流量（GB）、全部分区磁盘使用率，以及 Top 6 高占用进程列表。
+  - 在 `collector.get_gpu_metrics` 中接入无窗口 `nvidia-smi` CLI 兜底探测以原生适配 Windows/Linux NVIDIA 显卡；新增 `get_network_metrics` 计算两次采样窗口间的真实收发速率。
+  - 集成一键体检高占用进程、进程「提请治理」、端口占用排查及待审批系统治理/经验复盘清单交互闭环。
+- **无版本号桌面安装产物与平滑自动升级（`build_release_exe` · `AutoUpdaterService`）**：
+  - Windows 单文件客户端与 macOS 安装镜像统一采用无版本号文件名 `AgentHub-Local-windows-x64.exe` 与 `AgentHub-Local-macos-arm64.dmg`，避免跨版本升级后本地文件名残留旧版本号产生歧义；发行构建脚本自动生成纯净默认 `mcp_servers.json` 种子，防止本地测试配置泄漏。
+  - 自动更新服务新增 `normalize_windows_target_exe`（从历史带版本号 EXE 升级时自动落位并重命名为无版本号文件名）与 `.version` 缓存标记校验（防止同名包跨版本复用旧缓存）。
+
+### 🚀 v1.4.1 — CLI 账号模型动态识别、Gemini 4 Hydrogen / Orchestrator 适配与一键同步
 - **基于 CLI 账号动态嗅探与聚合可用模型（`agent_runner` · `models`）**：
   - 新增 `discover_cli_models` 与 `parse_agy_models_output`，按当前活跃 CLI 账号隔离目录（`GEMINI_CLI_HOME`）与系统代理自动执行 `agy models` 实时探测已解锁模型，自动过滤无权限模型（如未解锁的 `Gemini 4 Carbon`）。
   - 自动将多思考档位变体（`-low` / `-medium` / `-high` / `-xhigh`）聚合为主模型条目（如 `Gemini 4 Hydrogen`），并原样保留无思考后缀或单档位模型（如 `Orchestrator (Argon)` / `gemini-pro-orchestrator-g1-pro`、`GPT-OSS 120B`），同时支持未知未来新模型免改代码自动识别。
@@ -230,10 +239,10 @@ flowchart TD
 
 | 客户端版本 | 适用系统 | 包名称 | 运行方式 |
 | :--- | :--- | :--- | :--- |
-| **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-v1.2.2-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
-| **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-v1.2.2-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
-| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.2.2-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
-| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.2.2-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
+| **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
+| **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
+| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.4.2-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
+| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.4.2-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
 | **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
 
 ---
@@ -253,11 +262,11 @@ sequenceDiagram
     participant Port as package-portable (ubuntu)
     participant Rel as GitHub Releases 页面
 
-    Dev->>GH: git tag v1.2.2 && git push origin v1.2.2
+    Dev->>GH: git tag v1.4.2 && git push origin v1.4.2
     GH->>FE: 安装 Node 22 并导出静态前端 out/
     FE->>Port: 分发 out/ -> 生成 portable.zip & portable.tar.gz
-    FE->>Win: 分发 out/ -> PyInstaller --onefile 生成 *-windows-x64.exe
-    FE->>Mac: 分发 out/ -> PyInstaller + hdiutil 生成 *-macos-arm64.dmg
+    FE->>Win: 分发 out/ -> PyInstaller --onefile 生成 AgentHub-Local-windows-x64.exe
+    FE->>Mac: 分发 out/ -> PyInstaller + hdiutil 生成 AgentHub-Local-macos-arm64.dmg
     Port->>Rel: 仅过滤下载 release-* 汇聚 4 类独立资产创建 Release
     Win->>Rel: 挂载独立单文件 EXE
     Mac->>Rel: 挂载 macOS ARM64 DMG
@@ -266,9 +275,9 @@ sequenceDiagram
 ### 如何发布新版本：
 只需在 `version.json` 更新版本号并运行 `python sync_version.py`（或直接运行 `python sync_version.py <version>`），随后在本地执行以下命令：
 ```bash
-git tag -a v1.2.2 -m "Release v1.2.2"
+git tag -a v1.4.2 -m "Release v1.4.2"
 git push origin master
-git push origin v1.2.2
+git push origin v1.4.2
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 4 类干净的发行资产，几分钟内即可在 Releases 页面看到生成的下载文件！
 

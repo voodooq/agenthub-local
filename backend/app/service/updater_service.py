@@ -50,6 +50,22 @@ _SEMVER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 匹配 AgentHub-Local 历史可执行文件名中的版本号片段（如 -v1.4.1 / -v1.5.0-beta.1），保留后续系统与架构后缀
+_VERSIONED_WIN_EXE_RE = re.compile(
+    r"-v?\d+\.\d+\.\d+(?:-(?!windows\b)[0-9A-Za-z.]+)*",
+    re.IGNORECASE,
+)
+
+
+def normalize_windows_target_exe(target_exe: Path) -> Path:
+    """将带有历史版本号的 Windows EXE 路径归一化为无版本号文件名。"""
+    if not target_exe.name.lower().startswith("agenthub-local"):
+        return target_exe
+    clean_name = _VERSIONED_WIN_EXE_RE.sub("", target_exe.name, count=1)
+    if not clean_name or clean_name == target_exe.name:
+        return target_exe
+    return target_exe.with_name(clean_name)
+
 
 def get_github_repo() -> str:
     """获取用于检查更新的 GitHub 仓库（owner/repo）。"""
@@ -316,16 +332,118 @@ def build_windows_exe_update_script(
     """生成 Windows 单文件 EXE 脱离进程更新并自动重启的 PowerShell 脚本内容。
 
     由于 Windows 与 PyInstaller --onefile Bootloader 会锁定正在运行的可执行文件句柄，
-    必须等待所有关联进程彻底退出后，先移走旧文件再落位新文件并重新拉起。
+    必须等待所有关联进程彻底退出后，先移走旧文件再落位新文件并重新拉起；
+    若旧客户端文件名携带历史版本号，则在升级时自动归一化为无版本号文件名。
     """
     unique_pids = [str(pid) for pid in dict.fromkeys(wait_pids) if isinstance(pid, int) and pid > 0]
     pids_literal = ", ".join(unique_pids) if unique_pids else "0"
+    resolved_target = target_exe.resolve()
+    resolved_launch = normalize_windows_target_exe(resolved_target)
     src_str = str(source_exe.resolve()).replace("'", "''")
-    dst_str = str(target_exe.resolve()).replace("'", "''")
+    dst_str = str(resolved_target).replace("'", "''")
+    launch_str = str(resolved_launch).replace("'", "''")
     bak_str = f"{dst_str}.old"
-    work_dir = str(target_exe.resolve().parent).replace("'", "''")
+    work_dir = str(resolved_launch.parent).replace("'", "''")
     log_path = log_file if log_file is not None else (source_exe.resolve().parent / "apply_update.log")
     log_str = str(log_path).replace("'", "''")
+
+    if resolved_launch == resolved_target:
+        replace_and_launch_block = """$replaced = $false
+for ($attempt = 1; $attempt -le 30; $attempt++) {
+    try {
+        if (-not (Test-Path -LiteralPath $SourceExe)) {
+            Write-UpdateLog "ERROR: SourceExe does not exist."
+            break
+        }
+        if (Test-Path -LiteralPath $TargetExe) {
+            if (Test-Path -LiteralPath $BackupExe) {
+                Remove-Item -LiteralPath $BackupExe -Force -ErrorAction SilentlyContinue
+            }
+            Move-Item -LiteralPath $TargetExe -Destination $BackupExe -Force -ErrorAction Stop
+        }
+        Move-Item -LiteralPath $SourceExe -Destination $TargetExe -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $BackupExe) {
+            Remove-Item -LiteralPath $BackupExe -Force -ErrorAction SilentlyContinue
+        }
+        $replaced = $true
+        Write-UpdateLog "Replaced TargetExe successfully on attempt $attempt."
+        break
+    } catch {
+        Write-UpdateLog "Attempt $attempt failed: $($_.Exception.Message)"
+        if ((-not (Test-Path -LiteralPath $TargetExe)) -and (Test-Path -LiteralPath $BackupExe)) {
+            try { Move-Item -LiteralPath $BackupExe -Destination $TargetExe -Force -ErrorAction SilentlyContinue } catch {}
+        }
+        Start-Sleep -Milliseconds 500
+    }
+}
+
+if ($replaced -and (Test-Path -LiteralPath $TargetExe)) {
+    Write-UpdateLog "Launching updated executable: $TargetExe"
+    # 清理 PyInstaller 6.x (_PYI_*) 与旧进程父级环境变量，强制新 EXE 独立解压运行
+    Get-ChildItem Env: | Where-Object {
+        $_.Name -like '_PYI_*' -or $_.Name -in @('_MEIPASS2', 'DESKTOP_PARENT_PID', 'TAURI_PARENT_PID', 'PYTHONHOME', 'PYTHONPATH')
+    } | ForEach-Object {
+        Remove-Item "Env:\\$($_.Name)" -ErrorAction SilentlyContinue
+    }
+    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+    Start-Process -FilePath $TargetExe -WorkingDirectory $WorkDir -WindowStyle Normal
+} else {
+    Write-UpdateLog "Update failed: TargetExe was not replaced."
+}"""
+    else:
+        replace_and_launch_block = f"""$LaunchExe = '{launch_str}'
+for ($i = 0; $i -lt 30; $i++) {{
+    $launchHolders = @(Get-Process -ErrorAction SilentlyContinue | Where-Object {{ $_.Path -eq $LaunchExe }})
+    if ($launchHolders.Count -eq 0) {{ break }}
+    Write-UpdateLog "Waiting for $($launchHolders.Count) process(es) holding LaunchExe..."
+    Start-Sleep -Milliseconds 400
+}}
+
+$replaced = $false
+for ($attempt = 1; $attempt -le 30; $attempt++) {{
+    try {{
+        if (-not (Test-Path -LiteralPath $SourceExe)) {{
+            Write-UpdateLog "ERROR: SourceExe does not exist."
+            break
+        }}
+        if (Test-Path -LiteralPath $TargetExe) {{
+            if (Test-Path -LiteralPath $BackupExe) {{
+                Remove-Item -LiteralPath $BackupExe -Force -ErrorAction SilentlyContinue
+            }}
+            Move-Item -LiteralPath $TargetExe -Destination $BackupExe -Force -ErrorAction Stop
+        }}
+        if (Test-Path -LiteralPath $LaunchExe) {{
+            Remove-Item -LiteralPath $LaunchExe -Force -ErrorAction Stop
+        }}
+        Move-Item -LiteralPath $SourceExe -Destination $LaunchExe -Force -ErrorAction Stop
+        if (Test-Path -LiteralPath $BackupExe) {{
+            Remove-Item -LiteralPath $BackupExe -Force -ErrorAction SilentlyContinue
+        }}
+        $replaced = $true
+        Write-UpdateLog "Replaced and normalized TargetExe -> $LaunchExe on attempt $attempt."
+        break
+    }} catch {{
+        Write-UpdateLog "Attempt $attempt failed: $($_.Exception.Message)"
+        if ((-not (Test-Path -LiteralPath $TargetExe)) -and (Test-Path -LiteralPath $BackupExe)) {{
+            try {{ Move-Item -LiteralPath $BackupExe -Destination $TargetExe -Force -ErrorAction SilentlyContinue }} catch {{}}
+        }}
+        Start-Sleep -Milliseconds 500
+    }}
+}}
+
+if ($replaced -and (Test-Path -LiteralPath $LaunchExe)) {{
+    Write-UpdateLog "Launching normalized updated executable: $LaunchExe"
+    # 清理 PyInstaller 6.x (_PYI_*) 与旧进程父级环境变量，强制新 EXE 独立解压运行
+    Get-ChildItem Env: | Where-Object {{
+        $_.Name -like '_PYI_*' -or $_.Name -in @('_MEIPASS2', 'DESKTOP_PARENT_PID', 'TAURI_PARENT_PID', 'PYTHONHOME', 'PYTHONPATH')
+    }} | ForEach-Object {{
+        Remove-Item "Env:\\$($_.Name)" -ErrorAction SilentlyContinue
+    }}
+    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+    Start-Process -FilePath $LaunchExe -WorkingDirectory $WorkDir -WindowStyle Normal
+}} else {{
+    Write-UpdateLog "Update failed: LaunchExe was not replaced."
+}}"""
 
     return f"""$ErrorActionPreference = 'Continue'
 $SourceExe = '{src_str}'
@@ -361,48 +479,7 @@ for ($i = 0; $i -lt 60; $i++) {{
     Start-Sleep -Milliseconds 400
 }}
 
-$replaced = $false
-for ($attempt = 1; $attempt -le 30; $attempt++) {{
-    try {{
-        if (-not (Test-Path -LiteralPath $SourceExe)) {{
-            Write-UpdateLog "ERROR: SourceExe does not exist."
-            break
-        }}
-        if (Test-Path -LiteralPath $TargetExe) {{
-            if (Test-Path -LiteralPath $BackupExe) {{
-                Remove-Item -LiteralPath $BackupExe -Force -ErrorAction SilentlyContinue
-            }}
-            Move-Item -LiteralPath $TargetExe -Destination $BackupExe -Force -ErrorAction Stop
-        }}
-        Move-Item -LiteralPath $SourceExe -Destination $TargetExe -Force -ErrorAction Stop
-        if (Test-Path -LiteralPath $BackupExe) {{
-            Remove-Item -LiteralPath $BackupExe -Force -ErrorAction SilentlyContinue
-        }}
-        $replaced = $true
-        Write-UpdateLog "Replaced TargetExe successfully on attempt $attempt."
-        break
-    }} catch {{
-        Write-UpdateLog "Attempt $attempt failed: $($_.Exception.Message)"
-        if ((-not (Test-Path -LiteralPath $TargetExe)) -and (Test-Path -LiteralPath $BackupExe)) {{
-            try {{ Move-Item -LiteralPath $BackupExe -Destination $TargetExe -Force -ErrorAction SilentlyContinue }} catch {{}}
-        }}
-        Start-Sleep -Milliseconds 500
-    }}
-}}
-
-if ($replaced -and (Test-Path -LiteralPath $TargetExe)) {{
-    Write-UpdateLog "Launching updated executable: $TargetExe"
-    # 清理 PyInstaller 6.x (_PYI_*) 与旧进程父级环境变量，强制新 EXE 独立解压运行
-    Get-ChildItem Env: | Where-Object {{
-        $_.Name -like '_PYI_*' -or $_.Name -in @('_MEIPASS2', 'DESKTOP_PARENT_PID', 'TAURI_PARENT_PID', 'PYTHONHOME', 'PYTHONPATH')
-    }} | ForEach-Object {{
-        Remove-Item "Env:\\$($_.Name)" -ErrorAction SilentlyContinue
-    }}
-    $env:PYINSTALLER_RESET_ENVIRONMENT = '1'
-    Start-Process -FilePath $TargetExe -WorkingDirectory $WorkDir -WindowStyle Normal
-}} else {{
-    Write-UpdateLog "Update failed: TargetExe was not replaced."
-}}
+{replace_and_launch_block}
 
 Remove-Item -LiteralPath $PSCommandPath -Force -ErrorAction SilentlyContinue
 """
@@ -524,6 +601,45 @@ class AutoUpdaterService:
         updates_dir.mkdir(parents=True, exist_ok=True)
         return updates_dir
 
+    @staticmethod
+    def _is_cached_package_valid(
+        cached_file: Path,
+        expected_size: int,
+        target_version: str,
+        require_known_size: bool = False,
+    ) -> bool:
+        """校验本地缓存的更新包大小及所属版本号，防止无版本号包跨版本复用旧缓存。"""
+        if not cached_file.is_file():
+            return False
+        if require_known_size and expected_size <= 0:
+            return False
+        if expected_size > 0 and cached_file.stat().st_size != expected_size:
+            return False
+
+        clean_target = str(target_version or "").strip().lstrip("vV")
+        if not clean_target:
+            return False
+
+        ver_marker = cached_file.parent / f"{cached_file.name}.version"
+        if ver_marker.is_file():
+            try:
+                cached_ver = ver_marker.read_text(encoding="utf-8").strip().lstrip("vV")
+                return cached_ver == clean_target
+            except OSError:
+                return False
+
+        # 无版本标记文件时，仅当文件名自身明确携带目标版本号才允许复用
+        return clean_target in cached_file.name
+
+    @staticmethod
+    def _write_cache_version_marker(pkg_path: Path, target_version: str) -> None:
+        """记录无版本号安装包对应下载的目标版本号，供后续缓存比对。"""
+        clean_target = str(target_version or "").strip().lstrip("vV")
+        if not clean_target:
+            return
+        ver_marker = pkg_path.parent / f"{pkg_path.name}.version"
+        ver_marker.write_text(clean_target, encoding="utf-8")
+
     def get_status(self) -> dict[str, Any]:
         """返回当前更新状态快照（实时刷新版本号与运行形态）。"""
         snapshot = dict(self._state)
@@ -642,10 +758,15 @@ class AutoUpdaterService:
                     )
                     return self.get_status()
 
-                # 检查本地更新缓存目录是否已存在同字节大小的完整更新包
+                # 检查本地更新缓存目录是否已存在同版本且同字节大小的完整更新包
                 safe_asset_name = Path(asset_name).name
                 cached_file = self.get_updates_dir() / safe_asset_name
-                if cached_file.is_file() and (asset_size <= 0 or cached_file.stat().st_size == asset_size):
+                if self._is_cached_package_valid(
+                    cached_file=cached_file,
+                    expected_size=asset_size,
+                    target_version=latest_ver,
+                    require_known_size=False,
+                ):
                     actual_size = cached_file.stat().st_size
                     self._state["status"] = "downloaded"
                     self._state["downloaded_bytes"] = actual_size
@@ -678,6 +799,7 @@ class AutoUpdaterService:
         download_url = str(self._state.get("download_url") or "").strip()
         asset_name = Path(str(self._state.get("asset_name") or "")).name
         expected_size = int(self._state.get("total_bytes") or 0)
+        target_version = str(self._state.get("latest_version") or "").strip()
 
         if not asset_name or not _is_allowed_download_url(download_url):
             self._state["status"] = "error"
@@ -685,7 +807,12 @@ class AutoUpdaterService:
             return self.get_status()
 
         final_path = self.get_updates_dir() / asset_name
-        if not force and final_path.is_file() and expected_size > 0 and final_path.stat().st_size == expected_size:
+        if not force and self._is_cached_package_valid(
+            cached_file=final_path,
+            expected_size=expected_size,
+            target_version=target_version,
+            require_known_size=True,
+        ):
             self._state.update({
                 "status": "downloaded",
                 "downloaded_bytes": expected_size,
@@ -706,11 +833,22 @@ class AutoUpdaterService:
             "error_message": "",
         })
         self._download_task = asyncio.create_task(
-            self._download_worker(download_url=download_url, asset_name=asset_name, expected_size=expected_size)
+            self._download_worker(
+                download_url=download_url,
+                asset_name=asset_name,
+                expected_size=expected_size,
+                target_version=target_version,
+            )
         )
         return self.get_status()
 
-    async def _download_worker(self, download_url: str, asset_name: str, expected_size: int) -> None:
+    async def _download_worker(
+        self,
+        download_url: str,
+        asset_name: str,
+        expected_size: int,
+        target_version: str = "",
+    ) -> None:
         """后台流式下载任务：边读取字节块边落盘并实时刷新进度与速率。"""
         updates_dir = self.get_updates_dir()
         final_path = updates_dir / asset_name
@@ -758,6 +896,7 @@ class AutoUpdaterService:
                 raise RuntimeError(f"下载文件大小不完整（期望 {total_bytes} 字节，实际 {downloaded_bytes} 字节）")
 
             part_path.replace(final_path)
+            self._write_cache_version_marker(final_path, target_version)
             self._state.update({
                 "status": "downloaded",
                 "total_bytes": total_bytes or downloaded_bytes,
