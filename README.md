@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.4.0-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.4.1-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -19,7 +19,17 @@
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.4.0（最新）— 远程 MCP 协议全栈支持、跨网文件协同与 GitHub 自动升级加载
+### 🚀 v1.4.1（最新）— CLI 账号模型动态识别、Gemini 4 Hydrogen / Orchestrator 适配与一键同步
+- **基于 CLI 账号动态嗅探与聚合可用模型（`agent_runner` · `models`）**：
+  - 新增 `discover_cli_models` 与 `parse_agy_models_output`，按当前活跃 CLI 账号隔离目录（`GEMINI_CLI_HOME`）与系统代理自动执行 `agy models` 实时探测已解锁模型，自动过滤无权限模型（如未解锁的 `Gemini 4 Carbon`）。
+  - 自动将多思考档位变体（`-low` / `-medium` / `-high` / `-xhigh`）聚合为主模型条目（如 `Gemini 4 Hydrogen`），并原样保留无思考后缀或单档位模型（如 `Orchestrator (Argon)` / `gemini-pro-orchestrator-g1-pro`、`GPT-OSS 120B`），同时支持未知未来新模型免改代码自动识别。
+- **动态 `--model` 参数解析与新模型自动浮现（`agent_runner` · `gemini_client` · `models`）**：
+  - `resolve_agy_model_flag` 优先匹配动态变体映射表并支持档位缺失平滑回退；补齐 `Gemini 4 Hydrogen` 与 `Orchestrator (Argon)` 的 Cloud Code / REST 映射。
+  - 引入 `known_candidate_ids` 快照感知机制，CLI 升级或账号解锁新模型后自动浮现至输入框选择器，同时严格尊重用户手动取消勾选的偏好。
+- **设置页一键刷新识别交互（`SettingsModal` · `ModelSelector`）**：
+  - 在「设置 → 模型」页面新增「刷新识别模型」按钮（对接 `GET /api/v1/models/active?refresh=true`），支持随时穿透缓存同步当前 CLI 账号最新模型列表。
+
+### 🚀 v1.4.0 — 远程 MCP 协议全栈支持、跨网文件协同与 GitHub 自动升级加载
 - **远程 MCP 协议原生接入（`MCPManager` · `MemoryHubModal` · `SkillLoader`）**：
   - 全面支持 `Streamable HTTP`（含可选 `Mcp-Session-Id` 有/无状态连接、404 会话自动重连与 `close()` 异步 `DELETE` 清理）及 `Legacy HTTP + SSE`（强制同源校验与禁止跨站重定向防凭据泄露）。
   - 全面兼容公共与第三方标准 MCP 服务及多格式配置导入（Claude Desktop `mcpServers` / VS Code `servers` / Windsurf `serverUrl`）；新增服务名规范校验、Headers 密钥脱敏掩码保护与 `${ENV_VAR}` 运行时环境变量展开；全链路异步化 `shutdown_all()`。

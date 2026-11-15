@@ -170,6 +170,7 @@ export function SettingsModal({
   // 1. 模型测试与可用性筛选状态
   const [modelState, setModelState] = useState<ActiveModelsState | null>(null);
   const [loadingModels, setLoadingModels] = useState(false);
+  const [refreshingCliModels, setRefreshingCliModels] = useState(false);
   const [testingAll, setTestingAll] = useState(false);
   const [testingSingleId, setTestingSingleId] = useState<string | null>(null);
   const [savingVerified, setSavingVerified] = useState(false);
@@ -186,19 +187,46 @@ export function SettingsModal({
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ success: boolean; msg: string } | null>(null);
 
-  const fetchActiveModels = async () => {
+  const fetchActiveModels = async (forceRefresh: boolean = false) => {
     try {
-      setLoadingModels(true);
-      const res = await apiFetch('/api/v1/models/active');
+      if (forceRefresh) {
+        setRefreshingCliModels(true);
+        setModelFeedback({
+          success: true,
+          msg: '正在根据当前账号实时探测最新可用模型列表，请稍候...',
+        });
+      } else {
+        setLoadingModels(true);
+      }
+      const endpoint = forceRefresh ? '/api/v1/models/active?refresh=true' : '/api/v1/models/active';
+      const res = await apiFetch(endpoint);
       if (res.ok) {
         const data: ActiveModelsState = await res.json();
         setModelState(data);
         if (onModelsUpdated) onModelsUpdated(data);
+        if (forceRefresh) {
+          setModelFeedback({
+            success: true,
+            msg: `已根据账号 [${data.account_name}] (${data.auth_label}) 同步识别出 ${data.candidates.length} 个候选模型！`,
+          });
+        }
+      } else if (forceRefresh) {
+        setModelFeedback({
+          success: false,
+          msg: '刷新模型列表失败，请检查后端服务状态或 CLI 登录状态',
+        });
       }
-    } catch (e) {
+    } catch (e: any) {
       console.error('拉取账号模型状态失败:', e);
+      if (forceRefresh) {
+        setModelFeedback({
+          success: false,
+          msg: e?.message || '刷新识别模型时发生网络异常',
+        });
+      }
     } finally {
       setLoadingModels(false);
+      setRefreshingCliModels(false);
     }
   };
 
@@ -524,24 +552,37 @@ export function SettingsModal({
                     </p>
                   </div>
 
-                  <button
-                    type="button"
-                    onClick={handleTestAllModels}
-                    disabled={testingAll || loadingModels || !modelState || modelState.candidates.length === 0}
-                    className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-all shadow-md shadow-emerald-500/25 flex items-center justify-center space-x-2 shrink-0 disabled:opacity-50 min-h-[38px]"
-                  >
-                    {testingAll ? (
-                      <>
-                        <RefreshCw className="w-4 h-4 animate-spin" />
-                        <span>正在实测全部模型...</span>
-                      </>
-                    ) : (
-                      <>
-                        <Zap className="w-4 h-4 text-amber-300" />
-                        <span>一键测试可用模型</span>
-                      </>
-                    )}
-                  </button>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => fetchActiveModels(true)}
+                      disabled={refreshingCliModels || testingAll || loadingModels}
+                      className="px-3.5 py-2 rounded-xl bg-surface-200 hover:bg-surface-300 border border-border text-foreground font-semibold text-xs transition-all flex items-center justify-center space-x-1.5 shrink-0 disabled:opacity-50 min-h-[38px]"
+                      title="根据当前 CLI 账号权限重新扫描最新可用模型"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 text-emerald-500 ${refreshingCliModels ? 'animate-spin' : ''}`} />
+                      <span>{refreshingCliModels ? '同步识别中...' : '刷新识别模型'}</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={handleTestAllModels}
+                      disabled={testingAll || refreshingCliModels || loadingModels || !modelState || modelState.candidates.length === 0}
+                      className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-all shadow-md shadow-emerald-500/25 flex items-center justify-center space-x-2 shrink-0 disabled:opacity-50 min-h-[38px]"
+                    >
+                      {testingAll ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>正在实测全部模型...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-4 h-4 text-amber-300" />
+                          <span>一键测试可用模型</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 </div>
 
                 {/* 测试结果反馈条 */}

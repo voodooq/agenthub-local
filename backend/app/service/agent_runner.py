@@ -78,9 +78,11 @@ import asyncio
 import inspect
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import AsyncGenerator, Any
 
@@ -259,31 +261,349 @@ def _sanitize_prompt(prompt: str) -> str:
     return prompt
 
 
+def _normalize_cli_home_key(cli_home_dir: str | None) -> str:
+    """规范化 CLI 账号目录标识，用于缓存与并发锁隔离。"""
+    raw = (cli_home_dir or "").strip()
+    if not raw or raw.lower() in ("default", "none"):
+        return "default"
+    return raw
+
+
+_CLI_MODEL_METADATA_PRESETS: dict[str, dict[str, str]] = {
+    "gemini-4-argon": {
+        "name": "Gemini 4 Argon",
+        "description": "Google 最新第 4 代 Argon 旗舰深度推理引擎 · 超深思维链与复杂架构推演",
+        "badge": "CLI 旗舰 · 4.0 Argon",
+    },
+    "gemini-4-hydrogen": {
+        "name": "Gemini 4 Hydrogen",
+        "description": "Google 最新第 4 代 Hydrogen 均衡旗舰推理模型 · 兼顾高智商推理与工程响应速度",
+        "badge": "CLI 旗舰 · 4.0 Hydrogen",
+    },
+    "gemini-pro-orchestrator-g1-pro": {
+        "name": "Orchestrator (Argon)",
+        "description": "Google Antigravity 编排调度专用 Pro 引擎 · 复杂工具链与多阶段任务编排首选",
+        "badge": "CLI 编排 · Orchestrator",
+    },
+    "gemini-4-carbon": {
+        "name": "Gemini 4 Carbon",
+        "description": "Google 第 4 代 Carbon 轻量极速推理模型 · 敏捷任务执行与高频工具调用",
+        "badge": "CLI 极速 · 4.0 Carbon",
+    },
+    "gemini-3.8-flash": {
+        "name": "Gemini 3.8 Flash",
+        "description": "宿主机 CLI 原生高推理极速引擎 · 兼顾响应速度与全能系统工具调度",
+        "badge": "CLI 原生 · 3.8 极速",
+    },
+    "gemini-3.5-flash-lite": {
+        "name": "Gemini 3.5 Flash-Lite",
+        "description": "3.5 代毫秒级轻量模型 · 极速问答、代码纠错与敏捷检索",
+        "badge": "毫秒响应 · 3.5",
+    },
+    "gemini-2.5-flash": {
+        "name": "Gemini 2.5 Flash",
+        "description": "Google 经典高性价比高可用主力模型",
+        "badge": "CLI 稳定 · 2.5 Flash",
+    },
+    "claude-opus-5-5": {
+        "name": "Claude Opus 5.5",
+        "description": "通过 Antigravity 官方通道调度的 Claude 5.5 顶配深度推理模型",
+        "badge": "CLI 顶配 · Opus",
+    },
+    "claude-sonnet-5-5": {
+        "name": "Claude Sonnet 5.5",
+        "description": "通过 Antigravity 官方通道调度的 Claude 5.5 主力工程编码思考模型",
+        "badge": "CLI 原生 · 跨生态",
+    },
+    "gpt-oss-120b-medium": {
+        "name": "GPT-OSS 120B",
+        "description": "120B 巨量参数开源推理模型 · 多视角代码审查与技术问答",
+        "badge": "CLI 原生 · 120B",
+    },
+}
+
+# 已知支持思考档位聚合的基础前缀（即使 CLI 只返回其中 1 个档位也按基础 ID 聚合）
+_KNOWN_MULTI_THINKING_PREFIXES: set[str] = {
+    "gemini-4-argon",
+    "gemini-4-hydrogen",
+    "gemini-4-carbon",
+    "gemini-3.8-flash",
+    "claude-opus-5-5",
+    "claude-sonnet-5-5",
+}
+
+_THINKING_SUFFIX_RE = re.compile(r"^(.+?)-(xhigh|high|medium|low)$", re.IGNORECASE)
+_DISPLAY_SUFFIX_RE = re.compile(r"\s*\((?:xhigh|high|medium|low)\)\s*$", re.IGNORECASE)
+_VALID_CLI_MODEL_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]+$")
+
+_CLI_MODELS_CACHE_TTL_SECONDS = 300.0
+_CLI_MODELS_CACHE: dict[str, dict[str, Any]] = {}
+_DISCOVER_CLI_LOCKS: dict[str, asyncio.Lock] = {}
+_DYNAMIC_VARIANT_MAP: dict[str, list[str]] = {}
+_DYNAMIC_RAW_IDS: dict[str, str] = {}
+
+
+def parse_agy_models_output(stdout_text: str) -> tuple[list[dict[str, Any]], dict[str, list[str]], dict[str, str]]:
+    """解析 `agy models` 标准输出，自动聚合思考档位变体并生成结构化模型清单。
+
+    Args:
+        stdout_text: `agy models` 命令的标准输出文本。
+
+    Returns:
+        (models, variant_map, raw_id_map):
+            - models: 聚合后的模型元数据字典列表（按 CLI 输出顺序排列）
+            - variant_map: {base_id_lower: [raw_variant_id, ...]}
+            - raw_id_map: {raw_id_lower: raw_id}
+    """
+    entries: list[tuple[str, str, str | None, str | None]] = []
+    seen_raw: set[str] = set()
+    suffix_counts: dict[str, int] = {}
+
+    for raw_line in (stdout_text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = re.split(r"\t+|\s{2,}", line, maxsplit=1)
+        raw_id = parts[0].strip()
+        if not _VALID_CLI_MODEL_ID_RE.match(raw_id):
+            continue
+        raw_lower = raw_id.lower()
+        if raw_lower in seen_raw:
+            continue
+        seen_raw.add(raw_lower)
+
+        display_name = parts[1].strip() if len(parts) > 1 and parts[1].strip() else raw_id
+        sfx_match = _THINKING_SUFFIX_RE.match(raw_id)
+        if sfx_match:
+            prefix = sfx_match.group(1)
+            suffix = sfx_match.group(2).lower()
+            suffix_counts[prefix.lower()] = suffix_counts.get(prefix.lower(), 0) + 1
+            entries.append((raw_id, display_name, prefix, suffix))
+        else:
+            entries.append((raw_id, display_name, None, None))
+
+    models: list[dict[str, Any]] = []
+    variant_map: dict[str, list[str]] = {}
+    raw_id_map: dict[str, str] = {}
+    seen_base_ids: set[str] = set()
+
+    for raw_id, display_name, prefix, suffix in entries:
+        raw_id_map[raw_id.lower()] = raw_id
+
+        if prefix and suffix:
+            prefix_lower = prefix.lower()
+            should_aggregate = (
+                suffix_counts.get(prefix_lower, 0) >= 2
+                or prefix_lower in _KNOWN_MULTI_THINKING_PREFIXES
+            )
+            if should_aggregate:
+                variant_map.setdefault(prefix_lower, []).append(raw_id)
+                base_id = prefix
+                has_thinking = True
+            else:
+                base_id = raw_id
+                has_thinking = False
+        else:
+            base_id = raw_id
+            has_thinking = False
+
+        base_lower = base_id.lower()
+        if base_lower in seen_base_ids:
+            continue
+        seen_base_ids.add(base_lower)
+
+        preset = _CLI_MODEL_METADATA_PRESETS.get(base_lower) or _CLI_MODEL_METADATA_PRESETS.get(raw_id.lower())
+        cleaned_display = _DISPLAY_SUFFIX_RE.sub("", display_name).strip() or base_id
+
+        name = preset["name"] if preset else cleaned_display
+        description = (
+            preset["description"]
+            if preset
+            else f"当前 Antigravity CLI 账号动态识别的可用模型 ({base_id})"
+        )
+        badge = preset["badge"] if preset else ("CLI 动态 · 思考模型" if has_thinking else "CLI 动态 · 新模型")
+
+        models.append(
+            {
+                "id": base_id,
+                "name": name,
+                "provider": "Antigravity CLI",
+                "description": description,
+                "badge": badge,
+                "has_thinking": has_thinking,
+                "is_default": len(models) == 0,
+                "supported_auth_types": ["gemini_cli"],
+            }
+        )
+
+    return models, variant_map, raw_id_map
+
+
+async def discover_cli_models(
+    cli_home_dir: str | None = None,
+    force_refresh: bool = False,
+    timeout_seconds: float = 12.0,
+) -> list[dict[str, Any]]:
+    """按 CLI 账号目录动态执行 `agy models` 嗅探当前账号实际已解锁的模型列表。
+
+    若未安装 `agy`、网络超时或执行失败，会优雅回退至最近有效缓存；若尚无缓存则返回空列表，
+    由上层使用静态基准清单兜底。
+    """
+    cache_key = _normalize_cli_home_key(cli_home_dir)
+    now = time.time()
+    cached = _CLI_MODELS_CACHE.get(cache_key)
+    if (
+        not force_refresh
+        and cached
+        and cached.get("models")
+        and (now - float(cached.get("fetched_at", 0.0))) < _CLI_MODELS_CACHE_TTL_SECONDS
+    ):
+        return [dict(m) for m in cached["models"]]
+
+    lock = _DISCOVER_CLI_LOCKS.setdefault(cache_key, asyncio.Lock())
+    async with lock:
+        # 锁内二次检查缓存，避免并发刷新惊群重复拉起子进程
+        now = time.time()
+        cached = _CLI_MODELS_CACHE.get(cache_key)
+        if (
+            not force_refresh
+            and cached
+            and cached.get("models")
+            and (now - float(cached.get("fetched_at", 0.0))) < _CLI_MODELS_CACHE_TTL_SECONDS
+        ):
+            return [dict(m) for m in cached["models"]]
+
+        cli_bin, cli_type = _find_cli_binary()
+        if cli_type != "agy":
+            return [dict(m) for m in cached["models"]] if cached and cached.get("models") else []
+
+        env = _build_safe_env(cli_home_dir)
+        cmd = [cli_bin, "models"]
+        cwd = str(Path.home())
+
+        try:
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    limit=SUBPROCESS_STREAM_LIMIT,
+                    env=env,
+                    cwd=cwd,
+                    **get_silent_subprocess_kwargs(),
+                )
+            except NotImplementedError:
+                proc = _CompatSubprocess(cmd, env, cwd)
+
+            async def _collect_models_output() -> tuple[str, str, int]:
+                out_lines: list[str] = []
+                assert proc.stdout is not None
+                reader = _AsyncLineReader(proc.stdout)
+                while True:
+                    line = await reader.readline()
+                    if not line:
+                        break
+                    out_lines.append(line.decode("utf-8", errors="replace").strip())
+                stderr_bytes = await proc.stderr.read() if proc.stderr else b""
+                exit_code = await proc.wait()
+                return "\n".join(out_lines), stderr_bytes.decode("utf-8", errors="replace"), exit_code
+
+            try:
+                stdout_text, stderr_text, exit_code = await asyncio.wait_for(
+                    _collect_models_output(),
+                    timeout=timeout_seconds,
+                )
+            except asyncio.TimeoutError:
+                _kill_process_tree(proc)
+                try:
+                    await asyncio.wait_for(proc.wait(), timeout=2.0)
+                except Exception:
+                    pass
+                logger.warning(f"[CLI Model Discovery] `{cli_bin} models` 超时 (>{int(timeout_seconds)}s)，保留缓存/静态回退")
+                return [dict(m) for m in cached["models"]] if cached and cached.get("models") else []
+
+            if exit_code != 0:
+                err_msg = (stderr_text or stdout_text or f"exit={exit_code}").strip()[:160]
+                logger.warning(f"[CLI Model Discovery] `{cli_bin} models` 返回异常 ({exit_code}): {err_msg}")
+                return [dict(m) for m in cached["models"]] if cached and cached.get("models") else []
+
+            parsed_models, variant_map, raw_id_map = parse_agy_models_output(stdout_text)
+            if not parsed_models:
+                logger.warning("[CLI Model Discovery] 未能从 `agy models` 输出中解析到有效模型")
+                return [dict(m) for m in cached["models"]] if cached and cached.get("models") else []
+
+            _CLI_MODELS_CACHE[cache_key] = {
+                "models": parsed_models,
+                "variant_map": variant_map,
+                "raw_id_map": raw_id_map,
+                "fetched_at": time.time(),
+            }
+            _DYNAMIC_VARIANT_MAP.update(variant_map)
+            _DYNAMIC_RAW_IDS.update(raw_id_map)
+            logger.info(
+                f"[CLI Model Discovery] 已为账号 [{cache_key}] 动态识别 {len(parsed_models)} 个模型: "
+                f"{[m['id'] for m in parsed_models]}"
+            )
+            return [dict(m) for m in parsed_models]
+        except Exception as e:
+            logger.warning(f"[CLI Model Discovery] 探测可用模型异常: {e}")
+            return [dict(m) for m in cached["models"]] if cached and cached.get("models") else []
+
+
 def resolve_agy_model_flag(model: str | None, thinking_level: str | None = None) -> str:
     """
     将前端模型标识与思考等级解析为 Antigravity CLI (agy) 支持的真实 --model 参数。
+    优先匹配动态识别出的账号模型变体表，未知/离线场景自动回退至兼容规则。
     """
     level = (thinking_level or "high").lower()
-    if level not in ("low", "medium", "high"):
+    if level not in ("low", "medium", "high", "xhigh"):
         level = "high"
 
     if not model:
         return f"gemini-3.8-flash-{level}"
 
-    m_lower = model.strip().lower()
-
-    # GPT-OSS 120B 仅支持 medium
-    if "gpt" in m_lower or "120b" in m_lower:
-        return "gpt-oss-120b-medium"
+    m_raw = model.strip()
+    m_lower = m_raw.lower()
 
     explicit_suffix = None
-    for sfx in ("-low", "-medium", "-high"):
-        if m_lower.endswith(sfx):
-            explicit_suffix = sfx[1:]
-            break
+    base_candidate = m_lower
+    sfx_match = _THINKING_SUFFIX_RE.match(m_lower)
+    if sfx_match:
+        base_candidate = sfx_match.group(1)
+        explicit_suffix = sfx_match.group(2).lower()
 
     effective_level = level if thinking_level else (explicit_suffix or level)
 
+    # 1. 优先查动态识别的多档位变体表（支持未来 CLI 自动上线新系列模型）
+    if base_candidate in _DYNAMIC_VARIANT_MAP:
+        variants = _DYNAMIC_VARIANT_MAP[base_candidate]
+        desired = f"{base_candidate}-{effective_level}"
+        for v in variants:
+            if v.lower() == desired:
+                return v
+        # 若账号对该模型只开放了部分档位（例如无 high 仅 medium），按合理优先级自动回退
+        for fallback_lvl in ("medium", "high", "low", "xhigh"):
+            fb_target = f"{base_candidate}-{fallback_lvl}"
+            for v in variants:
+                if v.lower() == fb_target:
+                    return v
+        if variants:
+            return variants[0]
+
+    # 2. 优先查动态识别的无思考档位模型原始 ID（如 gemini-pro-orchestrator-g1-pro、gpt-oss-120b-medium）
+    if m_lower in _DYNAMIC_RAW_IDS:
+        return _DYNAMIC_RAW_IDS[m_lower]
+
+    # 3. 离线/首次冷启动兜底兼容规则（注意 orchestrator 必须先于 argon 判断，避免展示名中括号含 Argon 被误匹配）
+    if "gpt" in m_lower or "120b" in m_lower:
+        return "gpt-oss-120b-medium"
+    if "orchestrator" in m_lower or "g1-pro" in m_lower:
+        return "gemini-pro-orchestrator-g1-pro"
+    if "hydrogen" in m_lower:
+        return f"gemini-4-hydrogen-{effective_level}"
+    if "carbon" in m_lower:
+        return f"gemini-4-carbon-{effective_level}"
     if "argon" in m_lower or "2.5-pro" in m_lower or "3.1-pro" in m_lower:
         return f"gemini-4-argon-{effective_level}"
     if "opus" in m_lower:
@@ -293,7 +613,7 @@ def resolve_agy_model_flag(model: str | None, thinking_level: str | None = None)
     if "3.8-flash" in m_lower or "flash" in m_lower:
         return f"gemini-3.8-flash-{effective_level}"
 
-    return model.strip()
+    return m_raw
 
 
 async def test_cli_model_availability(

@@ -57,6 +57,22 @@ export const REAL_MODEL_LIST: ModelOption[] = [
     hasThinking: true,
   },
   {
+    id: 'gemini-4-hydrogen',
+    name: 'Gemini 4 Hydrogen',
+    provider: 'Antigravity CLI',
+    description: 'Google 最新第 4 代 Hydrogen 均衡旗舰推理模型 · 兼顾高智商推理与工程响应速度',
+    badge: 'CLI 旗舰 · 4.0 Hydrogen',
+    hasThinking: true,
+  },
+  {
+    id: 'gemini-pro-orchestrator-g1-pro',
+    name: 'Orchestrator (Argon)',
+    provider: 'Antigravity CLI',
+    description: 'Google Antigravity 编排调度专用 Pro 引擎 · 复杂工具链与多阶段任务编排首选',
+    badge: 'CLI 编排 · Orchestrator',
+    hasThinking: false,
+  },
+  {
     id: 'gemini-3.8-flash',
     name: 'Gemini 3.8 Flash',
     provider: 'Google Official',

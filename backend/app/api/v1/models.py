@@ -9,12 +9,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ...core.logging_config import logger
 from ...repository.account_repository import AccountRepository
-from ...service.agent_runner import test_cli_model_availability
+from ...service.agent_runner import discover_cli_models, test_cli_model_availability
 from ...service.gemini_client import GeminiClient
 from ...service.oauth_service import oauth_service
 from ...service.audit_service import audit_service
@@ -84,6 +84,26 @@ CLI_MODELS: List[ModelMeta] = [
         badge="CLI 旗舰 · 4.0 Argon",
         has_thinking=True,
         is_default=True,
+        supported_auth_types=["gemini_cli"],
+    ),
+    ModelMeta(
+        id="gemini-4-hydrogen",
+        name="Gemini 4 Hydrogen",
+        provider="Antigravity CLI",
+        description="Google 最新第 4 代 Hydrogen 均衡旗舰推理模型 · 兼顾高智商推理与工程响应速度",
+        badge="CLI 旗舰 · 4.0 Hydrogen",
+        has_thinking=True,
+        is_default=False,
+        supported_auth_types=["gemini_cli"],
+    ),
+    ModelMeta(
+        id="gemini-pro-orchestrator-g1-pro",
+        name="Orchestrator (Argon)",
+        provider="Antigravity CLI",
+        description="Google Antigravity 编排调度专用 Pro 引擎 · 复杂工具链与多阶段任务编排首选",
+        badge="CLI 编排 · Orchestrator",
+        has_thinking=False,
+        is_default=False,
         supported_auth_types=["gemini_cli"],
     ),
     ModelMeta(
@@ -160,6 +180,26 @@ OFFICIAL_API_MODELS: List[ModelMeta] = [
         badge="最新旗舰 · 4.0 Argon",
         has_thinking=True,
         is_default=True,
+        supported_auth_types=["api_key", "oauth_google_one", "oauth_personal"],
+    ),
+    ModelMeta(
+        id="gemini-4-hydrogen",
+        name="Gemini 4 Hydrogen",
+        provider="Google Official",
+        description="Google 最新第 4 代 Hydrogen 均衡旗舰推理模型 · 兼顾高智商推理与工程响应速度",
+        badge="最新旗舰 · 4.0 Hydrogen",
+        has_thinking=True,
+        is_default=False,
+        supported_auth_types=["api_key", "oauth_google_one", "oauth_personal"],
+    ),
+    ModelMeta(
+        id="gemini-pro-orchestrator-g1-pro",
+        name="Orchestrator (Argon)",
+        provider="Google Official",
+        description="Google 编排调度专用 Pro 引擎 · 复杂工具链与多阶段任务编排首选",
+        badge="编排引擎 · Orchestrator",
+        has_thinking=False,
+        is_default=False,
         supported_auth_types=["api_key", "oauth_google_one", "oauth_personal"],
     ),
     ModelMeta(
@@ -255,10 +295,26 @@ def _save_verified_store(store: Dict[str, Any]) -> None:
 
 
 def _get_candidates_for_auth_type(auth_type: str, cli_home_dir: Optional[str] = None) -> List[ModelMeta]:
-    """根据账号属性返回匹配的候选模型列表"""
+    """根据账号属性返回静态候选模型列表（同步兜底）"""
     norm_type = (auth_type or "").strip().lower()
     if norm_type in ("api_key", "oauth_google_one", "oauth_personal") and not cli_home_dir:
         return [m.model_copy(deep=True) for m in OFFICIAL_API_MODELS]
+    return [m.model_copy(deep=True) for m in CLI_MODELS]
+
+
+async def _get_candidates_for_account(
+    auth_type: str,
+    cli_home_dir: Optional[str] = None,
+    force_refresh: bool = False,
+) -> List[ModelMeta]:
+    """根据账号认证属性获取候选模型列表；CLI 账号优先动态调用 `agy models` 嗅探最新解锁模型。"""
+    norm_type = (auth_type or "").strip().lower()
+    if norm_type in ("api_key", "oauth_google_one", "oauth_personal") and not cli_home_dir:
+        return [m.model_copy(deep=True) for m in OFFICIAL_API_MODELS]
+
+    discovered = await discover_cli_models(cli_home_dir, force_refresh=force_refresh)
+    if discovered:
+        return [ModelMeta(**item) for item in discovered]
     return [m.model_copy(deep=True) for m in CLI_MODELS]
 
 
@@ -283,7 +339,7 @@ async def _resolve_target_account():
     return all_accounts[0] if all_accounts else None
 
 
-async def _build_active_models_response() -> ActiveModelsResponse:
+async def _build_active_models_response(force_refresh: bool = False) -> ActiveModelsResponse:
     """组装当前账号属性对应的候选模型与已保留可用模型响应（无 Google 账号时不默认显示 Gemini 模型）"""
     account = await _resolve_target_account()
     store = _load_verified_store()
@@ -300,8 +356,9 @@ async def _build_active_models_response() -> ActiveModelsResponse:
         cli_home_dir = account.cli_home_dir
         auth_label = _get_auth_label(auth_type)
 
-        candidates = _get_candidates_for_auth_type(auth_type, cli_home_dir)
-        acc_record = store.get("accounts", {}).get(account_name, {})
+        candidates = await _get_candidates_for_account(auth_type, cli_home_dir, force_refresh=force_refresh)
+        accounts_dict = store.setdefault("accounts", {})
+        acc_record = accounts_dict.get(account_name, {})
 
         # 校验存储记录的 auth_type 是否与当前账号一致
         if acc_record.get("auth_type") and acc_record.get("auth_type") != auth_type:
@@ -309,6 +366,7 @@ async def _build_active_models_response() -> ActiveModelsResponse:
 
         test_results_map = acc_record.get("test_results", {})
         saved_verified_ids: List[str] = acc_record.get("verified_model_ids", [])
+        known_candidate_ids: List[str] = acc_record.get("known_candidate_ids", [])
         is_tested = bool(test_results_map)
 
         # 为每个候选模型挂载最近一次测试结果
@@ -325,20 +383,52 @@ async def _build_active_models_response() -> ActiveModelsResponse:
         candidate_id_set = {m.id for m in candidates}
         valid_verified_ids = [mid for mid in saved_verified_ids if mid in candidate_id_set]
 
-        # 智能代际自适应：若当前账号历史上仅保存了旧版模型（如 2.x 系列），检测到候选库包含最新代际模型（如 4.0 Argon、3.8 Flash）
-        # 且最新模型未被当前账号明确标记为不可用时，自动将其并入输入框可用列表中并置顶，避免用户被困在老旧模型中
-        latest_flagship_ids = ["gemini-4-argon", "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+        # 智能代际自适应：
+        # 1) 兼容老快照中仅含旧版模型的情况，保证最新旗舰代际可自动置顶浮现；
+        # 2) 动态识别新增模型时（未出现在 known_candidate_ids 且未曾在 test_results 中测为不可用），自动并入输入框列表并同步记录已知快照。
+        latest_flagship_ids = [
+            "gemini-4-argon",
+            "gemini-4-hydrogen",
+            "gemini-pro-orchestrator-g1-pro",
+            "gemini-3.8-flash",
+            "gemini-3.5-flash-lite",
+        ]
         available_new_ids = [
             mid for mid in latest_flagship_ids
             if mid in candidate_id_set and test_results_map.get(mid, {}).get("available") is not False
         ]
+        known_set = set(known_candidate_ids) | set(saved_verified_ids) | set(test_results_map.keys())
+        discovered_new_ids = [
+            m.id for m in candidates
+            if m.id not in known_set and test_results_map.get(m.id, {}).get("available") is not False
+        ]
 
         if valid_verified_ids:
             has_any_latest = any(mid in valid_verified_ids for mid in latest_flagship_ids)
+            pending_insert_ids: list[str] = []
             if not has_any_latest and available_new_ids:
-                for new_id in reversed(available_new_ids):
+                pending_insert_ids.extend(available_new_ids)
+            for did in discovered_new_ids:
+                if did not in pending_insert_ids:
+                    pending_insert_ids.append(did)
+
+            store_dirty = False
+            if pending_insert_ids:
+                for new_id in reversed(pending_insert_ids):
                     if new_id not in valid_verified_ids:
                         valid_verified_ids.insert(0, new_id)
+                        store_dirty = True
+            current_candidate_ids = [m.id for m in candidates]
+            if current_candidate_ids != known_candidate_ids:
+                store_dirty = True
+
+            if store_dirty and account_name in accounts_dict:
+                acc_record["auth_type"] = auth_type
+                acc_record["verified_model_ids"] = valid_verified_ids
+                acc_record["known_candidate_ids"] = current_candidate_ids
+                accounts_dict[account_name] = acc_record
+                _save_verified_store(store)
+
             active_models = [m for m in candidates if m.id in valid_verified_ids]
         else:
             active_models = [m.model_copy(deep=True) for m in candidates]
@@ -487,11 +577,13 @@ async def list_available_models():
 
 
 @router.get("/active", response_model=ActiveModelsResponse)
-async def get_active_account_models():
+async def get_active_account_models(
+    refresh: bool = Query(default=False, description="是否跳过内存缓存并重新执行 CLI 模型列表探测"),
+):
     """
     根据当前活跃账号属性，返回自动匹配的可用模型列表、候选全集及历史测试详情。
     """
-    return await _build_active_models_response()
+    return await _build_active_models_response(force_refresh=refresh)
 
 
 async def _probe_single_model(account, model_meta: ModelMeta) -> Dict[str, Any]:
@@ -641,6 +733,7 @@ async def test_models_for_active_account(req: ModelTestRequest):
             acc_entry["verified_model_ids"] = available_ids
 
     acc_entry["auth_type"] = account.auth_type
+    acc_entry["known_candidate_ids"] = [m.id for m in candidates]
     acc_entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     accounts_dict[account.name] = acc_entry
     _save_verified_store(store)
@@ -704,6 +797,7 @@ async def update_verified_models(req: UpdateVerifiedModelsRequest):
     })
     acc_entry["auth_type"] = auth_type
     acc_entry["verified_model_ids"] = filtered
+    acc_entry["known_candidate_ids"] = [m.id for m in candidates]
     acc_entry["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     accounts_dict[account_name] = acc_entry
     _save_verified_store(store)
