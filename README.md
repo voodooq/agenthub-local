@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.4.5-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.4.6-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.4.5 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.4.6 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -191,8 +191,8 @@ flowchart TD
 | :--- | :--- | :--- | :--- |
 | **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
 | **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
-| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.4.5-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
-| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.4.5-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
+| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.4.6-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
+| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.4.6-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
 | **Docker 容器镜像** | Linux 服务器 / 跨平台容器 | `docker-compose.yml` / `backend/Dockerfile` | 见下方 [Linux 服务器 Docker 部署与远程访问指南](#-linux-服务器-docker-部署与远程访问指南) |
 
 ### 2. GitHub 自动检查升级与平滑覆盖重启 (`AutoUpdaterService` · `UpdateModal`)
@@ -217,7 +217,7 @@ sequenceDiagram
     participant Port as package-portable (ubuntu)
     participant Rel as GitHub Releases 页面
 
-    Dev->>GH: git tag v1.4.5 && git push origin v1.4.5
+    Dev->>GH: git tag v1.4.6 && git push origin v1.4.6
     GH->>FE: 安装 Node 22 并导出静态前端 out/
     FE->>Port: 分发 out/ -> 生成 portable.zip & portable.tar.gz
     FE->>Win: 分发 out/ -> PyInstaller --onefile 生成 AgentHub-Local-windows-x64.exe
@@ -230,9 +230,9 @@ sequenceDiagram
 ### 如何发布新版本
 只需在 `version.json` 更新版本号并运行 `python sync_version.py`（或直接运行 `python sync_version.py <version>`），随后在本地执行以下命令：
 ```bash
-git tag -a v1.4.5 -m "Release v1.4.5"
+git tag -a v1.4.6 -m "Release v1.4.6"
 git push origin master
-git push origin v1.4.5
+git push origin v1.4.6
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 4 类干净的发行资产，几分钟内即可在 Releases 页面看到生成的下载文件。
 
@@ -351,7 +351,13 @@ docker compose exec backend bash
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.4.5（最新）— 计划任务启动即巡检与动态默认模型自适应
+### 🚀 v1.4.6（最新）— Web / Docker 远程友好交互（浏览器内预览/下载与服务器目录浏览）
+- **生成文件远程无感预览与下载（`artifacts` · `apiClient` · `page` · `DeliverablesCard` · `LibraryView`）**：
+  - 新增 `_is_headless_remote_env()` 自动识别无头 Linux / Docker 容器环境，彻底消除点击生成文件时报错 `No such file or directory: 'xdg-open'`；自动切换为前端右侧画布内预览或带 `X-Access-Token` 鉴权的浏览器文件下载。
+- **服务器目录浏览器替代原生弹窗（`workspaces` · `ServerFolderBrowser` · `WorkspaceSwitcher` · `Sidebar`）**：
+  - 非 Windows 环境调用 `/api/v1/workspaces/select-folder` 时不再唤起 `powershell` 报错；新增 `GET /api/v1/workspaces/browse-dirs` 接口与 `ServerFolderBrowser` 组件，支持在 Web 弹窗中点选服务器/容器目录及工作区书签快速跳转。
+
+### 🚀 v1.4.5 — 计划任务启动即巡检与动态默认模型自适应
 - **后端启动自动激活 Cron 调度器（`backend/main.py`）**：在 FastAPI `lifespan` 启动钩子中自动调用 `TaskScheduler.get_instance().ensure_started()`，无需手动点开「已安排」页面即可全天候按 Cron 自动触发任务。
 - **无头任务动态模型自适应（`TaskScheduler._resolve_headless_model`）**：在工作区未单独指定模型时，自动按“工作区有效偏好 → 最近活跃会话模型 → 系统当前已启用算力通道默认/首个模型”智能选模，彻底解决仅配置第三方/本地算力（如 NVIDIA、DeepSeek、Ollama）而未配置 Google 账号时无法执行计划任务的问题。
 
