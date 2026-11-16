@@ -1445,9 +1445,10 @@ class AgentRuntime:
                 or ws_id
                 or "default"
             )
-            target_cwd = (
+            rollover_cwd = (
                 (getattr(source_conv, "current_cwd", None) if source_conv else None)
-                or effective_cwd
+                or ctx.get("current_cwd")
+                or target_cwd
             )
             target_model = (
                 effective_model_name
@@ -1484,8 +1485,8 @@ class AgentRuntime:
             # 提取当前会话已确认的工作区事实（如有）
             confirmed_facts_list: list[str] = []
             try:
-                facts = await fact_manager.list_facts(workspace_id=target_ws_id, limit=8)
-                for f_obj in facts or []:
+                facts = await fact_manager.list_facts(workspace_id=target_ws_id)
+                for f_obj in (facts or [])[:8]:
                     f_val = (
                         f_obj.get("fact_text")
                         if isinstance(f_obj, dict)
@@ -1499,7 +1500,7 @@ class AgentRuntime:
             distilled = await LocalContextCompressor.distill_handoff_summary(
                 conversation_id=conv_id,
                 user_goal=user_message.strip(),
-                current_cwd=target_cwd,
+                current_cwd=rollover_cwd,
                 produced_artifacts=produced_artifacts,
                 active_loop_scratchpad=getattr(active_loop_obj, "scratchpad_md", "") or "",
                 confirmed_facts=confirmed_facts_list,
@@ -1521,7 +1522,7 @@ class AgentRuntime:
                     "model_name": target_model,
                     "scene_mode": target_scene,
                     "incognito": False,
-                    "current_cwd": target_cwd,
+                    "current_cwd": rollover_cwd,
                     "workspace_id": target_ws_id,
                     "parent_conversation_id": conv_id,
                 }
@@ -1535,7 +1536,7 @@ class AgentRuntime:
             await ConversationRepository.update_agent_state(
                 new_conv_id,
                 rolling_summary=handoff_summary,
-                current_cwd=target_cwd,
+                current_cwd=rollover_cwd,
             )
             # 在新会话首条落库交接卡片，让用户和后续上下文都能直观看到完整蒸馏结果
             await MessageRepository.save_message(
@@ -1554,7 +1555,6 @@ class AgentRuntime:
                     await TaskLoopRepository.update_loop_status(
                         loop_id=active_loop_obj.id,
                         status="paused",
-                        last_summary=f"上下文水位达 {watermark_pct:.1f}%，已自动蒸馏并切换至接力新对话 {new_conv_id[:8]}",
                     )
                     active_loop_obj = None
                 except Exception as loop_err:
@@ -1571,7 +1571,7 @@ class AgentRuntime:
                 "new_conversation_id": new_conv_id,
                 "new_title": new_title,
                 "workspace_id": target_ws_id,
-                "current_cwd": target_cwd,
+                "current_cwd": rollover_cwd,
                 "watermark_pct": round(watermark_pct, 1),
                 "auto_continue": not task_completed,
                 "continue_prompt": continue_prompt,
@@ -1600,6 +1600,7 @@ class AgentRuntime:
                 except Exception as sync_err:
                     logger.debug(f"[AgentRuntime] 任务收尾物理资产同步跳过: {sync_err}")
 
+            turn_stats_payload: dict[str, Any] | None = None
             try:
                 turn_stats_payload = (
                     None
