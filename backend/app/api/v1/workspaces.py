@@ -17,7 +17,7 @@ from ...schema.workspace_schema import (
     WorkspaceSaveFileRequest,
 )
 from ...core.logging_config import logger
-from ...core.runtime_paths import get_silent_subprocess_kwargs
+from ...core.runtime_paths import get_silent_subprocess_kwargs, get_writable_app_root
 from ...tools.git_checkpoint import restore_shadow_snapshot, is_file_in_tree_snapshot
 from ...agent.checkpoint_manager import ShadowCheckpointManager
 
@@ -59,16 +59,87 @@ async def list_workspaces():
     return await WorkspaceRepository.get_all()
 
 
+def _resolve_default_browse_root() -> Path:
+    """解析远程服务器目录浏览器的默认起始目录。"""
+    ws_dir = get_writable_app_root() / "data" / "workspaces"
+    if ws_dir.is_dir():
+        return ws_dir.resolve()
+    app_root = get_writable_app_root()
+    if app_root.is_dir():
+        return app_root.resolve()
+    return Path.home().resolve()
+
+
 @router.post("/select-folder")
 async def select_folder_native():
     """
-    唤起 Windows 原生文件夹选择窗口，获取本地物理目录路径
+    Windows 下唤起原生文件夹选择器；Linux / Docker / 非桌面环境返回远程浏览引导信号。
     """
+    if os.name != "nt":
+        suggested = _resolve_default_browse_root()
+        return {
+            "selected_path": "",
+            "canceled": False,
+            "headless_remote": True,
+            "suggested_root": str(suggested),
+            "message": "当前运行在 Linux / Docker 远程环境，不支持原生系统弹窗，请直接浏览或输入服务器目录路径。",
+        }
+
     loop = asyncio.get_running_loop()
     selected_path = await loop.run_in_executor(None, _show_native_windows_folder_dialog)
     return {
         "selected_path": selected_path,
         "canceled": not bool(selected_path),
+        "headless_remote": False,
+    }
+
+
+@router.get("/browse-dirs")
+async def browse_server_directories(path: Optional[str] = Query(None, description="要浏览的服务器目录绝对路径")):
+    """列出服务器指定路径下的子目录列表，供 Web / Docker 远程环境点选挂载工作区。"""
+    target = Path(path.strip()).expanduser() if (path and path.strip()) else _resolve_default_browse_root()
+    try:
+        target = target.resolve()
+    except OSError:
+        target = _resolve_default_browse_root()
+
+    if not target.exists() or not target.is_dir():
+        raise HTTPException(status_code=404, detail=f"目录不存在: {target}")
+
+    ignored_names = {"node_modules", "__pycache__", ".git", ".venv", "venv", ".next"}
+    dirs: list[dict[str, str]] = []
+    try:
+        entries = sorted(target.iterdir(), key=lambda p: p.name.lower())
+        for entry in entries:
+            if entry.name in ignored_names:
+                continue
+            try:
+                if entry.is_dir():
+                    dirs.append({"name": entry.name, "path": str(entry)})
+                    if len(dirs) >= 200:
+                        break
+            except OSError:
+                continue
+    except PermissionError:
+        raise HTTPException(status_code=403, detail=f"无权读取目录: {target}")
+
+    parent_path = str(target.parent) if target.parent != target else ""
+    app_root = get_writable_app_root().resolve()
+    ws_dir = (app_root / "data" / "workspaces").resolve()
+    home_dir = Path.home().resolve()
+    bookmarks: list[dict[str, str]] = []
+    seen_bm: set[str] = set()
+    for label, cand in (("工作区沙盒", ws_dir), ("应用根目录", app_root), ("用户主目录", home_dir)):
+        cand_str = str(cand)
+        if cand.is_dir() and cand_str not in seen_bm:
+            seen_bm.add(cand_str)
+            bookmarks.append({"label": label, "path": cand_str})
+
+    return {
+        "current_path": str(target),
+        "parent_path": parent_path,
+        "bookmarks": bookmarks,
+        "dirs": dirs,
     }
 
 

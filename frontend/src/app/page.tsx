@@ -97,7 +97,7 @@ import {
   EditedFileItem,
   UpdateStatusData,
 } from '@/types';
-import { apiFetch, getAccessToken } from '@/utils/apiClient';
+import { apiFetch, downloadWorkspaceFile, getAccessToken } from '@/utils/apiClient';
 import {
   cleanFilePathCandidate,
   extractGeneratedFilePaths,
@@ -2583,6 +2583,32 @@ export default function WorkbenchPage() {
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           showFloatingToast(data?.detail || `无法打开文件: ${cleaned}`, 'error', 4500);
+          return;
+        }
+        if (data.headless_remote) {
+          if (mode === 'launch' && !data.is_dir) {
+            showFloatingToast(
+              `远程容器环境已切换为浏览器内预览 ${data.file_name || cleaned}`,
+              'success',
+              3200
+            );
+            await handlePreviewGeneratedFile(cleaned);
+          } else if (!data.is_dir) {
+            const ok = await downloadWorkspaceFile(
+              activeWorkspaceId || 'default',
+              cleaned,
+              data.file_name
+            );
+            showFloatingToast(
+              ok
+                ? `远程容器环境已触发浏览器下载 ${data.file_name || cleaned}`
+                : data.message || '当前为远程容器环境，请使用预览或下载查看文件',
+              ok ? 'success' : 'warning',
+              3800
+            );
+          } else {
+            showFloatingToast(data.message || `服务器目录路径: ${data.path || cleaned}`, 'success', 4200);
+          }
           return;
         }
         if (data.downgraded) {

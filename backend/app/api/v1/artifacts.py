@@ -138,8 +138,42 @@ def _reveal_in_file_manager(target: Path) -> None:
         subprocess.Popen(["xdg-open", parent_dir])
 
 
+def _is_headless_remote_env() -> bool:
+    """判断当前是否运行在无图形界面的 Linux / Docker 远程容器环境中。"""
+    if os.name == "nt" or sys.platform == "darwin":
+        return False
+    if Path("/.dockerenv").is_file() or Path("/run/.containerenv").is_file():
+        return True
+    if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
+        return True
+    return shutil.which("xdg-open") is None
+
+
+def _headless_remote_open_payload(
+    target: Path,
+    effective_mode: Literal["launch", "reveal"],
+    requested_mode: Literal["launch", "reveal"],
+    downgraded: bool,
+    downgraded_reason: str | None,
+) -> dict[str, Any]:
+    """构建无头远程环境下交由前端浏览器预览或下载的结构化响应。"""
+    return {
+        "success": True,
+        "headless_remote": True,
+        "launched": False,
+        "mode": effective_mode,
+        "requested_mode": requested_mode,
+        "downgraded": downgraded,
+        "downgraded_reason": downgraded_reason,
+        "path": str(target),
+        "file_name": target.name,
+        "is_dir": target.is_dir(),
+        "message": "当前运行在无头 Linux / Docker 远程环境，已自动切换为浏览器内预览或下载。",
+    }
+
+
 def _open_local_target(target: Path, mode: Literal["launch", "reveal"] = "launch") -> dict[str, Any]:
-    """根据安全等级执行打开或定位操作，并自动对高危可执行文件降级为目录定位。"""
+    """根据安全等级执行打开或定位操作，无头远程环境自动回退为前端预览/下载信号。"""
     if not target.exists():
         raise HTTPException(status_code=404, detail=f"目标文件不存在: {target}")
 
@@ -157,6 +191,11 @@ def _open_local_target(target: Path, mode: Literal["launch", "reveal"] = "launch
             "已自动转为打开所在文件夹并选中该文件。"
         )
 
+    if _is_headless_remote_env():
+        return _headless_remote_open_payload(
+            target, effective_mode, mode, downgraded, downgraded_reason
+        )
+
     try:
         if effective_mode == "launch":
             _launch_with_default_app(target)
@@ -168,6 +207,10 @@ def _open_local_target(target: Path, mode: Literal["launch", "reveal"] = "launch
                 if downgraded and downgraded_reason
                 else f"已在系统文件管理器中定位 {target.name}"
             )
+    except FileNotFoundError:
+        return _headless_remote_open_payload(
+            target, effective_mode, mode, downgraded, downgraded_reason
+        )
     except HTTPException:
         raise
     except Exception as exc:

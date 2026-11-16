@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { Workspace } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
+import { ServerFolderBrowser } from './ServerFolderBrowser';
 
 interface WorkspaceSwitcherProps {
   workspaces: Workspace[];
@@ -40,6 +41,7 @@ export function WorkspaceSwitcher({
   const [mountName, setMountName] = useState('');
   const [mountContext, setMountContext] = useState('');
   const [isSelectingNative, setIsSelectingNative] = useState(false);
+  const [isRemoteFolderMode, setIsRemoteFolderMode] = useState(false);
   const [isCreatingVirtual, setIsCreatingVirtual] = useState(false);
   const [virtualName, setVirtualName] = useState('');
   const [errorMessage, setErrorMessage] = useState('');
@@ -75,7 +77,16 @@ export function WorkspaceSwitcher({
       const res = await apiFetch('/api/v1/workspaces/select-folder', { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
-        if (data && data.selected_path) {
+        if (data && data.headless_remote) {
+          const initialPath = data.suggested_root || '';
+          setIsRemoteFolderMode(true);
+          setMountPath(initialPath);
+          const parts = String(initialPath).split(/[\\/]/).filter(Boolean);
+          setMountName(parts[parts.length - 1] || '工作区目录');
+          setIsMountingModalOpen(true);
+          setIsOpen(false);
+        } else if (data && data.selected_path) {
+          setIsRemoteFolderMode(false);
           setMountPath(data.selected_path);
           // 默认用文件夹名称作为工作区名字
           const parts = data.selected_path.split(/[\\/]/).filter(Boolean);
@@ -376,6 +387,22 @@ export function WorkspaceSwitcher({
                   className="w-full bg-surface-200/80 border border-border rounded-xl px-3 py-2 text-xs font-mono text-foreground outline-none"
                 />
               </div>
+
+              {isRemoteFolderMode && (
+                <div>
+                  <label className="text-[11px] font-medium text-muted-foreground block mb-1">
+                    服务器 / 容器目录浏览（点击进入并自动选中路径）
+                  </label>
+                  <ServerFolderBrowser
+                    currentPath={mountPath}
+                    onSelectPath={(selected) => {
+                      setMountPath(selected);
+                      const parts = selected.split(/[\\/]/).filter(Boolean);
+                      setMountName(parts[parts.length - 1] || '工作区目录');
+                    }}
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="text-xs font-semibold text-foreground block mb-1">自定义工作区名称</label>

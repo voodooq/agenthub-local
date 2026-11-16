@@ -34,6 +34,7 @@ import {
 import { Conversation, StatusPillData, Workspace } from '@/types';
 import { useAppVersion } from '@/config/version';
 import { apiFetch } from '@/utils/apiClient';
+import { ServerFolderBrowser } from './ServerFolderBrowser';
 
 export type MainNavHub = 'chat' | 'library' | 'scheduled' | 'skills';
 
@@ -140,6 +141,7 @@ export function Sidebar({
   const [mountName, setMountName] = useState('');
   const [mountContext, setMountContext] = useState('');
   const [isSelectingNative, setIsSelectingNative] = useState(false);
+  const [isRemoteFolderMode, setIsRemoteFolderMode] = useState(false);
   const [isCreatingVirtual, setIsCreatingVirtual] = useState(false);
   const [virtualName, setVirtualName] = useState('');
   const [wsErrorMsg, setWsErrorMsg] = useState('');
@@ -214,7 +216,15 @@ export function Sidebar({
       const res = await apiFetch('/api/v1/workspaces/select-folder', { method: 'POST' });
       if (res.ok) {
         const data = await res.json();
-        if (data?.selected_path) {
+        if (data?.headless_remote) {
+          const initialPath = data.suggested_root || '';
+          setIsRemoteFolderMode(true);
+          setMountPath(initialPath);
+          const parts = String(initialPath).split(/[\\/]/).filter(Boolean);
+          setMountName(parts[parts.length - 1] || '工作区目录');
+          setIsMountingModalOpen(true);
+        } else if (data?.selected_path) {
+          setIsRemoteFolderMode(false);
           setMountPath(data.selected_path);
           const parts = String(data.selected_path).split(/[\\/]/).filter(Boolean);
           setMountName(parts[parts.length - 1] || '本地工程工作区');
@@ -925,6 +935,22 @@ export function Sidebar({
                   className="w-full bg-surface-200/80 border border-border rounded-xl px-3 py-2 text-xs font-mono text-foreground outline-none"
                 />
               </div>
+
+              {isRemoteFolderMode && (
+                <div>
+                  <label className="text-[11px] font-medium text-muted-foreground block mb-1">
+                    服务器 / 容器目录浏览（点击进入并自动选中路径）
+                  </label>
+                  <ServerFolderBrowser
+                    currentPath={mountPath}
+                    onSelectPath={(selected) => {
+                      setMountPath(selected);
+                      const parts = selected.split(/[\\/]/).filter(Boolean);
+                      setMountName(parts[parts.length - 1] || '工作区目录');
+                    }}
+                  />
+                </div>
+              )}
 
               <div>
                 <label className="text-xs font-semibold text-foreground block mb-1">项目名称</label>

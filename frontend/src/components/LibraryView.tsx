@@ -24,7 +24,7 @@ import {
   AlertTriangle,
 } from 'lucide-react';
 import { Workspace, ArtifactItem } from '@/types';
-import { apiFetch, getAccessToken } from '@/utils/apiClient';
+import { apiFetch, downloadWorkspaceFile, getAccessToken } from '@/utils/apiClient';
 import { useLanguage } from '@/context/LanguageContext';
 
 interface LibraryViewProps {
@@ -149,6 +149,15 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
         showFeedback(data?.detail || `无法打开文件: ${art.file_name}`, 'error');
         return;
       }
+      if (data.headless_remote) {
+        if (!data.is_dir) {
+          showFeedback(`远程容器环境已切换为画布预览 ${art.file_name}`, 'success');
+          await handlePreviewArtifact(art);
+        } else {
+          showFeedback(data.message || `服务器目录: ${data.path || art.file_path}`, 'success');
+        }
+        return;
+      }
       if (data.downgraded) {
         showFeedback(data.message || data.downgraded_reason || '出于安全防护已自动打开所在文件夹定位', 'warning');
       } else {
@@ -166,6 +175,20 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
         showFeedback(data?.detail || `定位文件失败${fileName ? `: ${fileName}` : ''}`, 'error');
+        return;
+      }
+      if (data.headless_remote) {
+        if (!data.is_dir && data.path) {
+          const ok = await downloadWorkspaceFile(workspace?.id || 'default', data.path, fileName || data.file_name);
+          showFeedback(
+            ok
+              ? `远程容器环境已触发浏览器下载 ${fileName || data.file_name || ''}`
+              : data.message || '当前为远程容器环境，不支持唤起服务端资源管理器',
+            ok ? 'success' : 'error'
+          );
+        } else {
+          showFeedback(data.message || `服务器目录: ${data.path || ''}`, 'success');
+        }
         return;
       }
       showFeedback(data.message || `已在系统文件管理器中定位${fileName ? ` ${fileName}` : ''}`, 'success');

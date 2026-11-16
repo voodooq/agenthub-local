@@ -16,7 +16,7 @@ import {
   ChevronDown,
   ChevronUp,
 } from 'lucide-react';
-import { apiFetch } from '@/utils/apiClient';
+import { apiFetch, downloadWorkspaceFile } from '@/utils/apiClient';
 import type { VerifiedFileEntry } from '@/hooks/useVerifiedWorkspacePaths';
 
 interface DeliverablesCardProps {
@@ -151,9 +151,22 @@ export function DeliverablesCard({
           mode,
         }),
       });
+      const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        onSavedToast?.(err?.detail || '打开文件失败');
+        onSavedToast?.(data?.detail || '打开文件失败');
+        return;
+      }
+      if (data?.headless_remote) {
+        if (!data.is_dir) {
+          const ok = await downloadWorkspaceFile(workspaceId || 'default', filePath, data.file_name);
+          onSavedToast?.(
+            ok
+              ? `远程环境已开始下载 ${data.file_name || filePath}`
+              : data.message || '远程容器环境暂不支持打开本地窗口'
+          );
+        } else {
+          onSavedToast?.(data.message || `服务器目录: ${data.path || filePath}`);
+        }
       }
     } catch (err: any) {
       onSavedToast?.(err?.message || '打开文件请求失败');

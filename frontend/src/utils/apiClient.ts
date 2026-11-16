@@ -73,3 +73,36 @@ export async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Pr
   });
 }
 
+/**
+ * 在 Web / Docker 远程环境下通过带鉴权头的 fetch 下载工作区文件到本地浏览器
+ */
+export async function downloadWorkspaceFile(
+  workspaceId: string,
+  filePath: string,
+  fileName?: string
+): Promise<boolean> {
+  if (typeof window === 'undefined' || !filePath) return false;
+  try {
+    const qs = new URLSearchParams({
+      workspace_id: workspaceId || 'default',
+      file_path: filePath,
+    });
+    const res = await apiFetch(`/api/v1/artifacts/raw-by-path?${qs.toString()}`);
+    if (!res.ok) return false;
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const fallbackName = filePath.split(/[\\/]/).filter(Boolean).pop() || 'download';
+    a.download = fileName || fallbackName;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+    return true;
+  } catch (err) {
+    console.warn('[apiClient] 远程下载工作区文件失败:', err);
+    return false;
+  }
+}
+
