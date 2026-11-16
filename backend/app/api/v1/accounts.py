@@ -343,11 +343,21 @@ async def get_status_pill():
                 models = active_prov.get("models") or []
                 model_hint = f" ({models[0]})" if models else ""
                 prov_name = active_prov.get("name", "本地算力节点")
+                prov_id = str(active_prov.get("id") or "")
+                today_calls = 0
+                try:
+                    pool_usage = await TokenUsageRepository.get_pool_usage_summary()
+                    prov_usage = TokenUsageRepository.map_providers_usage([active_prov], pool_usage)
+                    today_calls = int((prov_usage.get(prov_id) or {}).get("today_calls") or 0)
+                    if today_calls == 0 and not prov_id:
+                        today_calls = int(((pool_usage.get("by_provider_name") or {}).get(prov_name) or {}).get("today_calls") or 0)
+                except Exception:
+                    today_calls = 0
                 return AccountStatusPill(
                     active_account_name=f"{prov_name}{model_hint}",
                     auth_type=active_prov.get("provider_type", "openai_compat"),
                     status="active",
-                    today_used=0,
+                    today_used=today_calls,
                     current_rpm=0,
                     rpm_limit=60,
                     is_warning=False,
