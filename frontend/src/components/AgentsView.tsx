@@ -24,7 +24,11 @@ import {
 } from 'lucide-react';
 import { Workspace, SkillItem } from '@/types';
 import { ModelOption } from '@/components/ModelSelector';
-import { fetchWorkspaceSkills } from '@/utils/skillCache';
+import {
+  fetchWorkspaceSkills,
+  getCachedWorkspaceSkills,
+  subscribeSkillsUpdated,
+} from '@/utils/skillCache';
 
 export interface AgentItem {
   id: string;
@@ -144,8 +148,23 @@ export function AgentsView({
       .finally(() => {
         if (isMounted) setSkillsLoading(false);
       });
+    const unsubscribe = subscribeSkillsUpdated(() => {
+      if (!isMounted) return;
+      const latest = getCachedWorkspaceSkills(workspace?.id);
+      if (latest) {
+        setAllSkills(latest);
+      } else {
+        fetchWorkspaceSkills(workspace?.id, { force: true, refreshBackend: true })
+          .then((skills) => {
+            if (isMounted) setAllSkills(skills || []);
+          })
+          .catch(() => {});
+      }
+    });
+
     return () => {
       isMounted = false;
+      unsubscribe();
     };
   }, [workspace?.id]);
 

@@ -490,6 +490,35 @@ export interface ExtensionSkillItem {
   body?: string;
 }
 
+export interface SkillVersionItem {
+  version_id: string;
+  version: string;
+  created_at: string;
+  source?: string;
+  description?: string;
+  size_bytes?: number;
+  size?: number;
+  is_current?: boolean;
+}
+
+export interface SkillVersionDetail extends SkillVersionItem {
+  content: string;
+  body?: string;
+}
+
+export interface SkillVersionListResponse {
+  skill_id: string;
+  current_version: string;
+  versions: SkillVersionItem[];
+}
+
+export interface SkillRollbackResponse {
+  success: boolean;
+  skill: SkillItem & Partial<ExtensionSkillItem>;
+  skills?: Array<SkillItem | ExtensionSkillItem>;
+  rolled_back_to: string;
+}
+
 export type ExecutionStrategy = 'direct' | 'plan_first';
 
 export type InquirySubmitAction = 'execute_now' | 'clarify_only';

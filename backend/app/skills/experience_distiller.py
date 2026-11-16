@@ -2228,6 +2228,9 @@ class SkillExperienceService:
                 pb_entry = raw_edited or str(payload.get("markdown_entry") or "").strip()
 
             skill_md_file = target_dir / "SKILL.md"
+            if skill_md_file.is_file():
+                from .skill_version_service import snapshot_skill_before_write
+                snapshot_skill_before_write(target_dir, source="distill")
             skill_md_file.write_text(sanitized_skill_md.strip() + "\n", encoding="utf-8")
             skill_loader.normalize_skill_file(skill_md_file)
 
@@ -2358,6 +2361,17 @@ class SkillExperienceService:
                         kb_dir = staging_dir / "knowledge"
                         kb_dir.mkdir(parents=True, exist_ok=True)
                         (kb_dir / "experience_playbook.md").write_text(pb_clean.strip() + "\n", encoding="utf-8")
+
+                if has_existing_skill and target_dir.exists():
+                    from .skill_version_service import VERSIONS_DIR_NAME, snapshot_skill_before_write
+                    snapshot_skill_before_write(target_dir, source="distill")
+                    existing_versions_dir = target_dir / VERSIONS_DIR_NAME
+                    if existing_versions_dir.is_dir():
+                        shutil.copytree(
+                            existing_versions_dir,
+                            staging_dir / VERSIONS_DIR_NAME,
+                            dirs_exist_ok=True,
+                        )
 
                 _atomic_replace_skill_dir(staging_dir, target_dir)
             finally:

@@ -19,6 +19,7 @@ import {
   fetchWorkspaceSkills,
   getCachedWorkspaceSkills,
   invalidateWorkspaceSkills,
+  subscribeSkillsUpdated,
 } from '@/utils/skillCache';
 import { SopDrawer } from './SopDrawer';
 
@@ -71,6 +72,31 @@ export function SkillsView({ workspace }: SkillsViewProps) {
 
   useEffect(() => {
     fetchSkills(false);
+  }, [workspace?.id]);
+
+  // 订阅技能热更新/回滚广播，同步更新技能列表与当前打开的 SOP 抽屉
+  useEffect(() => {
+    return subscribeSkillsUpdated(() => {
+      const wsId = workspace?.id;
+      const latest = getCachedWorkspaceSkills(wsId);
+      if (latest) {
+        setSkills(latest);
+        setSelectedSkill((prev) => {
+          if (!prev) return null;
+          return (
+            latest.find(
+              (item) =>
+                item.name.toLowerCase() === prev.name.toLowerCase() &&
+                item.scope === prev.scope
+            ) ||
+            latest.find((item) => item.name.toLowerCase() === prev.name.toLowerCase()) ||
+            prev
+          );
+        });
+      } else {
+        void fetchSkills(false);
+      }
+    });
   }, [workspace?.id]);
 
   const handleCreateSkill = async () => {
@@ -420,6 +446,14 @@ export function SkillsView({ workspace }: SkillsViewProps) {
         workspaceId={workspace?.id}
         onClose={() => setSelectedSkill(null)}
         onSkillDeleted={() => fetchSkills(true)}
+        onSkillUpdated={(updated) => {
+          setSelectedSkill(updated);
+          setSkills((prev) =>
+            prev.map((item) =>
+              item.name.toLowerCase() === updated.name.toLowerCase() ? { ...item, ...updated } : item
+            )
+          );
+        }}
       />
     </div>
   );

@@ -4,7 +4,11 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { Folder, Globe, FileText, X, ChevronDown } from 'lucide-react';
 import { SkillItem } from '@/types';
 import { useLanguage } from '@/context/LanguageContext';
-import { fetchWorkspaceSkills, getCachedWorkspaceSkills } from '@/utils/skillCache';
+import {
+  fetchWorkspaceSkills,
+  getCachedWorkspaceSkills,
+  subscribeSkillsUpdated,
+} from '@/utils/skillCache';
 
 interface SkillPickerModalProps {
   workspaceId: string;
@@ -45,7 +49,7 @@ export function SkillPickerModal({
       setLoading(true);
     }
 
-    fetchWorkspaceSkills(workspaceId, { force: true })
+    fetchWorkspaceSkills(workspaceId, { force: true, refreshBackend: true })
       .then((freshList) => {
         if (!cancelled) {
           setSkills(freshList);
@@ -60,8 +64,23 @@ export function SkillPickerModal({
         }
       });
 
+    const unsubscribe = subscribeSkillsUpdated(() => {
+      if (cancelled) return;
+      const latest = getCachedWorkspaceSkills(workspaceId);
+      if (latest) {
+        setSkills(latest);
+      } else {
+        fetchWorkspaceSkills(workspaceId, { force: true, refreshBackend: true })
+          .then((fresh) => {
+            if (!cancelled) setSkills(fresh);
+          })
+          .catch(() => {});
+      }
+    });
+
     return () => {
       cancelled = true;
+      unsubscribe();
     };
   }, [isOpen, workspaceId]);
 

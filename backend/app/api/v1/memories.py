@@ -235,6 +235,12 @@ class SkillRepoInstallRequest(BaseModel):
     source: str = Field(..., description="如 github:owner/repo/skills/my-skill 或 https://.../SKILL.md")
 
 
+class ExtensionSkillRollbackRequest(BaseModel):
+    """按历史版本快照回滚全局扩展 Skill"""
+
+    version_id: str = Field(..., description="目标历史版本快照 ID")
+
+
 class MCPServerSaveRequest(BaseModel):
     """添加或更新单个 MCP Server（兼容本地 stdio 与远程 Streamable HTTP / SSE）"""
     name: str = Field(..., description="MCP 服务唯一标识，如 github / sqlite / context7（严禁含 __）")
@@ -352,6 +358,59 @@ async def delete_installed_skill(skill_id: str):
         raise HTTPException(status_code=404, detail="未找到该技能包或已删除")
     skills = await asyncio.to_thread(skill_loader.list_skills, include_content=False)
     return {"status": "ok", "id": skill_id, "skills": skills}
+
+
+@router.get("/extensions/skills/{skill_id}/versions")
+async def list_extension_skill_versions(skill_id: str):
+    """获取指定全局扩展技能的历史版本快照列表（按时间倒序）"""
+    from ...skills.skill_version_service import list_skill_versions
+
+    skill_dir = await asyncio.to_thread(skill_loader._find_skill_dir, skill_id)
+    if not skill_dir:
+        raise HTTPException(status_code=404, detail=f"未找到技能包: {skill_id}")
+    return await asyncio.to_thread(list_skill_versions, skill_dir)
+
+
+@router.get("/extensions/skills/{skill_id}/versions/{version_id}")
+async def get_extension_skill_version_detail(skill_id: str, version_id: str):
+    """获取指定全局扩展技能历史版本快照的完整内容与解析正文"""
+    from ...skills.skill_version_service import get_skill_version_detail
+
+    skill_dir = await asyncio.to_thread(skill_loader._find_skill_dir, skill_id)
+    if not skill_dir:
+        raise HTTPException(status_code=404, detail=f"未找到技能包: {skill_id}")
+    try:
+        detail = await asyncio.to_thread(get_skill_version_detail, skill_dir, version_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if not detail:
+        raise HTTPException(status_code=404, detail=f"未找到历史版本: {version_id}")
+    return detail
+
+
+@router.post("/extensions/skills/{skill_id}/rollback")
+async def rollback_extension_skill(skill_id: str, req: ExtensionSkillRollbackRequest):
+    """将指定全局扩展技能一键回滚到历史版本快照，并强制刷新缓存"""
+    from ...skills.skill_version_service import rollback_skill_version
+
+    skill_dir = await asyncio.to_thread(skill_loader._find_skill_dir, skill_id)
+    if not skill_dir:
+        raise HTTPException(status_code=404, detail=f"未找到技能包: {skill_id}")
+    try:
+        res = await asyncio.to_thread(rollback_skill_version, skill_dir, req.version_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    latest_detail = await asyncio.to_thread(skill_loader.get_skill_detail_item, skill_id)
+    latest_skills = await asyncio.to_thread(skill_loader.list_skills, include_content=False, force_refresh=True)
+    return {
+        "success": True,
+        "skill": latest_detail or res,
+        "skills": latest_skills,
+        "rolled_back_to": res["rolled_back_to"],
+    }
 
 
 _SENSITIVE_HEADER_KEYWORDS = (

@@ -69,6 +69,50 @@ def bump_semver(raw: str | None, level: str = "minor") -> str:
     return f"{major}.{minor + 1}.0"
 
 
+def parse_yaml_frontmatter_kv(yaml_block: str) -> dict[str, str]:
+    """解析 YAML Frontmatter 键值对，兼容单行值、引号包裹及多行缩进/折叠语法（| / >）。"""
+    kv: dict[str, str] = {}
+    lines = yaml_block.splitlines()
+    idx = 0
+    while idx < len(lines):
+        line = lines[idx]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or ":" not in line:
+            idx += 1
+            continue
+        # 顶层 key 不应以空白缩进开头
+        if line[0].isspace():
+            idx += 1
+            continue
+
+        raw_k, raw_v = line.split(":", 1)
+        key = raw_k.strip().lower()
+        val_raw = raw_v.strip()
+
+        # 处理 YAML 多行标量（|, |-, >, >-）或空值后紧跟缩进续行
+        if val_raw in ("|", "|-", ">", ">-", "") and idx + 1 < len(lines) and lines[idx + 1][:1].isspace():
+            block_lines: list[str] = []
+            idx += 1
+            while idx < len(lines):
+                sub_line = lines[idx]
+                if sub_line.strip() == "":
+                    block_lines.append("")
+                    idx += 1
+                    continue
+                if sub_line[0].isspace():
+                    block_lines.append(sub_line.strip())
+                    idx += 1
+                else:
+                    break
+            joined = " ".join(part for part in block_lines if part).strip()
+            kv[key] = joined
+            continue
+
+        kv[key] = val_raw.strip('"').strip("'")
+        idx += 1
+    return kv
+
+
 class SkillLoader:
     """本地 Skill 四元组容器扫描、FTS5 领域知识同步、随包算子执行与热插拔加载器"""
 
@@ -219,33 +263,31 @@ class SkillLoader:
         if match:
             yaml_block = match.group(1)
             body = match.group(2).strip()
-            for line in yaml_block.splitlines():
-                if ":" in line:
-                    k, v = line.split(":", 1)
-                    k, v = k.strip().lower(), v.strip().strip('"').strip("'")
-                    if k == "name" and v:
-                        name = cls._sanitize_skill_id(v)
-                    elif k == "command" and v:
-                        clean_cmd = cls._sanitize_skill_id(v.lstrip("/"))
-                        command = f"/{clean_cmd}"
-                    elif k in ("type", "category") and v:
-                        if "mcp" in v.lower():
-                            skill_type = "mcp"
-                        elif "pro" in v.lower() or "suite" in v.lower():
-                            skill_type = "suite"
-                        else:
-                            skill_type = "skill"
-                    elif k == "tier" and v:
-                        tier = v.lower()
-                    elif k == "mcp_server" and v:
-                        mcp_server = v.strip()
-                        skill_type = "mcp"
-                    elif k == "version" and v:
-                        version = normalize_version_str(v)
-                    elif k == "updated_at" and v:
-                        updated_at = v
-                    elif k == "description" and v:
-                        description = v
+            kv = parse_yaml_frontmatter_kv(yaml_block)
+            if kv.get("name"):
+                name = cls._sanitize_skill_id(kv["name"])
+            if kv.get("command"):
+                clean_cmd = cls._sanitize_skill_id(kv["command"].lstrip("/"))
+                command = f"/{clean_cmd}"
+            type_val = kv.get("type") or kv.get("category") or ""
+            if type_val:
+                if "mcp" in type_val.lower():
+                    skill_type = "mcp"
+                elif "pro" in type_val.lower() or "suite" in type_val.lower():
+                    skill_type = "suite"
+                else:
+                    skill_type = "skill"
+            if kv.get("tier"):
+                tier = kv["tier"].lower()
+            if kv.get("mcp_server"):
+                mcp_server = kv["mcp_server"].strip()
+                skill_type = "mcp"
+            if kv.get("version"):
+                version = normalize_version_str(kv["version"])
+            if kv.get("updated_at"):
+                updated_at = kv["updated_at"]
+            if kv.get("description"):
+                description = re.sub(r"\s+", " ", kv["description"]).strip()
 
         if not description:
             m_title = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
@@ -798,13 +840,30 @@ class SkillLoader:
         return item
 
     def _get_list_snapshot_signature(self) -> tuple[Any, ...]:
-        """采集 skills/、suites/ 目录与 mcp_servers.json 的轻量状态签名，用于短窗口列表快照校验"""
+        """采集 skills/、suites/ 目录、各子技能 SKILL.md 与 mcp_servers.json 的轻量状态签名，用于短窗口列表快照校验"""
         sig: list[Any] = []
         for root_dir in (self.skills_dir, self.suites_dir):
             try:
                 sig.append(os.stat(root_dir).st_mtime_ns)
             except OSError:
                 sig.append(0)
+                continue
+            # 遍历子目录内的 SKILL.md，确保命令行直接修改已有技能文件时能即时失效列表快照
+            child_sigs: list[tuple[str, int, int]] = []
+            try:
+                with os.scandir(root_dir) as it:
+                    for entry in it:
+                        if entry.name.startswith(".") or not entry.is_dir():
+                            continue
+                        try:
+                            st_md = os.stat(Path(entry.path) / "SKILL.md")
+                            child_sigs.append((entry.name, st_md.st_mtime_ns, st_md.st_size))
+                        except OSError:
+                            continue
+            except OSError:
+                pass
+            child_sigs.sort()
+            sig.append(tuple(child_sigs))
         mcp_cfg_path = self._get_mcp_config_path()
         try:
             st = os.stat(mcp_cfg_path)
@@ -1344,6 +1403,9 @@ class SkillLoader:
         target_dir = self.skills_dir / safe_id
         target_dir.mkdir(parents=True, exist_ok=True)
         skill_md = target_dir / "SKILL.md"
+        if skill_md.is_file():
+            from ..skills.skill_version_service import snapshot_skill_before_write
+            snapshot_skill_before_write(target_dir, source="api_save")
 
         clean_body = (content or "").strip()
         cmd_str = (command or f"/{safe_id}").strip()

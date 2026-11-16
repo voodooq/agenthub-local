@@ -29,7 +29,7 @@ _SKILL_FULL_CACHE: dict[str, tuple[int, int, dict[str, Any]]] = {}
 # 列表级短窗口快照缓存: (l1_dir, workspace_root, include_content) -> (epoch, monotonic_ts, roots_mtime_sig, skills_list)
 _LIST_SNAPSHOT_CACHE: dict[
     tuple[str, str, bool],
-    tuple[int, float, tuple[int, ...], list[dict[str, Any]]],
+    tuple[int, float, tuple[Any, ...], list[dict[str, Any]]],
 ] = {}
 
 
@@ -74,26 +74,26 @@ def _resolve_project_root() -> Path:
 
 
 def _extract_frontmatter_fields(fm_text: str, default_name: str) -> dict[str, str]:
-    """从 YAML Frontmatter 块提取核心展示字段"""
+    """从 YAML Frontmatter 块提取核心展示字段（兼容多行 YAML 描述）。"""
+    from ..extensions.skill_loader import normalize_version_str, parse_yaml_frontmatter_kv
+
     parsed = {
         "name": default_name,
         "command": f"/{default_name}",
         "description": "",
         "version": "1.0.0",
     }
-    for line in fm_text.splitlines():
-        stripped = line.strip()
-        if ":" not in stripped:
+    kv = parse_yaml_frontmatter_kv(fm_text)
+    for k in ("name", "command", "description", "version", "updated_at"):
+        v = kv.get(k)
+        if not v:
             continue
-        k, v = stripped.split(":", 1)
-        k = k.strip().lower()
-        v = v.strip().strip("'\"")
-        if k in ("name", "command", "description", "version", "updated_at") and v:
-            if k == "version":
-                from ..extensions.skill_loader import normalize_version_str
-                parsed[k] = normalize_version_str(v)
-            else:
-                parsed[k] = v
+        if k == "version":
+            parsed[k] = normalize_version_str(v)
+        elif k == "description":
+            parsed[k] = re.sub(r"\s+", " ", v).strip()
+        else:
+            parsed[k] = v
     return parsed
 
 
@@ -246,14 +246,30 @@ class SkillService:
         return items
 
     @staticmethod
-    def _get_roots_mtime_sig(dirs: list[Path]) -> tuple[int, ...]:
-        """采集各技能根目录修改时间戳（微秒级），感知外部增删子目录变化"""
-        sig: list[int] = []
+    def _get_roots_mtime_sig(dirs: list[Path]) -> tuple[Any, ...]:
+        """采集各技能根目录及子技能 SKILL.md 的状态签名，感知命令行或外部增删改变化"""
+        sig: list[Any] = []
         for d in dirs:
             try:
                 sig.append(os.stat(d).st_mtime_ns)
             except OSError:
                 sig.append(0)
+                continue
+            child_sigs: list[tuple[str, int, int]] = []
+            try:
+                with os.scandir(d) as it:
+                    for entry in it:
+                        if entry.name.startswith(".") or not entry.is_dir():
+                            continue
+                        try:
+                            st_md = os.stat(Path(entry.path) / "SKILL.md")
+                            child_sigs.append((entry.name, st_md.st_mtime_ns, st_md.st_size))
+                        except OSError:
+                            continue
+            except OSError:
+                pass
+            child_sigs.sort()
+            sig.append(tuple(child_sigs))
         return tuple(sig)
 
     def list_all_skills(
@@ -408,6 +424,15 @@ class SkillService:
                         )
         return None
 
+    def resolve_skill_dir(self, skill_name: str) -> Path | None:
+        """按 L2 工作区优先于 L1 全局的规则定位技能物理目录。"""
+        detail = self.get_skill_detail(skill_name)
+        if detail and detail.get("folder_path"):
+            p = Path(detail["folder_path"])
+            if p.is_dir():
+                return p
+        return None
+
     def delete_workspace_skill(self, skill_name: str) -> bool:
         """
         删除工作区私有技能目录（彻底清除物理磁盘残留，支持按名称、指令或目录名匹配）
@@ -480,6 +505,9 @@ class SkillService:
         target_dir = self.workspace_root / "skills" / clean_name
         target_dir.mkdir(parents=True, exist_ok=True)
         skill_file = target_dir / "SKILL.md"
+        if skill_file.is_file():
+            from .skill_version_service import snapshot_skill_before_write
+            snapshot_skill_before_write(target_dir, source="api_save")
 
         cmd = command.strip()
         if not cmd.startswith("/"):

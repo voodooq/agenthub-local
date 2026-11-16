@@ -2814,6 +2814,7 @@ class AgentRuntime:
                                 edit_file_size = 0
                                 edit_time_str = datetime.now().strftime("%H:%M:%S")
                                 write_succeeded = False
+                                skill_updated_name = ""
                                 try:
                                     existed_before = target_file.exists()
                                     if existed_before and not overwrite:
@@ -2822,6 +2823,9 @@ class AgentRuntime:
                                     else:
                                         if existed_before:
                                             write_snapshot_hash = create_shadow_snapshot(current_work_dir)
+                                            if target_file.name.upper() == "SKILL.MD":
+                                                from ..skills.skill_version_service import snapshot_skill_before_write
+                                                snapshot_skill_before_write(target_file.parent, source="write_local_file")
                                         target_file.parent.mkdir(parents=True, exist_ok=True)
                                         target_file.write_text(file_content, encoding="utf-8")
                                         write_succeeded = True
@@ -2835,6 +2839,7 @@ class AgentRuntime:
                                         hotplug_note = ""
                                         if target_file.name.upper() == "SKILL.MD":
                                             target_file = skill_loader.normalize_skill_file(target_file)
+                                            skill_updated_name = target_file.parent.name
                                             hotplug_note = "\n🎯 [SKILL 标准校验与热插拔已激活]: 已自动规范化 YAML Frontmatter 与 kebab-case 命名，前端输入框 `/` 菜单现已可实时调用并查看该技能说明。"
                                         elif target_file.name.lower() == "mcp_servers.json":
                                             created_docs = skill_loader.ensure_mcp_companion_skills()
@@ -2887,7 +2892,15 @@ class AgentRuntime:
                                     "file_size": edit_file_size if write_succeeded else 0,
                                     "edit_time": edit_time_str if write_succeeded else "",
                                     "snapshot_tree_hash": write_snapshot_hash or "",
+                                    "skill_updated": bool(write_succeeded and skill_updated_name),
+                                    "skill_name": skill_updated_name if write_succeeded else "",
                                 }
+                                if write_succeeded and skill_updated_name:
+                                    yield {
+                                        "type": "skills_updated",
+                                        "skill_name": skill_updated_name,
+                                        "file_path": rel_display,
+                                    }
 
                     # ── 工具: 精准局部补丁修改 (replace_in_file - 代码手术刀与语法门禁) ──
                     elif func_name == "replace_in_file":
@@ -2970,6 +2983,7 @@ class AgentRuntime:
                                 ok = False
                                 syntax_ok = False
                                 unified_diff = ""
+                                replace_skill_updated_name = ""
 
                                 try:
                                     orig_text = target_file.read_text(encoding="utf-8", errors="replace")
@@ -2986,9 +3000,16 @@ class AgentRuntime:
                                             tool_output = syntax_err
                                             compressed = f"[AST 门禁拦截: {rel_display} 语法错误]"
                                         else:
-                                            # 4. 真正物理落盘
+                                            # 4. 真正物理落盘（若为 SKILL.md 则先留存历史快照再规范化并失效缓存）
+                                            is_skill_md = target_file.name.upper() == "SKILL.MD"
+                                            if is_skill_md:
+                                                from ..skills.skill_version_service import snapshot_skill_before_write
+                                                snapshot_skill_before_write(target_file.parent, source="replace_in_file")
                                             target_file.write_text(new_text_or_err, encoding="utf-8")
                                             self._invalidate_file_read_cache(conv_id, target_file)
+                                            if is_skill_md:
+                                                target_file = skill_loader.normalize_skill_file(target_file)
+                                                replace_skill_updated_name = target_file.parent.name
                                             tool_output = (
                                                 f"[成功应用局部补丁到 `{rel_display}`]\n"
                                                 f"```diff\n{unified_diff}\n```\n"
@@ -3042,7 +3063,15 @@ class AgentRuntime:
                                     "edit_time": replace_edit_time,
                                     "unified_diff": unified_diff if (ok and syntax_ok) else "",
                                     "snapshot_tree_hash": snapshot_hash or "",
+                                    "skill_updated": bool(ok and syntax_ok and replace_skill_updated_name),
+                                    "skill_name": replace_skill_updated_name if (ok and syntax_ok) else "",
                                 }
+                                if ok and syntax_ok and replace_skill_updated_name:
+                                    yield {
+                                        "type": "skills_updated",
+                                        "skill_name": replace_skill_updated_name,
+                                        "file_path": rel_display,
+                                    }
 
                     # ── 工具: AST 代码骨架大纲提取 (get_repo_skeleton - 防盲读爆Token) ──
                     elif func_name == "get_repo_skeleton":

@@ -5,8 +5,23 @@
  * 2. 同工作区 / 扩展列表并发请求自动去重，避免重复扫盘
  * 3. SOP 明文正文仅在用户点开查看详情时按需懒加载并缓存
  */
-import { ExtensionSkillItem, SkillItem } from '@/types';
+import {
+  ExtensionSkillItem,
+  SkillItem,
+  SkillRollbackResponse,
+  SkillVersionDetail,
+  SkillVersionListResponse,
+} from '@/types';
 import { apiFetch } from './apiClient';
+
+export const SKILLS_UPDATED_EVENT = 'agenthub:skills-updated';
+
+export interface SkillsUpdatedDetail {
+  workspaceId?: string;
+  scope: 'workspace' | 'extension' | 'all';
+  reason?: 'hot_reload' | 'rollback' | 'manual' | 'mutation';
+  skillName?: string;
+}
 
 const WS_STORAGE_PREFIX = 'agenthub_skills_ws_cache_v1:';
 const EXT_STORAGE_KEY = 'agenthub_skills_ext_cache_v1';
@@ -137,11 +152,44 @@ export function prefetchWorkspaceSkills(workspaceId?: string): void {
 }
 
 /**
- * 按需懒加载单个工作区技能的完整 SOP 正文，并在本地缓存
+ * 广播技能变更事件，通知所有已挂载的技能列表/抽屉/补全组件同步热更新
+ */
+export function emitSkillsUpdated(detail: SkillsUpdatedDetail): void {
+  if (typeof window === 'undefined') return;
+  window.dispatchEvent(new CustomEvent<SkillsUpdatedDetail>(SKILLS_UPDATED_EVENT, { detail }));
+}
+
+/**
+ * 订阅技能变更事件，返回取消订阅函数
+ */
+export function subscribeSkillsUpdated(
+  listener: (detail: SkillsUpdatedDetail) => void
+): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const handler = (ev: Event) => {
+    const customEv = ev as CustomEvent<SkillsUpdatedDetail>;
+    listener(customEv.detail || { scope: 'all' });
+  };
+  window.addEventListener(SKILLS_UPDATED_EVENT, handler);
+  return () => window.removeEventListener(SKILLS_UPDATED_EVENT, handler);
+}
+
+/**
+ * 判断文件路径是否指向技能定义文件（用于工具执行完成后的热更新兜底识别）
+ */
+export function isSkillFilePath(filePath?: string | null): boolean {
+  if (!filePath) return false;
+  const normalized = filePath.replace(/\\/g, '/').trim();
+  return /(?:^|\/)SKILL\.md$/i.test(normalized) || /(?:^|\/)\.?skills\/.+\.md$/i.test(normalized);
+}
+
+/**
+ * 按需懒加载单个工作区技能的完整 SOP 正文，并在本地缓存（支持版本号校验与强制刷新）
  */
 export async function fetchWorkspaceSkillDetail(
   skillName: string,
-  workspaceId?: string
+  workspaceId?: string,
+  options?: { force?: boolean; expectedVersion?: string }
 ): Promise<SkillItem | null> {
   const cleanName = skillName.trim();
   if (!cleanName) return null;
@@ -149,10 +197,17 @@ export async function fetchWorkspaceSkillDetail(
   const wsKey = normalizeWorkspaceKey(workspaceId);
   const detailKey = `${wsKey}::${cleanName.toLowerCase()}`;
   const cached = workspaceSkillDetailCache.get(detailKey);
-  if (cached) return cached;
+  const versionMatched =
+    !options?.expectedVersion ||
+    (cached?.version || '1.0.0') === options.expectedVersion;
+  if (!options?.force && cached && versionMatched) {
+    return cached;
+  }
 
-  const pending = workspaceDetailInFlight.get(detailKey);
-  if (pending) return pending;
+  if (!options?.force) {
+    const pending = workspaceDetailInFlight.get(detailKey);
+    if (pending) return pending;
+  }
 
   const requestPromise = (async (): Promise<SkillItem | null> => {
     const qs = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : '';
@@ -167,7 +222,9 @@ export async function fetchWorkspaceSkillDetail(
   try {
     return await requestPromise;
   } finally {
-    workspaceDetailInFlight.delete(detailKey);
+    if (workspaceDetailInFlight.get(detailKey) === requestPromise) {
+      workspaceDetailInFlight.delete(detailKey);
+    }
   }
 }
 
@@ -268,20 +325,28 @@ export function prefetchExtensionSkills(): void {
 }
 
 /**
- * 按需懒加载单个扩展技能包的完整 SKILL.md 原文与详情
+ * 按需懒加载单个扩展技能包的完整 SKILL.md 原文与详情（支持版本号校验与强制刷新）
  */
 export async function fetchExtensionSkillDetail(
-  skillId: string
+  skillId: string,
+  options?: { force?: boolean; expectedVersion?: string }
 ): Promise<ExtensionSkillItem | null> {
   const cleanId = skillId.trim();
   if (!cleanId) return null;
 
   const key = cleanId.toLowerCase();
   const cached = extensionDetailCache.get(key);
-  if (cached) return cached;
+  const versionMatched =
+    !options?.expectedVersion ||
+    (cached?.version || '1.0.0') === options.expectedVersion;
+  if (!options?.force && cached && versionMatched) {
+    return cached;
+  }
 
-  const pending = extensionDetailInFlight.get(key);
-  if (pending) return pending;
+  if (!options?.force) {
+    const pending = extensionDetailInFlight.get(key);
+    if (pending) return pending;
+  }
 
   const requestPromise = (async (): Promise<ExtensionSkillItem | null> => {
     const res = await apiFetch(`/api/v1/extensions/skills/${encodeURIComponent(cleanId)}`);
@@ -295,7 +360,9 @@ export async function fetchExtensionSkillDetail(
   try {
     return await requestPromise;
   } finally {
-    extensionDetailInFlight.delete(key);
+    if (extensionDetailInFlight.get(key) === requestPromise) {
+      extensionDetailInFlight.delete(key);
+    }
   }
 }
 
@@ -312,5 +379,122 @@ export function invalidateExtensionSkills(): void {
       // 忽略异常
     }
   }
+}
+
+let hotRefreshInFlight: Promise<void> | null = null;
+
+/**
+ * 沙盒写入/回滚后全量失效前后端技能缓存并实时拉取最新列表，随后广播热更新事件
+ */
+export async function invalidateAndRefreshSkills(
+  workspaceId?: string,
+  options?: { reason?: SkillsUpdatedDetail['reason']; skillName?: string }
+): Promise<void> {
+  if (hotRefreshInFlight) {
+    return hotRefreshInFlight;
+  }
+
+  hotRefreshInFlight = (async () => {
+    invalidateWorkspaceSkills(workspaceId);
+    invalidateExtensionSkills();
+    await Promise.all([
+      fetchWorkspaceSkills(workspaceId, { force: true, refreshBackend: true }).catch(() => []),
+      fetchExtensionSkills({ force: true, refreshBackend: true }).catch(() => []),
+    ]);
+    emitSkillsUpdated({
+      workspaceId,
+      scope: 'all',
+      reason: options?.reason || 'hot_reload',
+      skillName: options?.skillName,
+    });
+  })();
+
+  try {
+    await hotRefreshInFlight;
+  } finally {
+    hotRefreshInFlight = null;
+  }
+}
+
+/**
+ * 查询技能的历史版本列表（支持工作区技能与全局扩展技能）
+ */
+export async function fetchSkillVersions(
+  scope: 'workspace' | 'extension',
+  identifier: string,
+  workspaceId?: string
+): Promise<SkillVersionListResponse> {
+  const cleanId = encodeURIComponent(identifier.trim());
+  const url =
+    scope === 'extension'
+      ? `/api/v1/extensions/skills/${cleanId}/versions`
+      : `/api/v1/skills/${cleanId}/versions${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''}`;
+  const res = await apiFetch(url);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `获取版本历史失败 (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+/**
+ * 获取指定历史版本的完整 SKILL.md 原文与正文用于预览
+ */
+export async function fetchSkillVersionDetail(
+  scope: 'workspace' | 'extension',
+  identifier: string,
+  versionId: string,
+  workspaceId?: string
+): Promise<SkillVersionDetail> {
+  const cleanId = encodeURIComponent(identifier.trim());
+  const cleanVer = encodeURIComponent(versionId.trim());
+  const url =
+    scope === 'extension'
+      ? `/api/v1/extensions/skills/${cleanId}/versions/${cleanVer}`
+      : `/api/v1/skills/${cleanId}/versions/${cleanVer}${workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : ''}`;
+  const res = await apiFetch(url);
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `获取版本详情失败 (HTTP ${res.status})`);
+  }
+  return res.json();
+}
+
+/**
+ * 一键回滚技能到指定历史版本，并同步失效/刷新前端缓存
+ */
+export async function rollbackSkillVersion(
+  scope: 'workspace' | 'extension',
+  identifier: string,
+  versionId: string,
+  workspaceId?: string
+): Promise<SkillRollbackResponse> {
+  const cleanId = encodeURIComponent(identifier.trim());
+  const isExt = scope === 'extension';
+  const url = isExt
+    ? `/api/v1/extensions/skills/${cleanId}/rollback`
+    : `/api/v1/skills/${cleanId}/rollback`;
+  const body = isExt
+    ? { version_id: versionId }
+    : { version_id: versionId, workspace_id: workspaceId ?? null };
+
+  const res = await apiFetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `回滚技能版本失败 (HTTP ${res.status})`);
+  }
+  const data: SkillRollbackResponse = await res.json();
+
+  // 回滚后立即全量刷新缓存并广播更新事件
+  await invalidateAndRefreshSkills(workspaceId, {
+    reason: 'rollback',
+    skillName: identifier,
+  });
+
+  return data;
 }
 

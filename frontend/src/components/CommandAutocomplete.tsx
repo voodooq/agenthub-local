@@ -21,6 +21,7 @@ import {
   fetchExtensionSkillDetail,
   fetchExtensionSkills,
   getCachedExtensionSkills,
+  subscribeSkillsUpdated,
 } from '@/utils/skillCache';
 
 interface CommandItem {
@@ -302,7 +303,7 @@ export function CommandAutocomplete({
       setDynamicItems(mapExtensionSkillsToCommands(cached));
     }
 
-    fetchExtensionSkills({ force: true })
+    fetchExtensionSkills({ force: true, refreshBackend: true })
       .then((skills) => {
         if (!cancelled) {
           setDynamicItems(mapExtensionSkillsToCommands(skills));
@@ -312,8 +313,24 @@ export function CommandAutocomplete({
         // 静默忽略网络抖动，回退静态列表或缓存
       });
 
+    const unsubscribe = subscribeSkillsUpdated(() => {
+      if (cancelled) return;
+      setDetailCache({});
+      const latest = getCachedExtensionSkills();
+      if (latest) {
+        setDynamicItems(mapExtensionSkillsToCommands(latest));
+      } else {
+        fetchExtensionSkills({ force: true, refreshBackend: true })
+          .then((skills) => {
+            if (!cancelled) setDynamicItems(mapExtensionSkillsToCommands(skills));
+          })
+          .catch(() => {});
+      }
+    });
+
     return () => {
       cancelled = true;
+      unsubscribe();
     };
   }, [isSlashTriggered]);
 

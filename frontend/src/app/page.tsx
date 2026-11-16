@@ -114,8 +114,11 @@ import {
 import {
   fetchExtensionSkills,
   fetchWorkspaceSkills,
+  invalidateAndRefreshSkills,
+  isSkillFilePath,
   prefetchExtensionSkills,
   prefetchWorkspaceSkills,
+  subscribeSkillsUpdated,
 } from '@/utils/skillCache';
 import {
   AttachmentCategory,
@@ -878,47 +881,57 @@ export default function WorkbenchPage() {
     return () => clearInterval(timer);
   }, [updateState?.status, isUpdateModalOpen, showFloatingToast]);
 
-  const syncSkillCatalog = useCallback(async (wsId?: string) => {
-    try {
-      const [wsSkills, extSkills] = await Promise.all([
-        fetchWorkspaceSkills(wsId).catch(() => []),
-        fetchExtensionSkills().catch(() => []),
-      ]);
-      const mergedMap = new Map<
-        string,
-        { id: string; name: string; command: string; version: string }
-      >();
-      for (const sk of wsSkills) {
-        const rawCmd = (sk.command || `/${sk.name}`).trim();
-        const cmd = rawCmd.startsWith('/') ? rawCmd : `/${rawCmd}`;
-        mergedMap.set(cmd.toLowerCase(), {
-          id: sk.id || sk.name,
-          name: sk.name,
-          command: cmd,
-          version: sk.version || '1.0.0',
-        });
-      }
-      for (const ex of extSkills) {
-        const rawCmd = (ex.command || `/${ex.id || ex.name}`).trim();
-        const cmd = rawCmd.startsWith('/') ? rawCmd : `/${rawCmd}`;
-        if (!mergedMap.has(cmd.toLowerCase())) {
+  const syncSkillCatalog = useCallback(
+    async (wsId?: string, options?: { force?: boolean; refreshBackend?: boolean }) => {
+      try {
+        const [wsSkills, extSkills] = await Promise.all([
+          fetchWorkspaceSkills(wsId, options).catch(() => []),
+          fetchExtensionSkills(options).catch(() => []),
+        ]);
+        const mergedMap = new Map<
+          string,
+          { id: string; name: string; command: string; version: string }
+        >();
+        for (const sk of wsSkills) {
+          const rawCmd = (sk.command || `/${sk.name}`).trim();
+          const cmd = rawCmd.startsWith('/') ? rawCmd : `/${rawCmd}`;
           mergedMap.set(cmd.toLowerCase(), {
-            id: ex.id || ex.name,
-            name: ex.name,
+            id: sk.id || sk.name,
+            name: sk.name,
             command: cmd,
-            version: ex.version || '1.0.0',
+            version: sk.version || '1.0.0',
           });
         }
+        for (const ex of extSkills) {
+          const rawCmd = (ex.command || `/${ex.id || ex.name}`).trim();
+          const cmd = rawCmd.startsWith('/') ? rawCmd : `/${rawCmd}`;
+          if (!mergedMap.has(cmd.toLowerCase())) {
+            mergedMap.set(cmd.toLowerCase(), {
+              id: ex.id || ex.name,
+              name: ex.name,
+              command: cmd,
+              version: ex.version || '1.0.0',
+            });
+          }
+        }
+        setSkillCatalog(Array.from(mergedMap.values()));
+      } catch {
+        // 静默忽略技能目录预取波动
       }
-      setSkillCatalog(Array.from(mergedMap.values()));
-    } catch {
-      // 静默忽略技能目录预取波动
-    }
-  }, []);
+    },
+    []
+  );
 
   useEffect(() => {
     prefetchWorkspaceSkills(activeWorkspaceId);
     void syncSkillCatalog(activeWorkspaceId);
+  }, [activeWorkspaceId, syncSkillCatalog]);
+
+  // 订阅技能热更新/回滚广播，实时同步输入框技能版本目录
+  useEffect(() => {
+    return subscribeSkillsUpdated(() => {
+      void syncSkillCatalog(activeWorkspaceId);
+    });
   }, [activeWorkspaceId, syncSkillCatalog]);
 
   // 自动适配常态输入框高度（展开态由半屏样式接管高度）
@@ -2025,6 +2038,17 @@ export default function WorkbenchPage() {
             }
             if (parsed.type === 'tool_end') {
               invalidateVerification();
+              // 沙盒工具修改 SKILL.md 后自动失效前后端技能缓存并实时热更新
+              if (
+                (parsed.skill_updated === true || isSkillFilePath(parsed.file_path)) &&
+                parsed.status !== 'failed' &&
+                parsed.status !== 'error'
+              ) {
+                void invalidateAndRefreshSkills(activeWorkspaceId, {
+                  reason: 'hot_reload',
+                  skillName: parsed.skill_name,
+                });
+              }
             }
           } else if (parsed.type === 'thinking_chunk') {
             partialThinking += parsed.content || '';
@@ -2231,6 +2255,12 @@ export default function WorkbenchPage() {
               return updated;
             });
             invalidateVerification();
+          } else if (parsed.type === 'skills_updated') {
+            // 后端显式推送的技能热更新通知：清空前后端快照并全量拉取最新版本号与描述
+            void invalidateAndRefreshSkills(activeWorkspaceId, {
+              reason: 'hot_reload',
+              skillName: parsed.skill_name,
+            });
           } else if (parsed.type === 'control' && parsed.action === 'rollback_completed') {
             const targetCid = String(parsed.conversation_id || effectiveConvId || '').trim();
             if (targetCid) {
@@ -2238,6 +2268,7 @@ export default function WorkbenchPage() {
             }
             const targetTurn = Number(parsed.target_turn_id ?? 0);
             showFloatingToast(`已回滚至 Turn ${targetTurn}，正在同步会话界面状态...`, 'success', 3600);
+            void invalidateAndRefreshSkills(activeWorkspaceId, { reason: 'hot_reload' });
           }
         } catch (err) {
           console.warn('SSE 解析异常:', err, rawData);

@@ -435,7 +435,7 @@ export function MemoryHubModal({
     }
     try {
       const [extSkills, mRes] = await Promise.all([
-        fetchExtensionSkills({ force: true }),
+        fetchExtensionSkills({ force: true, refreshBackend: true }),
         apiFetch('/api/v1/extensions/mcp'),
       ]);
       setSkills(extSkills);
