@@ -19,6 +19,8 @@ import {
   Shield,
   BookOpen,
   Filter,
+  Pencil,
+  Lock,
 } from 'lucide-react';
 import { Workspace, SkillItem } from '@/types';
 import { ModelOption } from '@/components/ModelSelector';
@@ -118,8 +120,9 @@ export function AgentsView({
   const [searchQuery, setSearchQuery] = useState('');
   const [filterOwnership, setFilterOwnership] = useState<'all' | 'official' | 'custom'>('all');
 
-  // 创建/配置专家弹窗与状态
-  const [isCreateOpen, setIsCreateOpen] = useState(false);
+  // 创建/修改专家弹窗与状态
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [editingAgent, setEditingAgent] = useState<AgentItem | null>(null);
   const [formName, setFormName] = useState('');
   const [formDesc, setFormDesc] = useState('');
   const [formModel, setFormModel] = useState('');
@@ -148,34 +151,53 @@ export function AgentsView({
 
   // 从本地持久化存储加载专家
   useEffect(() => {
+    const effectiveModel = currentModel || (availableModels[0]?.id ?? 'gemini-2.5-flash');
+    const initedOfficial = DEFAULT_OFFICIAL_AGENTS.map((a) => ({
+      ...a,
+      base_model: effectiveModel,
+    }));
+
     try {
       const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
       if (saved) {
         const parsed: AgentItem[] = JSON.parse(saved);
-        setAgents(parsed);
+        // 分离个人自定义智能体和官方智能体，保证官方智能体始终不可被外部篡改
+        const customAgents = parsed.filter((a) => a.ownership === 'custom');
+        setAgents([...customAgents, ...initedOfficial]);
         return;
       }
     } catch { }
 
-    // 初始化默认官方专家（基座模型同步为当前真实生效的模型）
-    const effectiveModel = currentModel || (availableModels[0]?.id ?? 'gemini-2.5-flash');
-    const inited = DEFAULT_OFFICIAL_AGENTS.map((a) => ({
-      ...a,
-      base_model: effectiveModel,
-    }));
-    setAgents(inited);
+    setAgents(initedOfficial);
   }, [currentModel, availableModels]);
 
   // 当打开创建模态框时，同步默认选中的真实模型
   const handleOpenCreateModal = () => {
     const defaultModelId = currentModel || (availableModels[0]?.id ?? 'gemini-2.5-flash');
+    setEditingAgent(null);
     setFormName('');
     setFormDesc('');
     setFormModel(defaultModelId);
     setSelectedSkillIds([]);
     setIsSkillPickerOpen(false);
     setSkillSearchQuery('');
-    setIsCreateOpen(true);
+    setIsModalOpen(true);
+  };
+
+  // 打开修改个人专家模态框
+  const handleOpenEditModal = (agent: AgentItem, e: React.MouseEvent) => {
+    e.stopPropagation();
+    // 官方智能体受系统保护，绝不允许修改
+    if (agent.ownership === 'official') return;
+
+    setEditingAgent(agent);
+    setFormName(agent.name);
+    setFormDesc(agent.context_prompt || agent.description || '');
+    setFormModel(agent.base_model || (availableModels[0]?.id ?? 'gemini-2.5-flash'));
+    setSelectedSkillIds([...(agent.skill_ids || [])]);
+    setIsSkillPickerOpen(false);
+    setSkillSearchQuery('');
+    setIsModalOpen(true);
   };
 
   const handleToggleSkill = (skillId: string) => {
@@ -184,39 +206,84 @@ export function AgentsView({
     );
   };
 
-  const handleCreateAgent = (e: React.FormEvent) => {
+  // 保存专家（创建或修改）
+  const handleSaveAgent = (e: React.FormEvent) => {
     e.preventDefault();
     if (!formName.trim()) return;
 
-    const newAgent: AgentItem = {
-      id: `agent_${Date.now().toString(36)}`,
-      name: formName.trim(),
-      description: formDesc.trim() || '自定义专业智能体，搭载专属技能集与独立沙盒运行环境。',
-      base_model: formModel || (availableModels[0]?.id ?? 'gemini-2.5-flash'),
-      context_prompt: formDesc.trim() || undefined,
-      skill_ids: selectedSkillIds,
-      tools_count: Math.max(2, selectedSkillIds.length * 2),
-      ownership: 'custom',
-      status: 'active',
-      created_at: new Date().toISOString().split('T')[0],
-      updated_at: new Date().toISOString().split('T')[0],
-    };
+    const todayStr = new Date().toISOString().split('T')[0];
+    const targetModel = formModel || (availableModels[0]?.id ?? 'gemini-2.5-flash');
+    const targetPrompt = formDesc.trim();
 
-    const nextList = [newAgent, ...agents];
-    setAgents(nextList);
-    try {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(nextList));
-    } catch { }
+    if (editingAgent) {
+      // 严格安全防卫：禁止修改官方智能体
+      if (editingAgent.ownership === 'official') return;
 
-    setIsCreateOpen(false);
+      const nextList = agents.map((a) => {
+        if (a.id === editingAgent.id) {
+          return {
+            ...a,
+            name: formName.trim(),
+            description: formDesc.trim() || '自定义专业智能体，搭载专属技能集与独立沙盒运行环境。',
+            base_model: targetModel,
+            context_prompt: targetPrompt || undefined,
+            skill_ids: selectedSkillIds,
+            tools_count: Math.max(2, selectedSkillIds.length * 2),
+            updated_at: todayStr,
+          };
+        }
+        return a;
+      });
+
+      setAgents(nextList);
+      try {
+        const customs = nextList.filter((a) => a.ownership === 'custom');
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(customs));
+      } catch { }
+    } else {
+      // 创建全新个人智能体
+      const newAgent: AgentItem = {
+        id: `agent_${Date.now().toString(36)}`,
+        name: formName.trim(),
+        description: formDesc.trim() || '自定义专业智能体，搭载专属技能集与独立沙盒运行环境。',
+        base_model: targetModel,
+        context_prompt: targetPrompt || undefined,
+        skill_ids: selectedSkillIds,
+        tools_count: Math.max(2, selectedSkillIds.length * 2),
+        ownership: 'custom',
+        status: 'active',
+        created_at: todayStr,
+        updated_at: todayStr,
+      };
+
+      const nextList = [newAgent, ...agents];
+      setAgents(nextList);
+      try {
+        const customs = nextList.filter((a) => a.ownership === 'custom');
+        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(customs));
+      } catch { }
+    }
+
+    setIsModalOpen(false);
+    setEditingAgent(null);
   };
 
-  const handleDeleteAgent = (agentId: string, e: React.MouseEvent) => {
+  // 删除个人专家
+  const handleDeleteAgent = (agent: AgentItem, e: React.MouseEvent) => {
     e.stopPropagation();
-    const nextList = agents.filter((a) => a.id !== agentId);
+    // 严格安全防卫：官方专家不可删除
+    if (agent.ownership === 'official') return;
+
+    const confirmed = window.confirm(
+      `确定要删除个人专家【${agent.name}】吗？\n删除后不可恢复。`
+    );
+    if (!confirmed) return;
+
+    const nextList = agents.filter((a) => a.id !== agent.id);
     setAgents(nextList);
     try {
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(nextList));
+      const customs = nextList.filter((a) => a.ownership === 'custom');
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(customs));
     } catch { }
   };
 
@@ -260,7 +327,7 @@ export function AgentsView({
                 </span>
               </h1>
               <p className="text-xs text-muted-foreground mt-0.5">
-                装配真实基座模型与真实技能集，一键实例化独立沙盒并开始智能交互。
+                装配真实基座模型与真实技能集，官方专家受系统保护，个人专家支持自由修改、删除与沙盒化交互。
               </p>
             </div>
           </div>
@@ -358,19 +425,35 @@ export function AgentsView({
                       </div>
                     </div>
 
-                    <div className="flex items-center space-x-2">
-                      <span className="flex items-center space-x-1 text-[11px] text-emerald-500 font-medium">
-                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                        <span>可用</span>
-                      </span>
-                      {agent.ownership === 'custom' && (
-                        <button
-                          onClick={(e) => handleDeleteAgent(agent.id, e)}
-                          className="p-1 rounded-md text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 opacity-0 group-hover:opacity-100 transition-opacity"
-                          title="删除此自定义智能体"
+                    {/* 操作控制区：官方只读锁定，个人可修改、可删除 */}
+                    <div className="flex items-center space-x-1.5">
+                      {agent.ownership === 'official' ? (
+                        <div
+                          className="flex items-center space-x-1 px-2 py-0.5 rounded-md bg-surface-200/70 border border-border/60 text-muted-foreground text-[10px]"
+                          title="官方内置专家受系统保护，不可修改或删除"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
+                          <Lock className="w-3 h-3 text-muted-foreground/80" />
+                          <span>官方保护</span>
+                        </div>
+                      ) : (
+                        <div className="flex items-center space-x-1">
+                          <button
+                            onClick={(e) => handleOpenEditModal(agent, e)}
+                            className="flex items-center space-x-1 px-2 py-1 rounded-lg text-muted-foreground hover:text-emerald-500 hover:bg-emerald-500/10 transition-colors text-xs font-medium"
+                            title="修改/配置此智能体技能与模型"
+                          >
+                            <Pencil className="w-3.5 h-3.5" />
+                            <span className="text-[11px]">修改</span>
+                          </button>
+                          <button
+                            onClick={(e) => handleDeleteAgent(agent, e)}
+                            className="flex items-center space-x-1 px-2 py-1 rounded-lg text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-colors text-xs font-medium"
+                            title="删除此个人智能体"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                            <span className="text-[11px]">删除</span>
+                          </button>
+                        </div>
                       )}
                     </div>
                   </div>
@@ -416,19 +499,29 @@ export function AgentsView({
                 {/* 卡片底部操作栏 */}
                 <div className="mt-5 pt-3 border-t border-border/60 flex items-center justify-between text-xs text-muted-foreground">
                   <span className="font-mono text-[10px]">更新时间: {agent.updated_at}</span>
-                  <button
-                    onClick={() => {
-                      const skills = (agent.skill_ids || [])
-                        .map((id) => skillMap.get(id))
-                        .filter((s): s is SkillItem => Boolean(s));
-                      onLaunchSandboxChat?.(agent, skills);
-                    }}
-                    className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-600 dark:text-emerald-400 font-semibold transition-all shadow-sm active:scale-95"
-                    title="在独立沙盒中启动该专家的交互会话"
-                  >
-                    <Boxes className="w-3.5 h-3.5" />
-                    <span>启动沙盒</span>
-                  </button>
+                  <div className="flex items-center space-x-2">
+                    {agent.ownership === 'custom' && (
+                      <button
+                        onClick={(e) => handleOpenEditModal(agent, e)}
+                        className="px-2.5 py-1 rounded-lg border border-border/80 hover:bg-surface-200 text-foreground text-xs font-medium transition-colors"
+                      >
+                        编辑配置
+                      </button>
+                    )}
+                    <button
+                      onClick={() => {
+                        const skills = (agent.skill_ids || [])
+                          .map((id) => skillMap.get(id))
+                          .filter((s): s is SkillItem => Boolean(s));
+                        onLaunchSandboxChat?.(agent, skills);
+                      }}
+                      className="flex items-center space-x-1.5 px-3.5 py-1.5 rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-emerald-600 dark:text-emerald-400 font-semibold transition-all shadow-sm active:scale-95"
+                      title="在独立沙盒中启动该专家的交互会话"
+                    >
+                      <Boxes className="w-3.5 h-3.5" />
+                      <span>启动沙盒</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             );
@@ -436,8 +529,8 @@ export function AgentsView({
         </div>
       </div>
 
-      {/* 创建专家模态抽屉 (支持真实基座模型选择与真实技能多选挂载) */}
-      {isCreateOpen && (
+      {/* 创建 / 修改专家模态抽屉 */}
+      {isModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
           <div className="bg-surface-modal border border-border w-full max-w-xl max-h-[90vh] rounded-2xl p-6 shadow-2xl flex flex-col animate-scale-in text-foreground">
             <div className="flex items-center justify-between pb-3 border-b border-border shrink-0">
@@ -446,21 +539,28 @@ export function AgentsView({
                   <Bot className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-base font-bold text-foreground">创建新智能体专家</h3>
+                  <h3 className="text-base font-bold text-foreground">
+                    {editingAgent ? '修改智能体专家' : '创建新智能体专家'}
+                  </h3>
                   <p className="text-[11px] text-muted-foreground">
-                    装配真实可用的模型与技能，系统将自动分配独立沙盒工作区。
+                    {editingAgent
+                      ? `正在编辑个人专家【${editingAgent.name}】，调整技能装配与参数后将直接同步沙盒。`
+                      : '装配真实可用的模型与技能，系统将自动分配独立沙盒工作区。'}
                   </p>
                 </div>
               </div>
               <button
-                onClick={() => setIsCreateOpen(false)}
+                onClick={() => {
+                  setIsModalOpen(false);
+                  setEditingAgent(null);
+                }}
                 className="p-1.5 rounded-lg hover:bg-surface-100 text-muted-foreground hover:text-foreground"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleCreateAgent} className="flex-1 overflow-y-auto py-4 space-y-4 pr-1">
+            <form onSubmit={handleSaveAgent} className="flex-1 overflow-y-auto py-4 space-y-4 pr-1">
               <div>
                 <label className="block text-xs font-semibold text-foreground mb-1">
                   专家名称 <span className="text-rose-500">*</span>
@@ -515,7 +615,7 @@ export function AgentsView({
                 </select>
               </div>
 
-              {/* 真实技能装配版块 (核心功能) */}
+              {/* 真实技能装配版块 */}
               <div className="space-y-2 pt-1">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-semibold text-foreground flex items-center space-x-1.5">
@@ -645,7 +745,10 @@ export function AgentsView({
               <div className="flex items-center justify-end space-x-2 pt-3 border-t border-border shrink-0">
                 <button
                   type="button"
-                  onClick={() => setIsCreateOpen(false)}
+                  onClick={() => {
+                    setIsModalOpen(false);
+                    setEditingAgent(null);
+                  }}
                   className="px-4 py-2 rounded-xl border border-border hover:bg-surface-100 text-xs text-muted-foreground"
                 >
                   取消
@@ -654,7 +757,7 @@ export function AgentsView({
                   type="submit"
                   className="px-5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold shadow-md active:scale-95 transition-all"
                 >
-                  确认创建
+                  {editingAgent ? '保存修改' : '确认创建'}
                 </button>
               </div>
             </form>
