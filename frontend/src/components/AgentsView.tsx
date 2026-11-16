@@ -27,6 +27,7 @@ export interface AgentItem {
   name: string;
   description: string;
   base_model: string;
+  context_prompt?: string;
   ownership: 'official' | 'custom';
   status: 'active' | 'draft';
   skills_count: number;
@@ -47,6 +48,7 @@ const INITIAL_AGENTS: AgentItem[] = [
     name: 'Plugin Builder',
     description: '负责插件生成与 MCP 适配的构建专家，自带工具链与规范检测。',
     base_model: '4 Argon',
+    context_prompt: '你是 Plugin Builder 专家，负责标准化 MCP 服务与 Plugin 插件生成、工具测试与规范校验。在执行前必须校验工具调用的 JSON 闭合与参数 schema。',
     ownership: 'official',
     status: 'active',
     skills_count: 5,
@@ -59,6 +61,7 @@ const INITIAL_AGENTS: AgentItem[] = [
     name: '深度研究专家 (Deep Researcher)',
     description: '结合多维度一手文档与权威检索的调研专家，支持沉淀研报。',
     base_model: '4 Argon',
+    context_prompt: '你是深度研究专家 (Deep Researcher)，专注于多维度全网权威资料调研与结构化研究报告沉淀。所有论断必须基于一手信源与真实证据。',
     ownership: 'official',
     status: 'active',
     skills_count: 3,
@@ -71,6 +74,7 @@ const INITIAL_AGENTS: AgentItem[] = [
     name: 'OCR 与视觉分析助手',
     description: '自动解析复杂文档、公式与版面结构并执行精准识别。',
     base_model: '4 Argon',
+    context_prompt: '你是 OCR 与视觉分析助手，专注于提取图片/扫描件中的排版文本、表格与复杂数学公式。公式输出严格使用标准 LaTeX，表格输出为标准 Markdown。',
     ownership: 'custom',
     status: 'active',
     skills_count: 2,
@@ -83,6 +87,7 @@ const INITIAL_AGENTS: AgentItem[] = [
     name: '代码重构与架构导师',
     description: '根据软件设计哲学进行深模块划分与双视角代码审查。',
     base_model: '4 Argon',
+    context_prompt: '你是代码重构与架构导师，基于《软件设计的哲学》指导深模块设计、消除浅模块复杂度，并严格执行红-绿-重构 TDD 与双视角代码审查。',
     ownership: 'custom',
     status: 'active',
     skills_count: 4,
@@ -122,6 +127,7 @@ export function AgentsView({ workspace, onLaunchSandboxChat }: AgentsViewProps) 
       name: formName.trim(),
       description: formDesc.trim() || '自定义业务专家，搭载专属技能与沙盒配置。',
       base_model: formModel,
+      context_prompt: formDesc.trim() || undefined,
       ownership: 'custom',
       status: 'active',
       skills_count: 1,
@@ -378,3 +384,4 @@ export function AgentsView({ workspace, onLaunchSandboxChat }: AgentsViewProps) 
     </div>
   );
 }
+

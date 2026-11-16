@@ -35,7 +35,7 @@ import {
 } from 'lucide-react';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
-import { AgentsView } from '@/components/AgentsView';
+import { AgentsView, AgentItem } from '@/components/AgentsView';
 import { LibraryView } from '@/components/LibraryView';
 import { ScheduledView } from '@/components/ScheduledView';
 import { SkillsView } from '@/components/SkillsView';
@@ -684,6 +684,48 @@ export default function WorkbenchPage() {
     } catch (e) {
       console.warn('获取工作区失败:', e);
     }
+  };
+
+  /**
+   * 为选中的专家自动创建或定位专属沙盒并进入交互会话
+   */
+  const handleLaunchAgentSandbox = async (agent: AgentItem) => {
+    const sandboxName = `[沙盒] ${agent.name}`;
+    let targetWs = workspaces.find((w) => w.name === sandboxName || w.name === agent.name);
+
+    if (!targetWs) {
+      try {
+        const res = await apiFetch('/api/v1/workspaces', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: sandboxName,
+            type: 'virtual',
+            context_prompt: agent.context_prompt || agent.description,
+            model_preference: agent.base_model || currentModel,
+            security_level: 'standard',
+          }),
+        });
+        if (res.ok) {
+          const created: Workspace = await res.json();
+          targetWs = created;
+          await fetchWorkspaces();
+        }
+      } catch (err) {
+        console.error('动态创建专家沙盒失败:', err);
+      }
+    }
+
+    if (targetWs) {
+      setActiveWorkspaceId(targetWs.id);
+      setWorkspacePath(targetWs.root_path);
+      if (agent.base_model) {
+        setCurrentModel(agent.base_model);
+      }
+    }
+
+    setActiveNavHub('chat');
+    switchConversation(null);
   };
 
   const fetchConversations = async () => {
@@ -3102,10 +3144,7 @@ export default function WorkbenchPage() {
         {activeNavHub === 'agents' && (
           <AgentsView
             workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
-            onLaunchSandboxChat={(agent) => {
-              setActiveNavHub('chat');
-              switchConversation(null);
-            }}
+            onLaunchSandboxChat={handleLaunchAgentSandbox}
           />
         )}
 
@@ -3184,7 +3223,10 @@ export default function WorkbenchPage() {
                 className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-6 space-y-6"
               >
                 {messages.length === 0 ? (
-                  <PromptStarterCards onSelectPrompt={(text) => handleSendMessage(text)} />
+                  <PromptStarterCards
+                    workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
+                    onSelectPrompt={(text) => handleSendMessage(text)}
+                  />
                 ) : (
                   messages.map((msg, index) => {
                     const isUser = msg.role === 'user';
