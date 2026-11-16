@@ -13,8 +13,9 @@ services:
       - ./frontend/out:/app/static:ro
       - ./version.json:/app/version.json:ro
       - ./data:/app/data
-      # 挂载宿主机 CLI 账号隔离目录（兼容 Linux HOME 与 Windows USERPROFILE）
+      # 挂载宿主机 CLI 账号隔离目录与默认 ~/.gemini 登录态（兼容 Linux HOME 与 Windows USERPROFILE）
       - ${HOME:-${USERPROFILE:-~}}/.agenthub/accounts:/root/.agenthub/accounts
+      - ${HOME:-${USERPROFILE:-~}}/.gemini:/root/.gemini
     environment:
       - TZ=Asia/Shanghai
       - DB_PATH=/app/data/agenthub_local.db
