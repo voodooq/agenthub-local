@@ -15,7 +15,9 @@
 """
 import asyncio
 from collections import OrderedDict
+import json
 import math
+from pathlib import Path
 import re
 from typing import Any
 import uuid
@@ -130,29 +132,138 @@ def is_local_provider(provider_info: dict[str, Any] | None) -> bool:
     return False
 
 
+DEFAULT_CONTEXT_LIMIT_PRESETS: dict[str, int] = {
+    "local": 8_192,
+    "openai_compat": 32_768,
+    "deepseek": 65_536,
+    "openai_modern": 128_000,
+    "anthropic": 200_000,
+    "gemini": 1_000_000,
+}
+
+_USER_CONTEXT_LIMIT_CACHE: dict[str, Any] | None = None
+
+
+def _get_context_limits_config_path() -> Path:
+    """获取用户上下文上限配置文件路径（与用户偏好配置同目录）"""
+    from pathlib import Path as _Path
+
+    data_dir = _Path(__file__).resolve().parent.parent.parent / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    return data_dir / "context_limits.json"
+
+
+def get_user_context_limit_config() -> dict[str, Any]:
+    """读取用户自定义的上下文上限与接力水位阈值配置（带进程内存缓存）"""
+    global _USER_CONTEXT_LIMIT_CACHE
+    if _USER_CONTEXT_LIMIT_CACHE is not None:
+        return _USER_CONTEXT_LIMIT_CACHE
+
+    default_cfg: dict[str, Any] = {
+        "global_override": 0,
+        "model_overrides": {},
+        "rollover_watermark_pct": 90,
+    }
+    cfg_path = _get_context_limits_config_path()
+    if cfg_path.exists():
+        try:
+            raw = json.loads(cfg_path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                global_ov = max(0, int(raw.get("global_override") or 0))
+                raw_models = raw.get("model_overrides")
+                model_ov: dict[str, int] = {}
+                if isinstance(raw_models, dict):
+                    for k, v in raw_models.items():
+                        clean_k = str(k or "").strip().lower()
+                        val_int = max(0, int(v or 0))
+                        if clean_k and val_int > 0:
+                            model_ov[clean_k] = val_int
+                pct_val = int(raw.get("rollover_watermark_pct") or 90)
+                pct_val = min(98, max(50, pct_val))
+                default_cfg = {
+                    "global_override": global_ov,
+                    "model_overrides": model_ov,
+                    "rollover_watermark_pct": pct_val,
+                }
+        except Exception as e:
+            logger.warning(f"[ContextLimit] 读取用户上下文上限配置失败，回退默认配置: {e}")
+
+    _USER_CONTEXT_LIMIT_CACHE = default_cfg
+    return default_cfg
+
+
+def save_user_context_limit_config(
+    *,
+    global_override: int = 0,
+    model_overrides: dict[str, int] | None = None,
+    rollover_watermark_pct: int = 90,
+) -> dict[str, Any]:
+    """持久化保存用户自定义的上下文上限与接力阈值配置"""
+    global _USER_CONTEXT_LIMIT_CACHE
+    clean_models: dict[str, int] = {}
+    for k, v in (model_overrides or {}).items():
+        clean_k = str(k or "").strip().lower()
+        val_int = max(0, int(v or 0))
+        if clean_k and val_int > 0:
+            clean_models[clean_k] = val_int
+
+    sanitized = {
+        "global_override": max(0, int(global_override or 0)),
+        "model_overrides": clean_models,
+        "rollover_watermark_pct": min(98, max(50, int(rollover_watermark_pct or 90))),
+    }
+    cfg_path = _get_context_limits_config_path()
+    cfg_path.write_text(json.dumps(sanitized, indent=2, ensure_ascii=False), encoding="utf-8")
+    _USER_CONTEXT_LIMIT_CACHE = sanitized
+    return sanitized
+
+
+def get_effective_rollover_ratio() -> float:
+    """获取当前生效的自动接力水位比例（初始默认 0.90）"""
+    cfg = get_user_context_limit_config()
+    return float(cfg.get("rollover_watermark_pct") or 90) / 100.0
+
+
 def infer_context_limit(provider_info: dict[str, Any] | None, model_name: str = "") -> int:
-    """推算当前推理通道的单槽位最大上下文 Token 上限"""
+    """推算当前推理通道的单槽位最大上下文 Token 上限。
+
+    优先级：通道显式 max_context_tokens > 用户模型级覆盖 > 用户全局覆盖 > 系统默认初始值。
+    """
     if provider_info:
         explicit_limit = int(provider_info.get("max_context_tokens") or 0)
         if explicit_limit > 0:
             return explicit_limit
-        if is_local_provider(provider_info):
-            return 8192
 
     low_model = (model_name or (provider_info or {}).get("model_name") or "").strip().lower()
     ptype = str((provider_info or {}).get("provider_type") or "").strip().lower()
 
+    user_cfg = get_user_context_limit_config()
+    model_overrides: dict[str, int] = user_cfg.get("model_overrides") or {}
+    if low_model:
+        if low_model in model_overrides:
+            return int(model_overrides[low_model])
+        # 支持不带厂商前缀的短名匹配（如配置了 nemotron-3.5-super 匹配 nvidia/nemotron-3.5-super...）
+        for cfg_key, cfg_limit in model_overrides.items():
+            if cfg_key and cfg_key in low_model:
+                return int(cfg_limit)
+
+    global_override = int(user_cfg.get("global_override") or 0)
+    if global_override > 0:
+        return global_override
+
+    if provider_info and is_local_provider(provider_info):
+        return DEFAULT_CONTEXT_LIMIT_PRESETS["local"]
     if "claude" in low_model or ptype == "anthropic":
-        return 200_000
+        return DEFAULT_CONTEXT_LIMIT_PRESETS["anthropic"]
     if "gemini" in low_model or ptype in {"google_oauth", "gemini_api", "gemini_cli"}:
-        return 1_000_000
+        return DEFAULT_CONTEXT_LIMIT_PRESETS["gemini"]
     if "deepseek" in low_model:
-        return 65_536
+        return DEFAULT_CONTEXT_LIMIT_PRESETS["deepseek"]
     if any(tag in low_model for tag in ("gpt-4o", "gpt-4.1", "o1", "o3", "o4", "gpt-4-turbo")):
-        return 128_000
+        return DEFAULT_CONTEXT_LIMIT_PRESETS["openai_modern"]
     if ptype in {"llama_server", "ollama"}:
-        return 8192
-    return 32_768
+        return DEFAULT_CONTEXT_LIMIT_PRESETS["local"]
+    return DEFAULT_CONTEXT_LIMIT_PRESETS["openai_compat"]
 
 
 def resolve_compression_policy(

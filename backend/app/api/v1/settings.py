@@ -6,7 +6,12 @@ import json
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
-from typing import List, Optional
+from typing import Dict, List, Optional
+from ...agent.context_compressor import (
+    DEFAULT_CONTEXT_LIMIT_PRESETS,
+    get_user_context_limit_config,
+    save_user_context_limit_config,
+)
 from ...core.config import settings
 from ...core.logging_config import logger
 
@@ -190,4 +195,39 @@ async def save_personality_settings(config: PersonalityConfig):
     except Exception as e:
         logger.error(f"保存个性化配置异常: {e}")
         raise HTTPException(status_code=500, detail=f"保存配置失败: {str(e)}")
+
+
+class ContextLimitConfigPayload(BaseModel):
+    global_override: int = Field(default=0, ge=0, le=4000000, description="全局默认上下文上限覆盖（0 表示按模型自动识别）")
+    model_overrides: Dict[str, int] = Field(default_factory=dict, description="按模型名称覆盖的上下文上限映射")
+    rollover_watermark_pct: int = Field(default=90, ge=50, le=98, description="自动蒸馏接力水位阈值（百分比，默认 90）")
+
+
+@router.get("/context-limits")
+async def get_context_limits():
+    """获取用户上下文窗口上限覆盖配置及系统默认初始值参考"""
+    cfg = get_user_context_limit_config()
+    return {
+        "config": cfg,
+        "defaults": DEFAULT_CONTEXT_LIMIT_PRESETS,
+    }
+
+
+@router.post("/context-limits")
+async def save_context_limits(payload: ContextLimitConfigPayload):
+    """保存用户自定义的模型上下文上限与 90% 接力阈值配置"""
+    try:
+        saved = save_user_context_limit_config(
+            global_override=payload.global_override,
+            model_overrides=payload.model_overrides,
+            rollover_watermark_pct=payload.rollover_watermark_pct,
+        )
+        return {
+            "success": True,
+            "config": saved,
+            "message": "上下文窗口上限与接力阈值配置已保存并立即生效！",
+        }
+    except Exception as e:
+        logger.error(f"保存上下文上限配置异常: {e}")
+        raise HTTPException(status_code=500, detail=f"保存上下文配置失败: {str(e)}")
 

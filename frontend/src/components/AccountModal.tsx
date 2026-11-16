@@ -2107,20 +2107,72 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-emerald-500"
                       />
                     </div>
-                    <div className="md:col-span-2">
-                      <label className="block text-slate-300 mb-1.5 font-medium">
-                        单槽位上下文窗口上限 (max_context_tokens，0 表示自动探测)
-                      </label>
-                      <input
-                        type="number"
-                        min={0}
-                        max={2000000}
-                        step={512}
-                        value={provMaxContextTokens}
-                        onChange={(e) => setProvMaxContextTokens(Math.max(0, Number(e.target.value) || 0))}
-                        placeholder="8192"
-                        className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-emerald-500"
-                      />
+                    <div className="md:col-span-2 space-y-2">
+                      {(() => {
+                        const lowM = (provModels || '').toLowerCase();
+                        const lowUrl = (provBaseUrl || '').toLowerCase();
+                        const isLocal =
+                          provType === 'llama_server' ||
+                          provType === 'ollama' ||
+                          ['127.0.0.1', 'localhost', '0.0.0.0', 'host.docker.internal'].some((h) => lowUrl.includes(h));
+                        const inferredDefault = isLocal
+                          ? 8192
+                          : lowM.includes('claude') || provType === 'anthropic'
+                            ? 200000
+                            : lowM.includes('gemini')
+                              ? 1000000
+                              : lowM.includes('deepseek')
+                                ? 65536
+                                : ['gpt-4o', 'gpt-4.1', 'o1', 'o3', 'o4', 'gpt-4-turbo'].some((t) => lowM.includes(t))
+                                  ? 128000
+                                  : 32768;
+                        return (
+                          <>
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <label className="text-slate-300 font-medium">
+                                单槽位上下文窗口上限 (0 = 使用默认初始值 {inferredDefault.toLocaleString()})
+                              </label>
+                              <span className="text-[10px] text-emerald-400/90">
+                                达上限 90% 时自动蒸馏并接力新对话
+                              </span>
+                            </div>
+                            <input
+                              type="number"
+                              min={0}
+                              max={4000000}
+                              step={512}
+                              value={provMaxContextTokens}
+                              onChange={(e) => setProvMaxContextTokens(Math.max(0, Number(e.target.value) || 0))}
+                              placeholder={`0（默认按 ${inferredDefault} 计算）`}
+                              className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border/80 text-white font-mono outline-none focus:border-emerald-500"
+                            />
+                            <div className="flex flex-wrap gap-1.5">
+                              {[
+                                { label: '自动(0)', val: 0 },
+                                { label: '8K', val: 8192 },
+                                { label: '32K', val: 32768 },
+                                { label: '64K', val: 65536 },
+                                { label: '128K', val: 131072 },
+                                { label: '200K', val: 200000 },
+                                { label: '1M', val: 1000000 },
+                              ].map((preset) => (
+                                <button
+                                  key={preset.val}
+                                  type="button"
+                                  onClick={() => setProvMaxContextTokens(preset.val)}
+                                  className={`px-2 py-0.5 rounded-md text-[10px] font-mono border transition-colors ${
+                                    provMaxContextTokens === preset.val
+                                      ? 'bg-emerald-500/20 border-emerald-500/60 text-emerald-300'
+                                      : 'bg-surface-100 border-border/60 text-slate-400 hover:text-slate-200'
+                                  }`}
+                                >
+                                  {preset.label}
+                                </button>
+                              ))}
+                            </div>
+                          </>
+                        );
+                      })()}
                     </div>
                     <div>
                       <label className="block text-slate-300 mb-1.5 font-medium">优先级</label>

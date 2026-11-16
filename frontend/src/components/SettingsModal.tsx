@@ -23,6 +23,8 @@ import {
   ExternalLink,
   Copy,
   GitBranch,
+  Plus,
+  Trash2,
 } from 'lucide-react';
 import { apiFetch } from '@/utils/apiClient';
 import { ModelOption } from './ModelSelector';
@@ -93,6 +95,13 @@ export function SettingsModal({
 
   // 上下文记忆轮数状态 (默认 10 轮)
   const [contextRounds, setContextRounds] = useState<number>(10);
+  const [ctxGlobalOverride, setCtxGlobalOverride] = useState<number>(0);
+  const [ctxRolloverPct, setCtxRolloverPct] = useState<number>(90);
+  const [ctxModelOverrides, setCtxModelOverrides] = useState<Array<{ model: string; limit: number }>>([]);
+  const [newModelKey, setNewModelKey] = useState<string>('');
+  const [newModelLimit, setNewModelLimit] = useState<number>(65536);
+  const [savingCtxLimits, setSavingCtxLimits] = useState<boolean>(false);
+  const [ctxLimitFeedback, setCtxLimitFeedback] = useState<{ success: boolean; msg: string } | null>(null);
   const [cleanupMessage, setCleanupMessage] = useState<string | null>(null);
   const [isCleaning, setIsCleaning] = useState(false);
   const [copiedRepoUrl, setCopiedRepoUrl] = useState(false);
@@ -144,6 +153,65 @@ export function SettingsModal({
       setContextRounds(parseInt(savedRounds, 10));
     }
   }, []);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    let active = true;
+    apiFetch('/api/v1/settings/context-limits')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!active || !data?.config) return;
+        setCtxGlobalOverride(Number(data.config.global_override || 0));
+        setCtxRolloverPct(Number(data.config.rollover_watermark_pct || 90));
+        const rawMap = data.config.model_overrides || {};
+        const rows = Object.entries(rawMap).map(([model, limit]) => ({
+          model,
+          limit: Number(limit || 0),
+        }));
+        setCtxModelOverrides(rows);
+      })
+      .catch(() => {});
+    return () => {
+      active = false;
+    };
+  }, [isOpen]);
+
+  const handleSaveContextLimits = async (
+    nextGlobal = ctxGlobalOverride,
+    nextPct = ctxRolloverPct,
+    nextModels = ctxModelOverrides
+  ) => {
+    try {
+      setSavingCtxLimits(true);
+      setCtxLimitFeedback(null);
+      const modelMap: Record<string, number> = {};
+      for (const item of nextModels) {
+        const cleanKey = item.model.trim().toLowerCase();
+        if (cleanKey && item.limit > 0) {
+          modelMap[cleanKey] = Math.round(item.limit);
+        }
+      }
+      const res = await apiFetch('/api/v1/settings/context-limits', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          global_override: Math.max(0, Math.round(nextGlobal || 0)),
+          rollover_watermark_pct: Math.min(98, Math.max(50, Math.round(nextPct || 90))),
+          model_overrides: modelMap,
+        }),
+      });
+      const resData = await res.json();
+      if (res.ok) {
+        setCtxLimitFeedback({ success: true, msg: resData.message || '上下文窗口配置已保存！' });
+      } else {
+        setCtxLimitFeedback({ success: false, msg: resData.detail || '保存失败' });
+      }
+    } catch (e: any) {
+      setCtxLimitFeedback({ success: false, msg: e?.message || '网络异常' });
+    } finally {
+      setSavingCtxLimits(false);
+    }
+  };
 
   const handleUpdateContextRounds = (rounds: number) => {
     setContextRounds(rounds);
@@ -795,6 +863,205 @@ export function SettingsModal({
                     );
                   })}
                 </div>
+              </div>
+
+              {/* 模型上下文窗口上限与自动蒸馏接力阈值 */}
+              <div className="p-4 rounded-2xl bg-surface-100 border border-border space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <span className="text-xs font-bold text-foreground flex items-center space-x-2">
+                      <Cpu className="w-4 h-4 text-emerald-500" />
+                      <span>模型上下文窗口上限与接力阈值（默认值可自由修改）</span>
+                    </span>
+                    <p className="text-[11px] text-muted-foreground mt-1 leading-relaxed">
+                      系统内置初始值（本地 8K / 通用 OpenAI 兼容 32K / DeepSeek 64K / GPT 128K / Claude 200K / Gemini 1M）仅作默认兜底，您可根据实际模型规格修改；达设定水位百分比时将自动蒸馏并接力新对话。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={savingCtxLimits}
+                    onClick={() => handleSaveContextLimits()}
+                    className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white font-medium text-xs transition-all shadow-sm shadow-emerald-600/20 flex items-center space-x-1.5 shrink-0 disabled:opacity-50"
+                  >
+                    <Save className="w-3.5 h-3.5" />
+                    <span>{savingCtxLimits ? '保存中...' : '保存上限配置'}</span>
+                  </button>
+                </div>
+
+                {/* 接力触发水位百分比 + 全局默认覆盖 */}
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                  <div className="p-3 rounded-xl bg-surface-200/50 border border-border/70 space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-foreground">自动蒸馏接力水位阈值 (%)</span>
+                      <span className="font-mono text-emerald-500 font-bold">{ctxRolloverPct}%</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="number"
+                        min={50}
+                        max={98}
+                        value={ctxRolloverPct}
+                        onChange={(e) => setCtxRolloverPct(Math.min(98, Math.max(50, Number(e.target.value) || 90)))}
+                        className="w-24 px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs font-mono text-foreground outline-none focus:border-emerald-500"
+                      />
+                      <div className="flex flex-wrap gap-1">
+                        {[75, 85, 90, 95].map((pct) => (
+                          <button
+                            key={pct}
+                            type="button"
+                            onClick={() => setCtxRolloverPct(pct)}
+                            className={`px-2 py-1 rounded-md text-[10px] font-mono border transition-colors ${
+                              ctxRolloverPct === pct
+                                ? 'bg-emerald-500/20 border-emerald-500 text-emerald-600 dark:text-emerald-300 font-bold'
+                                : 'bg-surface-card border-border text-muted-foreground hover:text-foreground'
+                            }`}
+                          >
+                            {pct}%
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="p-3 rounded-xl bg-surface-200/50 border border-border/70 space-y-2">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-foreground">全局上下文上限覆盖</span>
+                      <span className="font-mono text-[11px] text-muted-foreground">
+                        {ctxGlobalOverride > 0 ? `${ctxGlobalOverride.toLocaleString()} tokens` : '按模型自动'}
+                      </span>
+                    </div>
+                    <input
+                      type="number"
+                      min={0}
+                      max={4000000}
+                      step={1024}
+                      value={ctxGlobalOverride}
+                      onChange={(e) => setCtxGlobalOverride(Math.max(0, Number(e.target.value) || 0))}
+                      placeholder="0 表示按模型初始值自动识别"
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs font-mono text-foreground outline-none focus:border-emerald-500"
+                    />
+                    <div className="flex flex-wrap gap-1">
+                      {[
+                        { label: '自动(0)', val: 0 },
+                        { label: '8K', val: 8192 },
+                        { label: '32K', val: 32768 },
+                        { label: '64K', val: 65536 },
+                        { label: '128K', val: 131072 },
+                        { label: '200K', val: 200000 },
+                        { label: '1M', val: 1000000 },
+                      ].map((preset) => (
+                        <button
+                          key={preset.val}
+                          type="button"
+                          onClick={() => setCtxGlobalOverride(preset.val)}
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-mono border transition-colors ${
+                            ctxGlobalOverride === preset.val
+                              ? 'bg-emerald-500/20 border-emerald-500 text-emerald-600 dark:text-emerald-300 font-bold'
+                              : 'bg-surface-card border-border text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          {preset.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* 按具体模型名覆写上下文上限 */}
+                <div className="p-3 rounded-xl bg-surface-200/40 border border-border/70 space-y-2.5">
+                  <div className="text-xs font-semibold text-foreground">
+                    按模型名称单独覆盖上下文上限（优先级高于全局覆盖）
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <input
+                      type="text"
+                      value={newModelKey}
+                      onChange={(e) => setNewModelKey(e.target.value)}
+                      placeholder="模型名或关键词（如 nemotron-3.5-super）"
+                      className="flex-1 min-w-[200px] px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs font-mono text-foreground outline-none focus:border-emerald-500"
+                    />
+                    <input
+                      type="number"
+                      min={1024}
+                      max={4000000}
+                      step={1024}
+                      value={newModelLimit}
+                      onChange={(e) => setNewModelLimit(Math.max(1024, Number(e.target.value) || 32768))}
+                      className="w-32 px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs font-mono text-foreground outline-none focus:border-emerald-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const cleanKey = newModelKey.trim().toLowerCase();
+                        if (!cleanKey) return;
+                        const filtered = ctxModelOverrides.filter((item) => item.model !== cleanKey);
+                        const nextList = [...filtered, { model: cleanKey, limit: newModelLimit }];
+                        setCtxModelOverrides(nextList);
+                        setNewModelKey('');
+                      }}
+                      className="px-3 py-1.5 rounded-lg bg-surface-card hover:bg-surface-200 border border-border text-xs font-medium text-foreground flex items-center space-x-1"
+                    >
+                      <Plus className="w-3.5 h-3.5 text-emerald-500" />
+                      <span>添加规则</span>
+                    </button>
+                  </div>
+
+                  {ctxModelOverrides.length > 0 && (
+                    <div className="space-y-1.5 pt-1">
+                      {ctxModelOverrides.map((row) => (
+                        <div
+                          key={row.model}
+                          className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-lg bg-surface-card border border-border text-xs"
+                        >
+                          <span className="font-mono text-foreground truncate">{row.model}</span>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <input
+                              type="number"
+                              min={1024}
+                              max={4000000}
+                              step={1024}
+                              value={row.limit}
+                              onChange={(e) => {
+                                const val = Math.max(1024, Number(e.target.value) || 32768);
+                                setCtxModelOverrides((prev) =>
+                                  prev.map((item) => (item.model === row.model ? { ...item, limit: val } : item))
+                                );
+                              }}
+                              className="w-28 px-2 py-1 rounded bg-surface-100 border border-border text-xs font-mono text-foreground outline-none focus:border-emerald-500"
+                            />
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setCtxModelOverrides((prev) => prev.filter((item) => item.model !== row.model))
+                              }
+                              className="p-1 text-muted-foreground hover:text-rose-500 transition-colors"
+                              title="删除此模型覆写"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {ctxLimitFeedback && (
+                  <div
+                    className={`p-2.5 rounded-lg text-xs flex items-center space-x-2 ${
+                      ctxLimitFeedback.success
+                        ? 'bg-emerald-500/10 border border-emerald-500/20 text-emerald-600 dark:text-emerald-300'
+                        : 'bg-rose-500/10 border border-rose-500/20 text-rose-500'
+                    }`}
+                  >
+                    {ctxLimitFeedback.success ? (
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                    ) : (
+                      <XCircle className="w-3.5 h-3.5 shrink-0" />
+                    )}
+                    <span>{ctxLimitFeedback.msg}</span>
+                  </div>
+                )}
               </div>
 
               {/* 会话列表去重与整理 */}

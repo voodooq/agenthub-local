@@ -42,6 +42,7 @@ from .tool_protocol import ToolProtocolAdapter
 from .context_builder import ContextBuilder
 from .context_compressor import (
     LocalContextCompressor,
+    get_effective_rollover_ratio,
     read_ephemeral_tool_ref,
     resolve_scrub_char_threshold,
 )
@@ -1632,7 +1633,7 @@ class AgentRuntime:
                     if (
                         ctx_limit > 0
                         and ctx_tokens > 0
-                        and (ctx_tokens / ctx_limit) >= self.AUTO_ROLLOVER_WATERMARK_RATIO
+                        and (ctx_tokens / ctx_limit) >= get_effective_rollover_ratio()
                     ):
                         rollover_triggered = True
                         watermark_pct = min(100.0, (ctx_tokens / ctx_limit) * 100.0)
@@ -4091,11 +4092,12 @@ class AgentRuntime:
                     if (
                         latest_ctx_limit > 0
                         and latest_ctx_tokens > 0
-                        and (latest_ctx_tokens / latest_ctx_limit) >= self.AUTO_ROLLOVER_WATERMARK_RATIO
+                        and (latest_ctx_tokens / latest_ctx_limit) >= get_effective_rollover_ratio()
                     ):
                         rollover_pct = min(100.0, (latest_ctx_tokens / latest_ctx_limit) * 100.0)
+                        threshold_pct = int(round(get_effective_rollover_ratio() * 100))
                         rollover_notice = (
-                            f"🔁 当前会话上下文水位已达 {rollover_pct:.1f}%（阈值 90%），"
+                            f"🔁 当前会话上下文水位已达 {rollover_pct:.1f}%（阈值 {threshold_pct}%），"
                             "已提前蒸馏关键工作上下文并在同工作区创建接力新对话继续执行。"
                         )
                         await MessageRepository.save_message(
