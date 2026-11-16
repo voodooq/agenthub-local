@@ -2300,7 +2300,8 @@ class AgentRuntime:
                                 }
                             tool_output = str(exec_res.get("output") or "")
                             tool_exit_code = int(exec_res.get("exit_code", 0) or 0)
-                            new_cwd = exec_res["new_cwd"]
+                            raw_new_cwd = exec_res.get("new_cwd")
+                            new_cwd: str | None = raw_new_cwd if isinstance(raw_new_cwd, str) and raw_new_cwd else None
                             if new_cwd and new_cwd != ctx.get("current_cwd"):
                                 ctx["current_cwd"] = new_cwd
                                 await ConversationRepository.update_agent_state(conv_id, current_cwd=new_cwd)
