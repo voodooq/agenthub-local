@@ -158,6 +158,7 @@ export default function WorkbenchPage() {
   const convLoopCacheRef = useRef<Map<string, TaskLoopResponse | null>>(new Map());
 
   const lastStreamErrorNoticeRef = useRef<{ convId: string; message: string } | null>(null);
+  const pendingRolloverContinueRef = useRef<{ convId: string; prompt: string } | null>(null);
   const lastStatusPillSigRef = useRef<string>('');
   const lastActiveLoopSigRef = useRef<string>('');
   const [statusPill, setStatusPill] = useState<StatusPillData | null>(null);
@@ -1631,6 +1632,13 @@ export default function WorkbenchPage() {
       let partialText = '';
       let partialThinking = '';
       let rollbackTargetConvId: string | null = null;
+      let rolloverPayload: {
+        new_conversation_id: string;
+        new_title?: string;
+        watermark_pct?: number;
+        auto_continue?: boolean;
+        continue_prompt?: string;
+      } | null = null;
       let currentStreamStepIndex = 0;
       let isRelayed = false;
       let executorAccount = statusPill?.active_account_name || 'AgentHub';
@@ -2080,6 +2088,14 @@ export default function WorkbenchPage() {
               }
               return updated;
             });
+          } else if (parsed.type === 'conversation_rollover' && parsed.new_conversation_id) {
+            rolloverPayload = {
+              new_conversation_id: String(parsed.new_conversation_id),
+              new_title: parsed.new_title ? String(parsed.new_title) : undefined,
+              watermark_pct: typeof parsed.watermark_pct === 'number' ? parsed.watermark_pct : undefined,
+              auto_continue: Boolean(parsed.auto_continue),
+              continue_prompt: parsed.continue_prompt ? String(parsed.continue_prompt) : undefined,
+            };
           } else if (parsed.type === 'done') {
             const doneRawText =
               typeof parsed.final_step_content === 'string'
@@ -2211,6 +2227,44 @@ export default function WorkbenchPage() {
       if (rollbackTargetConvId) {
         await fetchMessagesAndState(rollbackTargetConvId);
       }
+      const pendingRollover = rolloverPayload as {
+        new_conversation_id: string;
+        new_title?: string;
+        watermark_pct?: number;
+        auto_continue?: boolean;
+        continue_prompt?: string;
+      } | null;
+      if (pendingRollover?.new_conversation_id && getAbortReason() !== 'user') {
+        const oldCid = effectiveConvId || activeConvIdRef.current;
+        if (oldCid) {
+          activeStreamsMapRef.current.delete(oldCid);
+        }
+        const newCid = pendingRollover.new_conversation_id;
+        const wasViewingOld = !oldCid || activeConvIdRef.current === oldCid;
+        await fetchConversations();
+        if (wasViewingOld) {
+          activeConvIdRef.current = newCid;
+          setActiveConvId(newCid);
+          effectiveConvId = newCid;
+          if (pendingRollover.auto_continue && pendingRollover.continue_prompt) {
+            pendingRolloverContinueRef.current = {
+              convId: newCid,
+              prompt: pendingRollover.continue_prompt,
+            };
+            showFloatingToast(
+              `上下文水位达 ${pendingRollover.watermark_pct ?? 90}%，已自动蒸馏并切换至接力新对话继续执行`,
+              'success',
+              4800
+            );
+          } else {
+            showFloatingToast(
+              `上下文水位达 ${pendingRollover.watermark_pct ?? 90}%，已自动蒸馏并创建同工作区接力新对话`,
+              'success',
+              4200
+            );
+          }
+        }
+      }
     } catch (err) {
       clearWatchdogs();
       const reason = getAbortReason();
@@ -2290,6 +2344,18 @@ export default function WorkbenchPage() {
       }
     }
   };
+
+  useEffect(() => {
+    const pending = pendingRolloverContinueRef.current;
+    if (!pending || isStreaming || isStreamingRef.current) return;
+    if (activeConvId !== pending.convId) return;
+    pendingRolloverContinueRef.current = null;
+    const timer = window.setTimeout(() => {
+      void handleSendMessage(pending.prompt);
+    }, 220);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isStreaming, activeConvId]);
 
   const readFileAsDataUrl = (file: File): Promise<string> =>
     new Promise((resolve) => {

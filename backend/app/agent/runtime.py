@@ -68,6 +68,18 @@ class AgentRuntime:
 
     DEFAULT_REACT_STEPS = 16
     MAX_REACT_STEPS = 500  # 仅作极端防爆保护，常规推进按需动态扩展，仅在重复同一失败方案超过 3 次时熔断
+    AUTO_ROLLOVER_WATERMARK_RATIO = 0.90  # 上下文水位达到 90% 时自动蒸馏交接并在同工作区创建接力新对话
+
+    @staticmethod
+    def _compute_next_rollover_title(base_title: str) -> str:
+        """为自动接力新会话生成递增序号标题（如 `原标题 · 接力 #2`）。"""
+        clean = (base_title or "新会话").strip() or "新会话"
+        match = re.search(r"^(.*?)\s*·\s*接力\s*#(\d+)$", clean)
+        if match:
+            prefix = match.group(1).strip() or "新会话"
+            next_idx = int(match.group(2)) + 1
+            return f"{prefix} · 接力 #{next_idx}"
+        return f"{clean[:60]} · 接力 #2"
 
     # 活跃流式执行注册表：conversation_id -> {"token": str, "cancel_event": asyncio.Event}
     _active_streams: dict[str, dict[str, Any]] = {}
@@ -1216,6 +1228,9 @@ class AgentRuntime:
         failed_attempt_counts: dict[tuple[str, str], int] = {}
         consecutive_err_fp: dict[str, Any] = {"fp": "", "count": 0}
         last_executed_shell_cmd: str = ""
+        rollover_triggered = False
+        rollover_task_completed = False
+        recent_error_summaries: list[str] = []
 
         # 4.5 关联工作区长程自主领航舱 (TaskLoopRunner 闭环驱动：严格按 conversation_id 隔离 + 渐进式按需激活)
         active_loop_obj = None
@@ -1413,6 +1428,155 @@ class AgentRuntime:
                     }
                     active_loop_obj = None
 
+        async def _perform_context_rollover(
+            watermark_pct: float,
+            *,
+            task_completed: bool,
+        ) -> dict[str, Any] | None:
+            """上下文水位达到阈值时，蒸馏关键上下文并在同工作区创建接力新对话。"""
+            nonlocal active_loop_obj
+            if active_incognito or not conv_id:
+                return None
+
+            source_conv = await ConversationRepository.get_by_id(conv_id)
+            target_ws_id = (
+                (getattr(source_conv, "workspace_id", None) if source_conv else None)
+                or ws_id
+                or "default"
+            )
+            target_cwd = (
+                (getattr(source_conv, "current_cwd", None) if source_conv else None)
+                or effective_cwd
+            )
+            target_model = (
+                effective_model_name
+                or (getattr(source_conv, "model_name", None) if source_conv else None)
+                or model_name
+                or "4 Argon"
+            )
+            target_scene = (
+                active_scene
+                or (getattr(source_conv, "scene_mode", None) if source_conv else None)
+                or "agent"
+            )
+            base_title = (
+                (getattr(source_conv, "title", None) if source_conv else None)
+                or user_message.strip().split("\n")[0][:60]
+                or "新会话"
+            )
+            new_title = self._compute_next_rollover_title(base_title)
+            existing_summary = ""
+            if source_conv:
+                existing_summary = (
+                    getattr(source_conv, "anchored_summary", None)
+                    or getattr(source_conv, "rolling_summary", None)
+                    or ""
+                )
+
+            # 汇总最近错误卡点（含 last_step_error_info 兜底）
+            merged_errors = list(recent_error_summaries)
+            if isinstance(last_step_error_info, dict):
+                err_txt = str(last_step_error_info.get("error") or "").strip()
+                if err_txt and err_txt not in merged_errors:
+                    merged_errors.append(err_txt[:240])
+
+            # 提取当前会话已确认的工作区事实（如有）
+            confirmed_facts_list: list[str] = []
+            try:
+                facts = await fact_manager.list_facts(workspace_id=target_ws_id, limit=8)
+                for f_obj in facts or []:
+                    f_val = (
+                        f_obj.get("fact_text")
+                        if isinstance(f_obj, dict)
+                        else getattr(f_obj, "fact_text", "")
+                    )
+                    if f_val:
+                        confirmed_facts_list.append(str(f_val))
+            except Exception:
+                pass
+
+            distilled = await LocalContextCompressor.distill_handoff_summary(
+                conversation_id=conv_id,
+                user_goal=user_message.strip(),
+                current_cwd=target_cwd,
+                produced_artifacts=produced_artifacts,
+                active_loop_scratchpad=getattr(active_loop_obj, "scratchpad_md", "") or "",
+                confirmed_facts=confirmed_facts_list,
+                recent_errors=merged_errors,
+                existing_summary=existing_summary,
+                task_completed=task_completed,
+                watermark_pct=watermark_pct,
+            )
+            handoff_summary = str(distilled.get("handoff_summary") or "").strip()
+            continue_prompt = str(distilled.get("continue_prompt") or "").strip()
+
+            new_conv_id = str(uuid.uuid4())
+            await ConversationRepository.create(
+                {
+                    "id": new_conv_id,
+                    "title": new_title,
+                    "source_type": "local",
+                    "source_account": getattr(source_conv, "source_account", None) if source_conv else None,
+                    "model_name": target_model,
+                    "scene_mode": target_scene,
+                    "incognito": False,
+                    "current_cwd": target_cwd,
+                    "workspace_id": target_ws_id,
+                    "parent_conversation_id": conv_id,
+                }
+            )
+            await ConversationRepository.update_collapse_anchor(
+                conv_id=new_conv_id,
+                anchor_turn_id=0,
+                anchored_summary=handoff_summary,
+                added_saved_tokens=0,
+            )
+            await ConversationRepository.update_agent_state(
+                new_conv_id,
+                rolling_summary=handoff_summary,
+                current_cwd=target_cwd,
+            )
+            # 在新会话首条落库交接卡片，让用户和后续上下文都能直观看到完整蒸馏结果
+            await MessageRepository.save_message(
+                conversation_id=new_conv_id,
+                role="model",
+                content=handoff_summary,
+                executed_by_account=final_account,
+                token_count=max(1, len(handoff_summary) // 3),
+                turn_id=1,
+            )
+            await ConversationRepository.touch(new_conv_id)
+
+            # 若旧会话存在未结束的 Loop，则自动暂停避免残留运行态
+            if active_loop_obj and getattr(active_loop_obj, "id", None):
+                try:
+                    await TaskLoopRepository.update_loop_status(
+                        loop_id=active_loop_obj.id,
+                        status="paused",
+                        last_summary=f"上下文水位达 {watermark_pct:.1f}%，已自动蒸馏并切换至接力新对话 {new_conv_id[:8]}",
+                    )
+                    active_loop_obj = None
+                except Exception as loop_err:
+                    logger.debug(f"[ContextRollover] 暂停旧会话活跃 Loop 跳过: {loop_err}")
+
+            logger.info(
+                f"[ContextRollover] 会话 {conv_id} 水位达 {watermark_pct:.1f}% (>=90%)，"
+                f"已自动创建同工作区接力新会话 {new_conv_id} ({new_title})，"
+                f"auto_continue={not task_completed}"
+            )
+            return {
+                "type": "conversation_rollover",
+                "old_conversation_id": conv_id,
+                "new_conversation_id": new_conv_id,
+                "new_title": new_title,
+                "workspace_id": target_ws_id,
+                "current_cwd": target_cwd,
+                "watermark_pct": round(watermark_pct, 1),
+                "auto_continue": not task_completed,
+                "continue_prompt": continue_prompt,
+                "handoff_summary": handoff_summary,
+            }
+
         async def _emit_turn_tail_events(
             summary_text: str,
             *,
@@ -1454,6 +1618,32 @@ class AgentRuntime:
                     }
             except Exception as stats_err:
                 logger.debug(f"[AgentRuntime] 推送 token_stats 跳过: {stats_err}")
+
+            # 90% 上下文水位自动蒸馏交接：确保无痕模式下不触发，且同一轮内防重
+            nonlocal rollover_triggered
+            if not active_incognito and not rollover_triggered:
+                try:
+                    ctx_tokens = int((turn_stats_payload or {}).get("context_tokens") or 0)
+                    ctx_limit = int((turn_stats_payload or {}).get("context_limit") or 0)
+                    if (ctx_limit <= 0 or ctx_tokens <= 0) and in_memory_step_metrics:
+                        last_m = in_memory_step_metrics[-1]
+                        ctx_tokens = int(last_m.get("prompt_tokens") or 0)
+                        ctx_limit = int(last_m.get("context_limit") or 0)
+                    if (
+                        ctx_limit > 0
+                        and ctx_tokens > 0
+                        and (ctx_tokens / ctx_limit) >= self.AUTO_ROLLOVER_WATERMARK_RATIO
+                    ):
+                        rollover_triggered = True
+                        watermark_pct = min(100.0, (ctx_tokens / ctx_limit) * 100.0)
+                        rollover_ev = await _perform_context_rollover(
+                            watermark_pct,
+                            task_completed=rollover_task_completed,
+                        )
+                        if rollover_ev:
+                            yield rollover_ev
+                except Exception as rollover_err:
+                    logger.warning(f"[ContextRollover] 自动蒸馏接力新对话失败（已跳过）: {rollover_err}")
 
         # 抽取本轮视觉附件（图片/PDF），同 Turn 多步调用中保持多模态视觉输入不丢失
         visual_attachments = self._filter_visual_attachments(attachments)
@@ -2058,6 +2248,7 @@ class AgentRuntime:
                     accumulated_visible_text += ("\n\n" + final_saved_text if accumulated_visible_text else final_saved_text)
 
                     # ── 任务自主闭环门控与收尾统一事件推送 ──
+                    rollover_task_completed = True
                     summary_snippet = (final_saved_text or accumulated_visible_text).strip().split("\n")[0][:80]
                     async for tail_ev in _emit_turn_tail_events(
                         summary_snippet or "模型已完成自主闭环并输出交付结论",
@@ -3869,6 +4060,7 @@ class AgentRuntime:
                         "account": final_account,
                         "model": effective_model_name,
                     }
+                    rollover_task_completed = True
                     summary_snippet = clean_deliverable.split("\n")[0][:80]
                     async for tail_ev in _emit_turn_tail_events(
                         summary_snippet or "任务标记为已完成，工作记忆已归档",
@@ -3885,6 +4077,52 @@ class AgentRuntime:
                     break
 
                 step_idx += 1
+
+                # 多步 ReAct 执行中途若单步上下文水位已达 90%，提前熔断蒸馏并切换至同工作区接力新会话续跑
+                if (
+                    step_idx < current_max_steps
+                    and not active_incognito
+                    and not rollover_triggered
+                    and in_memory_step_metrics
+                ):
+                    latest_step_m = in_memory_step_metrics[-1]
+                    latest_ctx_tokens = int(latest_step_m.get("prompt_tokens") or 0)
+                    latest_ctx_limit = int(latest_step_m.get("context_limit") or 0)
+                    if (
+                        latest_ctx_limit > 0
+                        and latest_ctx_tokens > 0
+                        and (latest_ctx_tokens / latest_ctx_limit) >= self.AUTO_ROLLOVER_WATERMARK_RATIO
+                    ):
+                        rollover_pct = min(100.0, (latest_ctx_tokens / latest_ctx_limit) * 100.0)
+                        rollover_notice = (
+                            f"🔁 当前会话上下文水位已达 {rollover_pct:.1f}%（阈值 90%），"
+                            "已提前蒸馏关键工作上下文并在同工作区创建接力新对话继续执行。"
+                        )
+                        await MessageRepository.save_message(
+                            conversation_id=conv_id,
+                            role="model",
+                            content=rollover_notice,
+                            executed_by_account=final_account,
+                            token_count=max(1, len(rollover_notice) // 3),
+                            turn_id=current_turn_id,
+                        )
+                        await ConversationRepository.touch(conv_id)
+                        rollover_task_completed = False
+                        async for tail_ev in _emit_turn_tail_events(
+                            f"上下文水位达 {rollover_pct:.1f}%，自动蒸馏交接至同工作区新会话续跑",
+                        ):
+                            yield tail_ev
+                        stream_completed_normally = True
+                        yield {
+                            "type": "done",
+                            "full_content": (
+                                f"{accumulated_visible_text.strip()}\n\n{rollover_notice}".strip()
+                            ),
+                            "final_step_content": rollover_notice,
+                            "account": final_account,
+                            "model": effective_model_name,
+                        }
+                        break
 
                 # 若已到达自适应最大步数上限（最高动态扩展至 40 步），追加独立收尾汇总气泡避免仅剩工具过程卡片
                 if step_idx >= current_max_steps:

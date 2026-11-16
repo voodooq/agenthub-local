@@ -731,6 +731,217 @@ class LocalContextCompressor:
         }
 
     @classmethod
+    async def distill_handoff_summary(
+        cls,
+        *,
+        conversation_id: str,
+        user_goal: str = "",
+        current_cwd: str | None = None,
+        produced_artifacts: list[str] | None = None,
+        active_loop_scratchpad: str = "",
+        confirmed_facts: list[str] | None = None,
+        recent_errors: list[str] | None = None,
+        recent_messages: list[dict[str, Any]] | None = None,
+        existing_summary: str = "",
+        task_completed: bool = False,
+        watermark_pct: float = 90.0,
+    ) -> dict[str, Any]:
+        """当上下文水位达到接力阈值（如 90%）时，提炼高密度结构化交接摘要供同工作区新会话接力。
+
+        优先使用轻模型对近期执行轨迹做语义提炼，同时强制锚定硬事实底座（工作目录、产物清单、
+        草稿纸进度、报错卡点），轻模型不可用或超时时平滑降级为确定性规则蒸馏，确保关键上下文零丢失。
+        """
+        from ..memory.policy_guard import MemoryPolicyGuard
+        from ..service.attachment_service import attachment_service
+        from ..service.engine_pool import engine_pool
+
+        msgs = recent_messages
+        if msgs is None:
+            try:
+                msgs = await MessageRepository.get_by_conversation(conversation_id)
+            except Exception:
+                msgs = []
+
+        # 提取核心目标（优先显式传入，其次回溯首条用户有效输入）
+        def _msg_field(item: Any, key: str, default: str = "") -> str:
+            if isinstance(item, dict):
+                return str(item.get(key) or default)
+            return str(getattr(item, key, None) or default)
+
+        resolved_goal = (user_goal or "").strip()
+        if not resolved_goal and msgs:
+            for m in msgs:
+                if _msg_field(m, "role") == "user":
+                    raw_u = attachment_service.strip_attachments_for_display(
+                        _msg_field(m, "content")
+                    ).strip()
+                    if raw_u:
+                        resolved_goal = raw_u[:360]
+                        break
+        safe_goal, _ = MemoryPolicyGuard.sanitize_text(resolved_goal or "推进当前工作区任务")
+
+        # 收集去重后的关键文件路径、确定性事实与报错卡点
+        dedup_artifacts: list[str] = []
+        for item in produced_artifacts or []:
+            clean = str(item or "").strip()
+            if clean and clean not in dedup_artifacts:
+                dedup_artifacts.append(clean)
+
+        dedup_facts: list[str] = []
+        for f_item in confirmed_facts or []:
+            safe_f, _ = MemoryPolicyGuard.sanitize_text(str(f_item or "").strip())
+            if safe_f and safe_f not in dedup_facts:
+                dedup_facts.append(safe_f[:240])
+
+        dedup_errors: list[str] = []
+        for err_item in recent_errors or []:
+            safe_e, _ = MemoryPolicyGuard.sanitize_text(str(err_item or "").strip())
+            if safe_e and safe_e not in dedup_errors:
+                dedup_errors.append(safe_e[:240])
+
+        # 从最近 14 条消息中抽取压缩轨迹，避免把超大原始工具输出塞给轻模型
+        trace_lines: list[str] = []
+        for m in (msgs or [])[-14:]:
+            role = _msg_field(m, "role", "model")
+            raw_txt = (_msg_field(m, "compressed_content") or _msg_field(m, "content")).strip()
+            if role == "user":
+                raw_txt = attachment_service.strip_attachments_for_display(raw_txt).strip()
+            if not raw_txt:
+                continue
+            safe_txt, _ = MemoryPolicyGuard.sanitize_text(raw_txt)
+            # 对单条过长内容做头尾采样，保留核心结论与报错
+            if len(safe_txt) > 520:
+                safe_txt = f"{safe_txt[:320]} ... {safe_txt[-180:]}"
+            trace_lines.append(f"[{role}] {safe_txt}")
+
+        safe_existing, _ = MemoryPolicyGuard.sanitize_text((existing_summary or "").strip())
+        safe_scratchpad, _ = MemoryPolicyGuard.sanitize_text((active_loop_scratchpad or "").strip())
+
+        hard_facts_lines: list[str] = [
+            f"- **核心目标**: {safe_goal}",
+            f"- **工作目录 (CWD)**: `{current_cwd or '未显式指定'}`",
+            f"- **交接原因**: 上下文水位达到 {watermark_pct:.1f}%（{'本轮已收尾归档' if task_completed else '任务尚在进行中，需新会话无缝接力'}）",
+        ]
+        if dedup_artifacts:
+            hard_facts_lines.append(
+                "- **已修改/产出文件**: " + ", ".join(f"`{p}`" for p in dedup_artifacts[-15:])
+            )
+        if dedup_facts:
+            hard_facts_lines.append(
+                "- **已确认工作区事实**: " + " | ".join(dedup_facts[-6:])
+            )
+        if dedup_errors:
+            hard_facts_lines.append(
+                "- **最近卡点/已排除错误**: " + " | ".join(dedup_errors[-5:])
+            )
+        if safe_scratchpad:
+            hard_facts_lines.append(
+                f"- **自主循环草稿纸进度**:\n{safe_scratchpad[:900]}"
+            )
+
+        hard_facts_block = "\n".join(hard_facts_lines)
+
+        distilled_body = ""
+        used_llm = False
+        prompt = (
+            "你是一个高精度研发任务交接蒸馏器。当前会话上下文水位即将满载，系统将创建同工作区新会话继续工作。\n"
+            "请结合下方【硬事实底座】【已有历史摘要】与【近期执行轨迹】，提炼一份高信息密度、可直接指导新会话无缝接力的中文交接文档。\n"
+            "要求：\n"
+            "1. 必须包含五个小节：`### 1. 核心目标与环境`、`### 2. 已完成进展与关键结论`、`### 3. 关键文件与产物`、`### 4. 卡点与已排除弯路`、`### 5. 接力下一步建议`。\n"
+            "2. 严禁编造未在输入中出现的文件路径、命令结果或版本号；硬事实中的工作目录、文件路径、报错关键信息必须准确保留。\n"
+            "3. 篇幅控制在 1200 字以内，条理清晰、拒绝空话。\n\n"
+            f"【硬事实底座】\n{hard_facts_block}\n\n"
+            + (f"【已有历史摘要】\n{safe_existing[:900]}\n\n" if safe_existing else "")
+            + ("【近期执行轨迹】\n" + "\n".join(trace_lines) if trace_lines else "")
+        )
+
+        async def _consume_distill_stream() -> str:
+            collected = ""
+            async for evt in engine_pool.execute_stream_with_failover(
+                conversation_id=conversation_id,
+                user_prompt=prompt,
+                model_name="",
+                thinking_level="low",
+                system_override="你是高密度研发交接上下文蒸馏器，只输出严谨客观的结构化 Markdown 交接摘要。",
+                temperature=0.15,
+                pre_built_history=[],
+                task_role="light",
+            ):
+                etype = evt.get("type")
+                if etype == "chunk":
+                    collected += evt.get("content", "")
+                elif etype == "done":
+                    collected = evt.get("full_content", collected)
+                    break
+                elif etype == "error":
+                    return ""
+            return collected
+
+        try:
+            raw_llm_summary = await asyncio.wait_for(_consume_distill_stream(), timeout=15.0)
+            clean_llm = (raw_llm_summary or "").strip()
+            if len(clean_llm) >= 60:
+                safe_llm, _ = MemoryPolicyGuard.sanitize_text(clean_llm)
+                distilled_body = safe_llm[:2400]
+                used_llm = True
+        except Exception as e:
+            logger.debug(f"[ContextRollover] 轻模型蒸馏跳过，使用确定性规则蒸馏: {e}")
+
+        if not distilled_body:
+            # 确定性兜底：硬事实 + 前序摘要 + 最近 5 条轨迹摘要
+            fallback_parts: list[str] = [
+                "### 1. 核心目标与环境",
+                hard_facts_block,
+            ]
+            if safe_existing:
+                fallback_parts.append(f"### 2. 前序历史摘要\n{safe_existing[:700]}")
+            if trace_lines:
+                fallback_parts.append(
+                    "### 3. 近期关键执行轨迹\n" + "\n".join(f"- {line}" for line in trace_lines[-6:])
+                )
+            fallback_parts.append(
+                "### 4. 接力下一步建议\n"
+                + (
+                    "- 上一会话已完成当前轮交付，若用户继续追问可直接在当前工作区承接。"
+                    if task_completed
+                    else "- 请结合上述工作目录、已改动文件与卡点记录继续执行，避免重复已完成步骤。"
+                )
+            )
+            distilled_body = "\n\n".join(fallback_parts)[:2800]
+
+        header = (
+            f"## 🔁 上下文水位接力交接摘要（来源会话 `{conversation_id[:8]}` | 水位 {watermark_pct:.1f}%）\n"
+            f"> 本对话在同工作区自动接力创建，完整保留上一对话关键状态。\n\n"
+        )
+        # 确保最终文档同时包含明确的工作目录与产物兜底行，防止轻模型偶发漏写
+        anchor_footer = (
+            f"\n\n---\n**交接硬锚点**: `CWD={current_cwd or ''}`"
+            + (
+                f" | **产物({len(dedup_artifacts)})**: "
+                + ", ".join(f"`{p}`" for p in dedup_artifacts[-8:])
+                if dedup_artifacts
+                else ""
+            )
+        )
+        handoff_summary = (header + distilled_body + anchor_footer)[:3200]
+
+        continue_prompt = (
+            ""
+            if task_completed
+            else (
+                f"[自动接力续跑] 上一会话上下文水位已达 {watermark_pct:.0f}%，"
+                "系统已将核心目标、工作目录、已修改文件、草稿纸进度与卡点完整蒸馏并锚定至本会话。\n"
+                "请严格基于锚定交接摘要与当前工作目录继续推进尚未完成的工作，切勿重复已完成步骤或已验证失败的路径。"
+            )
+        )
+
+        return {
+            "handoff_summary": handoff_summary,
+            "continue_prompt": continue_prompt,
+            "used_llm": used_llm,
+        }
+
+    @classmethod
     async def scrub_tool_output(
         cls,
         *,
