@@ -3693,7 +3693,8 @@ class AgentRuntime:
 
                         err_lines = [ln.strip() for ln in tool_output_str.splitlines() if ln.strip()]
                         raw_err_line = err_lines[-1] if err_lines else tool_output_str.strip()
-                        norm_err_fp = f"{func_name}:{re.sub(r'\d+', '#', raw_err_line)[:100]}"
+                        norm_err_tail = re.sub(r"\d+", "#", raw_err_line)[:100]
+                        norm_err_fp = f"{func_name}:{norm_err_tail}"
                         if consecutive_err_fp.get("fp") == norm_err_fp:
                             consecutive_err_fp["count"] = int(consecutive_err_fp.get("count") or 0) + 1
                         else:
