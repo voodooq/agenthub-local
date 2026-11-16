@@ -234,22 +234,59 @@ class TaskScheduler:
             return
         self._loop_task = loop.create_task(self.start_loop())
 
-    async def _execute_headless_agent(self, workspace_id: str, prompt: str) -> dict[str, Any]:
-        """调用 AgentRuntime 在指定工作区下无头执行提示词并返回完整输出与状态。"""
-        from ..agent.runtime import agent_runtime
+    async def _resolve_headless_model(self, workspace_id: str) -> str:
+        """解析无头计划任务应使用的已启用模型，避免硬编码回退导致未配置 Google 时报错。"""
+        active_models: list[Any] = []
+        active_ids: list[str] = []
+        try:
+            from ..api.v1.models import _build_active_models_response
 
-        model_name = "4 Argon"
+            resp = await _build_active_models_response()
+            active_models = list(resp.models or [])
+            active_ids = [str(m.id) for m in active_models if getattr(m, "id", None)]
+        except Exception as e:
+            logger.debug(f"读取系统已启用模型列表失败，尝试数据库回退: {e}")
+
+        active_id_set = set(active_ids)
+
         try:
             async with db_manager.get_connection() as conn:
+                # 1. 优先使用工作区显式设置的模型偏好（需在当前已启用模型集合内，或无可用列表时兜底）
                 async with conn.execute(
                     "SELECT model_preference FROM workspaces WHERE id = ?;",
                     (workspace_id,),
                 ) as cursor:
                     ws_row = await cursor.fetchone()
-                    if ws_row and ws_row["model_preference"]:
-                        model_name = str(ws_row["model_preference"])
+                    ws_pref = str(ws_row["model_preference"]).strip() if (ws_row and ws_row["model_preference"]) else ""
+                    if ws_pref and (not active_id_set or ws_pref in active_id_set):
+                        return ws_pref
+
+                # 2. 回退使用该工作区最近活跃会话正在使用的可用模型
+                if active_id_set:
+                    async with conn.execute(
+                        "SELECT model_name FROM conversations WHERE workspace_id = ? AND model_name IS NOT NULL AND model_name != '' ORDER BY updated_at DESC LIMIT 1;",
+                        (workspace_id,),
+                    ) as cursor:
+                        conv_row = await cursor.fetchone()
+                        recent_model = str(conv_row["model_name"]).strip() if (conv_row and conv_row["model_name"]) else ""
+                        if recent_model and recent_model in active_id_set:
+                            return recent_model
         except Exception as e:
-            logger.warning(f"读取工作区默认模型偏好失败，回退默认模型: {e}")
+            logger.warning(f"读取工作区/会话模型偏好失败，回退系统可用默认模型: {e}")
+
+        # 3. 回退到当前系统已启用模型列表中的默认项或首项
+        for m in active_models:
+            if getattr(m, "is_default", False) and getattr(m, "id", None):
+                return str(m.id)
+        if active_ids:
+            return active_ids[0]
+        return "4 Argon"
+
+    async def _execute_headless_agent(self, workspace_id: str, prompt: str) -> dict[str, Any]:
+        """调用 AgentRuntime 在指定工作区下无头执行提示词并返回完整输出与状态。"""
+        from ..agent.runtime import agent_runtime
+
+        model_name = await self._resolve_headless_model(workspace_id)
 
         output_chunks: list[str] = []
         error_messages: list[str] = []
