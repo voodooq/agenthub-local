@@ -1,9 +1,14 @@
 """
 消息明细仓储层 (Message Repository)
 """
+import sqlite3
 from typing import Any
 from ..model.models import MessageModel
 from .db import db_manager
+
+
+class ConversationDeletedError(RuntimeError):
+    """目标会话已被删除或不存在时抛出的受控中断异常，避免外键约束异常刷屏。"""
 
 
 class MessageRepository:
@@ -87,29 +92,40 @@ class MessageRepository:
         # NOTE: 插入 messages 表时会由底层触发器自动同步建立 FTS5 全文索引
         """
         async with db_manager.get_connection() as conn:
-            cursor = await conn.execute(
-                """
-                INSERT INTO messages (
-                    conversation_id, turn_id, role, content,
-                    compressed_content, tool_calls_json, tool_call_id,
-                    executed_by_account, token_count
+            try:
+                cursor = await conn.execute(
+                    """
+                    INSERT INTO messages (
+                        conversation_id, turn_id, role, content,
+                        compressed_content, tool_calls_json, tool_call_id,
+                        executed_by_account, token_count
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        conversation_id,
+                        turn_id,
+                        role,
+                        content,
+                        compressed_content,
+                        tool_calls_json,
+                        tool_call_id,
+                        executed_by_account,
+                        token_count,
+                    ),
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    conversation_id,
-                    turn_id,
-                    role,
-                    content,
-                    compressed_content,
-                    tool_calls_json,
-                    tool_call_id,
-                    executed_by_account,
-                    token_count,
-                )
-            )
-            await conn.commit()
-            return cursor.lastrowid or 0
+                await conn.commit()
+                return cursor.lastrowid or 0
+            except sqlite3.IntegrityError as exc:
+                async with conn.execute(
+                    "SELECT 1 FROM conversations WHERE id = ? LIMIT 1;",
+                    (conversation_id,),
+                ) as check_cur:
+                    if await check_cur.fetchone() is None:
+                        raise ConversationDeletedError(
+                            f"会话 {conversation_id} 已不存在或已被删除"
+                        ) from exc
+                raise
 
     @staticmethod
     async def update_message_content(

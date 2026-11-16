@@ -16,7 +16,7 @@ from typing import Any, AsyncGenerator, Awaitable, Callable
 
 from ..core.logging_config import logger
 from ..repository.conversation_repository import ConversationRepository
-from ..repository.message_repository import MessageRepository
+from ..repository.message_repository import ConversationDeletedError, MessageRepository
 from ..repository.search_repository import SearchRepository
 from ..service.agent_runner import cancel_cli_processes
 from ..service.engine_pool import engine_pool
@@ -3966,6 +3966,12 @@ class AgentRuntime:
         except asyncio.CancelledError:
             await _cleanup_and_pause_loop_on_abort("任务取消(CancelledError)")
             raise
+
+        except ConversationDeletedError:
+            logger.info(f"[AgentRuntime] 会话 {conv_id} 已被删除，安全终止后台执行流。")
+            cancel_cli_processes(conv_id)
+            shell_executor.cancel_session_processes(conv_id)
+            yield {"type": "done", "full_content": ""}
 
         except Exception as unexpected_err:
             logger.error(f"[AgentRuntime] chat_stream 发生未捕获异常: {unexpected_err}", exc_info=True)
