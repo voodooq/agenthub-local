@@ -2137,8 +2137,8 @@ class AgentRuntime:
                         args = {}
                         args_parse_failed = bool(isinstance(raw_args, str) and raw_args.strip())
 
-                    tool_output = ""
-                    compressed = ""
+                    tool_output: str = ""
+                    compressed: str = ""
                     rescue_addon = ""
                     tool_exit_code: int | None = None
                     s10_intercepted = False
@@ -2298,7 +2298,7 @@ class AgentRuntime:
                                     "exit_code": -2,
                                     "new_cwd": ctx.get("current_cwd"),
                                 }
-                            tool_output = exec_res["output"]
+                            tool_output = str(exec_res.get("output") or "")
                             tool_exit_code = int(exec_res.get("exit_code", 0) or 0)
                             new_cwd = exec_res["new_cwd"]
                             if new_cwd and new_cwd != ctx.get("current_cwd"):
@@ -2863,7 +2863,7 @@ class AgentRuntime:
                         }
                         skeleton_res = get_workspace_skeleton(current_work_dir, target_arg)
                         if skeleton_res["status"] == "success":
-                            tool_output = skeleton_res["skeleton"]
+                            tool_output = str(skeleton_res.get("skeleton") or "")
                             scanned = skeleton_res.get("scanned_files", 1)
                             compressed = f"[成功提取骨架: {target_arg} (包含 {scanned} 个文件大纲)]"
                         else:
@@ -3030,7 +3030,7 @@ class AgentRuntime:
                                                 end_line=cache_slice_key[1],
                                             )
                                             if sliced_res["status"] == "success":
-                                                tool_output = sliced_res["content"]
+                                                tool_output = str(sliced_res.get("content") or "")
                                                 compressed = f"[切片读取 `{rel_display}` (L{sliced_res['shown_range'][0]}-L{sliced_res['shown_range'][1]} / 共 {sliced_res['total_lines']} 行)]"
                                                 session_file_read_cache[read_cache_key] = (
                                                     cur_mtime_ns,
@@ -3091,7 +3091,7 @@ class AgentRuntime:
                             "security": "SAFE",
                         }
                         fetch_res = await web_tools.fetch_url(target_url, extract_main_text=extract_main)
-                        tool_output = fetch_res["content"]
+                        tool_output = str(fetch_res.get("content") or "")
                         st_code = fetch_res["status_code"]
                         compressed = f"[已抓取 `{target_url[:45]}`: HTTP {st_code}, 共 {len(tool_output)} 字符]"
 
