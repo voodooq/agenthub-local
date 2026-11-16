@@ -193,7 +193,7 @@ flowchart TD
 | **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
 | **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.4.2-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
 | **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.4.2-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
-| **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
+| **Docker 容器镜像** | Linux 服务器 / 跨平台容器 | `docker-compose.yml` / `backend/Dockerfile` | 见下方 [Linux 服务器 Docker 部署与远程访问指南](#-linux-服务器-docker-部署与远程访问指南) |
 
 ### 2. GitHub 自动检查升级与平滑覆盖重启 (`AutoUpdaterService` · `UpdateModal`)
 * **静默检查与更新提醒**：客户端启动时自动静默检查 `voodooq/agenthub-local` 最新 Release（亦支持在「设置 → 关于」手动检查），发现新版本后在侧栏与顶栏展示提醒徽标，并在 `UpdateModal` 中渲染 Markdown 升级日志。
@@ -268,6 +268,83 @@ cd ..
 
 # 或直接使用 Python 启动原生桌面窗体：
 python desktop_app.py
+```
+
+---
+
+## 🐳 Linux 服务器 Docker 部署与远程访问指南
+
+如果您申请了在线 Linux 虚拟主机（VPS / 云服务器），推荐使用 Docker 方式部署后端与内置静态前端（仓库 `frontend/out/` 已预构建完整静态产物，可由后端 FastAPI 直接挂载托管）。
+
+### 1. 服务器环境准备
+确保 Linux 主机已安装 **Docker Engine** 与 **Docker Compose v2** 插件：
+```bash
+docker --version
+docker compose version
+```
+
+### 2. 拉取代码并准备数据与配置
+```bash
+git clone https://github.com/voodooq/agenthub-local.git
+cd agenthub-local
+
+# 拷贝环境变量模板（按需修改 TZ、代理或故障转移参数）
+cp .env.example .env
+
+# 创建本地持久化目录与 CLI 账号目录
+mkdir -p data ~/.agenthub/accounts
+```
+
+### 3. 一键构建并启动容器（Docker Compose 单容器全栈托管）
+仓库根目录 `docker-compose.yml` 已配置为单容器全栈托管模式（自动挂载 `frontend/out` 静态产物至 `/app/static`，由后端 FastAPI 统一提供 Web UI 与 `/api/*` 服务，占用更低、无需额外前端容器）：
+
+```bash
+# 首次构建镜像并后台启动
+docker compose up -d --build
+```
+
+> **提示**：
+> - 若您的 Linux 主机需要通过网络代理访问外部大模型 API，可在 `.env` 中配置 `HTTP_PROXY` 与 `HTTPS_PROXY` 后执行 `docker compose up -d` 自动注入。
+> - 若需拉取新版本代码并更新容器（`./data` 中的 SQLite 数据库与记忆完整保留）：
+>   ```bash
+>   git pull
+>   docker compose up -d --build
+>   ```
+
+### 4. 安全远程访问方式（关键）
+为防范 DNS 重绑定攻击与未授权访问，后端安全中间件（`LocalOnlyMiddleware`）**仅允许 `Host` 为 `localhost` / `127.0.0.1`**，且容器端口默认仅监听服务器回环地址 `127.0.0.1:8686`（**严禁直接将 8686 端口裸露到公网防火墙**）。
+
+- **方式 A：SSH 端口转发隧道（最推荐，零公网暴露风险）**
+  在您**本地电脑**的终端中执行：
+  ```bash
+  ssh -N -L 8686:127.0.0.1:8686 root@<您的Linux服务器IP>
+  ```
+  保持该终端运行，随后直接在本地电脑浏览器打开：**`http://127.0.0.1:8686`** 即可使用，系统会自动完成本机令牌（`X-Access-Token`）握手。
+
+- **方式 B：Nginx 反向代理 + HTTPS（需公网域名访问时）**
+  若必须通过公网域名访问，请务必在 Nginx 上启用 HTTPS 与 Basic Auth 访问控制，并将转发 `Host` 头重写为 `127.0.0.1`（同时开启 SSE 流式响应所需的 `proxy_buffering off`）：
+  ```nginx
+  location / {
+      proxy_pass http://127.0.0.1:8686;
+      proxy_set_header Host 127.0.0.1:8686;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_buffering off;
+      proxy_cache off;
+      proxy_read_timeout 600s;
+  }
+  ```
+
+### 5. 常用运维与排错命令
+```bash
+# 查看运行日志（含启动生成的 X-Access-Token 与模型探测状态）
+docker compose logs -f
+
+# 查看容器状态或重启服务
+docker compose ps
+docker compose restart
+
+# 进入容器内部调试或登录 Gemini CLI 账号
+docker compose exec backend bash
 ```
 
 ---
