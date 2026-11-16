@@ -419,6 +419,9 @@ class LocalShellExecutor:
         if stderr_str.strip():
             combined = f"{combined}\n[STDERR]\n{stderr_str.strip()}".strip()
 
+        # S7 前置零成本降噪：剥离 ANSI 转义序列、折叠 \r 进度条覆盖行并合并多余空行
+        combined = self._sanitize_terminal_output(combined)
+
         if timed_out:
             combined += (
                 f"\n[系统超时中断]: 命令执行超过 {int(timeout)} 秒已被进程树强杀。"
@@ -436,6 +439,34 @@ class LocalShellExecutor:
             "new_cwd": new_cwd,
             "timed_out": timed_out,
         }
+
+    _ANSI_ESCAPE_RE = re.compile(
+        r"\x1b\[[0-9;?]*[ -/]*[@-~]"
+        r"|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"
+        r"|\x1b[@-Z\\-_]"
+    )
+
+    @classmethod
+    def _sanitize_terminal_output(cls, raw_text: str) -> str:
+        """S7 前置零成本降噪：剥离 ANSI 转义序列、折叠 \\r 进度条覆盖行、合并连续 3 行以上空白行。"""
+        if not raw_text:
+            return ""
+        cleaned = cls._ANSI_ESCAPE_RE.sub("", raw_text)
+        cleaned = cleaned.replace("\r\n", "\n")
+        sanitized_lines: list[str] = []
+        blank_run = 0
+        for line in cleaned.split("\n"):
+            if "\r" in line:
+                parts = [seg for seg in line.split("\r") if seg != ""]
+                line = parts[-1] if parts else ""
+            if not line.strip():
+                blank_run += 1
+                if blank_run <= 2:
+                    sanitized_lines.append("")
+            else:
+                blank_run = 0
+                sanitized_lines.append(line)
+        return "\n".join(sanitized_lines)
 
     @staticmethod
     def sniff_and_extract_log(raw_output: str) -> str:

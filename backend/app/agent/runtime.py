@@ -5,6 +5,7 @@
 - 内层循环 (Intra-Turn ReAct): 单次提问内的多步“推理 -> 工具拦截 -> 安全审批/执行 -> Observation入库 -> 再次推理”闭环
 """
 import asyncio
+import hashlib
 import json
 import os
 import re
@@ -73,6 +74,113 @@ class AgentRuntime:
     # S3 会话级单调递增 MCP 已激活服务集合（仅增不减以守护 Zone 1 缓存，直到分块坍缩推进锚点）
     _activated_mcp_servers_by_conv: dict[str, set[str]] = {}
     _mcp_anchor_by_conv: dict[str, int] = {}
+    # S7 会话级读文件去重缓存: conv_id -> {(abs_path, start_line, end_line): (mtime_ns, size, turn_id, step_ref, line_count)}
+    _session_file_read_cache_by_conv: dict[
+        str, dict[tuple[str, int | None, int | None], tuple[int, int, int, str, int]]
+    ] = {}
+
+    def __init__(self) -> None:
+        self.tool_adapter = ToolProtocolAdapter
+
+    @classmethod
+    def _invalidate_file_read_cache(cls, conv_id: str, file_path: str | Path) -> None:
+        """文件发生写入或变更时，失效该会话下对应路径的读文件去重缓存。"""
+        cache = cls._session_file_read_cache_by_conv.get(conv_id)
+        if not cache:
+            return
+        try:
+            abs_target = str(Path(file_path).resolve())
+        except Exception:
+            abs_target = str(file_path)
+        keys_to_remove = [k for k in cache if k[0] == abs_target]
+        for k in keys_to_remove:
+            cache.pop(k, None)
+
+    @staticmethod
+    def _compute_tool_args_hash(args: Any) -> str:
+        """S10: 计算工具参数的规范化哈希，用于检测无写操作穿插的重复调用。"""
+        try:
+            canonical = json.dumps(args or {}, ensure_ascii=False, sort_keys=True, default=str)
+        except Exception:
+            canonical = str(args)
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _resolve_step_thinking_level(
+        cls,
+        *,
+        base_thinking_level: str,
+        lock_high_thinking: bool,
+        active_scene: str,
+        step_idx: int,
+        is_planning_phase: bool,
+        is_forced_final_step: bool,
+        recovered_error_count: int,
+        consecutive_stalls: int,
+        last_step_error_info: dict[str, Any] | None,
+        is_chitchat_turn: bool,
+        user_message: str,
+        has_attachments: bool = False,
+    ) -> str:
+        """S6: 根据当前 ReAct 步语义动态调节思考档位（仅在 base == 'high' 且未锁回时向下自适应降载）。"""
+        normalized_base = (base_thinking_level or "high").strip().lower()
+        if normalized_base != "high":
+            return normalized_base
+        if lock_high_thinking:
+            return "high"
+
+        if is_forced_final_step or active_scene == "oneshot" or is_chitchat_turn or active_scene != "agent":
+            return "low"
+
+        if (
+            is_planning_phase
+            or recovered_error_count > 0
+            or last_step_error_info is not None
+            or consecutive_stalls > 0
+        ):
+            return "high"
+
+        if step_idx == 0:
+            msg = (user_message or "").strip()
+            has_complex_feature = (
+                has_attachments
+                or bool(cls._TASK_INTENT_KEYWORDS_RE.search(msg))
+                or len(msg) > 100
+                or "```" in msg
+            )
+            return "high" if has_complex_feature else "medium"
+
+        return "medium"
+
+    def _append_schema_hint_if_arg_error(
+        self,
+        func_name: str,
+        tool_output: str,
+        *,
+        args_parse_failed: bool = False,
+    ) -> str:
+        """S4 联动回补：当工具因参数格式错误或缺失失败时，自动附带该单工具的完整 JSON Schema 说明。"""
+        out_str = str(tool_output or "")
+        out_lower = out_str.lower()
+        is_arg_error = args_parse_failed or (
+            out_str.startswith("Error:")
+            and any(
+                kw in out_lower
+                for kw in ("缺少必要参数", "参数", "missing", "required", "invalid", "schema", "json", "格式")
+            )
+        )
+        if not is_arg_error:
+            return out_str
+        schema_hint_fn = getattr(self.tool_adapter, "build_single_tool_schema_hint", None)
+        if not callable(schema_hint_fn):
+            return out_str
+        try:
+            schema_hint = schema_hint_fn(func_name)
+            if schema_hint and str(schema_hint).strip():
+                return f"{out_str}\n\n{str(schema_hint).strip()}"
+        except Exception as hint_err:
+            logger.debug(f"[AgentRuntime] 附带单工具 Schema 提示跳过: {hint_err}")
+        return out_str
 
     @classmethod
     async def _assemble_agent_tools(
@@ -1102,6 +1210,10 @@ class AgentRuntime:
         executed_mutating_shell = False
         injected_case_ids: list[str] = []
         turn_checkpoint_taken = False
+        lock_high_thinking = False
+        session_file_read_cache = self._session_file_read_cache_by_conv.setdefault(conv_id, {})
+        turn_tool_sig_cache: dict[tuple[str, str], int] = {}
+        last_executed_shell_cmd: str = ""
 
         # 4.5 关联工作区长程自主领航舱 (TaskLoopRunner 闭环驱动：严格按 conversation_id 隔离 + 渐进式按需激活)
         active_loop_obj = None
@@ -1601,11 +1713,26 @@ class AgentRuntime:
                 stream_error_code = ""
                 stream_denied_tools = ""
 
+                step_thinking_level = self._resolve_step_thinking_level(
+                    base_thinking_level=thinking_level,
+                    lock_high_thinking=lock_high_thinking,
+                    active_scene=active_scene,
+                    step_idx=step_idx,
+                    is_planning_phase=is_planning_phase,
+                    is_forced_final_step=is_forced_final_step,
+                    recovered_error_count=recovered_error_count,
+                    consecutive_stalls=consecutive_stalls,
+                    last_step_error_info=last_step_error_info,
+                    is_chitchat_turn=is_chitchat_turn,
+                    user_message=user_message,
+                    has_attachments=bool(attachments),
+                )
+
                 async for event in engine_pool.execute_stream_with_failover(
                     conversation_id=conv_id,
                     user_prompt=step_prompt,
                     model_name=model_name,
-                    thinking_level=thinking_level,
+                    thinking_level=step_thinking_level,
                     system_override=ctx.get("system_instruction"),
                     temperature=temperature,
                     work_dir=ctx.get("current_cwd"),
@@ -1676,6 +1803,8 @@ class AgentRuntime:
                         and not is_forced_final_step
                     ):
                         cli_native_tool_retry_count += 1
+                        if step_thinking_level in ("low", "medium"):
+                            lock_high_thinking = True
                         logger.warning(
                             "[AgentRuntime] 捕获 CLI 越权调用宿主内置工具 (%s)，触发盘中无感自愈纠偏 (%s/2)",
                             stream_denied_tools or "native_tool",
@@ -1787,15 +1916,32 @@ class AgentRuntime:
                 ))
                 is_bare_json_command = bool(re.search(r'\{\s*"command"\s*:', stripped_without_empty))
 
-                # 仅当命中真实机器伪标签，或上步报错且模型输出极简敷衍且非提问时，才触发强制推偏
+                # 仅当命中真实机器伪标签、低/中思考档位空回复，或上步报错且模型输出极简敷衍且非提问时，才触发强制推偏
+                is_empty_in_reduced_thinking = (
+                    step_thinking_level in ("low", "medium")
+                    and not stripped_without_empty
+                    and not tool_calls
+                )
                 is_abnormal_stall = (
                     has_explicit_pseudo_tags
                     or is_bare_json_command
+                    or is_empty_in_reduced_thinking
                     or (last_step_error_info is not None and len(stripped_without_empty) < 60 and not is_user_confirmation_request)
                 )
                 # 若剔除空标签后文本有效且无伪标签，直接放行，严禁触发重发
                 if not tool_calls and not has_explicit_pseudo_tags and len(stripped_without_empty) >= 15:
                     is_abnormal_stall = False
+
+                # S6 自动升档护栏：low/medium 档位下若发生空回复或工具解析失败，立即锁定当前轮剩余步骤升回 high
+                if step_thinking_level in ("low", "medium") and (
+                    is_empty_in_reduced_thinking
+                    or (not tool_calls and (has_explicit_pseudo_tags or is_bare_json_command))
+                ):
+                    lock_high_thinking = True
+                    logger.info(
+                        f"[AgentRuntime] S6 自动升档护栏触发（{step_thinking_level} -> high）: "
+                        f"empty={is_empty_in_reduced_thinking}, pseudo_tag={has_explicit_pseudo_tags}"
+                    )
 
                 # 情况 A：模型未发起真实工具调用
                 if not tool_calls or active_scene != "agent":
@@ -1851,12 +1997,21 @@ class AgentRuntime:
                         step_idx += 1
                         continue
 
-                    if active_scene == "agent" and not is_forced_final_step and is_abnormal_stall and not is_user_confirmation_request and consecutive_stalls < 3 and step_idx < current_max_steps - 1:
+                    if (
+                        active_scene == "agent"
+                        and (not is_forced_final_step or is_empty_in_reduced_thinking)
+                        and is_abnormal_stall
+                        and not is_user_confirmation_request
+                        and consecutive_stalls < 3
+                        and step_idx < current_max_steps - 1
+                    ):
+                        if is_forced_final_step and is_empty_in_reduced_thinking:
+                            force_final_text_only_step = True
                         consecutive_stalls += 1
                         logger.warning(f"[AgentRuntime] 捕获模型伪工具调用声明/卡顿: '{raw_stripped}'，激活强制纠偏推进器 (第{consecutive_stalls}次)")
                         last_step_error_info = {
                             "tool": "steering",
-                            "summary": "模型输出了未执行的伪工具声明，未包含系统能够执行的具体 <tool_call> 标签与有效参数",
+                            "summary": "模型输出了未执行的伪工具声明或空回复，未包含有效内容或具体 <tool_call> 标签与参数",
                         }
                         step_idx += 1
                         continue
@@ -1970,15 +2125,25 @@ class AgentRuntime:
                     func_info = tc.get("function", {})
                     func_name = func_info.get("name", "")
                     raw_args = func_info.get("arguments", "{}")
+                    args_parse_failed = False
                     try:
-                        args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                        parsed_args = json.loads(raw_args) if isinstance(raw_args, str) else (raw_args or {})
+                        if not isinstance(parsed_args, dict):
+                            args = {}
+                            args_parse_failed = True
+                        else:
+                            args = parsed_args
                     except Exception:
                         args = {}
+                        args_parse_failed = bool(isinstance(raw_args, str) and raw_args.strip())
 
                     tool_output = ""
                     compressed = ""
                     rescue_addon = ""
                     tool_exit_code: int | None = None
+                    s10_intercepted = False
+                    args_hash = self._compute_tool_args_hash(args)
+                    sig_key = (func_name, args_hash)
 
                     # 🛡️ 物理只读硬门控拦截：若处于规划阶段，绝对禁止执行任何破坏性写入或终端命令
                     if is_planning_phase and func_name not in PLANNING_SAFE_TOOLS:
@@ -2043,8 +2208,31 @@ class AgentRuntime:
                         except Exception as ckpt_err:
                             logger.warning(f"[AgentRuntime] Pre-Tool 自动静默快照跳过: {ckpt_err}")
 
+                    # S10: 轮内无写操作穿插的重复工具签名拦截（连续第 2 次完全相同只读/失败调用直接拦截）
+                    if not args_parse_failed and sig_key in turn_tool_sig_cache:
+                        s10_intercepted = True
+                        seen_step = turn_tool_sig_cache[sig_key]
+                        tool_output = (
+                            f"Denied: [重复工具调用拦截] 工具 `{func_name}` 使用完全相同的参数已于 Step {seen_step} 执行过，"
+                            f"且期间未发生任何文件写入或状态变更，结果不会发生变化。"
+                            f"请立即基于已有信息更换排查路径、修改代码或向用户如实报告阻塞原因。"
+                        )
+                        compressed = f"[拦截重复调用 `{func_name}` (与 Step {seen_step} 参数一致)]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": func_name,
+                            "reason": "拦截无写操作穿插的重复工具调用",
+                            "status": "denied",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
                     # ── 工具 1: 受控本地终端命令 (execute_local_command) ──
-                    if func_name == "execute_local_command":
+                    if s10_intercepted:
+                        pass
+                    elif func_name == "execute_local_command":
                         cmd_str = str(args.get("command", "")).strip()
                         reason_str = str(args.get("reason", "执行本地终端诊断或操作")).strip()
                         norm_cmd = re.sub(r"\s+", " ", cmd_str)
@@ -2441,6 +2629,7 @@ class AgentRuntime:
                                         target_file.parent.mkdir(parents=True, exist_ok=True)
                                         target_file.write_text(file_content, encoding="utf-8")
                                         write_succeeded = True
+                                        self._invalidate_file_read_cache(conv_id, target_file)
                                         try:
                                             st = target_file.stat()
                                             edit_file_size = int(st.st_size)
@@ -2603,6 +2792,7 @@ class AgentRuntime:
                                         else:
                                             # 4. 真正物理落盘
                                             target_file.write_text(new_text_or_err, encoding="utf-8")
+                                            self._invalidate_file_read_cache(conv_id, target_file)
                                             tool_output = (
                                                 f"[成功应用局部补丁到 `{rel_display}`]\n"
                                                 f"```diff\n{unified_diff}\n```\n"
@@ -2763,7 +2953,54 @@ class AgentRuntime:
                             else:
                                 try:
                                     ext, category, canonical_mime = attachment_service.classify_extension(target_file.name)
-                                    if category == "office" or ext in (".xlsx", ".docx", ".pptx", ".pdf"):
+                                    is_office_doc = category == "office" or ext in (".xlsx", ".docx", ".pptx", ".pdf")
+                                    start_l = args.get("start_line")
+                                    end_l = args.get("end_line")
+                                    if not is_office_doc and (start_l is not None or end_l is not None):
+                                        s_num = int(start_l) if start_l is not None else 1
+                                        e_num = int(end_l) if end_l is not None else 250
+                                        cache_slice_key = (s_num, e_num)
+                                    else:
+                                        cache_slice_key = (None, None)
+
+                                    abs_read_path = str(target_file.resolve())
+                                    read_cache_key = (abs_read_path, cache_slice_key[0], cache_slice_key[1])
+                                    force_refresh_raw = args.get("force_refresh", False)
+                                    force_refresh = (
+                                        force_refresh_raw.strip().lower() in ("true", "1", "yes")
+                                        if isinstance(force_refresh_raw, str)
+                                        else bool(force_refresh_raw)
+                                    )
+                                    stat_res = target_file.stat()
+                                    cur_mtime_ns = int(stat_res.st_mtime_ns)
+                                    cur_size = int(stat_res.st_size)
+                                    effective_collapse_anchor = int(
+                                        ctx.get("collapse_anchor_turn_id") or conv_collapse_anchor or 0
+                                    )
+                                    # 清理已随分块坍缩归档出热区的过期读缓存
+                                    stale_read_keys = [
+                                        ck for ck, cv in session_file_read_cache.items()
+                                        if cv[2] <= effective_collapse_anchor
+                                    ]
+                                    for sk in stale_read_keys:
+                                        session_file_read_cache.pop(sk, None)
+
+                                    cached_entry = session_file_read_cache.get(read_cache_key)
+                                    if (
+                                        not force_refresh
+                                        and cached_entry is not None
+                                        and cached_entry[0] == cur_mtime_ns
+                                        and cached_entry[1] == cur_size
+                                        and cached_entry[2] > effective_collapse_anchor
+                                    ):
+                                        cached_step_ref = cached_entry[3]
+                                        cached_line_count = cached_entry[4]
+                                        tool_output = (
+                                            f"[文件未修改：该片段与 {cached_step_ref} 读取的完全一致（共 {cached_line_count} 行），"
+                                            f"请直接复用上文内容；若确需重看请传 force_refresh=true]"
+                                        )
+                                        compressed = f"[命中会话读缓存 `{rel_display}` ({cached_step_ref}, 共 {cached_line_count} 行)]"
+                                    elif is_office_doc:
                                         ctx_info = attachment_service.extract_attachment_context(
                                             target_file,
                                             canonical_mime,
@@ -2776,28 +3013,39 @@ class AgentRuntime:
                                             f"{preview_txt}"
                                         )
                                         compressed = f"[已结构化读取文档 `{rel_display}` ({ctx_info.get('extractor')}): 共 {len(tool_output)} 字符]"
+                                        session_file_read_cache[read_cache_key] = (
+                                            cur_mtime_ns,
+                                            cur_size,
+                                            current_turn_id,
+                                            f"Turn {current_turn_id} Step {step_idx + 1}",
+                                            len(tool_output.splitlines()),
+                                        )
                                     else:
                                         # 针对纯文本/源码文件，支持行号切片读取
-                                        start_l = args.get("start_line")
-                                        end_l = args.get("end_line")
-                                        if start_l is not None or end_l is not None:
-                                            s_num = int(start_l) if start_l is not None else 1
-                                            e_num = int(end_l) if end_l is not None else 250
+                                        if cache_slice_key[0] is not None or cache_slice_key[1] is not None:
                                             sliced_res = read_local_file_sliced(
                                                 current_work_dir,
                                                 str(target_file),
-                                                start_line=s_num,
-                                                end_line=e_num,
+                                                start_line=cache_slice_key[0],
+                                                end_line=cache_slice_key[1],
                                             )
                                             if sliced_res["status"] == "success":
                                                 tool_output = sliced_res["content"]
                                                 compressed = f"[切片读取 `{rel_display}` (L{sliced_res['shown_range'][0]}-L{sliced_res['shown_range'][1]} / 共 {sliced_res['total_lines']} 行)]"
+                                                session_file_read_cache[read_cache_key] = (
+                                                    cur_mtime_ns,
+                                                    cur_size,
+                                                    current_turn_id,
+                                                    f"Turn {current_turn_id} Step {step_idx + 1}",
+                                                    int(sliced_res.get("total_lines") or len(tool_output.splitlines())),
+                                                )
                                             else:
                                                 tool_output = f"Error: {sliced_res.get('error', '切片读取失败')}"
                                                 compressed = f"[切片读取失败: {rel_display}]"
                                         else:
                                             raw_bytes = target_file.read_bytes()
                                             content_text = attachment_service.decode_text_bytes(raw_bytes)
+                                            total_raw_lines = len(content_text.splitlines())
                                             if len(content_text) > 120000:
                                                 content_text = (
                                                     content_text[:80000]
@@ -2806,6 +3054,13 @@ class AgentRuntime:
                                                 )
                                             tool_output = content_text
                                             compressed = f"[成功读取文件 `{rel_display}`: 共 {len(content_text)} 字符]"
+                                            session_file_read_cache[read_cache_key] = (
+                                                cur_mtime_ns,
+                                                cur_size,
+                                                current_turn_id,
+                                                f"Turn {current_turn_id} Step {step_idx + 1}",
+                                                total_raw_lines,
+                                            )
                                 except Exception as read_err:
                                     tool_output = f"Error: 读取文件失败: {read_err}"
                                     compressed = f"[读取文件异常: {str(read_err)[:40]}]"
@@ -3217,6 +3472,15 @@ class AgentRuntime:
                         )
                     )
                     if is_step_abnormal:
+                        # S6 自动升档护栏：在 low/medium 档位发生工具报错时，立即锁定当前轮剩余步骤升回 high
+                        if step_thinking_level in ("low", "medium"):
+                            lock_high_thinking = True
+                            logger.info(
+                                f"[AgentRuntime] S6 自动升档护栏触发（{step_thinking_level} -> high）: 工具 `{func_name}` 执行异常"
+                            )
+                        # S10: 未拦截的失败调用写入签名窗口，防止连续第 2 次无意义重试
+                        if not s10_intercepted and not args_parse_failed:
+                            turn_tool_sig_cache[sig_key] = step_idx + 1
                         # 语义级死循环判定 (LoopBreaker)
                         is_circuit_breaker = False
                         if func_name == "execute_local_command":
@@ -3265,11 +3529,35 @@ class AgentRuntime:
                             except Exception as rescue_err:
                                 logger.debug(f"[AgentRuntime] 盘中 L5 报错急救检索跳过: {rescue_err}")
                     else:
-                        if func_name == "execute_local_command":
-                            cmd_entry = str(args.get("command", "")).strip()
-                            command_history.append({"cmd": re.sub(r"\s+", " ", cmd_entry), "abnormal": False})
-                            if self._WRITE_SHELL_HINT_RE.search(cmd_entry):
-                                executed_mutating_shell = True
+                        if not s10_intercepted:
+                            is_mutating_tool = func_name in (
+                                "write_local_file",
+                                "replace_in_file",
+                                "mcp_download_artifact_to_workspace",
+                                "run_skill_tool",
+                            )
+                            is_mutating_shell = False
+                            if func_name == "execute_local_command":
+                                cmd_entry = str(args.get("command", "")).strip()
+                                norm_cmd_entry = re.sub(r"\s+", " ", cmd_entry)
+                                command_history.append({"cmd": norm_cmd_entry, "abnormal": False})
+                                if self._WRITE_SHELL_HINT_RE.search(cmd_entry):
+                                    executed_mutating_shell = True
+                                    is_mutating_shell = True
+                                elif last_executed_shell_cmd and norm_cmd_entry != last_executed_shell_cmd:
+                                    # 命令文本变更且成功执行，清空防重窗口以保障“执行变更 -> 重新验证”闭环
+                                    is_mutating_shell = True
+                                last_executed_shell_cmd = norm_cmd_entry
+
+                            if is_mutating_tool or is_mutating_shell:
+                                turn_tool_sig_cache.clear()
+                                if func_name == "mcp_download_artifact_to_workspace":
+                                    dl_path = str(args.get("save_rel_path") or "").strip()
+                                    if dl_path:
+                                        ws_dl_root = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
+                                        self._invalidate_file_read_cache(conv_id, (ws_dl_root / dl_path).resolve())
+                            elif not args_parse_failed:
+                                turn_tool_sig_cache[sig_key] = step_idx + 1
                         last_step_error_info = None
                         if not str(tool_output or "").startswith(("Error:", "Denied:")):
                             total_tool_steps += 1
@@ -3375,6 +3663,13 @@ class AgentRuntime:
 
                     if rescue_addon:
                         tool_output = (tool_output or "") + rescue_addon
+
+                    # S4 联动回补：工具因参数格式错误失败时，附带单工具完整 JSON Schema 说明
+                    tool_output = self._append_schema_hint_if_arg_error(
+                        func_name,
+                        tool_output,
+                        args_parse_failed=args_parse_failed,
+                    )
 
                     # 将工具输出与单行折叠摘要同时落盘
                     await MessageRepository.save_message(

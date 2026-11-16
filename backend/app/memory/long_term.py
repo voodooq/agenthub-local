@@ -342,6 +342,43 @@ class LongTermMemoryManager:
         task = asyncio.create_task(_debounce_worker())
         cls._debounce_tasks[conv_id] = task
 
+    _MEMORY_SIGNAL_KEYWORDS: tuple[str, ...] = (
+        "记住", "记一下", "以后", "默认", "不要", "别再", "禁止", "必须",
+        "规范", "约定", "习惯", "偏好", "喜欢", "倾向", "规则", "要求",
+        "配置", "路径", "目录", "工作区", "端口", "环境", "系统",
+        "windows", "linux", "macos", "powershell", "bash", ".venv",
+        "python", "node", "技术栈", "框架", "版本", "地址", "数据库",
+        "我是", "我在", "我们团队", "我们项目",
+        "prefer", "always", "never", "remember", "default", "must",
+        "don't", "do not", "avoid", "instead", "use ",
+    )
+
+    @classmethod
+    def _has_memory_signal(cls, dialog_text: str) -> bool:
+        """检测增量对话是否包含偏好/身份/环境/路径/规范/纠正信号词"""
+        lowered = (dialog_text or "").lower()
+        return any(kw in lowered for kw in cls._MEMORY_SIGNAL_KEYWORDS)
+
+    @classmethod
+    async def _has_free_local_light_provider(cls) -> bool:
+        """检测当前是否存在已启用且未冷却的专用本地免费 light 节点（ollama / llama_server / localhost）"""
+        try:
+            from ..core.provider_adapter import provider_adapter
+
+            light_providers = await provider_adapter.get_enabled_providers_for_role("light")
+            for prov in light_providers:
+                ptype = str(prov.get("provider_type") or "").lower()
+                base_url = str(prov.get("base_url") or "").lower()
+                if (
+                    ptype in ("ollama", "llama_server")
+                    or "127.0.0.1" in base_url
+                    or "localhost" in base_url
+                ):
+                    return True
+        except Exception:
+            return False
+        return False
+
     @classmethod
     async def extract_from_conversation(cls, conv_id: str) -> int:
         """
@@ -382,6 +419,14 @@ class LongTermMemoryManager:
             # 有效信息量太少，直接推进水位线无需消耗 LLM
             await ConversationRepository.update_last_extracted_turn_id(conv_id, max_turn)
             return 0
+
+        # S8 启发式前置门控：未命中长期记忆信号词且无专用本地免费 light 节点时，直接跳过 LLM 并推进水位锁
+        if not cls._has_memory_signal(dialog_text):
+            has_local_light = await cls._has_free_local_light_provider()
+            if not has_local_light:
+                logger.debug(f"会话 {conv_id} 未命中长期记忆信号词且无本地免费 light 节点，跳过 LLM 提炼")
+                await ConversationRepository.update_last_extracted_turn_id(conv_id, max_turn)
+                return 0
 
         # FTS5 检索最相关的已有记忆作为上下文
         existing_mems = await cls.retrieve_relevant(dialog_text, limit=8, min_confidence=0.4)

@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.4.3-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.4.4-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.4.3 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.4.4 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -191,8 +191,8 @@ flowchart TD
 | :--- | :--- | :--- | :--- |
 | **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
 | **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
-| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.4.3-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
-| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.4.3-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
+| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.4.4-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
+| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.4.4-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
 | **Docker 容器镜像** | Linux 服务器 / 跨平台容器 | `docker-compose.yml` / `backend/Dockerfile` | 见下方 [Linux 服务器 Docker 部署与远程访问指南](#-linux-服务器-docker-部署与远程访问指南) |
 
 ### 2. GitHub 自动检查升级与平滑覆盖重启 (`AutoUpdaterService` · `UpdateModal`)
@@ -217,7 +217,7 @@ sequenceDiagram
     participant Port as package-portable (ubuntu)
     participant Rel as GitHub Releases 页面
 
-    Dev->>GH: git tag v1.4.3 && git push origin v1.4.3
+    Dev->>GH: git tag v1.4.4 && git push origin v1.4.4
     GH->>FE: 安装 Node 22 并导出静态前端 out/
     FE->>Port: 分发 out/ -> 生成 portable.zip & portable.tar.gz
     FE->>Win: 分发 out/ -> PyInstaller --onefile 生成 AgentHub-Local-windows-x64.exe
@@ -230,9 +230,9 @@ sequenceDiagram
 ### 如何发布新版本
 只需在 `version.json` 更新版本号并运行 `python sync_version.py`（或直接运行 `python sync_version.py <version>`），随后在本地执行以下命令：
 ```bash
-git tag -a v1.4.3 -m "Release v1.4.3"
+git tag -a v1.4.4 -m "Release v1.4.4"
 git push origin master
-git push origin v1.4.3
+git push origin v1.4.4
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 4 类干净的发行资产，几分钟内即可在 Releases 页面看到生成的下载文件。
 
@@ -351,7 +351,19 @@ docker compose exec backend bash
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.4.3（最新）— Token 优化 Phase 1（KV Cache 连续性与 MCP 按需加载）、Linux/Docker 自动更新及计划任务真调度执行
+### 🚀 v1.4.4（最新）— Token 优化 Phase 2/3（协议/规则瘦身、动态思考、读去重、旁路门控与防空转拦截）
+- **S4（静态前缀与规范瘦身，`tool_protocol` · `context_builder` · `skill_loader`）**：
+  - `build_xml_protocol_prompt()` 改用高密度紧凑签名格式并新增 `build_single_tool_schema_hint()`（参数出错时自动回补该单工具完整 JSON Schema）；重构 Agent 铁律与 `plan_first` 提示词；拆分 `get_skill_dev_spec_prompt()` 仅在命中技能/MCP 开发意图时按需注入，常规 Agent 轮次实测固定前缀节省 ~3,788 tokens。
+- **S6（ReAct 步内动态思考档位调节，`runtime`）**：
+  - 新增 `_resolve_step_thinking_level()`：常规顺畅推进步降载为 `medium`，最终汇总步与纯简单问答降载为 `low`；一旦发生空回复、解析失败或工具报错立即锁回 `high`。
+- **S7（读文件去重与终端输出前置降噪，`runtime` · `shell_executor`）**：
+  - 新增基于磁盘 `mtime_ns + size` 与热区窗口校验的 `session_file_read_cache` 读文件去重指针；`shell_executor` 新增 `_sanitize_terminal_output()` 零成本剥离 ANSI 颜色码、`\r` 覆盖进度条行及连续空行。
+- **S8（旁路记忆启发式前置门控，`long_term` · `experience_distiller`）**：
+  - 180s 闲置记忆提取增加偏好/配置信号词门控；无自愈且无人工纠偏的纯多步任务直接走规则字段落盘，免调后台 LLM。
+- **S10（无写操作穿插的重复调用拦截护栏，`runtime`）**：
+  - 轮内连续重复发起相同只读/失败工具调用时直接拦截提示换路，发生写操作或状态变更立即清空窗口。
+
+### 🚀 v1.4.3 — Token 优化 Phase 1（KV Cache 连续性与 MCP 按需加载）、Linux/Docker 自动更新及计划任务真调度执行
 - **Token 优化 Phase 1（`context_builder` · `context_compressor` · `runtime` · `tool_protocol` · `engine_pool` · `provider_adapter` · `mcp_manager`）**：
   - **S1（Zone 2 严格 Append-Only）**：热区渲染统一保持 Write-Once 一致性，取消常规跨轮突变为 `compressed_content` 与逐轮折叠 `write_local_file`，仅在分块坍缩或逼近硬上限时批量折叠，修复跨轮 KV Cache 击穿。
   - **S2（轮内前缀稳定 + Anthropic Prompt Caching）**：`is_forced_final_step` 保留 `active_tools` 锁死 Zone 1 并拦截出站 `<tool_call>`；生图指引与确定性 `rand_seed` 迁至 Zone 3；`stream_anthropic` 自动注入 `cache_control: {"type": "ephemeral"}`（遇 400 自动降级记忆节点）。

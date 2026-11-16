@@ -1494,8 +1494,25 @@ class SkillLoader:
         self.invalidate_cache()
         return True
 
-    def get_skills_summary_prompt(self) -> str:
-        """生成极简的可用 Skill/MCP 列表摘要与四元组开发标准规范，供注入 System Prompt"""
+    def get_skill_dev_spec_prompt(self) -> str:
+        """生成 Skill-as-a-Folder 四元组与 MCP 热加载开发标准规范（按需注入）"""
+        return (
+            "### 📏 系统级 Skill-as-a-Folder 四元组与 MCP 热加载标准规范（强制遵守）：\n"
+            "当用户要求你创建/开发新的 SKILL（或触发 `/new-skill`）或接入 MCP 服务时，**必须遵守以下标准**：\n"
+            "1. **统一命名规范（kebab-case）**：\n"
+            "   - 所有 `skill-id`、`mcp-server-id` 及 `/command` 必须使用小写英文单词加连字符（`kebab-case`，如 `invoice-auditor`、`/audit`）。\n"
+            "2. **Skill-as-a-Folder 四元组目录标准（`skills/<skill-id>/`）**：\n"
+            "   - `skills/<skill-id>/SKILL.md`（**必选**）：顶部含 YAML Frontmatter（`name`, `command: /xxx`, `type: skill|mcp`, `description`），正文包含功能概述、快捷指令用法示例与执行 SOP；\n"
+            "   - `skills/<skill-id>/tools/<tool_name>.py`（**可选**）：当技能涉及精确数值计算、复杂规则校验或外部脚本时，编写独立 Python 脚本放在 `tools/` 下（脚本从 `sys.argv[1]` 或环境变量 `SKILL_TOOL_ARGS` 读取 JSON 参数并打印结果），通过 `run_skill_tool` 调用；\n"
+            "   - `skills/<skill-id>/knowledge/*.md`（**可选**）：存放长篇行业规程、标准模板或参考资料，系统自动挂载至 SQLite FTS5，通过 `search_skill_knowledge` 毫秒级按需检索；\n"
+            "   - `skills/<skill-id>/schema.json`（**可选**）：定义结构化输出的 JSON Schema 契约（含 `required` 字段列表）。\n"
+            "3. **开发 MCP 服务必配伴生 SKILL 说明**：\n"
+            "   - 编写 `mcp_servers/<server-id>/server.py` 并注册至 `mcp_servers.json` 后，必须同步创建 `skills/<server-id>/SKILL.md`（`type: mcp`、`mcp_server: <server-id>`），以便用户在输入框输入 `/` 时能直接查看完整说明书。\n"
+            "4. **绝对红线**：系统底层已实现四元组目录与 `mcp_servers.json` 全自动热加载，**严禁新建或修改任何前端 React 组件（如 `src/components/...`）**！"
+        )
+
+    def get_skills_summary_prompt(self, include_dev_spec: bool = False) -> str:
+        """生成极简的可用 Skill/MCP 列表摘要；开发规范仅在 include_dev_spec=True 时按需附加"""
         skills = self.list_skills(include_content=False)
         lines = ["### 🧩 已挂载的本地专业技能包与 MCP 封装规程 (Skills & MCP Summary)："]
         if skills:
@@ -1518,20 +1535,8 @@ class SkillLoader:
         else:
             lines.append("（当前暂无本地技能包）")
 
-        lines.append(
-            "\n### 📏 系统级 Skill-as-a-Folder 四元组与 MCP 热加载标准规范（强制遵守）：\n"
-            "当用户要求你创建/开发新的 SKILL（或触发 `/new-skill`）或接入 MCP 服务时，**必须遵守以下标准**：\n"
-            "1. **统一命名规范（kebab-case）**：\n"
-            "   - 所有 `skill-id`、`mcp-server-id` 及 `/command` 必须使用小写英文单词加连字符（`kebab-case`，如 `invoice-auditor`、`/audit`）。\n"
-            "2. **Skill-as-a-Folder 四元组目录标准（`skills/<skill-id>/`）**：\n"
-            "   - `skills/<skill-id>/SKILL.md`（**必选**）：顶部含 YAML Frontmatter（`name`, `command: /xxx`, `type: skill|mcp`, `description`），正文包含功能概述、快捷指令用法示例与执行 SOP；\n"
-            "   - `skills/<skill-id>/tools/<tool_name>.py`（**可选**）：当技能涉及精确数值计算、复杂规则校验或外部脚本时，编写独立 Python 脚本放在 `tools/` 下（脚本从 `sys.argv[1]` 或环境变量 `SKILL_TOOL_ARGS` 读取 JSON 参数并打印结果），通过 `run_skill_tool` 调用；\n"
-            "   - `skills/<skill-id>/knowledge/*.md`（**可选**）：存放长篇行业规程、标准模板或参考资料，系统自动挂载至 SQLite FTS5，通过 `search_skill_knowledge` 毫秒级按需检索；\n"
-            "   - `skills/<skill-id>/schema.json`（**可选**）：定义结构化输出的 JSON Schema 契约（含 `required` 字段列表）。\n"
-            "3. **开发 MCP 服务必配伴生 SKILL 说明**：\n"
-            "   - 编写 `mcp_servers/<server-id>/server.py` 并注册至 `mcp_servers.json` 后，必须同步创建 `skills/<server-id>/SKILL.md`（`type: mcp`、`mcp_server: <server-id>`），以便用户在输入框输入 `/` 时能直接查看完整说明书。\n"
-            "4. **绝对红线**：系统底层已实现四元组目录与 `mcp_servers.json` 全自动热加载，**严禁新建或修改任何前端 React 组件（如 `src/components/...`）**！"
-        )
+        if include_dev_spec:
+            lines.append("\n" + self.get_skill_dev_spec_prompt())
         return "\n".join(lines)
 
     def get_full_skill_markdown(

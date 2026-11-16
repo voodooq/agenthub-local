@@ -1438,46 +1438,48 @@ class ExperienceDistiller:
 
         fields = self._build_heuristic_micro_fields(trace, extracted)
 
-        # 若轻算力池可用，尝试用 LLM 精炼泛化三路正交锚点
-        safe_brief, _ = MemoryPolicyGuard.sanitize_payload(
-            {
-                "goal": trace.user_goal[:300],
-                "summary": trace.final_summary[:300],
-                "recoveries": extracted["recoveries"][:3],
-                "interventions": extracted["interventions"][:3],
-                "steps": fields["effective_commands"],
-            }
-        )
-        llm_prompt = (
-            "请从下列已验证成功的执行轨迹中提纯一条可复用的微经验 JSON（严禁输出 Markdown 以外的解释）：\n"
-            '{"task_category": "bug_fix|env_setup|data_audit|build_test|tool_usage", '
-            '"entity_tags": "逗号分隔的文件名/库名/命令/模块硬锚点", '
-            '"error_signature": "精准报错类名或关键错误码(无报错留空)", '
-            '"symptom_keywords": "5~8个口语化同义症状词，逗号分隔", '
-            '"scene_summary": "一句话场景描述(<=60字)", '
-            '"root_cause": "一句话核心根因(<=120字)", '
-            '"verified_solution": "已验证的最短避坑解法与关键命令", '
-            '"effective_commands": ["步骤1", "步骤2"]}\n\n'
-            f"轨迹摘要：\n{json.dumps(safe_brief, ensure_ascii=False)}"
-        )
-        llm_data = await self._invoke_light_json(
-            conversation_id=trace.conversation_id,
-            system_prompt="你是精准的 L5 实战微经验萃取器，仅输出严格 JSON。",
-            user_prompt=llm_prompt,
-            timeout=12.0,
-        )
-        if llm_data and not self._detect_mock_antipattern(
-            trace=trace, ledger_events=ledger_events, llm_data=llm_data
-        ):
-            fields["task_category"] = str(llm_data.get("task_category") or fields["task_category"])
-            fields["entity_tags"] = str(llm_data.get("entity_tags") or fields["entity_tags"])
-            fields["error_signature"] = str(llm_data.get("error_signature") or fields["error_signature"])
-            fields["symptom_keywords"] = str(llm_data.get("symptom_keywords") or fields["symptom_keywords"])
-            fields["scene_summary"] = str(llm_data.get("scene_summary") or fields["scene_summary"])
-            fields["root_cause"] = str(llm_data.get("root_cause") or fields["root_cause"])
-            fields["verified_solution"] = str(llm_data.get("verified_solution") or fields["verified_solution"])
-            if isinstance(llm_data.get("effective_commands"), list):
-                fields["effective_commands"] = [str(c) for c in llm_data["effective_commands"]][:8]
+        # S8: 仅因多步工具触发（无报错自愈且无人工纠偏）时，直接落盘启发式规则字段，免调 _invoke_light_json
+        if recovered_cnt > 0 or intervene_cnt > 0:
+            # 若轻算力池可用，尝试用 LLM 精炼泛化三路正交锚点
+            safe_brief, _ = MemoryPolicyGuard.sanitize_payload(
+                {
+                    "goal": trace.user_goal[:300],
+                    "summary": trace.final_summary[:300],
+                    "recoveries": extracted["recoveries"][:3],
+                    "interventions": extracted["interventions"][:3],
+                    "steps": fields["effective_commands"],
+                }
+            )
+            llm_prompt = (
+                "请从下列已验证成功的执行轨迹中提纯一条可复用的微经验 JSON（严禁输出 Markdown 以外的解释）：\n"
+                '{"task_category": "bug_fix|env_setup|data_audit|build_test|tool_usage", '
+                '"entity_tags": "逗号分隔的文件名/库名/命令/模块硬锚点", '
+                '"error_signature": "精准报错类名或关键错误码(无报错留空)", '
+                '"symptom_keywords": "5~8个口语化同义症状词，逗号分隔", '
+                '"scene_summary": "一句话场景描述(<=60字)", '
+                '"root_cause": "一句话核心根因(<=120字)", '
+                '"verified_solution": "已验证的最短避坑解法与关键命令", '
+                '"effective_commands": ["步骤1", "步骤2"]}\n\n'
+                f"轨迹摘要：\n{json.dumps(safe_brief, ensure_ascii=False)}"
+            )
+            llm_data = await self._invoke_light_json(
+                conversation_id=trace.conversation_id,
+                system_prompt="你是精准的 L5 实战微经验萃取器，仅输出严格 JSON。",
+                user_prompt=llm_prompt,
+                timeout=12.0,
+            )
+            if llm_data and not self._detect_mock_antipattern(
+                trace=trace, ledger_events=ledger_events, llm_data=llm_data
+            ):
+                fields["task_category"] = str(llm_data.get("task_category") or fields["task_category"])
+                fields["entity_tags"] = str(llm_data.get("entity_tags") or fields["entity_tags"])
+                fields["error_signature"] = str(llm_data.get("error_signature") or fields["error_signature"])
+                fields["symptom_keywords"] = str(llm_data.get("symptom_keywords") or fields["symptom_keywords"])
+                fields["scene_summary"] = str(llm_data.get("scene_summary") or fields["scene_summary"])
+                fields["root_cause"] = str(llm_data.get("root_cause") or fields["root_cause"])
+                fields["verified_solution"] = str(llm_data.get("verified_solution") or fields["verified_solution"])
+                if isinstance(llm_data.get("effective_commands"), list):
+                    fields["effective_commands"] = [str(c) for c in llm_data["effective_commands"]][:8]
 
         saved_case = await episodic_experience_store.upsert_case(
             workspace_id=trace.workspace_id or "GLOBAL",

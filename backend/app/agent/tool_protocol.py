@@ -605,37 +605,102 @@ class ToolProtocolAdapter:
             },
         ]
 
+    @staticmethod
+    def _compact_param_type(prop_schema: dict[str, Any]) -> str:
+        """将 JSON Schema 参数类型压缩为高密度短标识。"""
+        raw_type = str(prop_schema.get("type") or "any").lower()
+        type_map = {
+            "string": "str",
+            "integer": "int",
+            "number": "float",
+            "boolean": "bool",
+            "array": "list",
+            "object": "dict",
+        }
+        compact = type_map.get(raw_type, raw_type)
+        if compact == "list":
+            items = prop_schema.get("items")
+            if isinstance(items, dict) and items.get("type"):
+                item_type = type_map.get(str(items["type"]).lower(), str(items["type"]).lower())
+                return f"list[{item_type}]"
+        return compact
+
     @classmethod
     def build_xml_protocol_prompt(cls, tools: list[dict[str, Any]]) -> str:
         """
-        将工具列表编译为紧凑的 XML ReAct 协议说明，注入 System Prompt。
-        使任何纯文本 CLI 或 API 模型都能稳定发起工具调用。
+        将工具列表编译为高密度紧凑 XML ReAct 协议说明，注入 System Prompt。
+        使任何纯文本 CLI 或 API 模型都能稳定发起工具调用，同时显著降低静态前缀 Token 消耗。
         """
         if not tools:
             return ""
 
-        tool_Wait_lines = [
+        tool_lines = [
             "### 🛠️ 可用工具与调用协议 (Tool Calling Protocol)：",
-            "当你需要执行本机命令、更新任务草稿纸或加载专业技能以完成用户请求时，请在回复末尾输出如下标准 XML 标签（一次可输出一个或多个）：",
+            "需要调用本地工具时，请在回复末尾输出标准 XML 标签（支持一次输出多个并行调用）：",
             "```xml",
             '<tool_call name="工具名称">',
             '{"参数名": "参数值"}',
             "</tool_call>",
             "```",
-            "注意：",
-            "1. 标签内部必须是合法的 JSON 对象；",
-            "2. 输出 `<tool_call>` 后请立即停止编造执行结果，等待系统真实执行并回填结果后再继续下一轮推理；",
-            "3. 若无需调用工具即可直接回答用户问题，请直接输出正常回复，不要输出 `<tool_call>` 标签。",
+            "规则：1) 标签内必须是合法 JSON 对象；2) 输出 `<tool_call>` 后立即停止并等待真实回填，严禁编造执行结果；3) 无需调用工具时直接正常回复。",
             "",
             "当前已激活的工具列表：",
         ]
 
-        # NOTE: 按 tool name 字典序固定排序，保证同一工具集合在每轮生成字节级完全一致的前缀提示词，守护 KV Cache
+        # NOTE: 按 tool name 与参数名固定字典序排序，确保同一工具集合在每轮生成字节级完全一致的前缀，守护 KV Cache
         for t in sorted(tools, key=lambda item: str(item.get("name", ""))):
-            params_str = json.dumps(t.get("parameters", {}).get("properties", {}), ensure_ascii=False, sort_keys=True)
-            tool_Wait_lines.append(f"- **`{t['name']}`**: {t.get('description', '')} | 参数: `{params_str}`")
+            name = str(t.get("name", ""))
+            raw_desc = str(t.get("description", "")).strip()
+            first_line_desc = raw_desc.splitlines()[0].strip() if raw_desc else ""
+            params_schema = t.get("parameters", {}) if isinstance(t.get("parameters"), dict) else {}
+            props = params_schema.get("properties", {}) if isinstance(params_schema.get("properties"), dict) else {}
+            required_set = set(params_schema.get("required") or [])
 
-        return "\n".join(tool_Wait_lines)
+            if props:
+                param_sigs: list[str] = []
+                for p_name in sorted(props.keys()):
+                    p_info = props[p_name] if isinstance(props[p_name], dict) else {}
+                    p_type = cls._compact_param_type(p_info)
+                    req_label = "必填" if p_name in required_set else "可选"
+                    enum_vals = p_info.get("enum")
+                    if isinstance(enum_vals, list) and enum_vals:
+                        enum_str = "|".join(str(v) for v in enum_vals)
+                        param_sigs.append(f"{p_name}({p_type}, {req_label}, enum:[{enum_str}])")
+                    else:
+                        param_sigs.append(f"{p_name}({p_type}, {req_label})")
+                params_compact = ", ".join(param_sigs)
+            else:
+                params_compact = "无"
+
+            tool_lines.append(f"- `{name}`: {first_line_desc} | 参数: {params_compact}")
+
+        return "\n".join(tool_lines)
+
+    @classmethod
+    def build_single_tool_schema_hint(
+        cls,
+        tool_name: str,
+        tools: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """
+        返回指定单个工具的完整 JSON Schema 说明，供工具参数出错时自动回补。
+        """
+        target_name = str(tool_name or "").strip()
+        if not target_name:
+            return ""
+        candidate_tools = tools if tools is not None else cls.get_builtin_tools()
+        for t in candidate_tools:
+            if str(t.get("name", "")).strip() == target_name:
+                schema_obj = {
+                    "name": target_name,
+                    "description": t.get("description", ""),
+                    "parameters": t.get("parameters", {}),
+                }
+                return (
+                    f"[工具 `{target_name}` 完整 JSON Schema 回补说明]\n"
+                    f"```json\n{json.dumps(schema_obj, ensure_ascii=False, indent=2, sort_keys=True)}\n```"
+                )
+        return ""
 
     @classmethod
     def _parse_tool_arguments(cls, func_name: str, raw_json: str) -> dict[str, Any]:

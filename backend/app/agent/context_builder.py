@@ -27,6 +27,25 @@ from ..service.attachment_service import attachment_service
 from .context_compressor import LocalContextCompressor, estimate_tokens
 from .tool_protocol import ToolProtocolAdapter
 
+_SKILL_DEV_INTENT_KEYWORDS = (
+    "/new-skill",
+    "skill",
+    "mcp",
+    "技能",
+    "热加载",
+    "四元组",
+    "skill.md",
+    "mcp_servers.json",
+    "创建工具",
+    "开发工具",
+)
+
+
+def _should_inject_skill_dev_spec(user_query: str) -> bool:
+    """宽松匹配技能/MCP 开发意图，仅命中时才注入四元组开发规范"""
+    q_lower = (user_query or "").lower()
+    return any(kw in q_lower for kw in _SKILL_DEV_INTENT_KEYWORDS)
+
 
 class SessionHealer:
     """会话消息链自愈器：修复未闭合的 tool_calls"""
@@ -190,34 +209,17 @@ class ContextBuilder:
         elif effective_scene_mode == "agent":
             zone1_static_parts.append(
                 "### ⚠️ Agent 任务模式落盘真实性与自主自愈铁律（强制遵守）：\n"
-                "1. 你拥有真实的本地工具调用能力（支持 write_local_file, read_local_file, read_tool_ref, execute_local_command 等）。\n"
-                "2. 所有针对本地磁盘的文件创建、修改与终端执行，【必须且只能】通过输出标准 `<tool_call>` 标签真实调用工具完成！\n"
-                "3. 【严禁未执行先声明】：严禁在尚未输出 `<tool_call>` 或尚未收到真实的工具执行返回之前，在文本中宣称“已为你创建了某文件”、“已在本地落盘”。\n"
-                "4. 只有当工具真实执行成功并返回结果后，你才能告知用户文件已落盘并展示真实操作结果。\n"
-                "5. 【自主闭环与异常自愈铁律（严禁报错卡死退出）】：在本地开发、依赖安装、代码构建与测试运行过程中，若遇到终端命令报错（如 exit_code != 0、ENOENT 找不到 package.json、缺少路径参数等），【绝对严禁中途卡住或直接退出】！你必须基于报错信息第一性原理分析根因，主动调用工具自愈（如使用 `--prefix <相对路径>` 指定子目录执行、补全缺失文件、切换路径或执行修复脚本），直到整个功能与依赖全部完整跑通并交付验证！\n"
-                "6. 【真实输入附件红线 —— 严禁伪造与 Mock 替代（零容忍违规）】：\n"
-                "   - 用户上传的原始文档/Excel/图片统一落盘在工作区只读附件目录（虚拟工作区 `./attachments/`，物理挂载工程 `./.agenthub/attachments/`）。严禁调用 `write_local_file` 或编写脚本向附件目录写入/篡改文件；\n"
-                "   - 若遇到预期输入文件缺失、路径报错、Sheet 名称不匹配或解析异常，**绝对严禁私自生成任何 Mock / 模拟 / 测试样例输入文件来“兜底”完成分析**！编写的数据处理脚本必须坚持 Fail-Fast 原则（缺失即抛 `FileNotFoundError` 并以非零码退出），严禁内嵌“不存在就造默认测试数据继续运行”的伪分支；\n"
-                "   - 确系真实文件缺失或无法解析时，必须立即停机并向用户如实报告预期路径与缺失原因。\n"
-                "7. 【⚡ 极速执行与代码规范（强制遵循，违者终止任务）】：\n"
-                "   - 【Skill 封装脚本与成熟工具优先复用（严禁重复造轮子）】：当激活的 Skill、工作区或参考案例中已存在封装好的 Python/Shell 算子或流水线脚本时（如 `scripts/*.py`、`tools/*.py`），【必须优先直接执行该既有脚本】（通过 `run_skill_tool` 或 `execute_local_command python <脚本绝对路径> [参数]`），绝对严禁盲目编写新的临时 `.py` 脚本来替代它！只有当运行已有脚本遇到报错、缺失必要子功能且无法通过参数调节时，才允许基于错误堆栈对既有脚本进行最小化修复或编写补充适配逻辑；\n"
-                "   - 【已有文件修改首选 replace_in_file】：修改已有代码或脚本时，【必须优先且强烈推荐使用 `replace_in_file`】提交标准的 `SEARCH/REPLACE` 补丁，绝对严禁对数百行的已有代码调用 `write_local_file` 全量重写！对于超长文件先调用 `get_repo_skeleton` 获取结构大纲或用 `read_local_file` 切片读取！\n"
-                "   - 【单步多工具并行调用】：若一个步骤需要执行多项操作（如读取多个文件、写入多个配置或串行多个命令），你必须在【同一次回复】中连续并列输出多个 `<tool_call>` 标签一次性并发提交系统执行，严禁一次只调用一个工具来回拉扯 5~10 轮！\n"
-                "   - 【原地修改文件，严禁创建副本】：必须原地覆盖原有文件名（如 `render.py`），绝对严禁创建类似 `render_v1.py`、`render_v2.py`、`render_fixed.py` 等衍生副本，违者判定为严重的代码污染；\n"
-                "   - 【大文件落盘首选 write_local_file】：创建或重写完整代码、HTML 游戏等较长文本文件时，必须直接调用 `write_local_file` 落盘，严禁将数千上万字符的源码通过 `python -c \"...\"` 塞入单条 `execute_local_command` 命令行中；\n"
-                "   - 【Python 一次性诊断】：面对数据探索或环境探测，禁止写一个脚本看 Sheet1、再写一个脚本看 Sheet2、再看列名；必须在一个紧凑的 Python 脚本中一次性打印出所有元信息与关键样例，一步完成诊断！\n"
-                "   - 【过程调用与最终交付分离】：在需要调用 `<tool_call>` 的执行步骤中，仅可输出简短行动旁白，严禁在同一条工具调用步骤里提前撰写最终完整交付报告；也严禁自行编造 `[终端/工具输出]:` 或 `[Gemini]:` 标签；请等全部工具执行并返回真实结果后，再在最终无工具步骤独立向用户汇报完整成果。\n"
-                "8. 【⚡ 最新上传附件数据作为唯一起始基准（严禁沿用旧记忆与历史数据）】:\n"
-                "   - **最新附件绝对优先原则**：若当前轮次用户附带上传了新附件，系统必须默认且强制以【该最新上传的附件】作为本次任务的核心基准输入数据（Base Data Source）；\n"
-                "   - **严格限定旧数据场景**：仅当用户在【未上传新附件的前提下】明确发出「用我之前的数据再次进行分析 / 基于上一次的数据继续」等特指指令时，才允许基于历史会话中提取的旧数据或旧附件推进；\n"
-                "   - **严禁数据滞后与记忆幻觉**：只要用户本轮上传了新附件，历史轮次中针对旧文件提取的中间数据、统计结果以及 Working Memory（工作记忆）中记录的上一份文件摘要【在此刻一律全部失效作废】！严禁将旧附件的数据当成本次分析的基础；\n"
-                "   - **脚本复用路径必须重新对准**：若复用既有 Python 处理脚本（如 `process_*.py` / `generate_*.py`），在执行前【必须检查并更新脚本中的输入文件路径】，确保其读取的是本轮最新附件（位于 `./attachments/` 或 `.agenthub/attachments/` 下最新落盘的物理文件），严禁直接执行内部硬编码了历史旧文件名或旧路径的脚本！\n"
-                "   - **全量重新解析与推演**：必须针对最新上传的附件重新执行数据提取、列名核验与业务逻辑推演，确保所有生成的图表、代码、排程甘特图和报告结论 100% 来源于最新附件。\n"
-                "9. 【⚡ 产出物必须落盘于单层 output/ 目录（严禁嵌套 output/output 与后缀重复）】:\n"
-                "   - **一级 output 目录标准**：所有任务生成的最终产出物（如 Excel 排期表、Word 报告、分析图表等）必须直接保存在工作区一级 `output/` 目录下（如 `output/2026年石景山杯剑道甘特图排期表.xlsx`）；\n"
-                "   - **严禁多层嵌套**：绝对严禁在 `output/` 内部再创建嵌套的同名子目录（如 `output/output/...`），编写生成脚本时必须清洗路径，确保 `os.path.join('output', filename)` 中的 filename 不带 `output/` 前缀；\n"
-                "   - **严禁后缀重复污染**：在拼接文件名时，必须先去除原始赛事名中可能携带的 `.xlsx` 或 `排期表` 后缀，严禁生成如 `xxx.xlsx剑道甘特图排期表.xlsx` 这类错误文件名；\n"
-                "   - **严格对齐交付链接**：在最终交付回复中向用户展示的文件链接（如 `file:///.../output/xxx.xlsx`）必须与磁盘上真实落盘的单层相对路径 100% 精确一致，以便前端卡片精准核验与一键打开。"
+                "1. **真实调用与禁止先声明**：所有文件创建、修改与终端执行必须通过 `<tool_call>` 调用工具（如 `write_local_file`, `read_local_file`, `read_tool_ref`, `execute_local_command` 等）完成；严禁在未调用或未收到真实工具返回前宣称已落盘或已执行。\n"
+                "2. **自主闭环自愈（严禁报错卡死退出）**：遇到命令报错（`exit_code != 0`、`ENOENT` 等），必须分析根因并主动调工具自愈（如 `--prefix <相对路径>`、补全文件、切换路径），直到跑通交付。\n"
+                "3. **真实附件红线与 Fail-Fast（严禁 Mock 替代）**：只读附件目录（`./attachments/`、`.agenthub/attachments/`）严禁写入/篡改；缺失文件、Sheet 不匹配或解析异常时，严禁生成任何 Mock/模拟测试数据兜底，脚本必须 Fail-Fast（抛 `FileNotFoundError` 非零退出）并立即停机如实报告预期路径与原因。\n"
+                "4. **极速执行与代码规范**：\n"
+                "   - **复用优先**：Skill/工作区已有 `scripts/*.py`、`tools/*.py` 时必须优先直接执行（`run_skill_tool` 或 `execute_local_command`），仅在报错且无法调参时做最小化修复；\n"
+                "   - **局部补丁优先**：修改已有文件首选 `replace_in_file`（`SEARCH/REPLACE`），严禁全量重写数百行代码；超长文件先用 `get_repo_skeleton` 或 `read_local_file` 切片读取；\n"
+                "   - **单步并行与原地修改**：同一回复可并列输出多个 `<tool_call>` 并发执行；必须原地覆盖原文件，严禁生成 `_v1`/`_v2`/`_fixed` 副本；\n"
+                "   - **大文件与诊断**：长源码用 `write_local_file` 落盘，严禁塞入 `python -c`；数据探索须用单个紧凑 Python 脚本一次性打印全部元信息与样例；\n"
+                "   - **过程与交付分离**：调工具步骤仅附简短旁白，严禁提前撰写完整报告或编造 `[终端/工具输出]:` / `[Gemini]:` 标签。\n"
+                "5. **最新上传附件唯一基准**：本轮若上传新附件，强制以该最新附件为唯一起始基准，历史旧数据与 Working Memory 摘要一律作废；复用脚本前必须核验并更新输入路径指向最新附件；仅在未传新附件且用户特指继续旧数据时沿用旧数据。\n"
+                "6. **单层 `output/` 交付红线**：所有最终产出物必须直接保存于一级 `output/` 目录（如 `output/xxx.xlsx`），严禁 `output/output/` 多层嵌套或重复 `.xlsx` 等文件名后缀，交付链接（`file:///.../output/xxx`）须与磁盘单层路径 100% 一致。"
             )
             if tools:
                 protocol_prompt = ToolProtocolAdapter.build_xml_protocol_prompt(tools)
@@ -273,56 +275,37 @@ class ContextBuilder:
                     )
                     zone3_parts.append(
                         "### 📋【谋定而后动 (Plan-First)】前置对齐与方案规划硬性铁律（强制执行）：\n"
-                        "当前任务已启用【谋定而后动】策略。动工执行任何破坏性写入、文件修改或终端命令之前，必须先完成方案梳理与用户对齐！"
+                        "写盘与命令执行当前处于**物理锁定态**（仅挂载只读工具，可静默检索/读文件定位真实代码），动工前必须先完成方案对齐："
                         f"{clarify_follow_tip}\n"
-                        "1. 【物理安全硬门控处于锁定态】：当前阶段系统仅挂载了只读工具（如 read_local_file、read_tool_ref、检索等），写盘与修改已被安全锁定。你可以在本阶段先静默调用只读工具查看项目文件与目录结构，以确保制定的方案严谨且精准定位真实代码。\n"
-                        "2. 【输出结构规范】：\n"
-                        "   - 先输出结构清晰的 Markdown【实施方案（Implementation Plan）】与【分步执行步骤清单（Step-by-Step Task List）】；\n"
-                        "   - 步骤必须按序号标注（如 步骤 1、步骤 2...），并标注对应的工具安全级别（L0 只读 / L1 本地受控文件操作 / L2 终端执行与测试）；\n"
-                        "3. 【交互式对齐协议规范 (```interactive_inquiry)】：\n"
-                        '   - **【语法与字段格式硬约束】**：必须使用标准 Markdown 三反引号围栏代码块 ` ```interactive_inquiry ` 包裹合法 JSON；**严禁**使用 XML `<interactive_inquiry>...</interactive_inquiry>` 或 `[interactive_inquiry]` 标签！每道题必须使用 `"id"`（勿用 `question_id`）、`"type"` (`"single_choice"` / `"multi_choice"`)、`"label"`（勿用 `question`）以及对象数组 `"options": [{"value": "...", "label": "...", "desc": "..."}]`（严禁纯字符串数组）；\n'
-                        "   - **【单卡一次性收集全部确认项，严禁挤牙膏二次弹卡】**：如果任务存在多个参数设置、路线分歧、填空项或待审批步骤，**必须按问题实际需要，在当前唯一一张 `interactive_inquiry` 卡片的 `questions`、`fill_template` 与 `plan_steps` 中一次性全部列出（不人为限缩数量，切勿拆多轮）**；前端会自动通过分步向导引导用户逐项确认完毕后统一点击执行；\n"
-                        "   - **【严禁编造仅有单个无意义批准选项的空转伪选择题】**：`questions` 仅在确实存在 **至少 2 个有实质差异的可选分支或配置参数** 时才使用；绝对禁止在 `questions` 中制造只有一个「确认并立即执行」选项的无意义伪问题！若仅需用户审批步骤清单而无真实多分支分歧，请设 `\"questions\": []`（或省略 `questions`）仅输出 `plan_steps`；\n"
-                        "   - 若需求尚存不确定点或缺少关键参数，可在末尾输出带 `questions` / `fill_template` 的标准 JSON 协议块；若已可直接启动实施，请在末尾输出带 `phase: \"plan_approval\"` 与完整 `plan_steps` 的协议块（可同时携带 `questions` 与 `fill_template`，前端会在向导中逐步引导用户确认完再统一开始执行）：\n"
+                        "1. **Markdown 输出结构**：先输出【实施方案（Implementation Plan）】与带编号和工具安全级别（`L0` 只读 / `L1` 受控文件 / `L2` 终端测试）的【分步执行步骤清单（Step-by-Step Task List）】。\n"
+                        "2. **`interactive_inquiry` 语法与字段格式硬约束**：\n"
+                        "   - 必须使用 ` ```interactive_inquiry ` 围栏代码块包裹合法 JSON（严禁 XML `<interactive_inquiry>` 或 `[interactive_inquiry]`）。\n"
+                        "   - **单卡一次性收集全部确认项**：所有待确认参数、填空与 `plan_steps` 须在当前唯一卡片中一次列出，严禁多轮挤牙膏。\n"
+                        '   - **严禁编造仅有单个无意义批准选项的空转伪选择题**：仅当存在至少 2 个实质差异分支时才填 `questions`；若仅审批步骤，请设 `"questions": []` 仅输出 `plan_steps`。每题必须使用 `"id"`、`"type"` (`"single_choice"`/`"multi_choice"`)、`"label"` 与对象数组 `"options": [{"value","label","desc"}]`。\n'
+                        '   - 最小合法模板（`fill_template` 用 `{{参数名:默认值}}`；跨轮长期规则可为题目附 `"fact_key"`、`"fact_category"` (`user_pref|biz_rule|env_config`)、`"fact_scope"` (`workspace|global`)）：\n'
                         "```interactive_inquiry\n"
                         "{\n"
                         '  "inquiry_id": "inq_unique_id",\n'
                         '  "phase": "clarification 或 plan_approval",\n'
-                        '  "title": "方案与意图确认标题",\n'
+                        '  "title": "方案确认标题",\n'
                         '  "summary": "一句话核心说明",\n'
                         '  "questions": [\n'
-                        '    {\n'
+                        "    {\n"
                         '      "id": "q1",\n'
-                        '      "type": "single_choice 或 multi_choice",\n'
-                        '      "label": "确认项 1 标题说明",\n'
+                        '      "type": "single_choice",\n'
+                        '      "label": "确认项标题",\n'
                         '      "options": [\n'
-                        '        {"value": "opt_a", "label": "选项A名称", "desc": "推荐理由或说明"},\n'
-                        '        {"value": "opt_b", "label": "选项B名称", "desc": "备选说明"}\n'
+                        '        {"value": "opt_a", "label": "选项A", "desc": "推荐说明"},\n'
+                        '        {"value": "opt_b", "label": "选项B", "desc": "备选说明"}\n'
                         "      ],\n"
                         '      "default": "opt_a"\n'
-                        '    },\n'
-                        '    {\n'
-                        '      "id": "q2",\n'
-                        '      "type": "multi_choice",\n'
-                        '      "label": "确认项 2 多选说明",\n'
-                        '      "options": [\n'
-                        '        {"value": "opt_1", "label": "选项1名称", "desc": "说明"},\n'
-                        '        {"value": "opt_2", "label": "选项2名称", "desc": "说明"}\n'
-                        '      ]\n'
                         "    }\n"
                         "  ],\n"
-                        '  "fill_template": {\n'
-                        '    "label": "若需用户补充信息，提供留空填空模板：",\n'
-                        '    "template_text": "配置参数示例：端口号为 {{PORT:8080}}，目标路径为 {{TARGET_DIR:./output}}。"\n'
-                        "  },\n"
-                        '  "plan_steps": [\n'
-                        '    {"step": 1, "title": "步骤 1 简述", "tool_level": "L0"},\n'
-                        '    {"step": 2, "title": "步骤 2 简述", "tool_level": "L1"}\n'
-                        "  ]\n"
+                        '  "fill_template": {"label": "补充信息：", "template_text": "端口 {{PORT:8080}}，目录 {{TARGET_DIR:./output}}"},\n'
+                        '  "plan_steps": [{"step": 1, "title": "步骤1简述", "tool_level": "L0"}]\n'
                         "}\n"
                         "```\n"
-                        "   - 提示：留空填空模板中，使用 `{{参数名:默认值或提示}}` 作为标准占位符；仅针对需要跨轮长期复用的规则/偏好，在 `questions` 项中附带可选字段 `\"fact_key\"`、`\"fact_category\"` (`user_pref|biz_rule|env_config`) 与 `\"fact_scope\"` (`workspace|global`)。\n"
-                        "4. 【严禁跳过方案强行写盘】：方案未获得用户在前端确认审批通过前，绝对禁止声明已落地修改！"
+                        "3. **严禁跳过审批宣称落盘**：方案未获用户前端审批前，绝对禁止声明已落地修改。"
                     )
                 elif explicit_execute_unlock:
                     steps_block = ""
@@ -442,8 +425,12 @@ class ContextBuilder:
                             "### 🔎 相关早期历史片段召回 (冷区检索仅供参考)：\n" + "\n".join(cold_lines)
                         )
 
-            # 按需专业技能摘要与激活规程
-            skills_summary = await asyncio.to_thread(skill_loader.get_skills_summary_prompt)
+            # 按需专业技能摘要与激活规程（四元组开发规范仅在命中技能/MCP 开发意图时按需注入）
+            include_dev_spec = _should_inject_skill_dev_spec(user_query)
+            skills_summary = await asyncio.to_thread(
+                skill_loader.get_skills_summary_prompt,
+                include_dev_spec=include_dev_spec,
+            )
             if skills_summary:
                 zone3_parts.append(skills_summary)
 
