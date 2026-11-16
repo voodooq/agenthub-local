@@ -687,11 +687,19 @@ export default function WorkbenchPage() {
   };
 
   /**
-   * 为选中的专家自动创建或定位专属沙盒并进入交互会话
+   * 为选中的专家自动创建或定位专属沙盒并进入交互会话（注入真实技能约束）
    */
-  const handleLaunchAgentSandbox = async (agent: AgentItem) => {
+  const handleLaunchAgentSandbox = async (agent: AgentItem, selectedSkills: SkillItem[] = []) => {
     const sandboxName = `[沙盒] ${agent.name}`;
     let targetWs = workspaces.find((w) => w.name === sandboxName || w.name === agent.name);
+
+    let promptWithSkills = agent.context_prompt || agent.description || '';
+    if (selectedSkills && selectedSkills.length > 0) {
+      const skillSummary = selectedSkills
+        .map((s) => `- ${s.name || s.id} (${s.command || `/${s.id}`}): ${s.description || 'SOP 执行规范'}`)
+        .join('\n');
+      promptWithSkills += `\n\n【本专家专属挂载技能清单】\n${skillSummary}\n请在收到匹配任务时，严格按照对应技能的专业标准与 SOP 执行流程输出。`;
+    }
 
     if (!targetWs) {
       try {
@@ -701,7 +709,7 @@ export default function WorkbenchPage() {
           body: JSON.stringify({
             name: sandboxName,
             type: 'virtual',
-            context_prompt: agent.context_prompt || agent.description,
+            context_prompt: promptWithSkills,
             model_preference: agent.base_model || currentModel,
             security_level: 'standard',
           }),
@@ -3143,6 +3151,8 @@ export default function WorkbenchPage() {
         {activeNavHub === 'agents' && (
           <AgentsView
             workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
+            availableModels={availableModels}
+            currentModel={currentModel}
             onLaunchSandboxChat={handleLaunchAgentSandbox}
           />
         )}
