@@ -3445,6 +3445,11 @@ class AgentRuntime:
                         compressed = f"[未知工具调用 `{func_name}`]"
 
                     # 智能异常探测：判断该步骤是否遇到报错，并为下一步自愈循环激活调度器
+                    tool_output_str = (
+                        tool_output
+                        if isinstance(tool_output, str)
+                        else ("" if tool_output is None else str(tool_output))
+                    )
                     if (
                         func_name in (
                             "execute_local_command",
@@ -3453,14 +3458,14 @@ class AgentRuntime:
                             "run_skill_tool",
                             "mcp_download_artifact_to_workspace",
                         )
-                        and not str(tool_output or "").startswith(("Denied:", "Error:"))
+                        and not tool_output_str.startswith(("Denied:", "Error:"))
                     ):
                         has_workspace_mutations = True
                     prev_step_error = last_step_error_info
-                    out_lower = (tool_output or "").lower()
+                    out_lower = tool_output_str.lower()
                     is_step_abnormal = (
                         (tool_exit_code is not None and tool_exit_code != 0)
-                        or str(tool_output or "").startswith(("Error:", "Denied:"))
+                        or tool_output_str.startswith(("Error:", "Denied:"))
                         or any(
                             err_kw in out_lower
                             for err_kw in (
@@ -3502,7 +3507,7 @@ class AgentRuntime:
 
                         last_step_error_info = {
                             "tool": func_name,
-                            "summary": compressed or (tool_output.strip().split("\n")[0][:120]),
+                            "summary": compressed or (tool_output_str.strip().split("\n")[0][:120]),
                             "circuit_breaker": is_circuit_breaker,
                             "failed_cmd": re.sub(r"\s+", " ", str(args.get("command", "")).strip()) if func_name == "execute_local_command" else "",
                         }
@@ -3510,7 +3515,7 @@ class AgentRuntime:
                         if not active_incognito and active_scene != "oneshot":
                             try:
                                 rescue_cases = await episodic_experience_store.search_by_error(
-                                    tool_output or "",
+                                    tool_output_str,
                                     workspace_id=ws_id,
                                     limit=2,
                                     min_score=0.65,
