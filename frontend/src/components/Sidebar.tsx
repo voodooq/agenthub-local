@@ -14,6 +14,7 @@ import {
   Library,
   Clock,
   Puzzle,
+  Bot,
   FolderInput,
   Brain,
   Folder,
@@ -36,7 +37,7 @@ import { useAppVersion } from '@/config/version';
 import { apiFetch } from '@/utils/apiClient';
 import { ServerFolderBrowser } from './ServerFolderBrowser';
 
-export type MainNavHub = 'chat' | 'library' | 'scheduled' | 'skills';
+export type MainNavHub = 'chat' | 'agents' | 'library' | 'scheduled' | 'skills';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -420,93 +421,134 @@ export function Sidebar({
         )}
       </div>
 
-      {/* ② 核心功能枢纽区 (保留通用工作台命名) */}
-      <div className="p-2 border-b border-border space-y-0.5">
-        <button
-          onClick={() => onSelectNavHub?.('chat')}
-          className={`w-full flex items-center rounded-lg text-xs transition-colors ${
-            activeNavHub === 'chat'
-              ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
-              : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
-          } ${isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-1.5'}`}
-          title="对话与任务"
-        >
-          <MessageSquare className="w-4 h-4 shrink-0" />
-          {!isCollapsed && <span>对话与任务</span>}
-        </button>
-
-        <button
-          onClick={() => onSelectNavHub?.('library')}
-          className={`w-full flex items-center justify-between rounded-lg text-xs transition-colors ${
-            activeNavHub === 'library'
-              ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
-              : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
-          } ${isCollapsed ? 'justify-center p-2' : 'px-3 py-1.5'}`}
-          title="库 (Library · 沉淀文档与媒体资产)"
-        >
-          <div className="flex items-center space-x-2.5">
-            <Library className="w-4 h-4 shrink-0 text-sky-400" />
-            {!isCollapsed && <span>库 (Library)</span>}
-          </div>
+      {/* ② 核心导航枢纽区：工作台 + 专家与能力 */}
+      <div className="p-2 border-b border-border space-y-3">
+        {/* 子板块 A: 工作台 (WORKSPACE) */}
+        <div className="space-y-0.5">
           {!isCollapsed && (
-            <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-surface-200 text-muted-foreground font-mono">
-              资产
-            </span>
+            <div className="px-2 py-0.5 text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
+              工作台
+            </div>
           )}
-        </button>
-
-        {onOpenMemoryHub && (
           <button
-            onClick={onOpenMemoryHub}
-            className={`w-full flex items-center rounded-lg text-xs transition-colors hover:bg-surface-100 text-muted-foreground hover:text-foreground ${
-              isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-1.5'
-            }`}
-            title="记忆中枢 (长期记忆 · 事实双时间轴 · 行为账本 · 人设)"
+            onClick={() => onSelectNavHub?.('chat')}
+            className={`w-full flex items-center rounded-lg text-xs transition-colors ${
+              activeNavHub === 'chat'
+                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
+                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
+            } ${isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-1.5'}`}
+            title="对话与任务"
           >
-            <Brain className="w-4 h-4 shrink-0 text-emerald-500" />
-            {!isCollapsed && <span>记忆中枢</span>}
+            <MessageSquare className="w-4 h-4 shrink-0" />
+            {!isCollapsed && <span>对话与任务</span>}
           </button>
-        )}
 
-        <button
-          onClick={() => onSelectNavHub?.('scheduled')}
-          className={`w-full flex items-center justify-between rounded-lg text-xs transition-colors ${
-            activeNavHub === 'scheduled'
-              ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
-              : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
-          } ${isCollapsed ? 'justify-center p-2' : 'px-3 py-1.5'}`}
-          title="已安排 (Scheduled · 自动化定时任务)"
-        >
-          <div className="flex items-center space-x-2.5">
-            <Clock className="w-4 h-4 shrink-0 text-amber-400" />
-            {!isCollapsed && <span>已安排</span>}
-          </div>
+          <button
+            onClick={() => onSelectNavHub?.('library')}
+            className={`w-full flex items-center justify-between rounded-lg text-xs transition-colors ${
+              activeNavHub === 'library'
+                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
+                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
+            } ${isCollapsed ? 'justify-center p-2' : 'px-3 py-1.5'}`}
+            title="资产与库 (Library · 沉淀文档与媒体资产)"
+          >
+            <div className="flex items-center space-x-2.5">
+              <Library className="w-4 h-4 shrink-0 text-sky-400" />
+              {!isCollapsed && <span>资产与库</span>}
+            </div>
+            {!isCollapsed && (
+              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-surface-200 text-muted-foreground font-mono">
+                资产
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => onSelectNavHub?.('scheduled')}
+            className={`w-full flex items-center justify-between rounded-lg text-xs transition-colors ${
+              activeNavHub === 'scheduled'
+                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
+                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
+            } ${isCollapsed ? 'justify-center p-2' : 'px-3 py-1.5'}`}
+            title="已安排调度 (Triggers · 计划任务)"
+          >
+            <div className="flex items-center space-x-2.5">
+              <Clock className="w-4 h-4 shrink-0 text-amber-400" />
+              {!isCollapsed && <span>已安排调度</span>}
+            </div>
+            {!isCollapsed && (
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" title="后台调度守护就绪" />
+            )}
+          </button>
+        </div>
+
+        {/* 子板块 B: 专家与扩展能力 (EXPERTS & CAPABILITIES) */}
+        <div className="space-y-0.5 pt-1.5 border-t border-border/40">
           {!isCollapsed && (
-            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" title="后台调度守护就绪" />
+            <div className="px-2 py-0.5 text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
+              专家与能力
+            </div>
           )}
-        </button>
 
-        <button
-          onClick={() => onSelectNavHub?.('skills')}
-          className={`w-full flex items-center rounded-lg text-xs transition-colors ${
-            activeNavHub === 'skills'
-              ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
-              : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
-          } ${isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-1.5'}`}
-          title="技能与应用 (Skills & MCP)"
-        >
-          <Puzzle className="w-4 h-4 shrink-0 text-indigo-400" />
-          {!isCollapsed && <span>技能与应用</span>}
-        </button>
+          {/* 智能体 (专家中心) */}
+          <button
+            onClick={() => onSelectNavHub?.('agents')}
+            className={`w-full flex items-center justify-between rounded-lg text-xs transition-colors ${
+              activeNavHub === 'agents'
+                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
+                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
+            } ${isCollapsed ? 'justify-center p-2' : 'px-3 py-1.5'}`}
+            title="智能体 (专家装配与沙盒启动)"
+          >
+            <div className="flex items-center space-x-2.5">
+              <Bot className="w-4 h-4 shrink-0 text-emerald-500" />
+              {!isCollapsed && <span>智能体 (专家)</span>}
+            </div>
+            {!isCollapsed && (
+              <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 font-medium">
+                专家
+              </span>
+            )}
+          </button>
+
+          <button
+            onClick={() => onSelectNavHub?.('skills')}
+            className={`w-full flex items-center rounded-lg text-xs transition-colors ${
+              activeNavHub === 'skills'
+                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
+                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
+            } ${isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-1.5'}`}
+            title="技能与应用 (Skills & MCP)"
+          >
+            <Puzzle className="w-4 h-4 shrink-0 text-indigo-400" />
+            {!isCollapsed && <span>技能与应用</span>}
+          </button>
+
+          {onOpenMemoryHub && (
+            <button
+              onClick={onOpenMemoryHub}
+              className={`w-full flex items-center rounded-lg text-xs transition-colors hover:bg-surface-100 text-muted-foreground hover:text-foreground ${
+                isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-1.5'
+              }`}
+              title="记忆中枢 (长期记忆 · 事实双时间轴 · 行为账本 · 人设)"
+            >
+              <Brain className="w-4 h-4 shrink-0 text-emerald-500" />
+              {!isCollapsed && <span>记忆中枢</span>}
+            </button>
+          )}
+        </div>
       </div>
 
-      {/* ③ 中部滚动区：「项目」折叠树 + 「对话」独立列表 */}
+      {/* ③ 中部滚动区：「沙盒与项目」折叠树 + 「对话」独立列表 */}
       <div className="flex-1 overflow-y-auto p-2 space-y-3">
-        {/* 分组一：项目 (对应非 default 工作区) */}
+        {/* 分组一：沙盒与项目 (对应非 default 工作区) */}
         <div className="space-y-1">
           {!isCollapsed && (
             <div className="px-1.5 py-0.5 flex items-center justify-between text-[11px] font-bold text-muted-foreground">
-              <span>项目 ({projectWorkspaces.length})</span>
+              <span className="flex items-center space-x-1.5">
+                <Box className="w-3.5 h-3.5 text-sky-400" />
+                <span>沙盒与项目 ({projectWorkspaces.length})</span>
+              </span>
               <div className="flex items-center space-x-1">
                 <button
                   type="button"
@@ -521,7 +563,7 @@ export function Sidebar({
                   type="button"
                   onClick={() => setIsCreatingVirtual(true)}
                   className="p-1 rounded hover:bg-surface-200 text-muted-foreground hover:text-sky-400 transition-colors"
-                  title="新建沙盒托管项目"
+                  title="新建托管隔离沙盒"
                 >
                   <Plus className="w-3.5 h-3.5" />
                 </button>
@@ -849,44 +891,62 @@ export function Sidebar({
 
         {/* 三联轻工具条：用量分析 · 系统监控 · 设置 */}
         {isCollapsed ? (
-          <div className="flex flex-col items-center space-y-1">
+          <div className="flex flex-col items-center space-y-1.5 pt-1 border-t border-border/40">
             {onOpenTokenStats && (
               <button
+                type="button"
                 onClick={onOpenTokenStats}
-                className="p-2 rounded-lg hover:bg-surface-100 text-muted-foreground hover:text-foreground transition-colors"
-                title="用量分析"
+                className="p-2 rounded-xl hover:bg-surface-200 text-muted-foreground hover:text-foreground transition-colors"
+                title="用量分析 (Token 消耗统计)"
               >
-                <BarChart3 className="w-4 h-4" />
+                <BarChart3 className="w-4 h-4 text-emerald-500" />
+              </button>
+            )}
+            {onOpenSystemMonitor && (
+              <button
+                type="button"
+                onClick={onOpenSystemMonitor}
+                className="relative p-2 rounded-xl hover:bg-surface-200 text-muted-foreground hover:text-foreground transition-colors"
+                title="系统监控与性能"
+              >
+                <Activity className="w-4 h-4 text-sky-400" />
+                {pendingProposalCount > 0 && (
+                  <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-500" />
+                )}
               </button>
             )}
             <button
+              type="button"
               onClick={onOpenSettings}
-              className="p-2 rounded-lg hover:bg-surface-100 text-muted-foreground hover:text-foreground transition-colors"
-              title="设置"
+              className="relative p-2 rounded-xl hover:bg-surface-200 text-muted-foreground hover:text-foreground transition-colors"
+              title="偏好设置"
             >
-              <Sliders className="w-4 h-4" />
+              <Sliders className="w-4 h-4 text-amber-400" />
+              {hasUpdate && (
+                <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+              )}
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-3 gap-1 pt-0.5">
+          <div className="grid grid-cols-3 gap-1 pt-1 border-t border-border/40">
             <button
               type="button"
               onClick={() => onOpenTokenStats?.()}
-              className="flex items-center justify-center space-x-1 px-1.5 py-1.5 rounded-lg hover:bg-surface-100 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+              className="flex items-center justify-center space-x-1 px-1.5 py-1.5 rounded-lg hover:bg-surface-200 text-[11px] text-muted-foreground hover:text-foreground transition-colors border border-transparent hover:border-border/50"
               title="查看 Token 消耗与脱水节省统计"
             >
-              <BarChart3 className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">用量分析</span>
+              <BarChart3 className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
+              <span className="truncate font-medium">用量分析</span>
             </button>
 
             <button
               type="button"
               onClick={() => onOpenSystemMonitor?.()}
-              className="relative flex items-center justify-center space-x-1 px-1.5 py-1.5 rounded-lg hover:bg-surface-100 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+              className="relative flex items-center justify-center space-x-1 px-1.5 py-1.5 rounded-lg hover:bg-surface-200 text-[11px] text-muted-foreground hover:text-foreground transition-colors border border-transparent hover:border-border/50"
               title="系统监控与优化提案"
             >
-              <Activity className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">系统监控</span>
+              <Activity className="w-3.5 h-3.5 shrink-0 text-sky-400" />
+              <span className="truncate font-medium">系统监控</span>
               {pendingProposalCount > 0 && (
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
               )}
@@ -895,11 +955,11 @@ export function Sidebar({
             <button
               type="button"
               onClick={onOpenSettings}
-              className="relative flex items-center justify-center space-x-1 px-1.5 py-1.5 rounded-lg hover:bg-surface-100 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+              className="relative flex items-center justify-center space-x-1 px-1.5 py-1.5 rounded-lg hover:bg-surface-200 text-[11px] text-muted-foreground hover:text-foreground transition-colors border border-transparent hover:border-border/50"
               title="系统偏好、外观与模型路由设置"
             >
-              <Sliders className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate">设置</span>
+              <Sliders className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+              <span className="truncate font-medium">设置</span>
               {hasUpdate && (
                 <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
               )}

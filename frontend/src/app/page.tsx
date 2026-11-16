@@ -35,6 +35,7 @@ import {
 } from 'lucide-react';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
+import { AgentsView } from '@/components/AgentsView';
 import { LibraryView } from '@/components/LibraryView';
 import { ScheduledView } from '@/components/ScheduledView';
 import { SkillsView } from '@/components/SkillsView';
@@ -3097,7 +3098,17 @@ export default function WorkbenchPage() {
           </div>
         </header>
 
-        {/* 核心主枢纽视图路由 (对齐 Gemini 库 / 已安排 / 技能与应用) */}
+        {/* 核心主枢纽视图路由 (智能体专家 / 库 / 已安排 / 技能与应用) */}
+        {activeNavHub === 'agents' && (
+          <AgentsView
+            workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
+            onLaunchSandboxChat={(agent) => {
+              setActiveNavHub('chat');
+              switchConversation(null);
+            }}
+          />
+        )}
+
         {activeNavHub === 'library' && (
           <LibraryView
             workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
