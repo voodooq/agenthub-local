@@ -3666,13 +3666,18 @@ class AgentRuntime:
                         except Exception as scrub_err:
                             logger.debug(f"[AgentRuntime] 旁路工具清洗跳过: {scrub_err}")
 
+                    final_tool_output = (
+                        tool_output
+                        if isinstance(tool_output, str)
+                        else ("" if tool_output is None else str(tool_output))
+                    )
                     if rescue_addon:
-                        tool_output = (tool_output or "") + rescue_addon
+                        final_tool_output += rescue_addon
 
                     # S4 联动回补：工具因参数格式错误失败时，附带单工具完整 JSON Schema 说明
                     tool_output = self._append_schema_hint_if_arg_error(
                         func_name,
-                        tool_output,
+                        final_tool_output,
                         args_parse_failed=args_parse_failed,
                     )
 
