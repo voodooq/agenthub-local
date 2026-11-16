@@ -37,7 +37,7 @@ import { useAppVersion } from '@/config/version';
 import { apiFetch } from '@/utils/apiClient';
 import { ServerFolderBrowser } from './ServerFolderBrowser';
 
-export type MainNavHub = 'chat' | 'agents' | 'library' | 'scheduled' | 'skills';
+export type MainNavHub = 'chat' | 'agents' | 'library' | 'scheduled' | 'skills' | 'memory';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -524,18 +524,20 @@ export function Sidebar({
             {!isCollapsed && <span>技能与应用</span>}
           </button>
 
-          {onOpenMemoryHub && (
-            <button
-              onClick={onOpenMemoryHub}
-              className={`w-full flex items-center rounded-lg text-xs transition-colors hover:bg-surface-100 text-muted-foreground hover:text-foreground ${
-                isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-1.5'
-              }`}
-              title="记忆中枢 (长期记忆 · 事实双时间轴 · 行为账本 · 人设)"
-            >
+          <button
+            onClick={() => onSelectNavHub?.('memory')}
+            className={`w-full flex items-center justify-between rounded-lg text-xs transition-colors ${
+              activeNavHub === 'memory'
+                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
+                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
+            } ${isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-1.5'}`}
+            title="记忆中枢 (长期记忆 · 事实双时间轴 · 行为账本 · 人设)"
+          >
+            <div className="flex items-center space-x-2.5">
               <Brain className="w-4 h-4 shrink-0 text-emerald-500" />
               {!isCollapsed && <span>记忆中枢</span>}
-            </button>
-          )}
+            </div>
+          </button>
         </div>
       </div>
 

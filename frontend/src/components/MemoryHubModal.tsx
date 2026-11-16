@@ -46,15 +46,16 @@ import {
 } from '@/utils/skillCache';
 import { PersonaPreset, SkillItem } from './SettingsModal';
 
-export type MemoryHubTab = 'memories' | 'facts' | 'ledger' | 'personality' | 'extensions';
+export type MemoryHubTab = 'memories' | 'facts' | 'ledger' | 'personality';
 
-interface MemoryHubModalProps {
-  isOpen: boolean;
-  onClose: () => void;
+export interface MemoryHubModalProps {
+  isOpen?: boolean;
+  onClose?: () => void;
   onProvidersChanged?: () => void;
   workspaceId?: string;
   initialTab?: MemoryHubTab;
   onSkillsUpdated?: () => void;
+  asView?: boolean;
 }
 
 interface SkillInfo {
@@ -214,19 +215,22 @@ function formatIsoTime(iso?: string | null): string {
 }
 
 export function MemoryHubModal({
-  isOpen,
+  isOpen = true,
   onClose,
   onProvidersChanged,
   workspaceId = 'default',
   initialTab = 'memories',
   onSkillsUpdated,
+  asView = false,
 }: MemoryHubModalProps) {
   const onCloseRef = useRef(onClose);
   useEffect(() => {
     onCloseRef.current = onClose;
   }, [onClose]);
 
-  const [activeTab, setActiveTab] = useState<MemoryHubTab>(initialTab);
+  const [activeTab, setActiveTab] = useState<MemoryHubTab>(
+    initialTab === ('extensions' as any) ? 'memories' : initialTab
+  );
   const [memories, setMemories] = useState<LongTermMemoryItem[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -451,7 +455,7 @@ export function MemoryHubModal({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.preventDefault();
-        onCloseRef.current();
+        onCloseRef.current?.();
       }
     };
     window.addEventListener('keydown', handleKeyDown);
@@ -1242,97 +1246,100 @@ export function MemoryHubModal({
 
   const activeFactsCount = facts.filter((f) => f.is_active).length;
 
-  return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fade-in"
-      onClick={onClose}
-    >
-      <div
-        className="w-full max-w-4xl max-h-[88vh] flex flex-col rounded-2xl bg-surface-card border border-border shadow-2xl overflow-hidden text-foreground"
-        onClick={(e) => e.stopPropagation()}
-      >
-        {/* 顶部标题栏 */}
-        <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-surface-100/60">
-          <div className="flex items-center space-x-2.5">
-            <div className="p-2 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
-              <Brain className="w-5 h-5" />
-            </div>
-            <div>
-              <h2 className="text-[15px] font-bold text-foreground">
-                记忆中枢 · 精确事实双时间轴 · 账本追溯 · Skill 与 MCP
-              </h2>
-              <p className="text-xs text-muted-foreground">
-                L4 确定性 KV 契约 · Append-Only 审计账本 · 长期记忆画像 · 回复性格与自演化 Skill 扩展总线
-              </p>
-            </div>
-          </div>
+  if (!asView && !isOpen) return null;
 
+  const innerContent = (
+    <div
+      className={
+        asView
+          ? 'flex-1 flex flex-col h-full bg-surface-base overflow-hidden'
+          : 'w-full max-w-4xl max-h-[88vh] flex flex-col rounded-2xl bg-surface-card border border-border shadow-2xl overflow-hidden text-foreground'
+      }
+      onClick={asView ? undefined : (e) => e.stopPropagation()}
+    >
+      {/* 顶部标题栏 */}
+      <div
+        className={
+          asView
+            ? 'px-6 py-5 border-b border-border flex items-center justify-between bg-surface-100/50 shrink-0'
+            : 'px-6 py-4 border-b border-border flex items-center justify-between bg-surface-100/60'
+        }
+      >
+        <div className="flex items-center space-x-3">
+          <div className="p-2.5 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+            <Brain className="w-5 h-5" />
+          </div>
+          <div>
+            <h1 className="text-base font-bold text-foreground">
+              记忆中枢 (Memory Hub)
+            </h1>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              长期记忆画像 · 精确事实双时间轴 · Append-Only 行为审计账本 · 回复性格与人设
+            </p>
+          </div>
+        </div>
+
+        {!asView && onClose && (
           <button
             onClick={onClose}
             className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
+        )}
+      </div>
+
+      {/* 顶部 Tab 切换 */}
+      <div className="px-6 pt-3 border-b border-border flex items-center justify-between gap-3 bg-surface-100/30 overflow-x-auto shrink-0">
+        <div className="flex items-center space-x-4 whitespace-nowrap shrink-0">
+          <button
+            onClick={() => setActiveTab('memories')}
+            className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
+              activeTab === 'memories'
+                ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5" />
+            <span>长期记忆画像 ({memories.length})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('facts')}
+            className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
+              activeTab === 'facts'
+                ? 'border-teal-500 text-teal-600 dark:text-teal-400'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Clock className="w-3.5 h-3.5 text-teal-500" />
+            <span>精确事实视图 ({activeFactsCount})</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('ledger')}
+            className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
+              activeTab === 'ledger'
+                ? 'border-amber-500 text-amber-600 dark:text-amber-400'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <History className="w-3.5 h-3.5 text-amber-500" />
+            <span>事件账本追溯</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('personality')}
+            className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
+              activeTab === 'personality'
+                ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Brain className="w-3.5 h-3.5 text-purple-500" />
+            <span>回复性格与人设</span>
+          </button>
         </div>
-
-        {/* 顶部 Tab 切换 */}
-        <div className="px-6 pt-3 border-b border-border flex items-center justify-between gap-3 bg-surface-100/30 overflow-x-auto">
-          <div className="flex items-center space-x-4 whitespace-nowrap shrink-0">
-            <button
-              onClick={() => setActiveTab('memories')}
-              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'memories'
-                  ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
-            >
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>长期记忆画像 ({memories.length})</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('facts')}
-              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'facts'
-                  ? 'border-teal-500 text-teal-600 dark:text-teal-400'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
-            >
-              <Clock className="w-3.5 h-3.5 text-teal-500" />
-              <span>精确事实视图 ({activeFactsCount})</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('ledger')}
-              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'ledger'
-                  ? 'border-amber-500 text-amber-600 dark:text-amber-400'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
-            >
-              <History className="w-3.5 h-3.5 text-amber-500" />
-              <span>事件账本追溯</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('personality')}
-              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'personality'
-                  ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
-            >
-              <Brain className="w-3.5 h-3.5 text-purple-500" />
-              <span>回复性格与 SKILL</span>
-            </button>
-
-            <button
-              onClick={() => setActiveTab('extensions')}
-              className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${activeTab === 'extensions'
-                  ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
-                  : 'border-transparent text-muted-foreground hover:text-foreground'
-                }`}
-            >
-              <Puzzle className="w-3.5 h-3.5 text-teal-500" />
-              <span>Skill 与 MCP ({skills.length + Object.keys(mcpServers).length})</span>
-            </button>
-          </div>
 
           {activeTab === 'memories' && (
             <div className="flex items-center space-x-2 pb-2 shrink-0">
@@ -2220,683 +2227,30 @@ export function MemoryHubModal({
                     ) : (
                       <Save className="w-3.5 h-3.5" />
                     )}
-                    <span>保存性格与 SKILL 设置</span>
+                    <span>保存性格与人设设置</span>
                   </button>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* ────────── TAB 3: Skill 技能包与 MCP 扩展 (支持自定义添加与导入) ────────── */}
-          {activeTab === 'extensions' && (
-            <div className="space-y-6">
-              {extFeedback && (
-                <div
-                  className={`p-3 rounded-xl text-xs flex items-center justify-between animate-fadeIn ${extFeedback.success
-                      ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-300 border border-emerald-500/20'
-                      : 'bg-rose-500/10 text-rose-600 dark:text-rose-300 border border-rose-500/20'
-                    }`}
-                >
-                  <span>{extFeedback.msg}</span>
-                  <button
-                    type="button"
-                    onClick={() => setExtFeedback(null)}
-                    className="text-muted-foreground hover:text-foreground ml-2"
-                  >
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              )}
-
-              {/* 1. Workspace Skills 区域 */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <div>
-                    <h3 className="text-xs font-bold text-foreground flex items-center space-x-1.5">
-                      <Terminal className="w-3.5 h-3.5 text-emerald-500" />
-                      <span>按需专业技能包 (Workspace Skills · ./skills/*/SKILL.md)</span>
-                    </h3>
-                    <p className="text-[11px] text-muted-foreground mt-0.5">
-                      平时仅向模型暴露摘要（省 Token），触发任务时按需自动注入完整 SKILL.md 规程
-                    </p>
-                  </div>
-
-                  <div className="flex items-center space-x-2">
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setSkillFormMode(skillFormMode === 'create' ? 'none' : 'create')
-                      }
-                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>新建 Skill</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        setSkillFormMode(skillFormMode === 'import' ? 'none' : 'import')
-                      }
-                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-surface-100 hover:bg-surface-200 border border-border text-foreground text-xs font-medium transition-colors"
-                    >
-                      <Upload className="w-3.5 h-3.5 text-emerald-500" />
-                      <span>导入 SKILL.md</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* 新建自定义 Skill 表单 */}
-                {skillFormMode === 'create' && (
-                  <div className="p-4 rounded-xl bg-surface-100 border border-emerald-500/30 space-y-3">
-                    <div className="text-xs font-bold text-foreground">
-                      新建自定义按需技能包 (自动生成 skills/&lt;name&gt;/SKILL.md)
-                    </div>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                      <input
-                        type="text"
-                        value={newSkillName}
-                        onChange={(e) => setNewSkillName(e.target.value)}
-                        placeholder="技能标识名称 (如 docker-deploy-helper)"
-                        className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                      />
-                      <input
-                        type="text"
-                        value={newSkillDesc}
-                        onChange={(e) => setNewSkillDesc(e.target.value)}
-                        placeholder="一句话触发条件与用途说明"
-                        className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none"
-                      />
-                    </div>
-                    <textarea
-                      rows={5}
-                      value={newSkillContent}
-                      onChange={(e) => setNewSkillContent(e.target.value)}
-                      placeholder={
-                        '# 技能执行规程标题\n\n1. 第一步执行的检查指令...\n2. 第二步处理规范...\n3. 边界条件与安全注意事项...'
-                      }
-                      className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-y"
-                    />
-                    <div className="flex justify-end space-x-2">
-                      <button
-                        type="button"
-                        onClick={() => setSkillFormMode('none')}
-                        className="px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:bg-surface-200"
-                      >
-                        取消
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleCreateSkill}
-                        className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
-                      >
-                        保存并挂载 Skill
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* 导入 SKILL.md 表单 */}
-                {skillFormMode === 'import' && (
-                  <div className="p-4 rounded-xl bg-surface-100 border border-emerald-500/30 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-foreground">
-                        导入外部 SKILL.md 文件或直接粘贴 Markdown 规程
-                      </span>
-                      <div>
-                        <input
-                          ref={skillFileInputRef}
-                          type="file"
-                          accept=".md,.txt"
-                          onChange={handleSkillFileSelected}
-                          className="hidden"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => skillFileInputRef.current?.click()}
-                          className="px-3 py-1 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 text-xs font-medium flex items-center space-x-1"
-                        >
-                          <Upload className="w-3 h-3" />
-                          <span>选择本地 SKILL.md 文件</span>
-                        </button>
-                      </div>
-                    </div>
-                    <textarea
-                      rows={5}
-                      value={importSkillText}
-                      onChange={(e) => setImportSkillText(e.target.value)}
-                      placeholder={
-                        '---\nname: my-custom-skill\ndescription: 当需要执行特定领域任务时调用此技能\n---\n\n# 详细技能操作指南...'
-                      }
-                      className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-y"
-                    />
-                    <div className="flex justify-end space-x-2">
-                      <button
-                        type="button"
-                        onClick={() => setSkillFormMode('none')}
-                        className="px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:bg-surface-200"
-                      >
-                        取消
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleImportSkill}
-                        className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
-                      >
-                        确认导入并挂载
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <div className="grid grid-cols-1 gap-2.5">
-                  {skills.map((sk) => {
-                    const isPreviewing = previewSkillId === sk.id;
-                    return (
-                      <div
-                        key={sk.id}
-                        className="p-3.5 rounded-xl bg-surface-100/70 border border-border space-y-2"
-                      >
-                        <div className="flex items-start justify-between gap-3">
-                          <div className="space-y-1 flex-1 min-w-0">
-                            <div className="flex items-center space-x-2">
-                              <span className="text-xs font-bold text-foreground font-mono">
-                                {sk.name}
-                              </span>
-                              <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
-                                已就绪
-                              </span>
-                              {sk.is_builtin && (
-                                <span className="px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
-                                  内置示例
-                                </span>
-                              )}
-                              {sk.knowledge_files?.includes('experience_playbook.md') && (
-                                <span
-                                  className="px-1.5 py-0.5 rounded text-[10px] bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/25 flex items-center space-x-1"
-                                  title="已挂载自演化经验守则 (knowledge/experience_playbook.md)"
-                                >
-                                  <BookOpen className="w-2.5 h-2.5" />
-                                  <span>含经验守则</span>
-                                </span>
-                              )}
-                            </div>
-                            <p className="text-xs text-muted-foreground break-anywhere">
-                              {sk.description}
-                            </p>
-                          </div>
-
-                          <div className="flex items-center space-x-1 shrink-0">
-                            {(sk.content || sk.has_content) && (
-                              <button
-                                type="button"
-                                onClick={() => handleToggleSkillPreview(sk)}
-                                className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
-                                title="查看 SKILL.md 内容"
-                              >
-                                <Eye className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteSkill(sk.id)}
-                              className="p-1.5 rounded-lg text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
-                              title="删除此技能包"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
-
-                        {isPreviewing && (
-                          <pre className="p-3 rounded-lg bg-surface-card border border-border text-[11px] font-mono text-muted-foreground overflow-x-auto whitespace-pre-wrap max-h-48">
-                            {loadingPreviewId === sk.id
-                              ? '正在按需读取 SKILL.md 原文...'
-                              : sk.content || '暂无内容'}
-                          </pre>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              {/* 2. MCP Servers 区域 */}
-              <div className="space-y-3 pt-3 border-t border-border">
-                <div className="flex items-center justify-between flex-wrap gap-2">
-                  <div>
-                    <h3 className="text-xs font-bold text-foreground flex items-center flex-wrap gap-1.5">
-                      <ShieldCheck className="w-3.5 h-3.5 text-purple-500" />
-                      <span>MCP 外部扩展服务池</span>
-                      {mcpConfigPath && (
-                        <span
-                          className="text-[10px] font-mono font-normal px-1.5 py-0.5 rounded bg-surface-200 text-muted-foreground max-w-xs truncate"
-                          title={mcpConfigPath}
-                        >
-                          {mcpConfigPath}
-                        </span>
-                      )}
-                    </h3>
-                    <p className="text-[11px] text-muted-foreground mt-0.5">
-                      兼容本地 stdio 与远程 Streamable HTTP / SSE 协议 · 支持导入 Claude Desktop / Cursor / VS Code JSON
-                    </p>
-                  </div>
-
-                  <div className="flex items-center space-x-2">
-                    <button
-                      type="button"
-                      onClick={handleStartCreateMcp}
-                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-medium transition-colors"
-                    >
-                      <Plus className="w-3.5 h-3.5" />
-                      <span>添加 MCP 服务</span>
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        if (mcpFormMode === 'import') {
-                          setMcpFormMode('none');
-                        } else {
-                          resetMcpForm();
-                          setMcpFormMode('import');
-                        }
-                      }}
-                      className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-surface-100 hover:bg-surface-200 border border-border text-foreground text-xs font-medium transition-colors"
-                    >
-                      <Upload className="w-3.5 h-3.5 text-purple-500" />
-                      <span>导入 MCP JSON</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* 新建 / 编辑 MCP 服务表单 */}
-                {(mcpFormMode === 'create' || mcpFormMode === 'edit') && (
-                  <div className="p-4 rounded-xl bg-surface-100 border border-purple-500/30 space-y-3">
-                    <div className="flex items-center justify-between flex-wrap gap-2">
-                      <div className="text-xs font-bold text-foreground">
-                        {mcpFormMode === 'edit'
-                          ? `编辑 MCP 服务节点：${editingMcpName}`
-                          : '添加自定义 MCP 服务节点'}
-                      </div>
-                      <div className="inline-flex rounded-lg bg-surface-card border border-border p-0.5">
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setMcpConnTab('stdio');
-                            setFormTestResult(null);
-                          }}
-                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors flex items-center space-x-1 ${mcpConnTab === 'stdio'
-                              ? 'bg-purple-600 text-white'
-                              : 'text-muted-foreground hover:text-foreground'
-                            }`}
-                        >
-                          <Terminal className="w-3 h-3" />
-                          <span>本地进程 stdio</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setMcpConnTab('remote');
-                            setFormTestResult(null);
-                          }}
-                          className={`px-2.5 py-1 rounded-md text-[11px] font-medium transition-colors flex items-center space-x-1 ${mcpConnTab === 'remote'
-                              ? 'bg-sky-600 text-white'
-                              : 'text-muted-foreground hover:text-foreground'
-                            }`}
-                        >
-                          <Globe className="w-3 h-3" />
-                          <span>远程服务 HTTP / SSE</span>
-                        </button>
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                      <div>
-                        <input
-                          type="text"
-                          value={newMcpName}
-                          readOnly={mcpFormMode === 'edit'}
-                          onChange={(e) => setNewMcpName(e.target.value)}
-                          placeholder="服务名称 (如 context7 / github，严禁含 __)"
-                          className={`w-full px-3 py-2 rounded-lg border border-border text-xs text-foreground outline-none font-mono ${mcpFormMode === 'edit' ? 'bg-surface-200/70 opacity-80 cursor-not-allowed' : 'bg-surface-card'
-                            }`}
-                        />
-                      </div>
-                      <input
-                        type="text"
-                        value={newMcpDesc}
-                        onChange={(e) => setNewMcpDesc(e.target.value)}
-                        placeholder="功能说明 (选填)"
-                        className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none"
-                      />
-                    </div>
-
-                    {mcpConnTab === 'stdio' ? (
-                      <div className="space-y-2.5">
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
-                          <input
-                            type="text"
-                            value={newMcpCommand}
-                            onChange={(e) => setNewMcpCommand(e.target.value)}
-                            placeholder="启动命令 (如 npx / uvx / python)"
-                            className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                          />
-                          <input
-                            type="text"
-                            value={newMcpArgs}
-                            onChange={(e) => setNewMcpArgs(e.target.value)}
-                            placeholder="启动参数（空格分隔，如 -y @modelcontextprotocol/server-github）"
-                            className="sm:col-span-2 px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                          />
-                        </div>
-                        <textarea
-                          rows={2}
-                          value={newMcpEnvJson}
-                          onChange={(e) => setNewMcpEnvJson(e.target.value)}
-                          placeholder='环境变量 JSON（选填，如 {"GITHUB_PERSONAL_ACCESS_TOKEN": "ghp_xxx"}）'
-                          className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-y"
-                        />
-                      </div>
-                    ) : (
-                      <div className="space-y-2.5">
-                        <div className="grid grid-cols-1 sm:grid-cols-4 gap-2.5">
-                          <select
-                            value={newMcpRemoteTransport}
-                            onChange={(e) => setNewMcpRemoteTransport(e.target.value as 'streamable-http' | 'sse')}
-                            className="px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none"
-                          >
-                            <option value="streamable-http">Streamable HTTP (推荐)</option>
-                            <option value="sse">SSE (旧版兼容)</option>
-                          </select>
-                          <input
-                            type="url"
-                            value={newMcpUrl}
-                            onChange={(e) => setNewMcpUrl(e.target.value)}
-                            placeholder="服务端点 URL (如 https://mcp.context7.com/mcp)"
-                            className="sm:col-span-2 px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                          />
-                          <div className="flex items-center space-x-1.5">
-                            <span className="text-[11px] text-muted-foreground shrink-0">Timeout(s)</span>
-                            <input
-                              type="number"
-                              min={5}
-                              max={600}
-                              value={newMcpTimeout}
-                              onChange={(e) => setNewMcpTimeout(e.target.value)}
-                              className="w-full px-2.5 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                            />
-                          </div>
-                        </div>
-
-                        <div>
-                          <textarea
-                            rows={2}
-                            value={newMcpHeadersJson}
-                            onChange={(e) => setNewMcpHeadersJson(e.target.value)}
-                            placeholder='请求头 Headers JSON（可留空适配公开免鉴权服务，支持 ${ENV_VAR} 如 {"Authorization": "Bearer ${MCP_TOKEN}"}）'
-                            className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-y"
-                          />
-                          {mcpFormMode === 'edit' && newMcpHeadersJson.includes('****') && (
-                            <p className="text-[11px] text-sky-600 dark:text-sky-400 mt-1">
-                              提示：包含 `****` 的脱敏字段在保持原样或留空时会自动沿用已存储的真实密钥；如需更换请填入完整新值或 {'${ENV_VAR}'}。
-                            </p>
-                          )}
-                        </div>
-
-                        {/* 可选高级折叠区：跨网文件协同配置 */}
-                        <div className="rounded-lg border border-border bg-surface-card/60 overflow-hidden">
-                          <button
-                            type="button"
-                            onClick={() => setShowMcpAdvancedFileBridge((v) => !v)}
-                            className="w-full px-3 py-2 flex items-center justify-between text-[11px] font-medium text-muted-foreground hover:text-foreground transition-colors"
-                          >
-                            <span className="flex items-center space-x-1.5">
-                              <SlidersHorizontal className="w-3 h-3" />
-                              <span>高级：跨网文件协同配置（可选，标准公共 MCP 无需填写）</span>
-                            </span>
-                            {showMcpAdvancedFileBridge ? (
-                              <ChevronUp className="w-3.5 h-3.5" />
-                            ) : (
-                              <ChevronDown className="w-3.5 h-3.5" />
-                            )}
-                          </button>
-                          {showMcpAdvancedFileBridge && (
-                            <div className="px-3 pb-3 pt-1 space-y-2 border-t border-border/60">
-                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                                <input
-                                  type="url"
-                                  value={newMcpUploadEndpoint}
-                                  onChange={(e) => setNewMcpUploadEndpoint(e.target.value)}
-                                  placeholder="Upload URL (可选，如 http://127.0.0.1:8000/api/v1/files/upload)"
-                                  className="sm:col-span-2 px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                                />
-                                <input
-                                  type="text"
-                                  value={newMcpUploadFileField}
-                                  onChange={(e) => setNewMcpUploadFileField(e.target.value)}
-                                  placeholder="Upload File Field (默认 file)"
-                                  className="px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                                />
-                              </div>
-                              <input
-                                type="text"
-                                value={newMcpDownloadOriginsText}
-                                onChange={(e) => setNewMcpDownloadOriginsText(e.target.value)}
-                                placeholder="允许下载源 download_origins（可选，逗号分隔如 https://cdn.example.com；主 URL 同源已自动放行）"
-                                className="w-full px-2.5 py-1.5 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono"
-                              />
-                            </div>
-                          )}
-                        </div>
-                      </div>
-                    )}
-
-                    {formTestResult && (
-                      <div
-                        className={`px-3 py-2 rounded-lg text-xs border ${formTestResult.ok
-                            ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-700 dark:text-emerald-300'
-                            : 'bg-rose-500/10 border-rose-500/30 text-rose-700 dark:text-rose-300'
-                          }`}
-                      >
-                        {formTestResult.ok
-                          ? `✅ 探测成功 (${formTestResult.transport})：发现 ${formTestResult.tool_count} 个工具，耗时 ${formTestResult.latency_ms}ms${formTestResult.tools.length > 0
-                            ? ` · 示例: ${formTestResult.tools.slice(0, 5).join(', ')}`
-                            : ''
-                          }`
-                          : `❌ 探测失败：${formTestResult.error || '连接异常'}`}
-                      </div>
-                    )}
-
-                    <div className="flex justify-end items-center space-x-2">
-                      <button
-                        type="button"
-                        onClick={handleTestMcpFromForm}
-                        disabled={Boolean(testingMcpName)}
-                        className="px-3 py-1.5 rounded-lg border border-border bg-surface-card hover:bg-surface-200 text-xs font-medium text-foreground flex items-center space-x-1 disabled:opacity-50"
-                      >
-                        <Activity className="w-3.5 h-3.5 text-sky-500" />
-                        <span>{testingMcpName?.startsWith('__form__:') ? '测试中...' : '测试连接'}</span>
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          resetMcpForm();
-                          setMcpFormMode('none');
-                        }}
-                        className="px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:bg-surface-200"
-                      >
-                        取消
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleSaveMcpServer}
-                        className="px-4 py-1.5 rounded-lg bg-purple-600 hover:bg-purple-500 text-white text-xs font-semibold"
-                      >
-                        {mcpFormMode === 'edit' ? '保存修改' : '保存并接入 MCP'}
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {/* 导入 MCP JSON 配置表单 */}
-                {mcpFormMode === 'import' && (
-                  <div className="p-4 rounded-xl bg-surface-100 border border-purple-500/30 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-foreground">
-                        导入本地 / 远程 MCP JSON 配置（支持 Claude Desktop / Cursor / VS Code / Windsurf）
-                      </span>
-                      <div>
-                        <input
-                          ref={mcpFileInputRef}
-                          type="file"
-                          accept=".json"
-                          onChange={handleMcpFileSelected}
-                          className="hidden"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => mcpFileInputRef.current?.click()}
-                          className="px-3 py-1 rounded-lg bg-purple-500/15 hover:bg-purple-500/25 text-purple-600 dark:text-purple-400 border border-purple-500/30 text-xs font-medium flex items-center space-x-1"
-                        >
-                          <Upload className="w-3 h-3" />
-                          <span>选择本地 JSON 文件</span>
-                        </button>
-                      </div>
-                    </div>
-                    <textarea
-                      rows={5}
-                      value={importMcpJson}
-                      onChange={(e) => setImportMcpJson(e.target.value)}
-                      placeholder={
-                        '{\n  "mcpServers": {\n    "context7": {\n      "transport": "streamable-http",\n      "url": "https://mcp.context7.com/mcp"\n    },\n    "memory": {\n      "command": "npx",\n      "args": ["-y", "@modelcontextprotocol/server-memory"]\n    }\n  }\n}'
-                      }
-                      className="w-full px-3 py-2 rounded-lg bg-surface-card border border-border text-xs text-foreground outline-none font-mono resize-y"
-                    />
-                    <div className="flex justify-end space-x-2">
-                      <button
-                        type="button"
-                        onClick={() => setMcpFormMode('none')}
-                        className="px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:bg-surface-200"
-                      >
-                        取消
-                      </button>
-                      <button
-                        type="button"
-                        onClick={handleImportMcpJson}
-                        className="px-4 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold"
-                      >
-                        确认批量导入 MCP
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                <div className="space-y-2">
-                  {Object.entries(mcpServers).map(([srvName, cfg]) => {
-                    const badge = getMcpTransportBadge(cfg);
-                    const summary = getMcpEndpointSummary(cfg);
-                    const testRes = mcpTestResults[srvName];
-                    const isTesting = testingMcpName === srvName;
-                    return (
-                      <div
-                        key={srvName}
-                        className="p-3.5 rounded-xl bg-surface-100/70 border border-border space-y-2"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <div className="space-y-1 flex-1 min-w-0">
-                            <div className="flex items-center flex-wrap gap-2">
-                              <span className="text-xs font-bold text-foreground font-mono">
-                                {srvName}
-                              </span>
-                              <span
-                                className={`text-[10px] font-semibold px-1.5 py-0.5 rounded border ${badge.colorClass}`}
-                              >
-                                {badge.label}
-                              </span>
-                              {cfg.upload_endpoint && (
-                                <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-500/30">
-                                  文件协同
-                                </span>
-                              )}
-                              {summary && (
-                                <span
-                                  className="text-[11px] text-muted-foreground font-mono bg-surface-200 px-1.5 py-0.5 rounded truncate max-w-md"
-                                  title={summary}
-                                >
-                                  {summary}
-                                </span>
-                              )}
-                            </div>
-                            {cfg.description && (
-                              <p className="text-xs text-muted-foreground break-anywhere">
-                                {cfg.description}
-                              </p>
-                            )}
-                          </div>
-
-                          <div className="flex items-center space-x-1.5 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => handleTestSavedMcpServer(srvName)}
-                              disabled={Boolean(testingMcpName)}
-                              className="px-2.5 py-1 rounded-lg bg-surface-card hover:bg-surface-200 border border-border text-xs font-medium text-foreground flex items-center space-x-1 transition-colors disabled:opacity-50"
-                              title="测试 MCP 连通性与拉取工具列表"
-                            >
-                              <Activity className="w-3 h-3 text-sky-500" />
-                              <span>{isTesting ? '测试中...' : '测试连接'}</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleStartEditMcpServer(srvName, cfg)}
-                              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
-                              title="编辑此 MCP 服务配置"
-                            >
-                              <Edit3 className="w-3.5 h-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleToggleMcpServer(srvName)}
-                              className={`px-3 py-1 rounded-lg text-xs font-medium transition-colors ${cfg.enabled
-                                  ? 'bg-emerald-600 text-white'
-                                  : 'bg-surface-200 text-muted-foreground hover:text-foreground'
-                                }`}
-                            >
-                              {cfg.enabled ? '已启用' : '未启用'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteMcpServer(srvName)}
-                              className="p-1.5 rounded-lg text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 transition-colors"
-                              title="删除此 MCP 服务"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
-
-                        {testRes && (
-                          <div
-                            className={`px-2.5 py-1.5 rounded-lg text-[11px] border ${testRes.ok
-                                ? 'bg-emerald-500/10 border-emerald-500/25 text-emerald-700 dark:text-emerald-300'
-                                : 'bg-rose-500/10 border-rose-500/25 text-rose-700 dark:text-rose-300'
-                              }`}
-                          >
-                            {testRes.ok
-                              ? `探测成功 (${testRes.transport})：发现 ${testRes.tool_count} 个工具 · 耗时 ${testRes.latency_ms}ms${testRes.tools.length > 0
-                                ? ` · [${testRes.tools.slice(0, 6).join(', ')}${testRes.tools.length > 6 ? '...' : ''}]`
-                                : ''
-                              }`
-                              : `探测失败：${testRes.error || '连接异常'}`}
-                          </div>
-                        )}
-                      </div>
-                    );
-                  })}
                 </div>
               </div>
             </div>
           )}
         </div>
       </div>
+  );
+
+  if (asView) {
+    return innerContent;
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fade-in"
+      onClick={onClose}
+    >
+      {innerContent}
     </div>
   );
+}
+
+export function MemoryHubView(props: Omit<MemoryHubModalProps, 'isOpen' | 'onClose' | 'asView'>) {
+  return <MemoryHubModal {...props} asView />;
 }

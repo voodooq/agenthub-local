@@ -56,7 +56,7 @@ import { RightActionDrawer } from '@/components/RightActionDrawer';
 import { CommandAutocomplete } from '@/components/CommandAutocomplete';
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { LanguageToggle } from '@/components/LanguageToggle';
-import { MemoryHubModal, MemoryHubTab } from '@/components/MemoryHubModal';
+import { MemoryHubModal, MemoryHubView, MemoryHubTab } from '@/components/MemoryHubModal';
 import { InlineToolCard } from '@/components/InlineToolCard';
 import { ImportWizardModal } from '@/components/ImportWizardModal';
 import { LoopHUD } from '@/components/LoopHUD';
@@ -2992,8 +2992,7 @@ export default function WorkbenchPage() {
         }}
         onOpenSearch={() => setIsSearchOpen(true)}
         onOpenMemoryHub={() => {
-          setMemoryHubInitialTab('memories');
-          setIsMemoryHubOpen(true);
+          setActiveNavHub('memory');
         }}
         onOpenAccounts={() => setIsAccountOpen(true)}
         onOpenSync={() => setIsSyncOpen(true)}
@@ -3164,6 +3163,12 @@ export default function WorkbenchPage() {
         {activeNavHub === 'skills' && (
           <SkillsView
             workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
+          />
+        )}
+
+        {activeNavHub === 'memory' && (
+          <MemoryHubView
+            workspaceId={activeWorkspaceId}
           />
         )}
 
