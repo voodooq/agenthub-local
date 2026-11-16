@@ -100,6 +100,7 @@ class ContextBuilder:
         provider_info: dict[str, Any] | None = None,
         model_name: str = "",
         frozen_tail_prompt: str | None = None,
+        mcp_catalog_prompt: str | None = None,
     ) -> dict[str, Any]:
         """
         为当前推理步骤构建严格物理分区的三层上下文载荷 (Zone 1 + Zone 2 + Zone 3)。
@@ -222,6 +223,11 @@ class ContextBuilder:
                 protocol_prompt = ToolProtocolAdapter.build_xml_protocol_prompt(tools)
                 if protocol_prompt:
                     zone1_static_parts.append(protocol_prompt)
+            if mcp_catalog_prompt and mcp_catalog_prompt.strip():
+                zone1_static_parts.append(
+                    "### 🔌 可用 MCP 扩展能力目录（默认仅挂载目录摘要；如需使用某服务，请先调用 `discover_mcp_tools(server_names=[...])` 按需加载其完整参数 Schema）：\n"
+                    + mcp_catalog_prompt.strip()
+                )
 
         zone1_base_prompt = "\n\n".join(zone1_static_parts)
 
@@ -586,11 +592,8 @@ class ContextBuilder:
         history_list: list[dict[str, Any]] = []
         for m in raw_msgs:
             if m.role == "tool":
-                # 针对非当前轮次的历史工具输出，优先使用旁路脱水后的压缩摘要，避免老日志占满上下文
-                if (m.turn_id or 1) < int(current_turn_id) and m.compressed_content:
-                    effective_text = m.compressed_content
-                else:
-                    effective_text = m.content or m.compressed_content or "[工具执行完成]"
+                # 热区严格 Append-Only：统一使用入库时定型的 m.content（Write-Once），严禁跨轮切换为 compressed_content 破坏 KV Cache
+                effective_text = m.content or m.compressed_content or "[工具执行完成]"
                 history_list.append(
                     {
                         "role": "tool",
@@ -697,7 +700,23 @@ class ContextBuilder:
             return est_now > hard_ceiling or (is_cli_provider and est_chars_now > cli_char_ceiling)
 
         if _over_guard_limit() and len(final_zone2) > 2:
-            guarded_zone2 = [dict(item) for item in final_zone2]
+            # 逼近窗口硬上限时，先批量折叠历史文件写入以释放空间，尽量避免破坏热区正文
+            guarded_zone2 = LocalContextCompressor.fold_historical_file_writes(
+                final_zone2,
+                current_turn_id=current_turn_id,
+            )
+            est_now = (
+                estimate_tokens(final_system_instruction)
+                + estimate_tokens(tail_injection_prompt)
+                + estimate_tokens(user_query)
+                + sum(estimate_tokens(str(item.get("content") or "")) + 8 for item in guarded_zone2)
+            )
+            est_chars_now = (
+                len(final_system_instruction)
+                + len(tail_injection_prompt)
+                + len(user_query)
+                + sum(len(str(item.get("content") or "")) + 48 for item in guarded_zone2)
+            )
             total_n = len(guarded_zone2)
 
             def _trim_item_text(item_dict: dict[str, Any], head_len: int, tail_len: int, notice: str) -> None:

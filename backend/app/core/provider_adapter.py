@@ -23,6 +23,8 @@ from ..service.gemini_client import GeminiClient
 
 # 进程级缓存：不支持 stream_options.include_usage 的第三方兼容节点 URL 集合
 _STREAM_OPTIONS_UNSUPPORTED_HOSTS: set[str] = set()
+# 进程级缓存：不支持 Anthropic cache_control 的第三方反代/中转节点 URL 集合
+_ANTHROPIC_CACHE_CONTROL_UNSUPPORTED_HOSTS: set[str] = set()
 # 进程级缓存：仅允许 temperature=1 的第三方兼容节点与模型集合 {(endpoint, model_lower)}
 _TEMPERATURE_FIXED_ONE_MODELS: set[tuple[str, str]] = set()
 # 进程级缓存：完全不接受 temperature 参数的第三方兼容节点与模型集合 {(endpoint, model_lower)}
@@ -729,69 +731,95 @@ class ProviderAdapter:
             "x-api-key": api_key,
             "anthropic-version": "2023-06-01",
         }
-        payload: dict[str, Any] = {
-            "model": model_name,
-            "max_tokens": 4096,
-            "messages": claude_msgs,
-            "temperature": temperature,
-            "stream": True,
-        }
-        if system_instruction:
-            payload["system"] = system_instruction
+        use_cache_control = bool(
+            system_instruction
+            and len(system_instruction) >= 1024
+            and endpoint not in _ANTHROPIC_CACHE_CONTROL_UNSUPPORTED_HOSTS
+        )
 
         async with httpx.AsyncClient(timeout=90.0) as client:
-            async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
-                if resp.status_code != 200:
-                    err_body = (await resp.aread()).decode("utf-8", errors="replace")[:300]
-                    raise RuntimeError(f"Anthropic 接口报错 ({resp.status_code}): {err_body}")
+            for attempt in range(2):
+                payload: dict[str, Any] = {
+                    "model": model_name,
+                    "max_tokens": 4096,
+                    "messages": claude_msgs,
+                    "temperature": temperature,
+                    "stream": True,
+                }
+                if system_instruction:
+                    if use_cache_control:
+                        payload["system"] = [
+                            {
+                                "type": "text",
+                                "text": system_instruction,
+                                "cache_control": {"type": "ephemeral"},
+                            }
+                        ]
+                    else:
+                        payload["system"] = system_instruction
 
-                in_thinking_block = False
-                async for line in resp.aiter_lines():
-                    line_str = line.strip()
-                    if not line_str.startswith("data:"):
-                        continue
-                    data_part = line_str[5:].strip()
-                    try:
-                        ev = json.loads(data_part)
-                    except Exception:
-                        continue
-
-                    ev_type = ev.get("type")
-                    if ev_type == "message_start" and on_usage:
-                        msg_usage = (ev.get("message") or {}).get("usage")
-                        if isinstance(msg_usage, dict):
-                            try:
-                                on_usage(msg_usage, None)
-                            except Exception:
-                                pass
-                    elif ev_type == "message_delta" and on_usage:
-                        delta_usage = ev.get("usage")
-                        if isinstance(delta_usage, dict):
-                            try:
-                                on_usage(delta_usage, None)
-                            except Exception:
-                                pass
-                    elif ev_type == "content_block_delta":
-                        delta_obj = ev.get("delta") or {}
-                        thinking_piece = (
-                            delta_obj.get("thinking") or ""
-                            if emit_thinking_tags and delta_obj.get("type") == "thinking_delta"
-                            else ""
+                async with client.stream("POST", endpoint, headers=headers, json=payload) as resp:
+                    if resp.status_code == 400 and use_cache_control and attempt == 0:
+                        err_body = (await resp.aread()).decode("utf-8", errors="replace")[:300]
+                        logger.warning(
+                            f"[ProviderAdapter] Anthropic 节点 {endpoint} 返回 400 ({err_body})，"
+                            "自动降级为纯文本 system 并记忆该节点禁用 cache_control"
                         )
-                        text_piece = delta_obj.get("text") or ""
-                        if thinking_piece:
-                            if not in_thinking_block:
-                                yield "<think>"
-                                in_thinking_block = True
-                            yield thinking_piece
-                        if text_piece:
-                            if in_thinking_block:
-                                yield "</think>"
-                                in_thinking_block = False
-                            yield text_piece
+                        _ANTHROPIC_CACHE_CONTROL_UNSUPPORTED_HOSTS.add(endpoint)
+                        use_cache_control = False
+                        continue
+                    if resp.status_code != 200:
+                        err_body = (await resp.aread()).decode("utf-8", errors="replace")[:300]
+                        raise RuntimeError(f"Anthropic 接口报错 ({resp.status_code}): {err_body}")
 
-                if in_thinking_block:
-                    yield "</think>"
+                    in_thinking_block = False
+                    async for line in resp.aiter_lines():
+                        line_str = line.strip()
+                        if not line_str.startswith("data:"):
+                            continue
+                        data_part = line_str[5:].strip()
+                        try:
+                            ev = json.loads(data_part)
+                        except Exception:
+                            continue
+
+                        ev_type = ev.get("type")
+                        if ev_type == "message_start" and on_usage:
+                            msg_usage = (ev.get("message") or {}).get("usage")
+                            if isinstance(msg_usage, dict):
+                                try:
+                                    on_usage(msg_usage, None)
+                                except Exception:
+                                    pass
+                        elif ev_type == "message_delta" and on_usage:
+                            delta_usage = ev.get("usage")
+                            if isinstance(delta_usage, dict):
+                                try:
+                                    on_usage(delta_usage, None)
+                                except Exception:
+                                    pass
+                        elif ev_type == "content_block_delta":
+                            delta_obj = ev.get("delta") or {}
+                            thinking_piece = (
+                                delta_obj.get("thinking") or ""
+                                if emit_thinking_tags and delta_obj.get("type") == "thinking_delta"
+                                else ""
+                            )
+                            text_piece = delta_obj.get("text") or ""
+                            if thinking_piece:
+                                if not in_thinking_block:
+                                    yield "<think>"
+                                    in_thinking_block = True
+                                yield thinking_piece
+                            if text_piece:
+                                if in_thinking_block:
+                                    yield "</think>"
+                                    in_thinking_block = False
+                                yield text_piece
+
+                    if in_thinking_block:
+                        yield "</think>"
+                    return
 
     @classmethod
     async def generate_light_background_text(cls, prompt: str, system_prompt: str = "") -> str | None:

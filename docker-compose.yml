@@ -9,9 +9,10 @@ services:
       - "127.0.0.1:8686:8686"
     volumes:
       # 后端源码与静态前端挂载（由 FastAPI 直接托管 ./frontend/out，单容器即可运行完整前后端）
+      # 移除 :ro 只读限制，以支持容器内自动更新时同步覆盖宿主机源码、静态前端与 version.json
       - ./backend:/app
-      - ./frontend/out:/app/static:ro
-      - ./version.json:/app/version.json:ro
+      - ./frontend/out:/app/static
+      - ./version.json:/app/version.json
       - ./data:/app/data
       # 挂载宿主机 CLI 账号隔离目录与默认 ~/.gemini 登录态（兼容 Linux HOME 与 Windows USERPROFILE）
       - ${HOME:-${USERPROFILE:-~}}/.agenthub/accounts:/root/.agenthub/accounts

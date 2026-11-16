@@ -22,7 +22,7 @@ import httpx
 from ..core.config import load_version_metadata, settings
 from ..core.logging_config import logger
 from ..core.proxy_helper import get_system_proxy_url
-from ..core.runtime_paths import get_writable_app_root
+from ..core.runtime_paths import get_writable_app_root, is_directory_writable
 
 DEFAULT_GITHUB_REPO = "voodooq/agenthub-local"
 CHECK_CACHE_TTL_SECONDS = 900.0
@@ -127,14 +127,121 @@ def is_newer_version(remote_ver: str, current_ver: str) -> bool:
     return parse_semver(remote_ver) > parse_semver(current_ver)
 
 
+def is_running_in_docker(
+    dockerenv_path: Path | None = None,
+    cgroup_path: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> bool:
+    """判断当前进程是否运行在 Docker / 容器环境中。"""
+    environ = env if env is not None else os.environ
+    flag = str(environ.get("AGENTHUB_DOCKER") or "").strip().lower()
+    if flag in ("1", "true", "yes"):
+        return True
+
+    marker = dockerenv_path if dockerenv_path is not None else Path("/.dockerenv")
+    if marker.exists():
+        return True
+
+    cg_file = cgroup_path if cgroup_path is not None else Path("/proc/1/cgroup")
+    if cg_file.is_file():
+        try:
+            content = cg_file.read_text(encoding="utf-8", errors="ignore").lower()
+            if any(token in content for token in ("docker", "containerd", "kubepods", "lxc")):
+                return True
+        except OSError:
+            pass
+
+    return False
+
+
+def _is_mount_readonly(target_path: Path, mounts_path: Path | None = None) -> bool:
+    """检查 Linux /proc/mounts 中匹配目标路径的最长挂载点是否带有只读 (ro) 标志。"""
+    proc_mounts = mounts_path if mounts_path is not None else Path("/proc/mounts")
+    if not proc_mounts.is_file():
+        return False
+
+    try:
+        resolved_target = str(target_path.resolve())
+    except OSError:
+        resolved_target = str(target_path)
+
+    best_mount = ""
+    best_options: list[str] = []
+    try:
+        for line in proc_mounts.read_text(encoding="utf-8", errors="ignore").splitlines():
+            parts = line.split()
+            if len(parts) < 4:
+                continue
+            mount_point = parts[1].replace("\\040", " ")
+            options = parts[3].split(",")
+            is_match = (
+                resolved_target == mount_point
+                or mount_point == "/"
+                or resolved_target.startswith(mount_point.rstrip("/") + "/")
+            )
+            if is_match and len(mount_point) >= len(best_mount):
+                best_mount = mount_point
+                best_options = options
+    except OSError:
+        return False
+
+    return "ro" in best_options
+
+
+def _is_file_writable(file_path: Path) -> bool:
+    """验证已存在文件是否可在当前权限下原地覆写（兼容 Docker 单文件 bind mount）。"""
+    try:
+        with open(file_path, "r+b"):
+            return True
+    except OSError:
+        return False
+
+
+def detect_docker_update_capability(
+    app_root: Path | None = None,
+    mounts_path: Path | None = None,
+) -> tuple[bool, str]:
+    """检测 Docker 容器内是否具备原地热替换源码、前端静态资源与 version.json 的写权限。
+
+    Returns:
+        (can_auto_update, blocked_reason)
+    """
+    root = (app_root or get_writable_app_root()).resolve()
+    readonly_targets: list[str] = []
+
+    if _is_mount_readonly(root, mounts_path) or not is_directory_writable(root):
+        readonly_targets.append(str(root))
+
+    static_dir = root / "static"
+    if static_dir.exists():
+        if _is_mount_readonly(static_dir, mounts_path) or not is_directory_writable(static_dir):
+            readonly_targets.append(str(static_dir))
+
+    version_file = root / "version.json"
+    if version_file.exists():
+        if _is_mount_readonly(version_file, mounts_path) or not _is_file_writable(version_file):
+            readonly_targets.append(str(version_file))
+
+    if readonly_targets:
+        joined = "、".join(readonly_targets)
+        reason = (
+            f"检测到 Docker 容器内路径为只读挂载或无写权限（{joined}），无法在容器内直接热更新。"
+            "请在 docker-compose.yml 中移除对应挂载的 :ro 后重启容器，"
+            "或在宿主机拉取最新代码并执行 docker compose up -d --build 完成升级。"
+        )
+        return False, reason
+
+    return True, ""
+
+
 def detect_install_mode() -> str:
     """识别当前客户端的部署/运行形态。
 
     Returns:
-        "windows_exe" | "macos_app" | "portable"
+        "windows_exe" | "macos_app" | "docker" | "portable"
     """
     override = os.environ.get("AGENTHUB_INSTALL_MODE", "").strip().lower()
-    if override in ("windows_exe", "macos_app", "portable"):
+    if override in ("windows_exe", "macos_app", "docker", "portable"):
         return override
 
     is_frozen = bool(getattr(sys, "frozen", False))
@@ -142,6 +249,8 @@ def detect_install_mode() -> str:
         return "windows_exe"
     if is_frozen and sys.platform == "darwin":
         return "macos_app"
+    if is_running_in_docker():
+        return "docker"
     return "portable"
 
 
@@ -209,8 +318,8 @@ def select_release_asset(
                 if arch_hint in lower:
                     score += 10
         else:
-            # portable 便携包形态：优先跨平台压缩包，确保可安全热替换源码与前端静态资源
-            if plat == "win32":
+            # docker / portable 形态：优先跨平台压缩包，确保可安全热替换源码与前端静态资源
+            if plat == "win32" and install_mode != "docker":
                 if "portable" in lower and lower.endswith(".zip"):
                     score = 120
                 elif lower.endswith(".zip"):
@@ -238,8 +347,25 @@ def select_release_asset(
     return scored[0][1]
 
 
+def _restore_file_permissions(target_path: Path, archived_mode: int) -> None:
+    """在 POSIX 系统上保留归档中的可执行权限，并对 .sh 脚本兜底赋予执行位。"""
+    if sys.platform == "win32":
+        return
+    mode = archived_mode & 0o777
+    if target_path.suffix.lower() == ".sh":
+        target_mode = (mode | 0o755) if mode else 0o755
+    elif mode & 0o111:
+        target_mode = mode | 0o600
+    else:
+        return
+    try:
+        os.chmod(target_path, target_mode)
+    except OSError:
+        pass
+
+
 def _extract_archive_safely(archive_path: Path, staging_dir: Path) -> Path:
-    """安全解压 .zip / .tar.gz 更新包至暂存目录，防范 Zip Slip 路径穿越攻击。"""
+    """安全解压 .zip / .tar.gz 更新包至暂存目录，防范 Zip Slip 路径穿越攻击并保留执行权限。"""
     if staging_dir.exists():
         shutil.rmtree(staging_dir, ignore_errors=True)
     staging_dir.mkdir(parents=True, exist_ok=True)
@@ -258,6 +384,7 @@ def _extract_archive_safely(archive_path: Path, staging_dir: Path) -> Path:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 with zf.open(member, "r") as src_fp, open(target_path, "wb") as dst_fp:
                     shutil.copyfileobj(src_fp, dst_fp)
+                _restore_file_permissions(target_path, member.external_attr >> 16)
     elif lower_name.endswith((".tar.gz", ".tgz")):
         with tarfile.open(archive_path, "r:gz") as tf:
             for member in tf.getmembers():
@@ -274,6 +401,7 @@ def _extract_archive_safely(archive_path: Path, staging_dir: Path) -> Path:
                 target_path.parent.mkdir(parents=True, exist_ok=True)
                 with extracted, open(target_path, "wb") as dst_fp:
                     shutil.copyfileobj(extracted, dst_fp)
+                _restore_file_permissions(target_path, member.mode)
     else:
         raise ValueError(f"不支持的便携更新包格式: {archive_path.name}")
 
@@ -284,39 +412,122 @@ def _extract_archive_safely(archive_path: Path, staging_dir: Path) -> Path:
     return staging_dir
 
 
+def _write_file_inplace(src_file: Path, dst_file: Path) -> None:
+    """原地覆写目标文件内容（保留原有 inode，兼容 Docker 单文件 bind mount）。"""
+    dst_file.parent.mkdir(parents=True, exist_ok=True)
+    if dst_file.exists():
+        # 直接截断写入内容，避免 unlink/replace 在 Docker 单文件挂载点触发 EBUSY
+        with open(src_file, "rb") as src_fp, open(dst_file, "wb") as dst_fp:
+            shutil.copyfileobj(src_fp, dst_fp)
+        try:
+            shutil.copymode(src_file, dst_file)
+        except OSError:
+            pass
+    else:
+        shutil.copy2(src_file, dst_file)
+
+
+def _sync_directory_tree(
+    src_dir: Path,
+    dst_dir: Path,
+    skip_top_dirs: frozenset[str] = PROTECTED_TOP_LEVEL_NAMES,
+    skip_if_exists_files: frozenset[str] = PROTECTED_IF_EXISTS_FILES,
+) -> int:
+    """将源目录树安全同步至目标目录，跳过受保护目录并在根目录层保护用户配置文件。"""
+    if not src_dir.is_dir():
+        return 0
+
+    dst_resolved = dst_dir.resolve()
+    dst_resolved.mkdir(parents=True, exist_ok=True)
+    updated_files = 0
+
+    for root, dirnames, filenames in os.walk(src_dir):
+        root_path = Path(root)
+        rel_dir = root_path.relative_to(src_dir)
+
+        if rel_dir == Path("."):
+            dirnames[:] = [d for d in dirnames if d not in skip_top_dirs]
+        else:
+            dirnames[:] = [d for d in dirnames if d != "__pycache__"]
+
+        for filename in filenames:
+            if rel_dir == Path("."):
+                if filename in skip_top_dirs:
+                    continue
+                if filename in skip_if_exists_files and (dst_resolved / filename).exists():
+                    continue
+
+            src_file = root_path / filename
+            dst_file = (dst_resolved / rel_dir / filename).resolve()
+            if not dst_file.is_relative_to(dst_resolved):
+                raise ValueError(f"拒绝写入目标根目录之外的路径: {dst_file}")
+            _write_file_inplace(src_file, dst_file)
+            updated_files += 1
+
+    return updated_files
+
+
 def _apply_portable_archive(archive_path: Path, app_root: Path) -> int:
     """将便携包中的新版本文件安全同步到应用根目录，严格跳过用户数据与运行环境目录。"""
+    staging_dir = app_root / "data" / "updates" / f"staging_{int(time.time())}"
+    try:
+        src_root = _extract_archive_safely(archive_path, staging_dir)
+        return _sync_directory_tree(src_root, app_root)
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def _apply_docker_archive(archive_path: Path, app_root: Path) -> int:
+    """将便携包按 Docker 容器挂载结构映射到 /app（backend->/app, frontend/out->/app/static, version.json->/app/version.json）。"""
+    can_update, blocked_reason = detect_docker_update_capability(app_root)
+    if not can_update:
+        raise ValueError(blocked_reason)
+
     staging_dir = app_root / "data" / "updates" / f"staging_{int(time.time())}"
     updated_files = 0
     try:
         src_root = _extract_archive_safely(archive_path, staging_dir)
-        app_resolved = app_root.resolve()
 
-        for root, dirnames, filenames in os.walk(src_root):
-            root_path = Path(root)
-            rel_dir = root_path.relative_to(src_root)
+        # 1. 后端核心代码：压缩包内为 backend/，容器中 ./backend 挂载为 /app
+        backend_src = src_root / "backend"
+        if backend_src.is_dir():
+            updated_files += _sync_directory_tree(backend_src, app_root)
+        else:
+            # 兜底兼容直接平铺后端源码的压缩包结构
+            updated_files += _sync_directory_tree(
+                src_root,
+                app_root,
+                skip_top_dirs=PROTECTED_TOP_LEVEL_NAMES | frozenset({"frontend"}),
+            )
 
-            # 在根目录层级过滤掉受保护目录，避免遍历或写入用户数据库/虚拟环境
-            if rel_dir == Path("."):
-                dirnames[:] = [
-                    d for d in dirnames
-                    if d not in PROTECTED_TOP_LEVEL_NAMES
-                ]
+        # 2. 前端静态资源：压缩包内为 frontend/out/，容器中 ./frontend/out 挂载为 /app/static
+        frontend_out_src = src_root / "frontend" / "out"
+        if frontend_out_src.is_dir():
+            static_dst = app_root / "static"
+            updated_files += _sync_directory_tree(
+                frontend_out_src,
+                static_dst,
+                skip_top_dirs=frozenset({"__pycache__"}),
+                skip_if_exists_files=frozenset(),
+            )
 
-            for filename in filenames:
-                if rel_dir == Path("."):
-                    if filename in PROTECTED_TOP_LEVEL_NAMES:
-                        continue
-                    if filename in PROTECTED_IF_EXISTS_FILES and (app_resolved / filename).exists():
-                        continue
+        # 3. 根版本清单：原地覆写 /app/version.json（兼容单文件 bind mount）
+        version_src = src_root / "version.json"
+        if version_src.is_file():
+            _write_file_inplace(version_src, app_root / "version.json")
+            updated_files += 1
 
-                src_file = root_path / filename
-                dst_file = (app_resolved / rel_dir / filename).resolve()
-                if not dst_file.is_relative_to(app_resolved):
-                    raise ValueError(f"拒绝写入应用根目录之外的路径: {dst_file}")
-                dst_file.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src_file, dst_file)
-                updated_files += 1
+        # 4. 内置技能库（仅当容器中存在可写 skills 目录或包内附带 skills 时同步）
+        skills_src = src_root / "skills"
+        if skills_src.is_dir():
+            updated_files += _sync_directory_tree(
+                skills_src,
+                app_root / "skills",
+                skip_top_dirs=frozenset({"__pycache__", ".git"}),
+                skip_if_exists_files=frozenset(),
+            )
+    except PermissionError as exc:
+        raise ValueError(f"Docker 容器内文件写入权限不足，请检查宿主机目录与挂载权限: {exc}") from exc
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
 
@@ -498,6 +709,20 @@ pid = {int(wait_pid)}
 cmd = {cmd_list!r}
 cwd = {str(work_dir.resolve())!r}
 
+def _is_posix_zombie(target_pid: int) -> bool:
+    stat_path = f'/proc/{{target_pid}}/stat'
+    if not os.path.isfile(stat_path):
+        return False
+    try:
+        with open(stat_path, 'r', encoding='utf-8', errors='ignore') as fp:
+            content = fp.read()
+        rparen = content.rfind(')')
+        if rparen != -1 and len(content) > rparen + 2:
+            return content[rparen + 2] == 'Z'
+    except OSError:
+        pass
+    return False
+
 # 轮询等待旧进程完全退出并释放端口
 for _ in range(40):
     try:
@@ -509,6 +734,8 @@ for _ in range(40):
                 break
             ctypes.windll.kernel32.CloseHandle(handle)
         else:
+            if _is_posix_zombie(pid):
+                break
             os.kill(pid, 0)
     except OSError:
         break
@@ -548,8 +775,20 @@ def _resolve_portable_restart_args(app_root: Path) -> list[str]:
             return [str(desktop_script)]
 
     if main_file and "pytest" not in main_file and "unittest" not in main_file:
-        if Path(main_file).name == "main.py":
+        main_name = Path(main_file).name.lower()
+        if main_name == "main.py":
             return ["-m", "uvicorn", "backend.main:app", "--host", settings.host, "--port", str(settings.port)]
+        if "uvicorn" in main_name:
+            raw_args = list(sys.argv[1:])
+            has_backend_main = (app_root / "backend" / "main.py").is_file()
+            normalized_args = [
+                "backend.main:app" if (arg == "main:app" and has_backend_main) else arg
+                for arg in raw_args
+                if arg != "--reload"
+            ]
+            if not normalized_args:
+                normalized_args = ["backend.main:app", "--host", settings.host, "--port", str(settings.port)]
+            return ["-m", "uvicorn", *normalized_args]
         if Path(main_file).is_file():
             return [str(Path(main_file).resolve()), *sys.argv[1:]]
 
@@ -579,6 +818,8 @@ class AutoUpdaterService:
             "published_at": "",
             "html_url": f"https://github.com/{get_github_repo()}/releases",
             "install_mode": detect_install_mode(),
+            "can_auto_update": True,
+            "update_blocked_reason": "",
             "asset_name": "",
             "download_url": "",
             "total_bytes": 0,
@@ -641,10 +882,17 @@ class AutoUpdaterService:
         ver_marker.write_text(clean_target, encoding="utf-8")
 
     def get_status(self) -> dict[str, Any]:
-        """返回当前更新状态快照（实时刷新版本号与运行形态）。"""
+        """返回当前更新状态快照（实时刷新版本号、运行形态与热更新可用性）。"""
         snapshot = dict(self._state)
+        install_mode = detect_install_mode()
         snapshot["current_version"] = get_current_version()
-        snapshot["install_mode"] = detect_install_mode()
+        snapshot["install_mode"] = install_mode
+        if install_mode == "docker":
+            can_update, blocked_reason = detect_docker_update_capability(get_writable_app_root())
+        else:
+            can_update, blocked_reason = True, ""
+        snapshot["can_auto_update"] = can_update
+        snapshot["update_blocked_reason"] = blocked_reason
         return snapshot
 
     @staticmethod
@@ -1022,8 +1270,31 @@ class AutoUpdaterService:
                 "message": "已下载并为您打开 macOS 安装镜像 (.dmg)，请拖入 Applications 完成替换后重新启动。",
             }
 
+        if install_mode == "docker":
+            try:
+                updated_files = await asyncio.to_thread(_apply_docker_archive, downloaded_path, app_root)
+            except Exception as exc:
+                self._state["status"] = "downloaded"
+                self._state["error_message"] = str(exc)
+                raise ValueError(str(exc)) from exc
+            if trigger_exit:
+                # Docker 下 uvicorn 为容器 PID 1：不另起子进程以免端口冲突或随容器销毁，直接退出由 restart: unless-stopped 自动拉起
+                asyncio.create_task(self._delayed_exit(0.6))
+            return {
+                "status": "restarting",
+                "install_mode": install_mode,
+                "target_version": self._state.get("latest_version"),
+                "updated_files": updated_files,
+                "message": f"已完成 Docker 容器内 {updated_files} 个核心文件升级，正在安全退出进程以触发 Docker 自动重启加载新版本...",
+            }
+
         # portable 模式：先在当前目录安全解压替换代码与前端静态资源，再重启主程序进程
-        updated_files = await asyncio.to_thread(_apply_portable_archive, downloaded_path, app_root)
+        try:
+            updated_files = await asyncio.to_thread(_apply_portable_archive, downloaded_path, app_root)
+        except Exception as exc:
+            self._state["status"] = "downloaded"
+            self._state["error_message"] = str(exc)
+            raise ValueError(str(exc)) from exc
         restart_args = _resolve_portable_restart_args(app_root)
         restart_script_path = self.get_updates_dir() / "restart_portable.py"
         restart_script = build_portable_restart_script(

@@ -552,15 +552,9 @@ class LocalContextCompressor:
             context_rounds_override=context_rounds_override,
         )
 
-        # 对热区历史执行同路径与跨轮大文件写入自动折叠
-        folded_zone2 = cls.fold_historical_file_writes(
-            zone2_messages,
-            current_turn_id=current_turn_id,
-        )
-
-        # 过滤仅保留锚点之后的活跃消息
+        # 热区严格 Append-Only：常规非坍缩轮次绝不原地改写历史消息，仅按锚点过滤
         active_msgs = [
-            m for m in folded_zone2 if int(m.get("turn_id") or 1) > anchor_turn
+            m for m in zone2_messages if int(m.get("turn_id") or 1) > anchor_turn
         ]
 
         # 统计已完成历史轮次（strictly < current_turn_id）的有序 turn_id 列表
@@ -711,9 +705,11 @@ class LocalContextCompressor:
                 added_saved_tokens=added_saved,
             )
 
-        remaining_msgs = [
-            m for m in active_msgs if int(m.get("turn_id") or 1) > new_anchor
-        ]
+        # 仅在坍缩边界对剩余热区统一执行一次历史写盘折叠，保证两次坍缩之间 Zone 2 100% Append-Only
+        remaining_msgs = cls.fold_historical_file_writes(
+            [m for m in active_msgs if int(m.get("turn_id") or 1) > new_anchor],
+            current_turn_id=current_turn_id,
+        )
         collapse_reason = (
             "token超70%"
             if total_tokens >= trigger_token_budget

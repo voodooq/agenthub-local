@@ -1395,11 +1395,11 @@ class MCPManager:
         finally:
             await conn.close()
 
-    async def get_enabled_tools(self) -> list[dict[str, Any]]:
-        """获取所有已启用 MCP Server 暴露的工具 Schema（支持热感知配置文件更新与多态连接）"""
+    async def _collect_enabled_tools_by_server(self) -> dict[str, list[dict[str, Any]]]:
+        """收集所有已启用且健康连接的 MCP Server 工具 Schema，按 server_name 分组。"""
         self._sync_config_mtime()
         cfg = extract_mcp_servers_map(self.load_config())
-        all_tools: list[dict[str, Any]] = []
+        server_tools: dict[str, list[dict[str, Any]]] = {}
 
         # 清理已被移除或禁用的旧连接
         for existing_name in list(self._connections.keys()):
@@ -1433,6 +1433,7 @@ class MCPManager:
 
             if await conn.ensure_started():
                 self._failed_servers.pop(srv_name, None)
+                srv_list: list[dict[str, Any]] = []
                 for t in conn.tools_cache:
                     raw_tname = str(t.get("name") or "").strip()
                     if not raw_tname:
@@ -1441,18 +1442,76 @@ class MCPManager:
                     safe_schema = schema if isinstance(schema, dict) else {"type": "object", "properties": {}}
                     if "properties" not in safe_schema or not isinstance(safe_schema.get("properties"), dict):
                         safe_schema = {**safe_schema, "type": safe_schema.get("type") or "object", "properties": {}}
-                    all_tools.append({
+                    srv_list.append({
                         "name": f"mcp__{srv_name}__{raw_tname}",
                         "description": str(t.get("description") or f"MCP Tool from {srv_name}"),
                         "parameters": safe_schema,
                     })
+                if srv_list:
+                    server_tools[srv_name] = srv_list
             else:
                 self._failed_servers[srv_name] = time.monotonic()
                 stale_conn = self._connections.pop(srv_name, None)
                 if stale_conn:
                     await stale_conn.close()
 
+        return server_tools
+
+    async def get_enabled_tools(self) -> list[dict[str, Any]]:
+        """获取所有已启用 MCP Server 暴露的工具 Schema（支持热感知配置文件更新与多态连接）"""
+        server_tools = await self._collect_enabled_tools_by_server()
+        all_tools: list[dict[str, Any]] = []
+        for srv_name in sorted(server_tools.keys()):
+            all_tools.extend(server_tools[srv_name])
         return all_tools
+
+    async def get_mcp_catalog_summary(self) -> dict[str, Any]:
+        """生成轻量级 MCP 能力目录摘要（用于两段式按需延迟加载，避免 Zone 1 Schema 膨胀）。"""
+        server_tools = await self._collect_enabled_tools_by_server()
+        all_tools: list[dict[str, Any]] = []
+        catalog_lines: list[str] = []
+        servers_meta: dict[str, list[dict[str, str]]] = {}
+
+        for srv_name in sorted(server_tools.keys()):
+            tools_in_srv = server_tools[srv_name]
+            all_tools.extend(tools_in_srv)
+            tool_briefs: list[str] = []
+            meta_items: list[dict[str, str]] = []
+            for t in tools_in_srv:
+                full_name = str(t.get("name") or "")
+                raw_name = full_name.split("__", 2)[2] if full_name.startswith("mcp__") and len(full_name.split("__", 2)) == 3 else full_name
+                desc_clean = " ".join(str(t.get("description") or "").split())
+                if len(desc_clean) > 48:
+                    desc_clean = desc_clean[:45] + "..."
+                tool_briefs.append(f"{raw_name}({desc_clean})" if desc_clean else raw_name)
+                meta_items.append({
+                    "name": full_name,
+                    "raw_name": raw_name,
+                    "description": desc_clean,
+                })
+            servers_meta[srv_name] = meta_items
+            catalog_lines.append(f"- {srv_name}: {', '.join(tool_briefs)}")
+
+        total_schema_chars = sum(len(json.dumps(t, ensure_ascii=False)) for t in all_tools)
+        return {
+            "total_tools": len(all_tools),
+            "total_schema_chars": total_schema_chars,
+            "servers": servers_meta,
+            "catalog_text": "\n".join(catalog_lines),
+            "all_tools": all_tools,
+        }
+
+    async def get_tools_by_servers(self, server_names: list[str] | set[str]) -> list[dict[str, Any]]:
+        """按指定 MCP Server 名称集合返回对应完整工具 Schema 列表。"""
+        targets = {str(s).strip() for s in (server_names or []) if str(s).strip()}
+        if not targets:
+            return []
+        server_tools = await self._collect_enabled_tools_by_server()
+        selected: list[dict[str, Any]] = []
+        for srv_name in sorted(server_tools.keys()):
+            if srv_name in targets:
+                selected.extend(server_tools[srv_name])
+        return selected
 
     async def call_mcp_tool(self, namespaced_name: str, arguments: dict[str, Any]) -> str:
         """路由并调用形如 mcp__<server>__<tool> 的工具"""

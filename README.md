@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.4.2-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.4.3-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.4.2 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.4.3 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -191,8 +191,8 @@ flowchart TD
 | :--- | :--- | :--- | :--- |
 | **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
 | **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
-| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.4.2-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
-| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.4.2-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
+| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.4.3-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
+| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.4.3-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
 | **Docker 容器镜像** | Linux 服务器 / 跨平台容器 | `docker-compose.yml` / `backend/Dockerfile` | 见下方 [Linux 服务器 Docker 部署与远程访问指南](#-linux-服务器-docker-部署与远程访问指南) |
 
 ### 2. GitHub 自动检查升级与平滑覆盖重启 (`AutoUpdaterService` · `UpdateModal`)
@@ -217,7 +217,7 @@ sequenceDiagram
     participant Port as package-portable (ubuntu)
     participant Rel as GitHub Releases 页面
 
-    Dev->>GH: git tag v1.4.2 && git push origin v1.4.2
+    Dev->>GH: git tag v1.4.3 && git push origin v1.4.3
     GH->>FE: 安装 Node 22 并导出静态前端 out/
     FE->>Port: 分发 out/ -> 生成 portable.zip & portable.tar.gz
     FE->>Win: 分发 out/ -> PyInstaller --onefile 生成 AgentHub-Local-windows-x64.exe
@@ -230,9 +230,9 @@ sequenceDiagram
 ### 如何发布新版本
 只需在 `version.json` 更新版本号并运行 `python sync_version.py`（或直接运行 `python sync_version.py <version>`），随后在本地执行以下命令：
 ```bash
-git tag -a v1.4.2 -m "Release v1.4.2"
+git tag -a v1.4.3 -m "Release v1.4.3"
 git push origin master
-git push origin v1.4.2
+git push origin v1.4.3
 ```
 推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 4 类干净的发行资产，几分钟内即可在 Releases 页面看到生成的下载文件。
 
@@ -351,7 +351,19 @@ docker compose exec backend bash
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.4.2（最新）— 系统实时硬件监控与治理中枢、NVIDIA/网络吞吐探针及无版本号安装包
+### 🚀 v1.4.3（最新）— Token 优化 Phase 1（KV Cache 连续性与 MCP 按需加载）、Linux/Docker 自动更新及计划任务真调度执行
+- **Token 优化 Phase 1（`context_builder` · `context_compressor` · `runtime` · `tool_protocol` · `engine_pool` · `provider_adapter` · `mcp_manager`）**：
+  - **S1（Zone 2 严格 Append-Only）**：热区渲染统一保持 Write-Once 一致性，取消常规跨轮突变为 `compressed_content` 与逐轮折叠 `write_local_file`，仅在分块坍缩或逼近硬上限时批量折叠，修复跨轮 KV Cache 击穿。
+  - **S2（轮内前缀稳定 + Anthropic Prompt Caching）**：`is_forced_final_step` 保留 `active_tools` 锁死 Zone 1 并拦截出站 `<tool_call>`；生图指引与确定性 `rand_seed` 迁至 Zone 3；`stream_anthropic` 自动注入 `cache_control: {"type": "ephemeral"}`（遇 400 自动降级记忆节点）。
+  - **S3（MCP 两段式目录与按需 Schema 延迟挂载）**：启用 MCP 工具超过 5 个时默认仅注入轻量目录摘要，通过内置元工具 `discover_mcp_tools` 及关键词/历史/直调单调递增激活 Server，大幅削减空闲 Schema Token 消耗。
+- **Linux 与 Docker 自动更新全链路打通（`AutoUpdaterService` · `UpdateModal` · `docker-compose.yml`）**：
+  - 新增 `is_running_in_docker()`、`detect_docker_update_capability()`、`_apply_docker_archive()`（精准映射 `backend -> /app`、`frontend/out -> /app/static` 及原地覆写 `version.json`）与 PID 1 优雅退出交由 `restart: unless-stopped` 自动拉起；完善 `.tar.gz` 解压保留 `.sh` `+x` 权限与 Linux 便携/源码 `uvicorn` 平滑重启。
+  - 移除 `docker-compose.yml` 中 `/app/static` 与 `/app/version.json` 的 `:ro` 只读限制，并在 `UpdateModal` 中适配 Docker 运行形态与只读挂载检测提示。
+- **计划任务真实 Cron 调度、无头执行与状态详情（`TaskScheduler` · `scheduled` · `ScheduledView`）**：
+  - 实现纯 Python 标准 5 段 Cron 解析（含 `*`、`*/n`、`a-b`、`a,b` 及 `@hourly`/`@daily` 等别名）与 `start_loop()` 防同分钟重入自动巡检；`run_task()` 真实无头调用 `agent_runtime.chat_stream`，捕获 `running` / `success` / `failed` 状态、耗时与完整输出落库至 `scheduled_task_runs`。
+  - 新增 `GET /api/v1/scheduled/{task_id}/runs` 接口；前端 `ScheduledView` 升级为展示状态徽章、上次/下次运行时间、耗时及完整执行历史详情弹窗。
+
+### 🚀 v1.4.2 — 系统实时硬件监控与治理中枢、NVIDIA/网络吞吐探针及无版本号安装包
 - **实时硬件全景监控与多维度探针（`collector` · `RightActionDrawer`）**：
   - 将右侧抽屉重构为「系统实时监控与智能治理」面板：打开后每 3 秒自动轮询 `/api/v1/system/snapshot`，实时呈现 CPU 使用率/核数/主频、物理内存占用与 Swap、GPU 负载/显存占用/核心温度、网络实时上/下行吞吐速率及累计流量（GB）、全部分区磁盘使用率，以及 Top 6 高占用进程列表。
   - 在 `collector.get_gpu_metrics` 中接入无窗口 `nvidia-smi` CLI 兜底探测以原生适配 Windows/Linux NVIDIA 显卡；新增 `get_network_metrics` 计算两次采样窗口间的真实收发速率。

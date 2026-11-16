@@ -19,11 +19,31 @@ import {
 import { apiFetch } from '@/utils/apiClient';
 import { UpdateStatusData } from '@/types';
 
+interface ExtendedUpdateStatusData extends UpdateStatusData {
+  can_auto_update?: boolean;
+  update_blocked_reason?: string;
+}
+
 interface UpdateModalProps {
   isOpen: boolean;
   onClose: () => void;
-  initialUpdateState?: UpdateStatusData | null;
-  onUpdateStateChange?: (state: UpdateStatusData) => void;
+  initialUpdateState?: ExtendedUpdateStatusData | null;
+  onUpdateStateChange?: (state: ExtendedUpdateStatusData) => void;
+}
+
+function formatInstallModeLabel(mode?: string): string {
+  switch (mode) {
+    case 'docker':
+      return 'Docker 容器';
+    case 'windows_exe':
+      return 'Windows 桌面版';
+    case 'macos_app':
+      return 'macOS 桌面版';
+    case 'portable':
+      return '便携 / 源码版';
+    default:
+      return mode || '自动识别';
+  }
 }
 
 function formatBytes(bytes: number): string {
@@ -59,7 +79,7 @@ export function UpdateModal({
   initialUpdateState = null,
   onUpdateStateChange,
 }: UpdateModalProps) {
-  const [updateState, setUpdateState] = useState<UpdateStatusData | null>(initialUpdateState);
+  const [updateState, setUpdateState] = useState<ExtendedUpdateStatusData | null>(initialUpdateState);
   const [isChecking, setIsChecking] = useState(false);
   const [isRestarting, setIsRestarting] = useState(false);
   const [restartMessage, setRestartMessage] = useState<string>('');
@@ -284,6 +304,8 @@ export function UpdateModal({
   if (!isOpen) return null;
 
   const status = updateState?.status || 'idle';
+  const canAutoUpdate = updateState?.can_auto_update !== false;
+  const blockedReason = updateState?.update_blocked_reason || '';
   const progressPct = Math.max(0, Math.min(100, Number(updateState?.progress_percent || 0)));
   const totalBytes = Number(updateState?.total_bytes || 0);
   const downloadedBytes = Number(updateState?.downloaded_bytes || 0);
@@ -475,6 +497,14 @@ export function UpdateModal({
             </div>
           )}
 
+          {/* 容器只读挂载等环境限制提示 */}
+          {!canAutoUpdate && blockedReason && (
+            <div className="p-3.5 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-amber-700 dark:text-amber-300 text-xs flex items-start space-x-2 leading-relaxed">
+              <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span className="break-anywhere">{blockedReason}</span>
+            </div>
+          )}
+
           {/* 错误提示 */}
           {errorMsg && (
             <div className="p-3.5 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-300 text-xs flex items-start space-x-2">
@@ -487,7 +517,7 @@ export function UpdateModal({
         {/* 底部操作按钮区 */}
         <div className="px-6 py-4 border-t border-border/70 bg-surface-100/80 flex items-center justify-between shrink-0">
           <div className="text-[11px] text-muted-foreground">
-            {updateState?.install_mode ? `运行形态: ${updateState.install_mode}` : '自动匹配适配当前平台的客户端产物'}
+            {updateState?.install_mode ? `运行形态: ${formatInstallModeLabel(updateState.install_mode)}` : '自动匹配适配当前平台的客户端产物'}
           </div>
 
           <div className="flex items-center space-x-2.5">
@@ -501,7 +531,7 @@ export function UpdateModal({
               </button>
             )}
 
-            {updateState?.has_update && (status === 'available' || status === 'error') && Boolean(updateState?.download_url) && (
+            {canAutoUpdate && updateState?.has_update && (status === 'available' || status === 'error') && Boolean(updateState?.download_url) && (
               <button
                 type="button"
                 onClick={() => void handleStartDownload(status === 'error')}
@@ -512,14 +542,14 @@ export function UpdateModal({
               </button>
             )}
 
-            {status === 'downloaded' && !isRestarting && (
+            {canAutoUpdate && status === 'downloaded' && !isRestarting && (
               <button
                 type="button"
                 onClick={() => void handleApplyAndRestart()}
                 className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-all shadow-md shadow-emerald-600/25 flex items-center space-x-1.5 animate-pulse"
               >
                 <RotateCcw className="w-3.5 h-3.5" />
-                <span>立即重启并加载新版本</span>
+                <span>{updateState?.install_mode === 'docker' ? '立即升级并重启容器' : '立即重启并加载新版本'}</span>
               </button>
             )}
           </div>

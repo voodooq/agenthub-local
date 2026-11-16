@@ -237,7 +237,22 @@ class EnginePoolService:
         # - step_index == 0 时挂在当前 user_prompt 末尾；
         # - step_index >= 1（同轮多步 ReAct）时挂回本轮最初那条 user 消息发送副本末尾，
         #   既实现同轮多步 100% 前缀字节冻结，又确保跨轮次时彻底丢弃不写库、不污染 Zone 2！
+        # 针对绘画/生图意图增强 Prompt 指导：迁入 Zone 3 (tail_injection) 并使用确定性种子，守护 Zone 1 前缀缓存
         clean_tail = (tail_injection or "").strip()
+        image_keywords = ["画图", "画个图", "生成图片", "绘制", "画一张", "插画", "帮我画", "生图"]
+        if any(kw in user_prompt for kw in image_keywords):
+            import zlib
+            seed_input = f"{conversation_id}:{turn_id}".encode("utf-8")
+            rand_seed = (zlib.crc32(seed_input) % 999000) + 1000
+            image_guidance = (
+                "[视觉绘图增强指示]: 用户希望生成或绘制图像。\n"
+                "1. 请根据用户的描述，设计一段高质量、细节丰富、包含光影质感与艺术风格的英文绘画 Prompt（如 prompt_en）。\n"
+                f"2. 在回复正文中必须直接输出免限流极速 Markdown 图像标签（必须带上 model=turbo&seed={rand_seed}&nologo=true 参数，避免触发 45 秒限流）：\n"
+                f"   ![作品描述](https://image.pollinations.ai/prompt/{{url_encoded_prompt_en}}?model=turbo&seed={rand_seed}&width=1024&height=1024&nologo=true)\n"
+                "3. 随后用中文提供画面的构图意境、光影色彩及艺术风格解析。"
+            )
+            clean_tail = f"{clean_tail}\n\n{image_guidance}" if clean_tail else image_guidance
+
         if clean_tail:
             tail_block = f"\n\n<agenthub_tail_context>\n{clean_tail}\n</agenthub_tail_context>"
             attached_to_turn_user = False
@@ -286,20 +301,6 @@ class EnginePoolService:
         full_cli_prompt = context_text + prompt_with_attachments
 
         system_instruction = system_override or cls.read_system_profile()
-
-        # 针对绘画/生图意图增强 Prompt 指导：要求输出 Markdown 图片以及视觉艺术解析
-        image_keywords = ["画图", "画个图", "生成图片", "绘制", "画一张", "插画", "帮我画", "生图"]
-        if any(kw in user_prompt for kw in image_keywords):
-            import random
-            rand_seed = random.randint(1000, 999999)
-            image_guidance = (
-                "\n[视觉绘图增强指示]: 用户希望生成或绘制图像。"
-                "\n1. 请根据用户的描述，设计一段高质量、细节丰富、包含光影质感与艺术风格的英文绘画 Prompt（如 prompt_en）。"
-                f"\n2. 在回复正文中必须直接输出免限流极速 Markdown 图像标签（必须带上 model=turbo&seed={rand_seed}&nologo=true 参数，避免触发 45 秒限流）："
-                f"\n   ![作品描述](https://image.pollinations.ai/prompt/{{url_encoded_prompt_en}}?model=turbo&seed={rand_seed}&width=1024&height=1024&nologo=true)"
-                "\n3. 随后用中文提供画面的构图意境、光影色彩及艺术风格解析。"
-            )
-            system_instruction = (system_instruction + "\n" + image_guidance) if system_instruction else image_guidance
 
         if system_instruction:
             full_cli_prompt = f"[系统指令]: {system_instruction}\n\n{full_cli_prompt}"

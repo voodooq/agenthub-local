@@ -540,6 +540,24 @@ class ToolProtocolAdapter:
                 },
             },
             {
+                "name": "discover_mcp_tools",
+                "description": (
+                    "按 MCP 服务名按需加载其完整工具参数 Schema。"
+                    "当系统提示中的 MCP 扩展能力目录包含所需服务但尚未挂载详细参数时，调用此工具获取完整参数定义。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "server_names": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "需要激活并获取详细工具 Schema 的 MCP 服务名称列表（如 ['github', 'postgres']）。",
+                        },
+                    },
+                    "required": ["server_names"],
+                },
+            },
+            {
                 "name": "mcp_upload_workspace_file",
                 "description": (
                     "将当前工作区沙盒内的本地文件（如 ./attachments/ 或 ./.agenthub/attachments/ 中的附件及产出文件）"
@@ -697,6 +715,7 @@ class ToolProtocolAdapter:
         "get_repo_skeleton",
         "read_local_file",
         "read_tool_ref",
+        "discover_mcp_tools",
         "web_fetch",
         "update_working_memory",
         "load_skill_detail",

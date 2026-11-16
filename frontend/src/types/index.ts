@@ -433,7 +433,24 @@ export interface ScheduledTaskItem {
   next_run_at?: string | null;
   last_status?: 'success' | 'failed' | null;
   last_output?: string | null;
+  last_duration_ms?: number | null;
+  last_error?: string | null;
+  last_conversation_id?: string | null;
   created_at: string;
+}
+
+export interface ScheduledTaskRunItem {
+  id: string;
+  task_id: string;
+  workspace_id: string;
+  trigger_type: 'cron' | 'manual';
+  status: 'running' | 'success' | 'failed';
+  started_at: string;
+  finished_at?: string | null;
+  duration_ms?: number | null;
+  output_text?: string | null;
+  error_message?: string | null;
+  conversation_id?: string | null;
 }
 
 export interface SkillItem {

@@ -70,6 +70,84 @@ class AgentRuntime:
 
     # 活跃流式执行注册表：conversation_id -> {"token": str, "cancel_event": asyncio.Event}
     _active_streams: dict[str, dict[str, Any]] = {}
+    # S3 会话级单调递增 MCP 已激活服务集合（仅增不减以守护 Zone 1 缓存，直到分块坍缩推进锚点）
+    _activated_mcp_servers_by_conv: dict[str, set[str]] = {}
+    _mcp_anchor_by_conv: dict[str, int] = {}
+
+    @classmethod
+    async def _assemble_agent_tools(
+        cls,
+        *,
+        conv_id: str,
+        user_message: str,
+        collapse_anchor_turn_id: int = 0,
+        extra_activate_servers: list[str] | set[str] | None = None,
+    ) -> tuple[list[dict[str, Any]], str]:
+        """装配 Agent 模式可用工具集（支持 MCP 两段式目录与按需 Schema 延迟挂载）。"""
+        all_builtin = ToolProtocolAdapter.get_builtin_tools()
+        active_tools: list[dict[str, Any]] = list(all_builtin)
+        mcp_catalog_prompt = ""
+
+        prev_anchor = cls._mcp_anchor_by_conv.get(conv_id, 0)
+        if collapse_anchor_turn_id > prev_anchor:
+            cls._activated_mcp_servers_by_conv[conv_id] = set()
+            cls._mcp_anchor_by_conv[conv_id] = collapse_anchor_turn_id
+        elif conv_id not in cls._mcp_anchor_by_conv:
+            cls._mcp_anchor_by_conv[conv_id] = collapse_anchor_turn_id
+
+        activated_set = cls._activated_mcp_servers_by_conv.setdefault(conv_id, set())
+
+        try:
+            catalog = await mcp_manager.get_mcp_catalog_summary()
+        except Exception as e:
+            logger.warning(f"加载 MCP 目录摘要异常: {e}")
+            return active_tools, mcp_catalog_prompt
+
+        total_tools = int(catalog.get("total_tools") or 0)
+        total_schema_chars = int(catalog.get("total_schema_chars") or 0)
+        servers_meta: dict[str, list[dict[str, str]]] = catalog.get("servers") or {}
+
+        if total_tools == 0:
+            return active_tools, ""
+
+        # 工具总数 <= 5 且 Schema 体积 <= 2000 字符时直接全量挂载，免去额外 discover 往返
+        if total_tools <= 5 and total_schema_chars <= 2000:
+            active_tools.extend(catalog.get("all_tools") or [])
+            return active_tools, ""
+
+        # 两段式延迟挂载：按显式请求、关键词与热区历史单调递增激活 Server
+        if extra_activate_servers:
+            for srv in extra_activate_servers:
+                s_clean = str(srv).strip()
+                if s_clean in servers_meta:
+                    activated_set.add(s_clean)
+
+        query_lower = (user_message or "").lower()
+        for srv_name in servers_meta.keys():
+            if srv_name.lower() in query_lower:
+                activated_set.add(srv_name)
+
+        try:
+            min_turn = max(1, int(collapse_anchor_turn_id or 0) + 1)
+            hot_msgs = await MessageRepository.get_by_turn_window(conv_id, min_turn)
+            for hm in hot_msgs:
+                combined = f"{hm.content or ''}\n{hm.tool_calls_json or ''}"
+                if "mcp__" in combined:
+                    for srv_name in servers_meta.keys():
+                        if f"mcp__{srv_name}__" in combined:
+                            activated_set.add(srv_name)
+        except Exception as hist_err:
+            logger.debug(f"[AgentRuntime] 扫描热区历史 MCP 调用跳过: {hist_err}")
+
+        if activated_set:
+            try:
+                activated_tools = await mcp_manager.get_tools_by_servers(sorted(activated_set))
+                active_tools.extend(activated_tools)
+            except Exception as act_err:
+                logger.warning(f"按需加载已激活 MCP 工具异常: {act_err}")
+
+        mcp_catalog_prompt = str(catalog.get("catalog_text") or "").strip()
+        return active_tools, mcp_catalog_prompt
 
     _CHITCHAT_GREETING_RE = re.compile(
         r"^\s*(?:你好|您好|hi+|hello+|hey+|早安|早上好|下午好|晚上好|在吗|在不在|谢谢|多谢|感谢|再见|拜拜|晚安|你是谁|你叫什么|你能做什么|你会什么|介绍一下你自己|讲个笑话|陪我聊聊天)[！!。.?？\s]*$",
@@ -974,18 +1052,27 @@ class AgentRuntime:
 
         # 4. 准备当前场景可用的工具集合
         active_tools: list[dict[str, Any]] = []
+        mcp_catalog_prompt: str = ""
+        conv_collapse_anchor = 0
+        if not active_incognito:
+            try:
+                conv_meta = await ConversationRepository.get_by_id(conv_id)
+                if conv_meta:
+                    conv_collapse_anchor = int(getattr(conv_meta, "collapse_anchor_turn_id", 0) or 0)
+            except Exception:
+                conv_collapse_anchor = 0
+
         if active_scene == "agent":
-            all_builtin = ToolProtocolAdapter.get_builtin_tools()
             if is_planning_phase:
                 # 🛡️ 物理只读硬门控：规划态仅向模型暴露 L0 只读与记忆探测工具，写盘与终端完全隔离
+                all_builtin = ToolProtocolAdapter.get_builtin_tools()
                 active_tools.extend([t for t in all_builtin if t.get("name") in PLANNING_SAFE_TOOLS])
             else:
-                active_tools.extend(all_builtin)
-                try:
-                    mcp_tools = await mcp_manager.get_enabled_tools()
-                    active_tools.extend(mcp_tools)
-                except Exception as e:
-                    logger.warning(f"加载 MCP 工具集异常: {e}")
+                active_tools, mcp_catalog_prompt = await self._assemble_agent_tools(
+                    conv_id=conv_id,
+                    user_message=user_message,
+                    collapse_anchor_turn_id=conv_collapse_anchor,
+                )
 
         # 若用户已批准方案，将执行步骤持久化写入工作区 .agenthub/scratchpad.md
         if approved_plan_steps and target_cwd:
@@ -1363,7 +1450,7 @@ class AgentRuntime:
                     conversation_id=conv_id,
                     current_turn_id=current_turn_id,
                     user_query=user_message,
-                    tools=active_tools if (active_scene == "agent" and not is_forced_final_step) else None,
+                    tools=active_tools if active_scene == "agent" else None,
                     context_rounds_override=0 if active_scene == "oneshot" else context_rounds,
                     base_system_prompt=system_override,
                     execution_strategy=execution_strategy,
@@ -1375,6 +1462,7 @@ class AgentRuntime:
                     provider_info=resolved_primary_provider,
                     model_name=model_name,
                     frozen_tail_prompt=frozen_turn_tail_prompt,
+                    mcp_catalog_prompt=mcp_catalog_prompt if (active_scene == "agent" and not is_planning_phase) else None,
                 )
 
                 if await _check_cancelled():
@@ -1675,6 +1763,12 @@ class AgentRuntime:
 
                 # 6. 解析本步输出是否包含工具调用 (<tool_call>)
                 clean_text, tool_calls = ToolProtocolAdapter.parse_xml_tool_calls(step_raw_text)
+                if is_forced_final_step and tool_calls:
+                    logger.warning(
+                        "[AgentRuntime] is_forced_final_step 出站拦截：已强制剥离 %d 个意外 <tool_call> 调用",
+                        len(tool_calls),
+                    )
+                    tool_calls = []
 
                 # ── 关键反停滞与伪调用拦截（Anti-Stall & Steer）带精准白名单 ──
                 raw_stripped = (step_raw_text or "").strip()
@@ -1757,7 +1851,7 @@ class AgentRuntime:
                         step_idx += 1
                         continue
 
-                    if active_scene == "agent" and is_abnormal_stall and not is_user_confirmation_request and consecutive_stalls < 3 and step_idx < current_max_steps - 1:
+                    if active_scene == "agent" and not is_forced_final_step and is_abnormal_stall and not is_user_confirmation_request and consecutive_stalls < 3 and step_idx < current_max_steps - 1:
                         consecutive_stalls += 1
                         logger.warning(f"[AgentRuntime] 捕获模型伪工具调用声明/卡顿: '{raw_stripped}'，激活强制纠偏推进器 (第{consecutive_stalls}次)")
                         last_step_error_info = {
@@ -2036,7 +2130,11 @@ class AgentRuntime:
                             ):
                                 try:
                                     mcp_manager.clear_cooldowns()
-                                    active_tools = ToolProtocolAdapter.get_builtin_tools() + await mcp_manager.get_enabled_tools()
+                                    active_tools, mcp_catalog_prompt = await self._assemble_agent_tools(
+                                        conv_id=conv_id,
+                                        user_message=user_message,
+                                        collapse_anchor_turn_id=int(ctx.get("collapse_anchor_turn_id") or conv_collapse_anchor),
+                                    )
                                 except Exception as mcp_refresh_err:
                                     logger.debug(f"命令后刷新 MCP 工具跳过: {mcp_refresh_err}")
 
@@ -2355,7 +2453,11 @@ class AgentRuntime:
                                             hotplug_note = "\n🎯 [SKILL 标准校验与热插拔已激活]: 已自动规范化 YAML Frontmatter 与 kebab-case 命名，前端输入框 `/` 菜单现已可实时调用并查看该技能说明。"
                                         elif target_file.name.lower() == "mcp_servers.json":
                                             created_docs = skill_loader.ensure_mcp_companion_skills()
-                                            active_tools = ToolProtocolAdapter.get_builtin_tools() + await mcp_manager.get_enabled_tools()
+                                            active_tools, mcp_catalog_prompt = await self._assemble_agent_tools(
+                                                conv_id=conv_id,
+                                                user_message=user_message,
+                                                collapse_anchor_turn_id=int(ctx.get("collapse_anchor_turn_id") or conv_collapse_anchor),
+                                            )
                                             doc_tip = f"（已自动补全 {created_docs} 个 MCP 伴生 SKILL 说明文档）" if created_docs else ""
                                             hotplug_note = f"\n🔌 [MCP 热插拔已重载]: 已重新扫描 mcp_servers.json，当前可用工具总数: {len(active_tools)}{doc_tip}。"
                                         tool_output = (
@@ -2879,6 +2981,56 @@ class AgentRuntime:
                             "compressed": compressed,
                         }
 
+                    # ── 工具 3.9: MCP 工具按需发现与动态激活 (discover_mcp_tools) ──
+                    elif func_name == "discover_mcp_tools":
+                        raw_servers = args.get("server_names")
+                        if isinstance(raw_servers, str):
+                            req_servers = [s.strip() for s in raw_servers.split(",") if s.strip()]
+                        elif isinstance(raw_servers, list):
+                            req_servers = [str(s).strip() for s in raw_servers if str(s).strip()]
+                        else:
+                            req_servers = []
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"discover_mcp_tools({req_servers})",
+                            "reason": "按需加载 MCP 服务完整工具 Schema",
+                            "security": "READ_ONLY",
+                        }
+                        if not req_servers:
+                            tool_output = "Error: 请提供至少一个有效的 MCP 服务名称（server_names）。"
+                            compressed = "[discover_mcp_tools 参数缺失]"
+                        else:
+                            discovered_tools = await mcp_manager.get_tools_by_servers(req_servers)
+                            active_tools, mcp_catalog_prompt = await self._assemble_agent_tools(
+                                conv_id=conv_id,
+                                user_message=user_message,
+                                collapse_anchor_turn_id=int(ctx.get("collapse_anchor_turn_id") or conv_collapse_anchor),
+                                extra_activate_servers=req_servers,
+                            )
+                            if discovered_tools:
+                                tool_output = (
+                                    f"已成功激活并加载以下 MCP 服务工具 Schema（{len(discovered_tools)} 个工具）：\n"
+                                    + json.dumps(discovered_tools, ensure_ascii=False, indent=2)
+                                )
+                                compressed = f"[已按需挂载 {len(discovered_tools)} 个 MCP 工具 Schema]"
+                            else:
+                                catalog_info = await mcp_manager.get_mcp_catalog_summary()
+                                avail = sorted((catalog_info.get("servers") or {}).keys())
+                                tool_output = f"未找到已启用的 MCP 服务 {req_servers}。当前可用服务: {avail}"
+                                compressed = "[discover_mcp_tools 未匹配到可用服务]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"discover_mcp_tools({req_servers})",
+                            "reason": "按需加载 MCP 服务完整工具 Schema",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
                     # ── 工具 4: MCP 扩展工具 (mcp__<server>__<tool>) ──
                     elif func_name.startswith("mcp__"):
                         yield {
@@ -2891,6 +3043,15 @@ class AgentRuntime:
                         }
                         tool_output = await mcp_manager.call_mcp_tool(func_name, args)
                         is_err = tool_output.startswith("Error:")
+                        # 直调合法 mcp__srv__tool 放行后，顺便将该 srv 纳入当前会话单调递增激活集合
+                        mcp_parts = func_name.split("__", 2)
+                        if len(mcp_parts) == 3 and not is_err:
+                            active_tools, mcp_catalog_prompt = await self._assemble_agent_tools(
+                                conv_id=conv_id,
+                                user_message=user_message,
+                                collapse_anchor_turn_id=int(ctx.get("collapse_anchor_turn_id") or conv_collapse_anchor),
+                                extra_activate_servers=[mcp_parts[1]],
+                            )
                         compressed = shell_executor.compress_output(
                             command=f"{func_name}({json.dumps(args, ensure_ascii=False)[:30]})",
                             raw_output=tool_output,

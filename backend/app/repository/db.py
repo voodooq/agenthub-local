@@ -187,6 +187,24 @@ class DatabaseManager:
                 await conn.execute(f"ALTER TABLE llm_providers ADD COLUMN {col} {col_type};")
                 logger.info(f"成功为 llm_providers 表迁移并扩展字段: {col} ({col_type})")
 
+    async def _migrate_scheduled_tasks_table(self, conn: aiosqlite.Connection) -> None:
+        """
+        动态平滑补全 scheduled_tasks 表字段（耗时、错误详情、关联会话与防重入分钟标记）
+        """
+        async with conn.execute("PRAGMA table_info(scheduled_tasks);") as cursor:
+            columns = [row["name"] for row in await cursor.fetchall()]
+
+        new_columns = {
+            "last_duration_ms": "INTEGER",
+            "last_error": "TEXT",
+            "last_conversation_id": "TEXT",
+            "last_triggered_minute": "TEXT",
+        }
+        for col, col_type in new_columns.items():
+            if col not in columns:
+                await conn.execute(f"ALTER TABLE scheduled_tasks ADD COLUMN {col} {col_type};")
+                logger.info(f"成功为 scheduled_tasks 表迁移并扩展字段: {col} ({col_type})")
+
     async def init_db(self) -> None:
         """
         执行数据库建表与触发器初始化脚本
@@ -518,6 +536,28 @@ class DatabaseManager:
             );
             """)
             await conn.execute("CREATE INDEX IF NOT EXISTS idx_sched_ws ON scheduled_tasks(workspace_id);")
+            await self._migrate_scheduled_tasks_table(conn)
+
+            # 14b. 计划任务运行历史表 (scheduled_task_runs - 记录每次 Cron/手动触发的完整结果与耗时)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS scheduled_task_runs (
+                id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                workspace_id TEXT NOT NULL,
+                trigger_type TEXT NOT NULL CHECK(trigger_type IN ('cron', 'manual')),
+                status TEXT NOT NULL CHECK(status IN ('running', 'success', 'failed')),
+                started_at DATETIME NOT NULL,
+                finished_at DATETIME,
+                duration_ms INTEGER,
+                output_text TEXT,
+                error_message TEXT,
+                conversation_id TEXT,
+                FOREIGN KEY(task_id) REFERENCES scheduled_tasks(id) ON DELETE CASCADE
+            );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sched_runs_task_started ON scheduled_task_runs(task_id, started_at DESC);"
+            )
 
             # 15. 追加式原始事件账本表 (event_ledger - Append-Only 黑匣子事件轨迹)
             await conn.execute("""
