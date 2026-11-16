@@ -11,6 +11,21 @@
       "env": {},
       "description": "接管本机已开启 --remote-debugging-port=9222 的 Edge/Chrome 浏览器（按需启用）",
       "enabled": false
+    },
+    "fencing-gantt-mcp": {
+      "transport": "streamable-http",
+      "url": "http://127.0.0.1:3100/mcp",
+      "headers": {
+        "Authorization": "Bearer agenthub-token-replace-me"
+      },
+      "timeout_seconds": 30.0,
+      "description": "导入的 MCP 服务 (fencing-gantt-mcp)",
+      "enabled": true,
+      "upload_endpoint": "http://127.0.0.1:3100/api/v1/files/upload",
+      "upload_file_field": "file",
+      "download_origins": [
+        "http://127.0.0.1:3100"
+      ]
     }
   }
 }

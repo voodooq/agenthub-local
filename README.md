@@ -2,6 +2,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/Version-v1.4.2-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
   <img src="https://img.shields.io/badge/Next.js-14.2-black?logo=next.js&style=flat-square" alt="Next.js" />
@@ -12,8 +13,262 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local 是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
-> 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、Llama.cpp、Nvidia 实例），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、SiliconFlow、Google AI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
+> AgentHub Local（`v1.4.2 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
+
+---
+
+## 🏗️ 核心架构视图 (Architecture Overview)
+
+```mermaid
+flowchart TD
+    subgraph UI["全景交互层 (Next.js 14.2 + React 18 + Strata 设计)"]
+        WS["工作区切换器 WorkspaceSwitcher (虚拟沙盒 / 本地物理目录)"]
+        Mode["模式二元重构 TopModeSwitcher (对话模式 / 任务模式 + 澄清向导)"]
+        HUD["Loop 自主领航舱 LoopHUD (会话强隔离 / DAG 步进 / DoD 质检)"]
+        Cards["交互卡片群 (ApprovalCard / DiffViewerCard / DeliverablesCard / TokenMetricsFooterBar)"]
+        Views["功能枢纽 (LibraryView / ScheduledView / SkillsView / MemoryHubModal)"]
+        SysUI["系统治理与升级 (RightActionDrawer 硬件监控 / UpdateModal 自动升级)"]
+    end
+
+    subgraph Engine["后端微内核与多源算力引擎 (FastAPI + aiosqlite)"]
+        Runtime["AgentRuntime 执行主控 (盘中纠偏 / 伪落盘拦截 / 独立交付拆分)"]
+        LoopEng["TaskLoopRunner 状态机 (Planner -> Executor -> Verifier -> Reflector + 错误指纹熔断)"]
+        Policy["PolicyInterceptor 三级网关 (L0 只读 / L1 快照写 / L2 高危 HITL 阻断)"]
+        Pool["EnginePoolService 算力池 (多通道冷却熔断 / CLI 动态模型嗅探 discover_cli_models)"]
+    end
+
+    subgraph MemorySurgery["上下文工程、代码手术刀与双回滚时光机"]
+        Ctx["三区上下文与 KV Cache 守护 (ContextBuilder + LocalContextCompressor)"]
+        Mem["分层记忆与 L5 实战微经验库 (FactManager + EpisodicExperienceStore)"]
+        FTS["零拷贝增量 FTS5 引擎 (workspace_fts.py)"]
+        Surgery["Code Surgery 代码手术刀 (ast_skeleton.py + code_surgery.py)"]
+        Rollback["双回滚时光机 (git_checkpoint.py 单步快照 + ShadowCheckpointManager 全会话回滚)"]
+    end
+
+    subgraph EcoMonitor["扩展生态、实时监控与自动化升级"]
+        MCP["远程 MCP 与跨网协同 (MCPManager Streamable HTTP/SSE + mcp_file_bridge)"]
+        Skills["双层 Skill 沙盒与自进化 (skill_loader.py + SkillAuditor + experience_distiller)"]
+        Probe["CrossPlatformHardwareProbe (collector.py / nvidia-smi / 网络吞吐)"]
+        Sched["计划任务守护器 (task_scheduler.py Cron + Toast)"]
+        Updater["AutoUpdaterService (GitHub Releases 检查 / 流式下载 / 无版本号覆盖重启)"]
+    end
+
+    WS --> FTS
+    WS --> Skills
+    Mode --> Runtime
+    Runtime --> LoopEng
+    Runtime --> Pool
+    LoopEng --> Policy
+    Policy --> Cards
+    LoopEng --> HUD
+    Runtime --> Ctx
+    Ctx --> Mem
+    Runtime --> Surgery
+    Surgery --> Rollback
+    Runtime --> MCP
+    Probe --> SysUI
+    Updater --> SysUI
+    Sched --> Views
+```
+
+---
+
+## 🌟 核心技术方案与特性矩阵
+
+### 1. ⚡ 多源算力池化、CLI 动态模型识别与全链路水表
+* **多源无状态算力调度 (`EnginePoolService` · `gemini_client.py`)**：
+  * 统一池化本地私有引擎（Ollama、vLLM、`llama.cpp` / `llama-server`）与云端 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI）。
+  * 内置模型级 **180 秒冷却熔断锁**与地区网络受限 **300 秒隔离**，遭遇 429 或连续 503 自动切换备选通道；自适应 Kimi/Moonshot 等模型参数（如 `temperature=1`）。
+* **CLI 账号模型动态嗅探与聚合 (`agent_runner.py` · `ModelSelector` · `SettingsModal`)**：
+  * 新增 `discover_cli_models` 与 `parse_agy_models_output`，按活跃 CLI 账号隔离目录（`GEMINI_CLI_HOME`）实时执行 `agy models` 探测已解锁模型，自动过滤无权限模型。
+  * 自动将多思考档位变体（`-low` / `-medium` / `-high` / `-xhigh`）聚合为主模型条目，保留无后缀单档位模型；`resolve_agy_model_flag` 支持动态变体映射与档位平滑回退，支持未来新模型免改代码自动识别。
+  * 在「设置 → 模型」提供「刷新识别模型」按钮（对接 `GET /api/v1/models/active?refresh=true`），引入 `known_candidate_ids` 感知新解锁模型自动浮现。
+* **全链路性能微水表 (`TokenMetricsFooterBar`)**：
+  * 深度适配 `llama-server`（`/health`、`/props`、`/tokenize`、`timings`），每条回复底部渲染单行实时水表，展示上下文水位、KV Cache 命中率、脱水节省比例及 TTFT / TPS。
+
+---
+
+### 2. 📂 通用工作区机制与零拷贝增量 FTS5 引擎
+* **双模态工作区 (`WorkspaceSwitcher`)**：
+  * **托管虚拟工作区**：用于临时问答与实验，数据安全存放于隔离沙盒内。
+  * **本地物理目录工作区**：直接挂载电脑上已有的代码或资料目录，**零迁移成本接入**。
+* **物理 CWD 强锁定与专属契约 (`WORKSPACE.md`)**：Agent 执行命令与文件写入严格锁定在工作区根路径下，禁止跨目录越界写；支持为每个工作区维护 `WORKSPACE.md` 技术栈与业务术语契约。
+* **零拷贝增量 FTS5 (`workspace_fts.py`)**：扫描前自动解析 `.gitignore` 与 `.agenthubignore`，基于 `mtime + size + sha256` 水位线防抖建立 trigram BM25 全文分词索引，索引独立存放于 `<workspace>/.agenthub/index.db`，绝不污染工程源码。
+
+---
+
+### 3. 🔄 Loop 自主循环工程与会话强隔离
+* **`Planner -> Executor -> Verifier -> Reflector` 自驱状态机 (`loop_runner.py`)**：
+  * **Planner** 拆解目标为 DAG 子任务并同步写入 `<workspace>/.agenthub/scratchpad.md`；**Executor** 具身执行；**Verifier** 进行 DoD 独立验收；**Reflector** 遇错自愈调整策略。
+  * **错误指纹死循环熔断**：提取 `hash(error_type + error_message)`，连续 3 次遭遇相同错误自动触发熔断保护。
+* **Loop 领航舱会话强隔离 (`LoopHUD`)**：
+  * `GET /api/v1/loop/workspace/{ws_id}/active` 与前端 SSE 分发按 `conversation_id` 强隔离，切换对话或空白会话瞬间清零领航舱；采用三层纯闲聊判定与惰性建 Loop，纯文本闲聊彻底零触发、零闪烁。
+* **需求澄清与自动升舱 (`InteractiveInquiryCard`)**：在对话模式下启用需求澄清后，支持分步确认引导（含 `Tab` 跳选占位模板）；用户点击批准计划或立即执行时，自动升舱为 Agent 执行态并物理落盘。
+
+---
+
+### 4. 🛡️ 三级敏感操作网关、HITL 审批与防卡死治理
+* **三级敏感操作拦截网关 (`policy_interceptor.py` · `ApprovalCard`)**：
+  * 🟢 **L0（只读安全）**：读取、扫描与无副作用查询 $\rightarrow$ 静默自动放行。
+  * 🟡 **L1（工作区受控写）**：工作区内新建或修改文件 $\rightarrow$ 自动创建轻量快照后放行。
+  * 🔴 **L2（高危拦截）**：跨目录越界写、物理删除、高危 Shell 指令 $\rightarrow$ 挂起循环并呼出四键审批卡片（**批准本次 / 本任务白名单 / 改参另存为 / 拒绝并改道**）。
+* **CLI 原生工具越权自愈与长流抗卡死 (`agent_runner.py` · `shell_executor.py`)**：
+  * 拦截 CLI 原生越权工具调用并触发 `cli_native_tool_denied`，在 `AgentRuntime` 内进行同轮最多 2 次无感盘中纠偏，引导模型回归标准 `<tool_call>` 协议。
+  * `_AsyncLineReader` 配备 16 MiB 子进程缓冲区与 300,000 字符安全限流；`LocalShellExecutor` 对超过编码阈值的超长脚本（Windows `-EncodedCommand` > 24 KB / POSIX > 64 KB）自动转为临时 `.ps1`/`.sh` 文件执行并清理，彻底消除 `[WinError 206]`。
+
+---
+
+### 5. 🔪 Code Surgery 精准代码手术刀与 AST 语法门禁
+* **Tree-sitter 代码大纲与语法门禁 (`tools/ast_skeleton.py`)**：
+  * 轻量提取函数、类、方法签名与结构大纲，避免整文件读取浪费上下文；写盘前强制执行 `validate_syntax_before_write`（Python / JS / TS），阻断语法损坏写入。
+* **带行号切片读取与三级容错局部补丁 (`tools/code_surgery.py`)**：
+  * `read_local_file_sliced` 支持 `start_line` / `end_line` 窗口读取与 `123 |` 行号对齐。
+  * `apply_search_replace_blocks` 支持多块 `<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE` 原子补丁，提供 **Level 1 精确匹配 $\rightarrow$ Level 2 缩进与空行容错对齐 $\rightarrow$ Level 3 相似度诊断提示**，并回传标准 Unified Diff。
+* **行级红绿 Diff 卡片与一键撤销 (`DiffViewerCard`)**：前端直观渲染行级增删比对、快照 Tree Hash 与「一键撤销修改」交互按钮。
+
+---
+
+### 6. 🧠 三区上下文压缩、L5 实战微经验库与影子 Git 双回滚时光机
+* **三区上下文工程与 KV Cache 守护 (`context_builder.py` · `context_compressor.py`)**：
+  * 物理划分 **Zone 1（恒定不动前缀）+ Zone 2（只增不改热区 + 分块坍缩）+ Zone 3（跨轮零残留尾注）**，结合 36k 云端软上限、44K/48K CLI 防爆阀、同路径历史写入折叠与两级漏斗脱水（超长工具输出转为 `ToolRef` + `read_tool_ref` 按行回查），最大化 KV Cache 命中率。
+* **四层记忆体系与 L5 静默实战微经验库 (`experience_store.py` · `fact_manager.py` · `long_term.py`)**：
+  * 整合滑动窗口摘要（`session_summary.py`）、双时间轴确定性事实（`FactManager`）、180s 闲置水位锁长时提炼（`long_term.py`）与只增不改行为账本（`ledger.py`），全程经 `MemoryPolicyGuard`（`policy_guard.py`）脱敏凭据。
+  * **L5 `EpisodicExperienceStore`**：基于 SQLite `FTS5 trigram` 与**三路正交锚点（实体标签 + 报错特征码 + 口语同义词簇）**，在 Zone 3 按阈值分级注入（`>= 0.80` 强采纳、`0.65~0.80` 参考提示、`< 0.65` 过滤）；工具遇错时即时检索避坑解法；回合结束后静默提炼微经验并执行复用加权（`+0.03`）与失败降权（`-0.15`）达尔文淘汰。
+* **影子 Git 双回滚时光机与 0-Token 斜杠指令 (`git_checkpoint.py` · `checkpoint_manager.py`)**：
+  * **单步快照**：`git_checkpoint.py` 通过 `agenthub_shadow.index` 毫秒级生成 40 位 Tree Hash 快照，配合 `POST /api/v1/workspaces/{id}/rollback` 一键单步还原。
+  * **全会话时光机**：`ShadowCheckpointManager` 在 `<workspace>/.agenthub/shadow_git` 维护独立镜像仓库，支持 `/ckpt`、`/rollback`、`/remember`、`/distill` 零 Token 斜杠管理命令，`/rollback` 可原子回滚磁盘源码、草稿纸、SQLite 消息与行为账本。
+
+---
+
+### 7. 🧩 双层多 Skill 协同沙盒与无错门控自进化
+* **双层隔离与极速加载 (`skill_loader.py` · `SkillsView` · `SopDrawer`)**：
+  * 支持 **L1 全局底座 Skill（`skills/`）** 与 **L2 工作区私有 Skill（`<workspace>/skills/` 与 `<workspace>/.agenthub/skills/`）**，L2 同名自动覆盖 L1 并标注 `[工作区重写]`。
+  * 采用 4KB Frontmatter 摘要 + 前端 SWR 缓存实现 `/` 秒开，点击 `[SOP]` 按需懒加载完整规程；单条指令支持多次 `/` 串联多 Skill 协同执行。
+* **供应链安全审计与无错沉淀门控 (`skill_auditor.py` · `experience_distiller.py`)**：
+  * 导入三方 Skill 时通过 `SkillAuditor` 遍历 AST，阻断 `os.system`、`subprocess`、`eval`、硬编码密钥与越狱注入。
+  * `evaluate_skill_distill_eligibility` 严格拦截未完成或末尾带报错的残缺轨迹，仅完整无错工作流开放沉淀，并自动抽取 `Troubleshooting / 避坑注意事项`；支持同名 Skill 语义化版本（`patch`/`minor`）原子迭代，完整保留既有 `knowledge/` 自定义文档。
+
+---
+
+### 8. 🌐 远程 MCP 协议全栈支持与跨网安全文件协同
+* **全协议 MCP 接入 (`mcp_manager.py` · `MemoryHubModal`)**：
+  * 在本地 `_StdioMCPConnection` 基础上原生扩展 `_RemoteHttpMCPConnection`，全面支持 **`Streamable HTTP`**（含 `Mcp-Session-Id` 有/无状态连接、404 自动重连与异步 `DELETE` 清理）及 **`Legacy HTTP + SSE`**（强制同源校验与禁止跨站重定向防凭据泄露）。
+  * 兼容 Claude Desktop（`mcpServers`）、VS Code（`servers`）与 Windsurf（`serverUrl`）配置格式导入，支持 `${ENV_VAR}` 运行时环境变量展开与 Headers 密钥脱敏掩码保护。
+* **跨网安全文件协同桥接 (`mcp_file_bridge.py`)**：
+  * 提供 `mcp_upload_workspace_file` 与 `mcp_download_artifact_to_workspace` 通用工具：上传支持自定义表单字段 `upload_file_field` 与体积校验；下载采用 `aiter_bytes()` 真流式体积熔断、严格 `2xx` 与反误写校验，落盘后自动注册资产库。
+
+---
+
+### 9. 📚 资产库归档、磁盘物理核验与独立交付呈现
+* **反伪落盘幻觉与物理存在性核验 (`artifacts.py` · `AgentRuntime` · `DeliverablesCard`)**：
+  * 拦截无工具纯叙事宣称已写入却未真实落盘的幻觉（触发 `stream_reset` 纠偏）；新增 `POST /api/v1/artifacts/verify-paths` 批量核验工作区文件真实大小与修改时间，零落盘气泡绝不渲染误导性绿色交付卡片。
+  * 强制分离「执行过程」与「最终交付正文」，防止 `update_working_memory(task_completed=true)` 导致交付正文混入折叠区，并在底栏渲染「生成文件直达」卡片。
+* **沙盒隔离上传与双向溯源 (`attachment_service.py` · `LibraryView`)**：上传文件按 SHA-256 去重隔离于 `.agenthub/attachments/`；资产库支持一键唤起系统资源管理器高亮定位物理文件，并支持反查来源会话与 Prompt。
+
+---
+
+### 10. 🖥️ 系统实时硬件监控与智能治理中枢
+* **跨平台实时硬件探针 (`probe/collector.py` · `RightActionDrawer`)**：
+  * 打开右侧「系统实时监控与智能治理」抽屉后，每 3 秒自动轮询 `/api/v1/system/snapshot`，实时展示 CPU 使用率/核数/主频、物理内存与 Swap、全分区磁盘占用及 Top 6 高占用进程。
+  * `collector.get_gpu_metrics` 接入无窗口 `nvidia-smi` CLI 探测（原生适配 Windows/Linux NVIDIA 显卡负载、显存与核心温度）；新增 `get_network_metrics` 计算真实实时上/下行吞吐速率与累计流量（GB）。
+  * 集成一键体检高占用进程、进程「提请治理」、端口占用排查及待审批系统治理/经验复盘清单交互闭环。
+
+---
+
+### 11. ⏰ 无人值守计划任务与全景四语种国际化 (i18n)
+* **后台计划任务 (`task_scheduler.py` · `ScheduledView`)**：支持 Cron 表达式与日常周期调度，支持 `[立即测试]` 静默跑通，任务完成后自动调用 Windows 原生 Toast 桌面通知。
+* **四语种国际化 (`i18nDictionary.ts`)**：全量界面与交互组件原生支持 **简体中文 (zh-CN)**、**繁体中文 (zh-TW)**、**英语 (en)**、**日语 (ja)**。
+
+---
+
+## 📦 多客户端无版本号发行包与自动升级
+
+### 1. 预编译离线发行包
+在 GitHub Releases 页面，我们为不同操作系统与使用场景提供预编译产物（自 `v1.4.2` 起，桌面端单文件与 DMG 镜像全面采用**无版本号文件名**，消除跨版本升级后本地残留旧版本号的歧义）：
+
+| 客户端版本 | 适用系统 | 包名称 | 运行方式 |
+| :--- | :--- | :--- | :--- |
+| **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
+| **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
+| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.4.2-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
+| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.4.2-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
+| **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
+
+### 2. GitHub 自动检查升级与平滑覆盖重启 (`AutoUpdaterService` · `UpdateModal`)
+* **静默检查与更新提醒**：客户端启动时自动静默检查 `voodooq/agenthub-local` 最新 Release（亦支持在「设置 → 关于」手动检查），发现新版本后在侧栏与顶栏展示提醒徽标，并在 `UpdateModal` 中渲染 Markdown 升级日志。
+* **流式下载与无版本号平滑落位**：点击「立即升级」自动匹配当前平台产物并流式下载，实时展示百分比进度、已下载体积与速率；内置 `.version` 缓存标记校验防止同名包跨版本复用旧缓存，并通过 `normalize_windows_target_exe` 在从历史带版本号 EXE 升级时自动重命名为 `AgentHub-Local-windows-x64.exe`。
+* **数据零覆写重启**：通过 `/api/v1/system/update/*` 接口编排一键重启替换加载新版本，严格保护 `data/` 数据库与用户个人配置不被覆写。
+
+---
+
+## 🛠️ GitHub Releases 自动打包机制 (CI/CD)
+
+本项目配置了跨平台并行 GitHub Actions 自动化打包流水线（`.github/workflows/release.yml`）：
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Dev as 开发者
+    participant GH as GitHub Remote
+    participant FE as build-frontend (ubuntu)
+    participant Win as build-windows-exe (windows-latest)
+    participant Mac as build-macos-dmg (macos-latest)
+    participant Port as package-portable (ubuntu)
+    participant Rel as GitHub Releases 页面
+
+    Dev->>GH: git tag v1.4.2 && git push origin v1.4.2
+    GH->>FE: 安装 Node 22 并导出静态前端 out/
+    FE->>Port: 分发 out/ -> 生成 portable.zip & portable.tar.gz
+    FE->>Win: 分发 out/ -> PyInstaller --onefile 生成 AgentHub-Local-windows-x64.exe
+    FE->>Mac: 分发 out/ -> PyInstaller + hdiutil 生成 AgentHub-Local-macos-arm64.dmg
+    Port->>Rel: 仅过滤下载 release-* 汇聚 4 类独立资产创建 Release
+    Win->>Rel: 挂载独立单文件 EXE
+    Mac->>Rel: 挂载 macOS ARM64 DMG
+```
+
+### 如何发布新版本
+只需在 `version.json` 更新版本号并运行 `python sync_version.py`（或直接运行 `python sync_version.py <version>`），随后在本地执行以下命令：
+```bash
+git tag -a v1.4.2 -m "Release v1.4.2"
+git push origin master
+git push origin v1.4.2
+```
+推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 4 类干净的发行资产，几分钟内即可在 Releases 页面看到生成的下载文件。
+
+---
+
+## 💻 源码本地启动与开发指南
+
+如果您希望从源码启动开发或调试：
+
+### 1. 环境准备
+* Python $\ge$ 3.10
+* Node.js $\ge$ 18
+
+### 2. 安装依赖
+```bash
+# 后端依赖安装
+pip install -r requirements.txt
+
+# 前端依赖安装
+cd frontend
+npm install
+cd ..
+```
+
+### 3. 启动方式
+```bash
+# Windows 用户直接双击运行（或带控制台日志的调试模式）：
+启动AgentHub桌面版.bat
+启动AgentHub_调试模式(带控制台日志).bat
+
+# macOS / Linux 用户运行：
+./启动AgentHub桌面版.sh
+
+# 或直接使用 Python 启动原生桌面窗体：
+python desktop_app.py
+```
 
 ---
 
@@ -49,267 +304,24 @@
   - 客户端启动自动静默检查 `voodooq/agenthub-local` 最新 Release 并支持手动检查；发现新版本时在侧栏与顶栏展示提醒徽标，并在弹窗中渲染 Markdown 升级日志（Release Notes）。
   - 点击「立即升级」自动匹配当前平台产物（Windows 单文件 EXE / macOS DMG / Portable 便携包）流式下载，实时展示百分比进度条、已下载体积与速率；下载完毕后提示并支持一键重启替换加载新版本（严格保护 `data/` 与个人配置不被覆写）。
 
-### 🛡️ v1.3.6 — 反伪落盘幻觉、WinError 206 兜底、CLI 长流扩容与磁盘物理核验
-- **Windows 超长命令回退与 CLI 流式长输出防护（`LocalShellExecutor` · `agent_runner` · `AgentRuntime`）**：
-  - `LocalShellExecutor` 对超过编码安全阈值的脚本（Windows `-EncodedCommand` > 24 KB / POSIX > 64 KB）自动切换临时 `.ps1`/`.sh` 文件执行并自动清理，捕获底层 `Popen` `OSError` 结构化回传，彻底消除 `[WinError 206]` 进程崩溃。
-  - 新增 `_AsyncLineReader` 与 16 MiB 子进程缓冲区上限，消除超长单行 NDJSON 导致的 `LimitOverrunError / ValueError`；同步将 `MAX_CHUNKS_PER_SESSION` 扩容至 `30000` 并接入 `300,000` 字符双指标安全限流。
-- **纯文本伪落盘/预剧透幻觉拦截与上下文热区自适退让（`AgentRuntime` · `ContextBuilder` · `LocalContextCompressor`）**：
-  - 拦截无工具纯叙事宣称文件已写入却未真实落盘的行为（触发 `stream_reset` 并激活 `hallucinated_write` 纠偏逼出真实写盘工具）；在实质性工具调用步自动剥离首个 `<tool_call>` 后的未执行假结果剧透；流式中断落库自动补充磁盘未落盘警示。
-  - `ContextBuilder` 与 `LocalContextCompressor` 新增 CLI 字符软防爆阀（48K 渲染保护 / 44K 压缩触发）、历史跨轮大文件写入自动折叠，以及热区保留轮数动态退让逻辑；`EnginePoolService` 补齐 Google 模型缺省调度活跃账号兜底。
-- **前后端磁盘物理存在性真实核验（`artifacts` · `useVerifiedWorkspacePaths` · `AssistantMarkdownMessage` · `page.tsx`）**：
-  - 新增 `POST /api/v1/artifacts/verify-paths` 批量核验工作区真实文件大小与修改时间；前端正文行内芯片与底栏「生成文件直达」严格以工作区物理存在为前提，异常中断/零落盘气泡绝不再渲染误导性绿色交付卡片。
+### 🛡️ v1.3.x — 代码手术刀、L5 微经验与影子 Git 双回滚、会话强隔离及物理真实核验
+- **Code Surgery 与单步快照回滚（`v1.3.0 ~ v1.3.1`）**：引入 Tree-sitter 代码大纲提取与 AST 语法门禁（`validate_syntax_before_write`）、行号切片读取、`apply_search_replace_blocks` 三级容错局部补丁、行级红绿 `DiffViewerCard`、`SkillAuditor` 静态安全审计，以及基于 `agenthub_shadow.index` 的毫秒级 Git Shadow 单步回滚。
+- **L5 实战微经验库与全会话影子 Git 时光机（`v1.3.2`）**：落地 `EpisodicExperienceStore`（SQLite `FTS5 trigram` + 三路正交锚点 + 阈值分级注入 + 复用奖惩淘汰）、`ShadowCheckpointManager`（`.agenthub/shadow_git` 独立镜像仓库），以及 `/ckpt`、`/rollback`、`/remember`、`/distill` 零 Token 斜杠指令集。
+- **Loop 会话隔离、交付分离与防伪落盘物理核验（`v1.3.3 ~ v1.3.6`）**：实现 `LoopHUD` 按 `conversation_id` 强隔离与三层纯闲聊零触发；建立 `evaluate_skill_distill_eligibility` 无错沉淀门控与语义化版本原子迭代；强制分离执行过程与独立最终交付气泡；接入 CLI 原生工具越权盘中自愈、超长命令临时脚本防 `[WinError 206]` 兜底、历史库平滑守护与 `POST /api/v1/artifacts/verify-paths` 磁盘物理存在性真实核验。
 
-### 🛡️ v1.3.5 — CLI 工具越权盘中自愈、历史数据库平滑守护与静态类型健壮性治理
-- **CLI 原生工具越权隔离与盘中无感自愈（`agent_runner` · `engine_pool` · `AgentRuntime` · `page.tsx`）**：
-  - 托管 CLI 流全面屏蔽底层 `tool_request` / `tool_result` 内部确认请求，同步移除前端 SSE `tool_request` 对确认审批抽屉（`RightActionDrawer`）的误打开与误计数。
-  - `denied_actions` 拦截升级为结构化 `cli_native_tool_denied` 事件并在 `AgentRuntime` 接入同轮最多 2 次盘中自动纠偏（搭配 `stream_reset` 与 `replace_prev_empty_step` 原地复用空白占位气泡），强指令引导模型改用标准 `<tool_call>` 协议续跑，避免多步长任务中途报错熔断。
-- **历史数据库屏蔽防护、测试隔离与 BOM 容错（`config` · `mcp_manager` · `conftest`）**：
-  - 新增 `has_sqlite_user_data` 与 `resolve_default_db_path`，防止 0 字节或纯空白初始化的 `agenthub_local.db` 屏蔽原有非空历史库 `gemini_hub_local.db`。
-  - 新增 `pytest` 会话级数据库路径防线，双重隔离 `app.*` 与 `backend.app.*` 默认配置，杜绝测试写穿生产 `data/` 目录；`MCPManager.load_config` 改用 `utf-8-sig` 兼容带 UTF-8 BOM 的配置文件。
-- **子进程 `stdin` 类型收窄与静态健壮性修复（`agent_runner`）**：
-  - 将超长 Prompt 写入 `asyncio.subprocess.Process.stdin` 的路径由 `getattr` 改为显式 `proc_stdin = proc.stdin` + `is not None` 类型收窄，消除静态分析 `NoneType` 属性告警。
+### ✨ v1.2.x — 三区上下文与 KV Cache 守护、性能微水表及多源算力稳定化
+- **三区上下文压缩与两级漏斗脱水**：确立 Zone 1（恒定前缀）/ Zone 2（只增不改热区 + 36k 软上限坍缩）/ Zone 3（零残留尾注）物理隔离，配合工具长输出 `ToolRef` 旁路脱水与 `180s` 闲置记忆提炼水位锁，最大化本地与云端 KV Cache 命中率。
+- **`llama-server` 深度适配与全链路 Token 水表**：原生接入 `llama.cpp`（`/health`、`/props`、`/tokenize`、`timings`），渲染单行实时水表（上下文水位、KV 命中率、TTFT/TPS）与 `/stats` 分角色消耗看板。
+- **多源算力熔断与体验升级**：引入模型级 `180s` 熔断冷却锁与 `300s` 地区隔离，支持需求澄清自动升舱落盘、多 Skill 串联协同、长文本半屏编辑与执行步骤单行折叠。
 
-### 🛠️ v1.3.4 — CLI 工具主权与超时治理、CDP 浏览器韧性及最终交付结果独立呈现
-- **最终交付结果与执行过程严格分离（`AgentRuntime` · `EnginePoolService` · `ToolTagSanitizer`）**：
-  - 修复 `update_working_memory(task_completed=true)` 与实质性工具并发触发时抢先 `break` 导致最终交付正文混入过程折叠区的问题，强制切入无工具纯文本汇总步；仅归档收尾且已含完整长正文时自动拆条清理，步数达上限时兜底落盘独立收尾消息。
-  - CLI 历史序列化全面改为 `<history_turn role="...">` 结构化标签并接入 `stripPseudoTranscriptPrefixes` 双端安全清洗，消除 `[终端/工具输出]: ... [Gemini]:` 角色串台自演幻觉；前端历史重载与 SSE 流尾自动无损拆出独立最终交付气泡与「生成文件直达」栏。
-- **CLI 工具主权收敛、`WinError 206` 修复与浏览器自愈（`agent_runner` · `mcp_manager` · `chat`）**：
-  - 收敛 Antigravity/Gemini CLI 原生工具调用权限（禁止旁路内置工具），超长 Prompt 在 Windows 改为 `stdin` 管道安全喂入以彻底消除 `[WinError 206]`。
-  - 新增 SSE 连接空闲心跳保活机制与 MCP Playwright-CDP 断线自动重连/自愈韧性，避免长等待场景断流超时。
+### 🚀 v1.1.x — 项目工作区中枢、Loop 自主循环、四层记忆治理与跨平台发布体系
+- **通用工作区与增量 FTS5**：支持虚拟沙盒与本地物理目录零迁移挂载、`.gitignore` 过滤增量 trigram 索引、4KB Frontmatter + SWR 技能秒开及 `L1/L2` 同名覆盖。
+- **Loop 自主循环与 HITL 审批网关**：落地 `Planner -> Executor -> Verifier -> Reflector` 状态机、错误指纹 3 次熔断、Plan-First 引导向导与 `L0 / L1 / L2` 三级敏感操作四键审批网关。
+- **记忆治理与跨平台打包**：构建基于本地 SQLite 的四层记忆体系（`FactManager` 双时间轴事实、事件账本与凭据脱敏）、沙盒隔离上传、资产库双向溯源及 GitHub Actions 跨平台自动打包流水线。
 
-### 🛡️ v1.3.3 — Loop 领航舱会话强隔离、纯闲聊与完整无错门控及 Skill 原子迭代
-- **会话强隔离与零噪按需激活 (`TaskLoopRepository` · `LoopHUD` · `Runtime`)**：`GET /api/v1/loop/workspace/{ws_id}/active` 与前端轮询/SSE 分发全面按 `conversation_id` 强隔离，欢迎页、空白会话或切换对话瞬间立即清零隐藏顶部 Loop 领航舱并拦截非当前会话背景推送；采用三层纯闲聊判定 + 渐进式惰性建 Loop，纯文本闲聊彻底零触发、零闪烁。
-- **完整无错 Skill 提纯门控与避坑容错沉淀 (`evaluate_skill_distill_eligibility`)**：彻底屏蔽非 `completed` 状态、纯单次只读检索噪音与末尾带未恢复报错（含 Windows PowerShell 中文环境与非零退出码探测）的残缺轨迹，仅完整无错工作流方开放「沉淀为可复用 Skill」；对自愈成功的轨迹自动抽取纯净 SOP 并追加 `Troubleshooting / 避坑注意事项`。
-- **已有 Skill 语义化自适应迭代与原子替换**：`/distill` 与 `apply_proposal` 对已有同名 Skill 全面支持冲突防护（`create_new` 同名自动转升级）、`run_skill_tool` `skill_name` 精准溯源、按是否改动入参契约/核心步骤自适应递增 `patch`/`minor` 版本号，并通过 Staging + 备份原子切换完整保留既有 `knowledge/` 自定义文档。
-
-### 🧠 v1.3.2 — L5 静默实战微经验库、影子 Git 双回滚时光机与正交双提纯 (Episodic Memory & Shadow Rollback)
-- **L5 个人实战微经验引擎 (`EpisodicExperienceStore`)**：采用 SQLite `FTS5 trigram`（纯 Trigger 触发器自同步，消除重复索引计数）与**三路正交锚点（实体标签 + 报错特征码 + 口语同义词簇）**，支持中文 3-gram 滑窗与跨口语表达检索，结合当前工作区亲和度实现归一化匹配度计算与 `MemoryPolicyGuard` 全程敏感凭据脱敏。
-- **上下文分级注入与盘中报错急救 (`ContextBuilder` & `AgentRuntime`)**：Zone 3 严格在非无痕态按阈值分级注入（`>= 0.80` 强指令采纳、`0.65~0.80` 参考提示、`< 0.65` 彻底过滤零干扰）；工具执行遇到报错异常（`is_step_abnormal`）时即时检索 L5 历史避坑解法直接喂给下一步推理加速自愈。
-- **盘后静默复盘与闭环进化 (`ExperienceDistiller`)**：回合正常收尾时基于 `event_ledger` 自动静默提炼微经验（集成 `_detect_mock_antipattern` 反造假拦截与纯规则降级零 Token 兜底），并对当轮引用案例自动执行复用加权（`hit_count + 1`、`+0.03`）或失败降权（`fail_count + 1`、`-0.15`）达尔文淘汰机制。
-- **全会话影子 Git 双回滚时光机 (`ShadowCheckpointManager`)**：在 `<workspace>/.agenthub/shadow_git` 维护完全独立于用户原生 `.git` 的隔离镜像仓库（带工作区互斥异步锁、僵尸 `index.lock` 自动清理及附件/数据库目录强制保护），在写盘与终端命令前自动生成无感检查点，并级联绑定会话生命周期。
-- **0-Token 斜杠工作流指令集与正交双提纯 (`/ckpt` · `/rollback` · `/remember` · `/distill`)**：Pre-Turn 即时拦截斜杠管理命令；`/rollback` 原子回滚磁盘源码、草稿纸、SQLite 消息与行为账本并回推 `control/rollback_completed` SSE 事件同步刷新前端气泡；`/distill` 将实战轨迹正交分离写入 Skill（经 AST + `SkillAuditor` 过审）、L4 `FactManager` 与 L5 微经验库并 0ms 热加载。
-
-### ⚡ v1.3.0（包含 v1.3.1）— 工程感知、精准代码手术刀与健壮性修复（Code Surgery & Git Checkpoint）
-- **健壮性与兼容性修复（v1.3.1）**：
-  - **仓储层方法名对齐与别名兼容**：修复工作区回滚 API 路由对 `WorkspaceRepository.get_by_id` 的调用，并在仓储层增设 `get_workspace_by_id` 别名映射，消除类型检查与属性不存在异常。
-  - **静态分析与作用域安全**：对 `replace_in_file` 局域变量 `unified_diff`、`ok`、`syntax_ok` 实施前置初始化，确保在极端读盘异常或中断分支下变量 100% 明确绑定。
-  - **资产库登记双层安全兜底**：修正精准局部补丁写盘后的资产登记为 `ArtifactRepository.register_artifact` 标准规范，并在 `AttachmentService` 增设兼容代理方法，杜绝未重载进程的 Warning 告警。
-- **精准局部补丁与三级容错匹配 (`replace_in_file`)**：彻底颠覆改一行重写全篇文件的传统低效模式。支持多块 `<<<<<<< SEARCH ... ======= ... >>>>>>> REPLACE` 原子化应用；支持 Level 1 精确匹配、Level 2 缩进与空行容错归一化对齐、Level 3 相似度诊断提示；生成标准 Unified Diff 红绿增量回传。
-- **带行号切片的精准代码读取 (`read_local_file`)**：支持 `start_line` 与 `end_line` 限制读取窗口，强制添加 `123 |` 行号前缀，防止长代码截断与无意义上下文填充。
-- **Tree-sitter AST 代码大纲感知与语法校验门禁 (`get_repo_skeleton`)**：原生集成 Tree-sitter，轻量提取函数、类、方法签名与文档大纲（0 Token 浪费）；落盘前强制执行 AST 语法门禁（Python / JS / TS），防止损坏语法树。
-- **Git Shadow 无损快照与单步秒级回滚 (`git_checkpoint`)**：修改前通过 `GIT_INDEX_FILE=.git/agenthub_shadow.index` 毫秒级生成 40 位 Tree Hash 快照；不污染用户工作分支与 Commit Log；配合 `POST /api/v1/workspaces/{id}/rollback` 支持一键原子还原。
-- **供应链 Skill 导入静态安全审计 (`SkillAuditor`)**：导入三方 Skill 时通过 AST 语法树遍历，阻断 `os.system`、`subprocess`、`eval`、硬编码可疑密钥及 Prompt 越狱注入风险。
-- **行级红绿 Unified Diff 渲染与一键撤销卡片**：前端全新开发 `DiffViewerCard`，直观呈现行级增删代码比对、快照 Tree Hash 与「一键撤销修改」交互按钮。
-
-### ✨ v1.2.0（包含 v1.2.4）— 本地上下文压缩、KV Cache 守护、双模性能水表与多源算力稳定化
-- **Token 消耗与执行效率深度精调（v1.2.4）**：
-  - **工具变体协议与空壳清洗**：100% 兼容属性式、紧凑前缀式与子标签嵌套式非标协议，清洗空白 `<tool_call>` 块，消除无效 40k 全文纠偏重发；支持任务标记完成时安全收尾。
-  - **网络加速与模型级熔断锁**：降级备选链剔除 404 死模型，新增模型级 180s 熔断冷却锁（429 或连续 503 直跳 2.5-flash，TTFT 降至 1.5s 内）；Kimi/Moonshot 通道参数自适应；地区网络受限 300s 隔离。
-  - **闲置记忆提炼去重锁**：180s 闲置提炼增加轮次水位锁与异常推进兜底，无新对话轮次零 Token 消耗、零空转，消除重复拉起 `agy.exe`。
-  - **云端 36k 软上限坍缩与两级漏斗脱水**：激活云端大窗口 36,000 Tokens 经济软上限与 8 轮热区坍缩；Scrubber 阈值下探至 600 字符，$\le 3500$ 字符或无报错 100% 走纯 Python 规则提取（0 Token 开销、<1ms 延迟），超长报错采样限长 1500 字符以内，彻底扭转清洗倒挂；实现同路径多次写入历史自动折叠。
-  - **ReAct 步数收敛与技能降载**：Zone 1 注入单步多工具并发、原地修改文件严禁副本与 Python 一次性诊断铁律；任务完成自动提炼关闭大模型调用，仅记轻量提议。
-- **对话澄清自动升舱与真实落盘闭环（v1.2.3）**：在对话模式（chat）下启用需求澄清后，当用户在交互卡片中点击批准计划或立即执行时，前后端自适应联动升舱为 Agent 任务执行态，解开只读红线与工具安全限制，真实调用 `write_local_file` 与终端工具完成物理落盘并拉起 LOOP 自主领航舱。
-- **过程思考与执行步骤流水线体验升级（v1.2.3）**：重构工具卡片与执行步骤可视化，单步工具彻底取消嵌套折叠直显关键文件路径与命令输出；深度思考卡片采用高质感弱化排版与流式微光状态，去除同轮次重复的模型头标识，呈现连贯丝滑的执行流水线。
-- **多源算力稳定化与抗卡死治理（v1.2.2）**：严格隔离后台轻量旁路与 CLI/算力池异常告警，新增 KIMI 等模型 `temperature=1` 参数自适应与 400 非限流隔离；补全前端 SSE「停止生成」按钮、首包/空闲看门狗、宿主机探针主循环异步解耦与启动孤儿 Loop 自愈；同步落地算力池今日总消耗汇总、多源通道精准计数、DSML 工具标签防泄漏及思考过程样式弱化。
-- **三区上下文压缩与 KV Cache 前缀守护**：划分 Zone 1（绝对不动前缀）+ Zone 2（只增不改热区 + 分块坍缩）+ Zone 3（跨轮零残留尾注），结合 SQLite FTS5 冷历史双路召回与工具长输出旁路脱水（`>1,000` 字符转 `Ref` + `read_tool_ref` 按行切片回查），最大化本地与云端 KV Cache 命中率。
-- **`llama-server` 深度适配与全链路 Token 水表**：原生接入 `llama.cpp`（`/health`、`/props` 单槽位显存探测、`/tokenize` 与 `timings`），在每条回复底部渲染单行实时水表（上下文水位、KV Cache 命中率、脱水节省、TTFT/TPS），支持 `/stats` 查看全会话分角色消耗看板；未配置 Google 账号时自动隐藏未绑定 Gemini 模型，仅显示用户自有算力通道模型。
-- **已有 Skill 迭代升级 & 多 Skill 协同编排**：基于已有 Skill 再次执行优化提炼时，支持直接迭代升级原 `SKILL.md` SOP 与语义化版本号；支持单条消息内通过 `/` 串联多个不同 Skill 协同完成任务。
-- **长文本半屏编辑 & 执行步骤单行折叠**：长输入支持一键扩展至半屏高度查看与编辑；工具执行步骤区默认单行折叠摘要条，全端接入全新透明品牌图标并在设置「关于」页展示版本与开源地址。
-
-### 🚀 v1.1.0 — 项目工作区中枢、Loop 自主循环、四层记忆治理与跨平台发布体系
-- **通用工作区与零拷贝增量 FTS5**：支持托管虚拟沙盒与本地物理目录零迁移绑定、`.gitignore` 自动过滤与工作区独立 FTS5 trigram 倒排索引；实现基于 4KB Frontmatter 摘要与前端 SWR 的极速 Skill 列表秒开与 `L1/L2` 同名覆盖。
-- **Loop 自主循环与 Plan-First 前置对齐**：落地 `Planner -> Executor -> Verifier -> Reflector` 自驱状态机、错误指纹防死循环熔断、物理只读硬门控、分步确认引导向导（含 `Tab` 跳选占位模板与防重复弹卡守卫）及 `L0 / L1 / L2` 三级敏感操作 HITL 四键审批网关。
-- **四层记忆分层治理与经验自演化**：100% 基于本地 SQLite 构建滑动窗口增量摘要、支持工作区覆盖与一键回滚的双时间轴精确结构化事实（`FactManager`）、只增不改事件账本与凭据自动脱敏网关，以及任务后基于 Unified Diff 人工确认的 Skill 经验沉淀闭环。
-- **全链路安全交付与多平台自动化打包**：支持工作区物理隔离上传（Office/PDF/源码/图片拖拽与粘贴）及反模型幻觉只读防线；打通生成文件对话内一键直开与资产库双向同步；建立 `version.json` 全局单一版本配置中心与 GitHub Actions 跨平台自动构建流水线（轻量便携包 / Windows x64 单文件 EXE / macOS ARM64 DMG）。
-
-### 🌱 v1.0.0 — 本地多源算力解耦与自主智能体底座奠基
-- **算力与数据完全解耦**：确立基于原生 SQLite WAL + FTS5 的纯本地持久化架构，支持本地私有推理引擎（Ollama / vLLM / Llama.cpp）与主流商业/开源 API 算力统一池化管理与故障冷却切换。
-- **桌面级私有工作台基座**：完成 FastAPI 后端、Next.js 静态前端与原生桌面窗口集成，提供多会话历史持久化、流式工具调用、本地终端安全执行、基础 Skill 技能体系、MCP 扩展接入及中/繁/英/日四语种国际化底座。
-
----
-
-## 🏗️ 系统架构视图 (Architecture Overview)
-
-```mermaid
-flowchart TD
-    subgraph UI ["全景信息架构 (Strata 极客交互设计)"]
-        WS["📂 工作区上下文切换器 (Workspace Switcher)<br/>(通用虚拟沙盒 / 本地已有物理目录零迁移挂载)"]
-        Hub["🧭 核心功能枢纽<br/>[💬 对话与任务 | 📚 库 | ⏱️ 已安排 | 🧩 技能与应用]"]
-        Mode["💊 模式二元重构<br/>[💬 对话模式] (只读探讨) | [⚡ 任务模式] (谋定而后动 / 直接执行)"]
-        HUD["🛰️ Loop 自主领航舱 (HUD)<br/>(DAG步骤指示器 · DoD质检灯 · 暂停/恢复/强停)"]
-        Gate["🛡️ HITL 敏感操作四按键审批卡片<br/>(✅批准本次 | 🛡️本任务白名单 | ✏️改参另存为 | ❌拒绝改道)"]
-    end
-
-    subgraph CoreEngine ["微内核与自主循环引擎 (Loop Engineering)"]
-        LoopEng["🔄 TaskLoopRunner 状态机<br/>(Planner -> Executor -> Verifier -> Reflector)<br/>错误指纹防死循环熔断保护"]
-        Policy["🛡️ PolicyInterceptor 三级敏感操作网关<br/>🟢 L0只读放行 / 🟡 L1工作区受控快照写 / 🔴 L2高危阻断挂起"]
-        FTS["⚡ 零拷贝增量 FTS5 引擎<br/>(.gitignore 过滤 + 水位线防抖 + BM25 就地召回)"]
-        Skills["🧩 双层多 Skill 协同沙盒<br/>(L1 全局底座 vs L2 工作区重写 · 多/协同 · 版本迭代进化)"]
-        Artifacts["📚 资产库自动注册器<br/>(落盘自动归档 + 对话内一键直开 + 原生资源管理器高亮定位)"]
-        Sched["⏰ 计划任务后台守护器<br/>(Cron/日常周期调度 + Windows 原生 Toast 桌面通知)"]
-    end
-
-    WS --> FTS
-    WS --> Skills
-    Mode --> LoopEng
-    LoopEng --> Policy
-    Policy --> Gate
-    LoopEng --> HUD
-    LoopEng --> Artifacts
-    Sched --> UI
-```
-
----
-
-## 🌟 核心特性矩阵
-
-### 1. 📂 通用工作区机制 (Workspace Hub & 物理目录绑定)
-* **零业务硬编码**：全面支持用户自定义任意名称、任意业务属性的工作组（如 Web 全栈、自动化运维、法律/财务核算、个人知识库等）。
-* **双模态工作区**：
-  * **托管虚拟工作区**：用于临时问答与实验，数据安全存放于沙盒内；
-  * **本地物理目录工作区**：直接挂载电脑上已有的代码或资料目录，**零迁移成本接入**。
-* **物理 CWD 强锁定与防越界**：Agent 执行命令与写入文件严格锁定在工作区根路径下，禁止跨目录越界写；提供严格路径越界安全防御。
-* **专属背景契约 (`WORKSPACE.md`)**：每个工作区可维护专属的技术栈规范或业务术语，AI 问答天然贴合项目语境。
-
----
-
-### 2. 🔄 Loop 自主循环工程与防死循环熔断 (Loop Engineering)
-* **`Planner -> Executor -> Verifier -> Reflector` 自驱状态机**：
-  * **Planner**：自动拆解复杂目标为 DAG 子任务，实时同步写入 `<workspace>/.agenthub/scratchpad.md`；
-  * **Executor**：在工作区物理路径下具身执行工具或命令；
-  * **Verifier**：独立客观验收 (DoD 判定与返回码校验)；
-  * **Reflector**：遭遇未通过或报错时自愈反思并调整策略。
-* **错误指纹死循环熔断**：提取 `hash(error_type + error_message)` 错误指纹，**连续 3 次遭遇相同错误自动触发熔断保护**，杜绝死循环空转与 Token 浪费。
-* **🧭 顶部 Loop 自主领航舱 (HUD)**：置顶展示子任务 DAG 步进、DoD 质检状态灯、当前迭代轮次，支持随时一键 `[暂停]`、`[继续]`、`[强停]`。
-
----
-
-### 3. 🛡️ 三级敏感操作拦截网关与 HITL 人工审批 (PolicyInterceptor)
-* 🟢 **L0（只读安全）**：文件读取、目录扫描、代码分析、无副作用查询 $\rightarrow$ 静默自动放行；
-* 🟡 **L1（工作区受控写）**：在工作区物理路径内新建或修改文件 $\rightarrow$ 执行前自动在 `<workspace>/.agenthub/snapshots/` 创建轻量时间戳备份快照后放行；
-* 🔴 **L2（高危拦截）**：跨目录越界写入、物理删除文件、不可逆破坏性 Shell 指令 $\rightarrow$ 挂起当前循环并呼出审批卡片：
-  * **✅ 批准本次 (Approve Once)**：仅放行本次调用；
-  * **🛡️ 本任务白名单 (Approve All)**：在当前任务生命周期内对该工具免密放行；
-  * **✏️ 改参另存为 (Modify Args)**：人工在线修改参数并放行；
-  * **❌ 拒绝并改道 (Reject & Reroute)**：驳回操作并附带引导建议，由 Reflector 重新规划。
-
----
-
-### 4. ⚡ 本地物理目录零拷贝增量 FTS5 引擎 (Incremental FTS5)
-* **智能规则过滤**：扫描前强制解析用户目录的 `.gitignore` 与 `.agenthubignore`，自动剔除 `node_modules`、`.git`、`dist`、超大日志及二进制文件；
-* **增量水位线与防抖**：基于文件 `mtime + size + sha256` 维护水位线，仅对改动文件建立 trigram BM25 全文分词索引；
-* **存储完全隔离**：索引统一存放于 `<workspace>/.agenthub/index.db`，绝不污染用户工程源码。
-
----
-
-### 5. 🧩 双层多 Skill 协同沙盒与版本增量演进
-* **L1 底座全局 Skill (`skills/`)**：随程序分发的通用环境体检、代码规范与文档助手；
-* **L2 工作区私有 Skill (`<workspace>/skills/` 与 `<workspace>/.agenthub/skills/`)**：仅当前工作区可见，可随项目 Git 仓库协同提交；
-* **同名覆盖与多 `/` 联合协同**：L2 同名 Skill 自动覆盖 L1 并在 UI 标出 `[工作区重写]`；单条指令支持多次 `/` 挂载协同多个 Skill 联合完成任务，支持基于已有 Skill 自动递增语义化版本号持续演进；
-* **`/` 极速响应与 SOP 按需抽屉**：采用 4KB Frontmatter 轻量摘要 + 列表级快照缓存与前端 SWR 0ms 秒开缓存，海量技能下输入 `/` 或点击技能按钮瞬间弹出，点击 `[📖 SOP]` 再按需懒加载完整执行规程。
-
----
-
-### 6. 📚 资产库统一归档与会话双向溯源 (LibraryView)
-* **自动登记**：对话中使用 `[📥 一键落盘到工作区]` 或由 Loop 任务生成的文件、报表与可视化图表，自动向资产库登记元数据；
-* **原生定位**：点击卡片一键唤起 Windows 原生资源管理器（`explorer /select`）高亮定位目标物理文件；
-* **双向溯源**：资产可反查生成它的来源会话与 Prompt 历史。
-
----
-
-### 7. ⏰ 无人值守计划任务中枢 (ScheduledView)
-* **定时静默调度**：支持以 Cron 表达式或日常周期（daily、hourly、每周一等）定义计划任务；
-* **桌面原生通知**：任务在后台执行完成后，自动调用 Windows 原生 Toast 桌面通知，实时提醒执行概况；
-* **在线测试**：支持在控制台点击 `[立即测试]` 并在后台静默跑通全流程。
-
----
-
-### 8. 🌍 全景四语种国际化 (i18n)
-* 全量交互组件、工作区切换器、Loop 领航舱、审批卡片、SOP 抽屉及计划任务均已在 `i18nDictionary.ts` 中维护映射：
-  * **简体中文 (zh-CN)**
-  * **繁体中文 (zh-TW)**
-  * **英语 (en)**
-  * **日语 (ja)**
-
----
-
-## 📦 多客户端离线包下载与运行
-
-在 GitHub Releases 页面，我们为不同操作系统与使用场景提供了预编译离线包：
-
-| 客户端版本 | 适用系统 | 包名称 | 运行方式 |
-| :--- | :--- | :--- | :--- |
-| **Windows 独立单文件桌面版** | Windows 10/11 x64 | `AgentHub-Local-windows-x64.exe` | 免安装免解压，单文件双击直接运行（同级目录存数据，无权限时存 `%LOCALAPPDATA%\AgentHubLocal`） |
-| **macOS 独立桌面安装版** | macOS Apple Silicon (ARM64) | `AgentHub-Local-macos-arm64.dmg` | 打开镜像将 `AgentHub.app` 拖入 `Applications`；首次运行如遇未签名提示，右键「打开」或在终端执行 `xattr -cr /Applications/AgentHub.app` |
-| **轻量便携包（Windows / 通用）** | Windows / 跨平台 | `AgentHub-Local-v1.4.2-portable.zip` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好 `requirements.txt` 后运行 `启动AgentHub桌面版.bat` |
-| **轻量便携包（macOS / Linux）** | macOS / Linux | `AgentHub-Local-v1.4.2-portable.tar.gz` | 不含 Python 二进制运行库（约 `~2.2 MB`），解压装好依赖后运行 `./启动AgentHub桌面版.sh` |
-| **Docker 容器镜像** | 跨平台容器环境 | `docker-compose.yml` | `docker compose up -d` |
-
----
-
-## 🛠️ GitHub Releases 自动打包机制 (CI/CD)
-
-本项目配置了跨平台并行 GitHub Actions 自动化打包流水线（`.github/workflows/release.yml`）：
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor Dev as 开发者
-    participant GH as GitHub Remote
-    participant FE as build-frontend (ubuntu)
-    participant Win as build-windows-exe (windows-latest)
-    participant Mac as build-macos-dmg (macos-latest)
-    participant Port as package-portable (ubuntu)
-    participant Rel as GitHub Releases 页面
-
-    Dev->>GH: git tag v1.4.2 && git push origin v1.4.2
-    GH->>FE: 安装 Node 22 并导出静态前端 out/
-    FE->>Port: 分发 out/ -> 生成 portable.zip & portable.tar.gz
-    FE->>Win: 分发 out/ -> PyInstaller --onefile 生成 AgentHub-Local-windows-x64.exe
-    FE->>Mac: 分发 out/ -> PyInstaller + hdiutil 生成 AgentHub-Local-macos-arm64.dmg
-    Port->>Rel: 仅过滤下载 release-* 汇聚 4 类独立资产创建 Release
-    Win->>Rel: 挂载独立单文件 EXE
-    Mac->>Rel: 挂载 macOS ARM64 DMG
-```
-
-### 如何发布新版本：
-只需在 `version.json` 更新版本号并运行 `python sync_version.py`（或直接运行 `python sync_version.py <version>`），随后在本地执行以下命令：
-```bash
-git tag -a v1.4.2 -m "Release v1.4.2"
-git push origin master
-git push origin v1.4.2
-```
-推送后，GitHub 会在云端全自动执行编译、矩阵打包并挂载 4 类干净的发行资产，几分钟内即可在 Releases 页面看到生成的下载文件！
-
----
-
-## 💻 源码本地启动与开发
-
-如果您希望从源码启动开发或调试：
-
-### 1. 环境准备
-- Python $\ge$ 3.10
-- Node.js $\ge$ 18
-
-### 2. 安装依赖
-```bash
-# 后端依赖安装
-pip install -r requirements.txt
-
-# 前端依赖安装
-cd frontend
-npm install
-cd ..
-```
-
-### 3. 一键启动
-```bash
-# Windows 用户直接双击运行：
-启动AgentHub桌面版.bat
-
-# 或命令行方式启动原生桌面窗体：
-python desktop_app.py
-```
+### 🌱 v1.0.x — 本地多源算力解耦与自主智能体底座奠基
+- **算力与数据完全解耦**：确立原生 SQLite WAL + FTS5 纯本地持久化架构，支持本地私有推理引擎（Ollama / vLLM / llama.cpp）与商业/开源 API 统一池化管理。
+- **桌面级私有工作台基座**：完成 FastAPI 后端、Next.js 静态前端与原生桌面窗口集成，奠定多会话持久化、流式工具调用、本地终端安全执行、Skill/MCP 扩展及中/繁/英/日四语种国际化底座。
 
 ---
 
