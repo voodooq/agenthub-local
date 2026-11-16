@@ -180,9 +180,11 @@ async def lifespan(app: FastAPI):
     # 启动计划任务后台 Cron 调度守护器，确保服务启动即自动巡检到期任务
     scheduler_task: asyncio.Task | None = None
     try:
-        from app.scheduler.task_scheduler import task_scheduler
+        from app.scheduler.task_scheduler import TaskScheduler
 
-        scheduler_task = asyncio.create_task(task_scheduler.start_loop())
+        scheduler = TaskScheduler.get_instance()
+        scheduler.ensure_started()
+        scheduler_task = scheduler._loop_task
     except Exception as sched_err:
         logger.warning(f"[Scheduler] 启动计划任务后台守护器失败: {sched_err}")
 
