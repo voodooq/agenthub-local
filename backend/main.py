@@ -177,11 +177,20 @@ async def lifespan(app: FastAPI):
 
     decay_task = asyncio.create_task(_daily_decay_task())
 
+    # 启动计划任务后台 Cron 调度守护器，确保服务启动即自动巡检到期任务
+    scheduler_task: asyncio.Task | None = None
+    try:
+        from app.scheduler.task_scheduler import task_scheduler
+
+        scheduler_task = asyncio.create_task(task_scheduler.start_loop())
+    except Exception as sched_err:
+        logger.warning(f"[Scheduler] 启动计划任务后台守护器失败: {sched_err}")
+
     try:
         yield
     finally:
         logger.info("应用正在优雅关机，正在清理后台任务与常驻 MCP 进程池...")
-        for bg_task in (decay_task, parent_watch_task):
+        for bg_task in (decay_task, scheduler_task, parent_watch_task):
             if bg_task and not bg_task.done():
                 bg_task.cancel()
                 try:
