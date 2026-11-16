@@ -67,7 +67,7 @@ class AgentRuntime:
     """微内核智能体双层循环编排器"""
 
     DEFAULT_REACT_STEPS = 16
-    MAX_REACT_STEPS = 40  # 任务深度自愈与多步推进时的绝对动态扩展上限
+    MAX_REACT_STEPS = 500  # 仅作极端防爆保护，常规推进按需动态扩展，仅在重复同一失败方案超过 3 次时熔断
 
     # 活跃流式执行注册表：conversation_id -> {"token": str, "cancel_event": asyncio.Event}
     _active_streams: dict[str, dict[str, Any]] = {}
@@ -1213,6 +1213,8 @@ class AgentRuntime:
         lock_high_thinking = False
         session_file_read_cache = self._session_file_read_cache_by_conv.setdefault(conv_id, {})
         turn_tool_sig_cache: dict[tuple[str, str], int] = {}
+        failed_attempt_counts: dict[tuple[str, str], int] = {}
+        consecutive_err_fp: dict[str, Any] = {"fp": "", "count": 0}
         last_executed_shell_cmd: str = ""
 
         # 4.5 关联工作区长程自主领航舱 (TaskLoopRunner 闭环驱动：严格按 conversation_id 隔离 + 渐进式按需激活)
@@ -1547,15 +1549,15 @@ class AgentRuntime:
                 is_forced_final_step = force_final_text_only_step
                 force_final_text_only_step = False
 
-                # 步数自适应动态扩展检查：当步数接近预算、任务仍在深度自愈且未触发死循环熔断时，自动扩展步数
+                # 步数自适应动态扩展检查：只要未触发死循环熔断且任务仍在推进，即自动按 +16 步扩展（不再受限于固定 40 步）
                 if active_scene == "agent" and allow_step_extension and step_idx >= current_max_steps - 2:
                     if current_max_steps < self.MAX_REACT_STEPS:
-                        current_max_steps = min(current_max_steps + 8, self.MAX_REACT_STEPS)
+                        current_max_steps = min(current_max_steps + 16, self.MAX_REACT_STEPS)
                         yield {
                             "type": "step_extend",
                             "step": step_idx + 1,
                             "max_steps": current_max_steps,
-                            "message": f"任务正在深度自主推演与闭环攻坚中，已自动扩展执行预算至第 {current_max_steps} 步...",
+                            "message": f"任务仍在正常推进中，已自动扩展执行预算至第 {current_max_steps} 步...",
                         }
 
                 ctx = await ContextBuilder.build(
@@ -3477,6 +3479,11 @@ class AgentRuntime:
                             )
                         )
                     )
+                    attempt_key = (
+                        re.sub(r"\s+", " ", str(args.get("command", "")).strip())
+                        if func_name == "execute_local_command"
+                        else args_hash
+                    )
                     if is_step_abnormal:
                         # S6 自动升档护栏：在 low/medium 档位发生工具报错时，立即锁定当前轮剩余步骤升回 high
                         if step_thinking_level in ("low", "medium"):
@@ -3487,24 +3494,34 @@ class AgentRuntime:
                         # S10: 未拦截的失败调用写入签名窗口，防止连续第 2 次无意义重试
                         if not s10_intercepted and not args_parse_failed:
                             turn_tool_sig_cache[sig_key] = step_idx + 1
-                        # 语义级死循环判定 (LoopBreaker)
+                        # 语义级死循环判定 (LoopBreaker)：同一方案重复尝试失败超过 3 次（或同一报错指纹连续失败超过 3 次）才触发熔断
                         is_circuit_breaker = False
-                        if func_name == "execute_local_command":
-                            cmd_entry = str(args.get("command", "")).strip()
-                            norm_entry = re.sub(r"\s+", " ", cmd_entry)
-                            command_history.append({"cmd": norm_entry, "abnormal": True})
-                            # 规则 1: 连续 2 次执行完全相同的命令均异常
-                            if len(command_history) >= 2 and command_history[-1]["cmd"] == command_history[-2]["cmd"] and command_history[-2]["abnormal"]:
-                                is_circuit_breaker = True
-                            # 规则 2: 最近 5 步中出现 3 次相同失败命令
-                            recent_same = [h for h in command_history[-5:] if h["cmd"] == norm_entry and h["abnormal"]]
-                            if len(recent_same) >= 3:
-                                is_circuit_breaker = True
+                        attempt_sig = (func_name, attempt_key)
+                        failed_attempt_counts[attempt_sig] = failed_attempt_counts.get(attempt_sig, 0) + 1
 
-                            if is_circuit_breaker:
-                                allow_step_extension = False
-                                circuit_breaker_triggered = True
-                                logger.warning(f"[AgentRuntime] 触发死循环熔断 (LoopBreaker): {norm_entry}")
+                        err_lines = [ln.strip() for ln in tool_output_str.splitlines() if ln.strip()]
+                        raw_err_line = err_lines[-1] if err_lines else tool_output_str.strip()
+                        norm_err_fp = f"{func_name}:{re.sub(r'\d+', '#', raw_err_line)[:100]}"
+                        if consecutive_err_fp.get("fp") == norm_err_fp:
+                            consecutive_err_fp["count"] = int(consecutive_err_fp.get("count") or 0) + 1
+                        else:
+                            consecutive_err_fp["fp"] = norm_err_fp
+                            consecutive_err_fp["count"] = 1
+
+                        if func_name == "execute_local_command":
+                            command_history.append({"cmd": attempt_key, "abnormal": True})
+
+                        if (
+                            failed_attempt_counts[attempt_sig] > 3
+                            or int(consecutive_err_fp["count"]) > 3
+                        ):
+                            is_circuit_breaker = True
+                            allow_step_extension = False
+                            circuit_breaker_triggered = True
+                            logger.warning(
+                                f"[AgentRuntime] 触发死循环熔断 (LoopBreaker): 方案 `{func_name}` 已重复失败超过 3 次 "
+                                f"(attempt_fails={failed_attempt_counts[attempt_sig]}, consecutive_same_err={consecutive_err_fp['count']})"
+                            )
 
                         last_step_error_info = {
                             "tool": func_name,
@@ -3535,6 +3552,9 @@ class AgentRuntime:
                             except Exception as rescue_err:
                                 logger.debug(f"[AgentRuntime] 盘中 L5 报错急救检索跳过: {rescue_err}")
                     else:
+                        consecutive_err_fp["fp"] = ""
+                        consecutive_err_fp["count"] = 0
+                        failed_attempt_counts.pop((func_name, attempt_key), None)
                         if not s10_intercepted:
                             is_mutating_tool = func_name in (
                                 "write_local_file",
@@ -3797,6 +3817,13 @@ class AgentRuntime:
                 if was_cancelled or await _check_cancelled():
                     was_cancelled = True
                     break
+
+                # 若已触发死循环熔断（同一方案重复失败超过 3 次），立即切换至纯文本收尾向用户说明卡点
+                if circuit_breaker_triggered:
+                    force_final_text_only_step = True
+                    current_max_steps = min(step_idx + 2, self.MAX_REACT_STEPS)
+                    step_idx += 1
+                    continue
 
                 # 显式完成收尾：仅当本步无待消化实质工具结果且已包含完整交付正文时直接拆条收尾；否则推进纯文本最终汇总步
                 if task_marked_completed and not last_step_error_info:
