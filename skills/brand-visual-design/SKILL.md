@@ -52,3 +52,4 @@ description: 品牌视觉与宣发物料设计：涵盖品牌标识、AI Logo、
   ```powershell
   node skills/brand-visual-design/scripts/extract-colors.cjs
   ```
+

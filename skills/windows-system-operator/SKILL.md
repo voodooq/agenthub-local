@@ -63,3 +63,4 @@ description: Windows 桌面与运维控制中枢（Windows 专享）：涵盖端
    ```
 2. **屏幕取证与视觉核验**：
    调用 Python `PIL.ImageGrab` 或 PowerShell 截取当前屏幕，落盘至 `output/screenshots/` 供模型视觉核验执行状态。
+

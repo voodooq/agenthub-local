@@ -30,3 +30,4 @@ description: 通用多邮箱管理助手（支持 163、QQ、Outlook、Gmail）�
 python skills/mail-assistant/scripts/email_client.py --test --service 163 --user your_email@163.com --password your_auth_code
 ```
 - 所有密码与授权码必须从环境变量中读取（如 `$env:MAIL_AUTH_CODE`），严禁明文硬编码。
+

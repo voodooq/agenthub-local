@@ -47,3 +47,4 @@ description: 全端 UI/UX 设计与样式中枢：涵盖 Web/移动端设计系�
 本技能随包携带了全栈设计规范与数据：
 - 查询本地设计库：`python skills/ui-ux-design-pro/scripts/search.py "<关键词>"`
 - 生成/验证 Design Tokens：`node skills/ui-ux-design-pro/scripts/validate-tokens.cjs`
+

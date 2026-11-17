@@ -20,3 +20,4 @@ description: 响应式 Web 交互演示幻灯片：基于 HTML、CSS 与 Chart.j
 1. **渲染框架**：单文件自包含 HTML，引入 CDN 版本的 Tailwind CSS 与 Chart.js。
 2. **排版比例**：支持 16:9 响应式容器，支持暗黑模式与全屏演示。
 3. **交付产物**：输出至 `output/slides/<project_name>.html`。
+
