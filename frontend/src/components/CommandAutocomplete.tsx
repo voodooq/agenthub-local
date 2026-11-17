@@ -317,6 +317,7 @@ export function CommandAutocomplete({
   const [previewItemId, setPreviewItemId] = useState<string | null>(null);
   const [detailCache, setDetailCache] = useState<Record<string, string>>({});
   const [loadingDocId, setLoadingDocId] = useState<string | null>(null);
+  const [dismissedTokenKey, setDismissedTokenKey] = useState<string | null>(null);
 
   // 基于光标所在位置的当前分隔词判定触发状态，支持单条消息串联输入多个 /skill
   const activeTokenInfo = useMemo(() => {
@@ -358,6 +359,33 @@ export function CommandAutocomplete({
     isSlashTriggered,
     isAtTriggered,
   } = activeTokenInfo;
+
+  const currentTokenKey = isTriggered ? `${tokenStart}:${lastWord}` : '';
+  const isDismissed = Boolean(currentTokenKey && dismissedTokenKey === currentTokenKey);
+
+  // 脱离触发词后重置关闭状态，确保下次重新键入 / 或 @ 可再次弹出
+  useEffect(() => {
+    if (!isTriggered && dismissedTokenKey !== null) {
+      setDismissedTokenKey(null);
+      setPreviewItemId(null);
+    }
+  }, [isTriggered, dismissedTokenKey]);
+
+  // 监听 Esc 键退出联想浮层
+  useEffect(() => {
+    if (!isTriggered || isDismissed) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        setPreviewItemId(null);
+        setDismissedTokenKey(currentTokenKey);
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, [isTriggered, isDismissed, currentTokenKey, onClose]);
 
   // 触发 '@' 时加载持久化专家列表（带短时缓存与本地存储回退）
   useEffect(() => {
@@ -494,7 +522,7 @@ export function CommandAutocomplete({
       .slice(0, MAX_AUTOCOMPLETE_ITEMS);
   }, [isTriggered, lastWord, allCommands]);
 
-  if (!isTriggered || filtered.length === 0) {
+  if (!isTriggered || isDismissed || filtered.length === 0) {
     return null;
   }
 
@@ -511,9 +539,25 @@ export function CommandAutocomplete({
         activePreviewItem ? 'max-w-3xl' : 'max-w-xl'
       } bg-surface-100/95 backdrop-blur-xl border border-border rounded-2xl shadow-2xl p-2.5 z-30 animate-scale-in transition-all`}
     >
-      <div className="px-3 py-1.5 text-[10px] font-semibold text-muted-foreground uppercase tracking-wider border-b border-border/60 flex items-center justify-between">
-        <span>快捷指令、本地 SKILL 与 MCP 封装规程 (@上下文 / /技能包)</span>
-        <span className="text-muted-foreground font-mono">点击指令直接填入 · 点击「📖 说明」查看完整规程 · Esc 关闭</span>
+      <div className="px-3 py-1.5 text-[11px] font-medium text-muted-foreground border-b border-border/60 flex items-center justify-between gap-2">
+        <span className="truncate font-semibold text-foreground/85">
+          {isAtTriggered ? '点名调度专家 (@)' : '快捷指令与技能 (/)'}
+        </span>
+        <div className="flex items-center space-x-2 shrink-0 text-[10px]">
+          <span>点击填入 · Esc 退出</span>
+          <button
+            type="button"
+            onClick={() => {
+              setPreviewItemId(null);
+              setDismissedTokenKey(currentTokenKey);
+              onClose();
+            }}
+            className="p-0.5 rounded hover:bg-surface-200 text-muted-foreground hover:text-foreground transition-colors"
+            title="关闭 (Esc)"
+          >
+            <X className="w-3 h-3" />
+          </button>
+        </div>
       </div>
 
       <div className={`mt-1.5 ${activePreviewItem ? 'grid grid-cols-1 md:grid-cols-12 gap-2.5' : ''}`}>
