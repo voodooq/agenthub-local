@@ -4,6 +4,7 @@
 from fastapi import APIRouter, HTTPException
 import asyncio
 from ...agent.loop_runner import TaskLoopRunner
+from ...agent.policy_interceptor import approval_event_manager
 from ...core.logging_config import logger
 from ...extensions.skill_loader import skill_loader
 from ...memory.ledger import event_ledger
@@ -129,6 +130,13 @@ async def handle_loop_action(
             action=approval_req.action,
             modified_args=approval_req.modified_arguments,
             guidance=approval_req.user_guidance,
+        )
+        # 同步唤醒在 AgentRuntime 中挂起等待的执行协程
+        approval_event_manager.resolve(
+            identifier=loop_id,
+            action=approval_req.action,
+            modified_arguments=approval_req.modified_arguments,
+            user_guidance=approval_req.user_guidance,
         )
         if result.get("success") and approval_req.action in ("modify_args", "reject"):
             await _record_loop_intervention(

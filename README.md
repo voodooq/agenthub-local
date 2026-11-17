@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.4.6-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.4.12-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.4.6 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.4.12 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -108,18 +108,39 @@ flowchart TD
 
 ---
 
-### 4. 🛡️ 三级敏感操作网关、HITL 审批与防卡死治理
-* **三级敏感操作拦截网关 (`policy_interceptor.py` · `ApprovalCard`)**：
+### 4. 🛡️ 三级敏感操作网关、HITL 四键审批与 15s 倒计时自动封锁
+* **三级敏感操作拦截网关 (`policy_interceptor.py` · `runtime.py` · `ApprovalCard`)**：
   * 🟢 **L0（只读安全）**：读取、扫描与无副作用查询 $\rightarrow$ 静默自动放行。
-  * 🟡 **L1（工作区受控写）**：工作区内新建或修改文件 $\rightarrow$ 自动创建轻量快照后放行。
-  * 🔴 **L2（高危拦截）**：跨目录越界写、物理删除、高危 Shell 指令 $\rightarrow$ 挂起循环并呼出四键审批卡片（**批准本次 / 本任务白名单 / 改参另存为 / 拒绝并改道**）。
+  * 🟡 **L1（工作区受控写）**：工作区内新建或修改文件 $\rightarrow$ 自动创建轻量安全快照后放行。
+  * 🔴 **L2（高危拦截）**：跨目录越界写、物理删除、高危 Shell 指令（如 `rm -rf`, `del /f`, `format`, `drop database` 等） $\rightarrow$ **程序级硬挂起循环**，向前端下发 `waiting_approval` 事件并呼出四键审批卡片：
+    * ① **批准本次 (approve_once)**：仅对当前这步操作豁免放行；
+    * ② **本任务白名单 (approve_all)**：将该工具或特征加入会话白名单，后续免审批；
+    * ③ **改参另存为 (modify_args)**：支持在前端直接编辑 JSON 目标参数（如改存至安全目录），以新参数放行执行；
+    * ④ **拒绝并改道 (reject)**：驳回高危操作并输入改道建议，驱动模型反思换用安全方案。
+  * ⏱️ **15 秒超时自动封锁**：审批卡片集成平滑倒计时进度条，**若 15 秒内无任何人工操作，系统自动判定为驳回并执行物理封锁**，彻底杜绝无值守场景下的越权风险。
 * **CLI 原生工具越权自愈与长流抗卡死 (`agent_runner.py` · `shell_executor.py`)**：
   * 拦截 CLI 原生越权工具调用并触发 `cli_native_tool_denied`，在 `AgentRuntime` 内进行同轮最多 2 次无感盘中纠偏，引导模型回归标准 `<tool_call>` 协议。
   * `_AsyncLineReader` 配备 16 MiB 子进程缓冲区与 300,000 字符安全限流；`LocalShellExecutor` 对超过编码阈值的超长脚本（Windows `-EncodedCommand` > 24 KB / POSIX > 64 KB）自动转为临时 `.ps1`/`.sh` 文件执行并清理，彻底消除 `[WinError 206]`。
 
 ---
 
-### 5. 🔪 Code Surgery 精准代码手术刀与 AST 语法门禁
+### 5. 🎯 专家防幻觉与严谨度配置系统 (Grounding & Anti-Hallucination)
+* **双模式严谨度动态调谐 (`GroundingConfig` · `context_builder.py` · `runtime.py`)**：
+  * **🎯 严谨工作模式**：专为工作任务（日报归纳、数据审计、Excel报表、PPT架构、代码审查）设计，默认强制锁定 `temperature=0.1`，高密度注入事实唯一基准铁律；
+  * **💡 自由构想模式**：适用于创意脑暴与文案生成，默认 `temperature=0.7`，兼顾灵活性与创造力；
+  * **推理模型能力嗅探**：自适应识别固定温度推理模型（如 o1、o3、DeepSeek-R1），避免强设 temperature 导致 API 400 报错。
+* **程序级真实工具调用核验状态机 (`verify_tool_call`)**：
+  * 杜绝“未调工具却谎称已完成”的凭空捏造。单轮内严格追踪真实工具调用状态机，若模型无有效工具调用却输出“已为您查询/已收集整理完毕”等虚假声明，后端直接硬拦截并驳回重新生成。
+* **空数据 Fail-Fast 熔断机制 (`fail_fast_on_missing`)**：
+  * 当检索日志或文件返回空数据（`[]`、`""`、`FileNotFoundError`）时，系统自动切断模型的惯性脑补，强行执行拒答熔断，要求必须如实告知用户客观事实。
+* **官方专家预设全量加固与数据审计最小权限**：
+  * 官方 7 大核心专家（数据审计、Excel 报表、PPT 架构、代码架构师等）全量预设专属防幻觉与严谨度配置，数据审计专家工具集强制锁定为只读，禁用任何命令执行与随意写盘。
+* **单色扁平化视觉标准 (Monochrome Flat Design)**：
+  * 全面摒弃高饱和彩色标签与彩绘图块，全界面改用灰白单色几何图标（`Shield`, `Sliders`, `FileCheck`）与极简暗色细线框，沉稳专业。
+
+---
+
+### 6. 🔪 Code Surgery 精准代码手术刀与 AST 语法门禁
 * **Tree-sitter 代码大纲与语法门禁 (`tools/ast_skeleton.py`)**：
   * 轻量提取函数、类、方法签名与结构大纲，避免整文件读取浪费上下文；写盘前强制执行 `validate_syntax_before_write`（Python / JS / TS），阻断语法损坏写入。
 * **带行号切片读取与三级容错局部补丁 (`tools/code_surgery.py`)**：
@@ -129,7 +150,7 @@ flowchart TD
 
 ---
 
-### 6. 🧠 三区上下文压缩、L5 实战微经验库与影子 Git 双回滚时光机
+### 7. 🧠 三区上下文压缩、L5 实战微经验库与影子 Git 双回滚时光机
 * **三区上下文工程与 KV Cache 守护 (`context_builder.py` · `context_compressor.py`)**：
   * 物理划分 **Zone 1（恒定不动前缀）+ Zone 2（只增不改热区 + 分块坍缩）+ Zone 3（跨轮零残留尾注）**，结合 36k 云端软上限、44K/48K CLI 防爆阀、同路径历史写入折叠与两级漏斗脱水（超长工具输出转为 `ToolRef` + `read_tool_ref` 按行回查），最大化 KV Cache 命中率。
 * **四层记忆体系与 L5 静默实战微经验库 (`experience_store.py` · `fact_manager.py` · `long_term.py`)**：
@@ -141,17 +162,20 @@ flowchart TD
 
 ---
 
-### 7. 🧩 双层多 Skill 协同沙盒与无错门控自进化
-* **双层隔离与极速加载 (`skill_loader.py` · `SkillsView` · `SopDrawer`)**：
-  * 支持 **L1 全局底座 Skill（`skills/`）** 与 **L2 工作区私有 Skill（`<workspace>/skills/` 与 `<workspace>/.agenthub/skills/`）**，L2 同名自动覆盖 L1 并标注 `[工作区重写]`。
-  * 采用 4KB Frontmatter 摘要 + 前端 SWR 缓存实现 `/` 秒开，点击 `[SOP]` 按需懒加载完整规程；单条指令支持多次 `/` 串联多 Skill 协同执行。
+### 8. 🧩 技能高内聚体系、操作系统静默适配与无标化
+* **高内聚核心模块精简与双层隔离 (`skill_loader.py` · `SkillsView` · `SopDrawer`)**：
+  * 摒弃细碎分散脚本，将 30+ 零碎技能重构收敛为 15 个高内聚核心模块（Windows 体系全量合并至 `windows-system-operator`，工程与架构收敛至 `code-architecture-review` 等）；
+  * 支持 **L1 全局底座 Skill（`skills/`）** 与 **L2 工作区私有 Skill（`<workspace>/skills/`）**，L2 同名自动高优覆盖 L1。
+* **宿主机环境静默自适应与彻底去标**：
+  * 后端加载时自动感知当前操作系统（Windows / macOS / Linux），不匹配当前环境的技能完全静默隐藏；
+  * 前端卡片彻底移除彩色「跨平台 / Windows」徽章，界面达到极致纯净，减少用户认知负荷。
 * **供应链安全审计与无错沉淀门控 (`skill_auditor.py` · `experience_distiller.py`)**：
-  * 导入三方 Skill 时通过 `SkillAuditor` 遍历 AST，阻断 `os.system`、`subprocess`、`eval`、硬编码密钥与越狱注入。
-  * `evaluate_skill_distill_eligibility` 严格拦截未完成或末尾带报错的残缺轨迹，仅完整无错工作流开放沉淀，并自动抽取 `Troubleshooting / 避坑注意事项`；支持同名 Skill 语义化版本（`patch`/`minor`）原子迭代，完整保留既有 `knowledge/` 自定义文档。
+  * 导入三方 Skill 时通过 `SkillAuditor` 遍历 AST，阻断 `os.system`、`subprocess`、`eval`、硬编码密钥与越狱注入；
+  * `evaluate_skill_distill_eligibility` 严格拦截未完成或末尾带报错的残缺轨迹，仅完整无错工作流开放沉淀，并支持语义化版本（`patch`/`minor`）原子迭代。
 
 ---
 
-### 8. 🌐 远程 MCP 协议全栈支持与跨网安全文件协同
+### 9. 🌐 远程 MCP 协议全栈支持与跨网安全文件协同
 * **全协议 MCP 接入 (`mcp_manager.py` · `MemoryHubModal`)**：
   * 在本地 `_StdioMCPConnection` 基础上原生扩展 `_RemoteHttpMCPConnection`，全面支持 **`Streamable HTTP`**（含 `Mcp-Session-Id` 有/无状态连接、404 自动重连与异步 `DELETE` 清理）及 **`Legacy HTTP + SSE`**（强制同源校验与禁止跨站重定向防凭据泄露）。
   * 兼容 Claude Desktop（`mcpServers`）、VS Code（`servers`）与 Windsurf（`serverUrl`）配置格式导入，支持 `${ENV_VAR}` 运行时环境变量展开与 Headers 密钥脱敏掩码保护。
@@ -160,7 +184,7 @@ flowchart TD
 
 ---
 
-### 9. 📚 资产库归档、磁盘物理核验与独立交付呈现
+### 10. 📚 资产库归档、磁盘物理核验与独立交付呈现
 * **反伪落盘幻觉与物理存在性核验 (`artifacts.py` · `AgentRuntime` · `DeliverablesCard`)**：
   * 拦截无工具纯叙事宣称已写入却未真实落盘的幻觉（触发 `stream_reset` 纠偏）；新增 `POST /api/v1/artifacts/verify-paths` 批量核验工作区文件真实大小与修改时间，零落盘气泡绝不渲染误导性绿色交付卡片。
   * 强制分离「执行过程」与「最终交付正文」，防止 `update_working_memory(task_completed=true)` 导致交付正文混入折叠区，并在底栏渲染「生成文件直达」卡片。
@@ -168,7 +192,7 @@ flowchart TD
 
 ---
 
-### 10. 🖥️ 系统实时硬件监控与智能治理中枢
+### 11. 🖥️ 系统实时硬件监控与智能治理中枢
 * **跨平台实时硬件探针 (`probe/collector.py` · `RightActionDrawer`)**：
   * 打开右侧「系统实时监控与智能治理」抽屉后，每 3 秒自动轮询 `/api/v1/system/snapshot`，实时展示 CPU 使用率/核数/主频、物理内存与 Swap、全分区磁盘占用及 Top 6 高占用进程。
   * `collector.get_gpu_metrics` 接入无窗口 `nvidia-smi` CLI 探测（原生适配 Windows/Linux NVIDIA 显卡负载、显存与核心温度）；新增 `get_network_metrics` 计算真实实时上/下行吞吐速率与累计流量（GB）。
@@ -176,7 +200,7 @@ flowchart TD
 
 ---
 
-### 11. ⏰ 无人值守计划任务与全景四语种国际化 (i18n)
+### 12. ⏰ 无人值守计划任务与全景四语种国际化 (i18n)
 * **后台计划任务 (`task_scheduler.py` · `ScheduledView`)**：支持 Cron 表达式与日常周期调度，支持 `[立即测试]` 静默跑通，任务完成后自动调用 Windows 原生 Toast 桌面通知。
 * **四语种国际化 (`i18nDictionary.ts`)**：全量界面与交互组件原生支持 **简体中文 (zh-CN)**、**繁体中文 (zh-TW)**、**英语 (en)**、**日语 (ja)**。
 
@@ -351,7 +375,30 @@ docker compose exec backend bash
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.4.6（最新）— Web / Docker 远程友好交互（浏览器内预览/下载与服务器目录浏览）
+### 🚀 v1.4.12（最新）— 专家防幻觉与严谨度体系、L2 拦截 15 秒倒计时自动封锁与单色扁平化设计
+- **L2 高危敏感操作 15 秒倒计时自动封锁四键审批卡（`runtime.py` · `policy_interceptor.py` · `ApprovalCard.tsx`）**：
+  - 彻底打通 L2 级敏感操作（跨目录越界写、物理删除、高危 Shell 指令）程序级硬挂起；
+  - 呼出单色扁平化四键审批卡（批准本次 / 本任务白名单 / 改参另存为 / 拒绝并改道），并集成 15 秒平滑递减倒计时；
+  - 15 秒内无任何人工操作时，自动触发超时封锁并阻断越权执行，杜绝无人值守风险。
+- **专家防幻觉与严谨度配置系统（`GroundingConfig` · `context_builder.py` · `runtime.py` · `AgentsView.tsx`）**：
+  - 推出「🎯 严谨工作模式」（锁定 T=0.1，防虚构强约束）与「💡 自由构想模式」（T=0.7），支持 o1/o3/DeepSeek-R1 等固定温度推理模型能力嗅探；
+  - 真实工具调用硬核验（`verify_tool_call`）：程序级追踪单轮真实工具状态机，硬拦截未调工具却谎称已完成的虚假声明；
+  - 空数据 Fail-Fast 熔断（`fail_fast_on_missing`）：无数据如实拒答，禁止脑补；
+  - 官方 7 大核心专家全量严谨加固，数据审计专家锁定只读最小权限白名单；
+  - 全界面统一遵循单色扁平化（Monochrome Flat Icons）设计标准。
+
+### 🚀 v1.4.11 — 技能操作系统静默自动适配与彻底无标化
+- **宿主机环境静默感知与自动过滤（`skill_loader.py` · `skill_service.py`）**：
+  - 加载技能时静默探测当前宿主机系统（Windows / macOS / Linux），不匹配环境的技能完全静默隐藏；
+  - 彻底移除技能卡片上的彩色「跨平台 / Windows」徽章，界面极简纯净。
+
+### 🚀 v1.4.10 — 技能体系高内聚整合与环境感知修复
+- 将 30+ 零散细碎技能重构整合为 15 个高内聚核心模块，修复跨平台路径引用与坏味道。
+
+### 🚀 v1.4.7 ~ v1.4.9 — 跨端打包、系统稳定性与版本发布流水线加固
+- 优化 GitHub Actions 跨平台发行包流水线，完善环境依赖隔离与启动自愈。
+
+### 🚀 v1.4.6 — Web / Docker 远程友好交互（浏览器内预览/下载与服务器目录浏览）
 - **生成文件远程无感预览与下载（`artifacts` · `apiClient` · `page` · `DeliverablesCard` · `LibraryView`）**：
   - 新增 `_is_headless_remote_env()` 自动识别无头 Linux / Docker 容器环境，彻底消除点击生成文件时报错 `No such file or directory: 'xdg-open'`；自动切换为前端右侧画布内预览或带 `X-Access-Token` 鉴权的浏览器文件下载。
 - **服务器目录浏览器替代原生弹窗（`workspaces` · `ServerFolderBrowser` · `WorkspaceSwitcher` · `Sidebar`）**：

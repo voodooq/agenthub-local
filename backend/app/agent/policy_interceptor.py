@@ -3,8 +3,9 @@
 分级规则：
 - 🟢 L0 (Safe / Read-only): 读操作、扫描、无副作用查询 -> 静默放行
 - 🟡 L1 (Workspace Write / Snapshot): 工作区目录内受控写入 -> 自动快照备份后放行
-- 🔴 L2 (Critical / Out-of-bounds): 跨目录越界、危险删除、破坏性 Shell、敏感网络外发 -> 挂起并要求 HITL 审批
+- 🔴 L2 (Critical / Out-of-bounds): 跨目录越界、危险删除、破坏性 Shell、敏感网络外发 -> 挂起并要求 HITL 审批（15秒超时自动封锁）
 """
+import asyncio
 import os
 import shutil
 import time
@@ -68,7 +69,10 @@ class PolicyInterceptor:
             return PolicyDecision(allowed=True, level="L0")
 
         # 2. 判别文件系统写操作
-        file_write_tools = {"write_file", "edit_file", "save_file", "create_file", "append_file"}
+        file_write_tools = {
+            "write_file", "edit_file", "save_file", "create_file", "append_file",
+            "write_local_file", "replace_in_file"
+        }
         if tool_name in file_write_tools:
             raw_path = arguments.get("path") or arguments.get("file_path") or arguments.get("Path")
             if not raw_path:
@@ -116,7 +120,7 @@ class PolicyInterceptor:
             )
 
         # 4. 判别系统命令执行工具 (Shell / Bash / Terminal)
-        exec_tools = {"run_command", "execute_command", "bash", "terminal", "shell"}
+        exec_tools = {"run_command", "execute_command", "bash", "terminal", "shell", "execute_local_command"}
         if tool_name in exec_tools:
             cmd = arguments.get("command") or arguments.get("CommandLine") or ""
             cmd_lower = cmd.lower()
@@ -203,5 +207,93 @@ class PolicyInterceptor:
         from ..memory.policy_guard import MemoryPolicyGuard
 
         return MemoryPolicyGuard.sanitize_text(text)
+
+
+class ApprovalResult:
+    """人工审批或自动封锁决议结果"""
+
+    def __init__(
+        self,
+        action: str,  # approve_once | approve_all | modify_args | reject
+        modified_arguments: dict[str, Any] | None = None,
+        user_guidance: str | None = None,
+        is_timeout: bool = False,
+    ):
+        self.action = action
+        self.modified_arguments = modified_arguments
+        self.user_guidance = user_guidance
+        self.is_timeout = is_timeout
+
+
+class ApprovalEventManager:
+    """
+    负责在协程层面实现 HITL 审批挂起与 15s 倒计时自动封锁
+    """
+
+    def __init__(self):
+        self._waiters: dict[str, asyncio.Event] = {}
+        self._results: dict[str, ApprovalResult] = {}
+        self._call_to_loop: dict[str, str] = {}
+        self._loop_to_call: dict[str, str] = {}
+
+    def register(self, call_id: str, loop_id: str | None = None) -> asyncio.Event:
+        event = asyncio.Event()
+        self._waiters[call_id] = event
+        if loop_id:
+            self._call_to_loop[call_id] = loop_id
+            self._loop_to_call[loop_id] = call_id
+        return event
+
+    async def wait_for_decision(self, call_id: str, timeout_seconds: float = 15.0) -> ApprovalResult:
+        """
+        异步挂起等待人工四键决策；若在指定时限（默认 15 秒）内未收到操作，自动封锁驳回。
+        """
+        event = self._waiters.get(call_id)
+        if not event:
+            return ApprovalResult(action="reject", user_guidance="未注册的审批调用", is_timeout=False)
+        try:
+            await asyncio.wait_for(event.wait(), timeout=timeout_seconds)
+            res = self._results.pop(call_id, None)
+            return res or ApprovalResult(action="reject", user_guidance="审批结果异常为空", is_timeout=False)
+        except asyncio.TimeoutError:
+            logger.warning(f"[ApprovalEventManager] 审批卡调用 {call_id} 超过 {timeout_seconds} 秒未响应，自动封锁！")
+            return ApprovalResult(
+                action="reject",
+                user_guidance="【15秒超时自动封锁】未在时限内收到操作，安全网关已自动封锁该高危操作并阻止执行。",
+                is_timeout=True,
+            )
+        finally:
+            self._waiters.pop(call_id, None)
+            loop_id = self._call_to_loop.pop(call_id, None)
+            if loop_id and self._loop_to_call.get(loop_id) == call_id:
+                self._loop_to_call.pop(loop_id, None)
+
+    def resolve(
+        self,
+        identifier: str,
+        action: str,
+        modified_arguments: dict[str, Any] | None = None,
+        user_guidance: str | None = None,
+    ) -> bool:
+        """
+        通过 call_id 或 loop_id 唤醒挂起的等待协程
+        """
+        call_id = identifier
+        if call_id not in self._waiters and identifier in self._loop_to_call:
+            call_id = self._loop_to_call[identifier]
+
+        if call_id in self._waiters:
+            self._results[call_id] = ApprovalResult(
+                action=action,
+                modified_arguments=modified_arguments,
+                user_guidance=user_guidance,
+                is_timeout=False,
+            )
+            self._waiters[call_id].set()
+            return True
+        return False
+
+
+approval_event_manager = ApprovalEventManager()
 
 

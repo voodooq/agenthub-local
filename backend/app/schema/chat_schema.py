@@ -1,7 +1,6 @@
 """
 流式对话核心请求契约
 """
-from typing import Any
 from pydantic import BaseModel, Field
 
 

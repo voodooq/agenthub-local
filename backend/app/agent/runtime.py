@@ -38,6 +38,7 @@ from ..extensions.mcp_file_bridge import (
 )
 from ..skills.experience_distiller import ExecutionTrace, experience_distiller
 from .checkpoint_manager import ShadowCheckpointManager
+from .policy_interceptor import PolicyInterceptor, approval_event_manager
 from .shell_executor import shell_executor
 from .tool_protocol import ToolProtocolAdapter
 from .context_builder import ContextBuilder
@@ -1437,6 +1438,11 @@ class AgentRuntime:
             explicit_execute_unlock=bool(explicit_execute_unlock),
         )
 
+        policy_gate = PolicyInterceptor(
+            workspace_root=str(target_cwd or os.getcwd()),
+            security_level="standard",
+        )
+
         async def _ensure_active_loop(initial_status: str = "executing"):
             """渐进式按需创建 Loop：仅在实质工具调用、待确认交互或故障中断时才创建，避免纯闲聊触发 HUD 闪现"""
             nonlocal active_loop_obj, tracked_loop_id
@@ -1462,6 +1468,115 @@ class AgentRuntime:
             active_loop_obj = created
             tracked_loop_id = created.id
             return active_loop_obj
+
+        async def _eval_and_wait_l2_approval(
+            t_name: str,
+            t_args: dict[str, Any],
+            r_reason: str,
+            snap_path: str | None = None,
+            result_holder: dict[str, Any] | None = None,
+        ) -> AsyncGenerator[dict[str, Any], None]:
+            """
+            🔴 L2 高危敏感操作拦截网关：挂起循环并呼出四键审批卡片（15s 超时自动封锁）。
+            支持四键操作：批准本次 (approve_once) / 本任务白名单 (approve_all) / 改参另存为 (modify_args) / 拒绝并改道 (reject)。
+            """
+            nonlocal active_loop_obj, tracked_loop_id, step_idx
+
+            # 0. 检查是否在白名单中
+            if t_name in policy_gate.session_whitelists:
+                if result_holder is not None:
+                    result_holder["allowed"] = True
+                    result_holder["args"] = t_args
+                    result_holder["guidance"] = "在任务白名单中直接放行"
+                    result_holder["is_timeout"] = False
+                return
+
+            # 1. 确保 Loop 存在且置为 waiting_approval
+            eff_loop = await _ensure_active_loop(initial_status="waiting_approval")
+            loop_id = eff_loop.id if eff_loop else f"loop_{conv_id}"
+            call_id = f"call_{uuid.uuid4().hex[:8]}"
+            approval_payload = {
+                "call_id": call_id,
+                "tool_name": t_name,
+                "arguments": t_args,
+                "policy_level": "L2",
+                "risk_reason": r_reason,
+                "snapshot_path": snap_path,
+            }
+
+            await TaskLoopRepository.update_loop_status(
+                loop_id=loop_id,
+                status="waiting_approval",
+                pending_approval=approval_payload,
+            )
+            if active_loop_obj:
+                active_loop_obj.loop_status = "waiting_approval"
+                from ..schema.loop_schema import PendingApprovalCall
+                active_loop_obj.pending_approval_call = PendingApprovalCall(**approval_payload)
+
+            # 2. 推送 SSE 事件让前端呼出 ApprovalCard（启动 15s 倒计时）
+            yield {
+                "type": "loop_step",
+                "loop_id": loop_id,
+                "status": "waiting_approval",
+                "iteration": step_idx,
+                "pending_approval_call": approval_payload,
+                "scratchpad_md": active_loop_obj.scratchpad_md if active_loop_obj else "",
+            }
+
+            # 3. 注册并异步挂起协程，等待人工操作或 15 秒超时自动封锁
+            approval_event_manager.register(call_id, loop_id=loop_id)
+            decision_res = await approval_event_manager.wait_for_decision(call_id, timeout_seconds=15.0)
+
+            # 4. 恢复 Loop 状态为 executing 并清除待审批项
+            await TaskLoopRepository.update_loop_status(
+                loop_id=loop_id,
+                status="executing",
+                pending_approval=None,
+            )
+            if active_loop_obj:
+                active_loop_obj.loop_status = "executing"
+                active_loop_obj.pending_approval_call = None
+
+            yield {
+                "type": "loop_step",
+                "loop_id": loop_id,
+                "status": "executing",
+                "iteration": step_idx,
+                "pending_approval_call": None,
+                "scratchpad_md": active_loop_obj.scratchpad_md if active_loop_obj else "",
+            }
+
+            # 5. 根据决策结果分支填充返回
+            if decision_res.action == "approve_once":
+                if result_holder is not None:
+                    result_holder["allowed"] = True
+                    result_holder["args"] = t_args
+                    result_holder["guidance"] = "用户已批准本次执行"
+                    result_holder["is_timeout"] = False
+            elif decision_res.action == "approve_all":
+                policy_gate.add_to_whitelist(t_name)
+                if result_holder is not None:
+                    result_holder["allowed"] = True
+                    result_holder["args"] = t_args
+                    result_holder["guidance"] = "已加入本任务白名单并放行"
+                    result_holder["is_timeout"] = False
+            elif decision_res.action == "modify_args":
+                eff_args = decision_res.modified_arguments or t_args
+                if result_holder is not None:
+                    result_holder["allowed"] = True
+                    result_holder["args"] = eff_args
+                    result_holder["guidance"] = "已采用用户修改后的参数放行"
+                    result_holder["is_timeout"] = False
+            else:  # reject 或 15s 超时自动封锁
+                guidance = decision_res.user_guidance or "用户拒绝了该项高危操作，请更换安全的替代方案。"
+                if decision_res.is_timeout:
+                    guidance = "【15秒超时自动封锁】审批卡未在 15 秒内收到操作，安全网关已自动封锁该高危操作并阻止执行。"
+                if result_holder is not None:
+                    result_holder["allowed"] = False
+                    result_holder["args"] = t_args
+                    result_holder["guidance"] = guidance
+                    result_holder["is_timeout"] = decision_res.is_timeout
 
         async def _finalize_turn_loop(
             summary_text: str,
@@ -2667,32 +2782,68 @@ class AgentRuntime:
                         sec_level = "DENY" if is_hard_loop_blocked else shell_executor.check_security(cmd_str)
 
                         if sec_level == "DENY":
-                            deny_reason = (
-                                f"Denied: 【死循环物理硬阻断】命令 `{cmd_str}` 已经触发死循环熔断，系统已物理封禁重复执行此失败操作。"
-                                f"请立即停止调用工具，直接向用户详细陈述排查事实与物理卡点，说明无法自动完成的原因并请求人工介入。"
-                                if is_hard_loop_blocked
-                                else f"Denied: 命令 `{cmd_str}` 触发系统高危安全黑名单已被强制拦截。严禁执行破坏性指令，请改用安全的替代方式回答用户。"
-                            )
-                            await audit_service.log(
-                                event_type="shell_command_denied",
-                                actor="agent",
-                                detail={"command": cmd_str, "reason": reason_str, "loop_blocked": is_hard_loop_blocked},
-                                approved=False,
-                            )
-                            tool_output = deny_reason
-                            compressed = f"[死循环物理硬阻断 `{norm_cmd[:45]}`]" if is_hard_loop_blocked else f"[安全红线拦截高危命令 `{cmd_str[:50]}`]"
-                            yield {
-                                "type": "tool_end",
-                                "call_id": call_id,
-                                "name": func_name,
-                                "command": cmd_str,
-                                "reason": reason_str,
-                                "status": "denied",
-                                "output": tool_output,
-                                "compressed": compressed,
-                            }
+                            if is_hard_loop_blocked:
+                                deny_reason = (
+                                    f"Denied: 【死循环物理硬阻断】命令 `{cmd_str}` 已经触发死循环熔断，系统已物理封禁重复执行此失败操作。"
+                                    f"请立即停止调用工具，直接向用户详细陈述排查事实与物理卡点，说明无法自动完成的原因并请求人工介入。"
+                                )
+                                await audit_service.log(
+                                    event_type="shell_command_denied",
+                                    actor="agent",
+                                    detail={"command": cmd_str, "reason": reason_str, "loop_blocked": True},
+                                    approved=False,
+                                )
+                                tool_output = deny_reason
+                                compressed = f"[死循环物理硬阻断 `{norm_cmd[:45]}`]"
+                                yield {
+                                    "type": "tool_end",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": cmd_str,
+                                    "reason": reason_str,
+                                    "status": "denied",
+                                    "output": tool_output,
+                                    "compressed": compressed,
+                                }
+                            else:
+                                # 🔴 L2 高危 Shell 拦截：呼出四键审批卡（15s 超时自动封锁）
+                                l2_gate_res: dict[str, Any] = {}
+                                async for evt in _eval_and_wait_l2_approval(
+                                    t_name=func_name,
+                                    t_args={"command": cmd_str, "reason": reason_str},
+                                    r_reason=f"命令包含高危敏感特征或系统破坏性指令: {cmd_str[:60]}",
+                                    result_holder=l2_gate_res,
+                                ):
+                                    yield evt
 
-                        else:
+                                if not l2_gate_res.get("allowed", False):
+                                    deny_reason = f"Denied: 【高危拦截已阻断】{l2_gate_res.get('guidance', '用户拒绝了该项高危操作')}"
+                                    await audit_service.log(
+                                        event_type="shell_command_denied",
+                                        actor="agent",
+                                        detail={"command": cmd_str, "reason": reason_str, "guidance": l2_gate_res.get("guidance")},
+                                        approved=False,
+                                    )
+                                    tool_output = deny_reason
+                                    compressed = f"[高危操作阻断 `{cmd_str[:45]}`]"
+                                    yield {
+                                        "type": "tool_end",
+                                        "call_id": call_id,
+                                        "name": func_name,
+                                        "command": cmd_str,
+                                        "reason": reason_str,
+                                        "status": "denied",
+                                        "output": tool_output,
+                                        "compressed": compressed,
+                                    }
+                                else:
+                                    # 用户批准本次或改参放行
+                                    eff_cmd = str(l2_gate_res.get("args", {}).get("command") or cmd_str).strip()
+                                    cmd_str = eff_cmd
+                                    norm_cmd = re.sub(r"\s+", " ", cmd_str)
+                                    sec_level = "CONFIRM"
+
+                        if sec_level != "DENY":
                             # 全自动确认直通执行（包含 CONFIRM 与 SAFE 级命令），无需用户手动点击确认
                             yield {
                                 "type": "tool_start",
@@ -3209,15 +3360,63 @@ class AgentRuntime:
                                     "cwd": str(current_work_dir),
                                 }
                             else:
-                                # 全自动确认直通写入物理文件，无需用户手动点击确认
-                                yield {
-                                    "type": "tool_start",
-                                    "call_id": call_id,
-                                    "name": func_name,
-                                    "command": f"write_file -> {rel_display} ({len(file_content)} 字符)",
-                                    "reason": f"真实落盘本地文件 {rel_display}",
-                                    "security": "AUTO_CONFIRMED",
-                                }
+                                # 🔴 L2 跨工作区越界写检查
+                                is_out_of_bounds = False
+                                try:
+                                    target_file.relative_to(ws_guard_root)
+                                except ValueError:
+                                    is_out_of_bounds = True
+
+                                write_allowed = True
+                                if is_out_of_bounds:
+                                    l2_write_res: dict[str, Any] = {}
+                                    async for evt in _eval_and_wait_l2_approval(
+                                        t_name=func_name,
+                                        t_args=args,
+                                        r_reason=f"写操作尝试跨越工作区边界: 目标路径 `{target_file}` 不在当前工作区 `{ws_guard_root}` 范围内",
+                                        result_holder=l2_write_res,
+                                    ):
+                                        yield evt
+
+                                    if not l2_write_res.get("allowed", False):
+                                        write_allowed = False
+                                        deny_msg = f"Denied: 【跨目录越界写已阻断】{l2_write_res.get('guidance', '用户拒绝了跨目录写入')}"
+                                        tool_output = deny_msg
+                                        compressed = f"[越界写已阻断 `{rel_display}`]"
+                                        yield {
+                                            "type": "tool_end",
+                                            "call_id": call_id,
+                                            "name": func_name,
+                                            "command": f"write_file({rel_display})",
+                                            "reason": "跨目录越界写审批未通过",
+                                            "status": "denied",
+                                            "output": tool_output,
+                                            "compressed": compressed,
+                                            "cwd": str(current_work_dir),
+                                        }
+                                    else:
+                                        eff_args = l2_write_res.get("args") or args
+                                        args = eff_args
+                                        new_raw_path = str(args.get("file_path") or args.get("path") or "").strip()
+                                        if new_raw_path:
+                                            target_file = Path(new_raw_path)
+                                            if not target_file.is_absolute():
+                                                target_file = (current_work_dir / target_file).resolve()
+                                            else:
+                                                target_file = target_file.resolve()
+                                            file_content = str(args.get("content", file_content))
+                                            overwrite = bool(args.get("overwrite", overwrite))
+
+                                if write_allowed:
+                                    # 全自动确认直通写入物理文件，无需用户手动点击确认
+                                    yield {
+                                        "type": "tool_start",
+                                        "call_id": call_id,
+                                        "name": func_name,
+                                        "command": f"write_file -> {rel_display} ({len(file_content)} 字符)",
+                                        "reason": f"真实落盘本地文件 {rel_display}",
+                                        "security": "AUTO_CONFIRMED",
+                                    }
                                 write_snapshot_hash = None
                                 existed_before = False
                                 edit_file_size = 0
