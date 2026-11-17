@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.5.0-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.5.1-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.5.0 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.5.1 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -432,6 +432,19 @@ docker compose exec backend bash
   - 实现纯 Python 标准 5 段 Cron 解析（含 `*`、`*/n`、`a-b`、`a,b` 及 `@hourly`/`@daily` 等别名）与 `start_loop()` 防同分钟重入自动巡检；`run_task()` 真实无头调用 `agent_runtime.chat_stream`，捕获 `running` / `success` / `failed` 状态、耗时与完整输出落库至 `scheduled_task_runs`。
   - 新增 `GET /api/v1/scheduled/{task_id}/runs` 接口；前端 `ScheduledView` 升级为展示状态徽章、上次/下次运行时间、耗时及完整执行历史详情弹窗。
 
+### 🚀 v1.5.1 — MCP 服务双中枢管理、全栈严格类型安全加固与极致纯实底体验
+- **MCP 服务双中枢管理（`McpServerManager` · `SkillsView` · `MemoryHubModal`）**：
+  - 将原本缺失的 MCP 接入、查看、编辑、测试、删除与批量导入功能深度重构为独立通用中枢组件，并在「技能与应用 → 关联应用 (MCP)」与「记忆中枢 → 关联应用与 MCP」中实现双入口无缝互通。
+  - 动态识别并直观呈现本地 STDIO 与远程 Streamable-HTTP / SSE 真实已接入服务，支持就地一键测试连通性、查看延迟毫秒数及可用工具明细；
+  - 提供新建接入向导（参数/环境变量/Headers/超时配置）、就地编辑保存、启停状态切换及二次确认安全删除；全面兼容导入 Claude Desktop / Cursor / `mcp_servers.json` 配置文件。
+- **全栈严格类型安全加固与编译器陷阱排查**：
+  - 彻底排查并修复 `shell_executor.py` 中 `communicate()` 在复杂 kwargs 推导下的 `tuple[bytes, ...]` 类型兼容；
+  - 修复 `runtime.py` 内部 `PendingApprovalCall` 强类型 Literal 构造与局部 `import json` 作用域屏蔽导致的 `UnboundLocalError`；
+  - 修正 `office-ppt`（`build_ppt.py` 工厂函数与类类型区隔）与 `excel-data-suite`（`audit_table.py` 参数 `encoding_errors`、Series 掩码处理、`build_excel.py` 工作表存在性安全窄化）的类型注解。
+- **全站纯实底防透光与单色扁平化（`/ui-ux-pro-max`）全面生效**：
+  - 彻底拔除全站 `backdrop-blur-*` 虚化毛玻璃，全局统一遮罩为纯黑 `bg-black/80`，所有抽屉与弹窗容器施加 `opacity: 1 !important` 纯实心底色，杜绝文字透光穿透与晕影重叠；
+  - 全面收敛图标为极简单色扁平（Monochrome Flat）矢量风格。
+
 ### 🚀 v1.5.0 — 后台长驻进程托管池、只读并发子智能体、防幻觉三道防线与极致单色实底 UI
 - **后台长驻进程托管池（`BackgroundProcessManager` · `processes` · `RightActionDrawer`）**：
   - 赋予 Agent 异步拉起长驻任务（如 `npm run dev`、`uvicorn`、长时间数据流脚本）的闭环生命周期管理，解决传统同步等待阻塞问题。
@@ -453,54 +466,12 @@ docker compose exec backend bash
   - 全局统一遮罩为高对比度纯色压暗 `bg-black/80`，抽屉与弹窗容器强制 100% 纯实心底色（`bg-surface-card` 与 `opacity: 1 !important`），保证文字阅读对比度 $\ge 4.5:1$。
   - 全站图标全面贯彻单色扁平化设计，剔除花哨彩色图标与 emoji，回归极客沉浸体验。
 
-### 🚀 v1.4.2 — 系统实时硬件监控与治理中枢、NVIDIA/网络吞吐探针及无版本号安装包
-- **实时硬件全景监控与多维度探针（`collector` · `RightActionDrawer`）**：
-  - 将右侧抽屉重构为「系统实时监控与智能治理」面板：打开后每 3 秒自动轮询 `/api/v1/system/snapshot`，实时呈现 CPU 使用率/核数/主频、物理内存占用与 Swap、GPU 负载/显存占用/核心温度、网络实时上/下行吞吐速率及累计流量（GB）、全部分区磁盘使用率，以及 Top 6 高占用进程列表。
-  - 在 `collector.get_gpu_metrics` 中接入无窗口 `nvidia-smi` CLI 兜底探测以原生适配 Windows/Linux NVIDIA 显卡；新增 `get_network_metrics` 计算两次采样窗口间的真实收发速率。
-  - 集成一键体检高占用进程、进程「提请治理」、端口占用排查及待审批系统治理/经验复盘清单交互闭环。
-- **无版本号桌面安装产物与平滑自动升级（`build_release_exe` · `AutoUpdaterService`）**：
-  - Windows 单文件客户端与 macOS 安装镜像统一采用无版本号文件名 `AgentHub-Local-windows-x64.exe` 与 `AgentHub-Local-macos-arm64.dmg`，避免跨版本升级后本地文件名残留旧版本号产生歧义；发行构建脚本自动生成纯净默认 `mcp_servers.json` 种子，防止本地测试配置泄漏。
-  - 自动更新服务新增 `normalize_windows_target_exe`（从历史带版本号 EXE 升级时自动落位并重命名为无版本号文件名）与 `.version` 缓存标记校验（防止同名包跨版本复用旧缓存）。
-
-### 🚀 v1.4.1 — CLI 账号模型动态识别、Gemini 4 Hydrogen / Orchestrator 适配与一键同步
-- **基于 CLI 账号动态嗅探与聚合可用模型（`agent_runner` · `models`）**：
-  - 新增 `discover_cli_models` 与 `parse_agy_models_output`，按当前活跃 CLI 账号隔离目录（`GEMINI_CLI_HOME`）与系统代理自动执行 `agy models` 实时探测已解锁模型，自动过滤无权限模型（如未解锁的 `Gemini 4 Carbon`）。
-  - 自动将多思考档位变体（`-low` / `-medium` / `-high` / `-xhigh`）聚合为主模型条目（如 `Gemini 4 Hydrogen`），并原样保留无思考后缀或单档位模型（如 `Orchestrator (Argon)` / `gemini-pro-orchestrator-g1-pro`、`GPT-OSS 120B`），同时支持未知未来新模型免改代码自动识别。
-- **动态 `--model` 参数解析与新模型自动浮现（`agent_runner` · `gemini_client` · `models`）**：
-  - `resolve_agy_model_flag` 优先匹配动态变体映射表并支持档位缺失平滑回退；补齐 `Gemini 4 Hydrogen` 与 `Orchestrator (Argon)` 的 Cloud Code / REST 映射。
-  - 引入 `known_candidate_ids` 快照感知机制，CLI 升级或账号解锁新模型后自动浮现至输入框选择器，同时严格尊重用户手动取消勾选的偏好。
-- **设置页一键刷新识别交互（`SettingsModal` · `ModelSelector`）**：
-  - 在「设置 → 模型」页面新增「刷新识别模型」按钮（对接 `GET /api/v1/models/active?refresh=true`），支持随时穿透缓存同步当前 CLI 账号最新模型列表。
-
-### 🚀 v1.4.0 — 远程 MCP 协议全栈支持、跨网文件协同与 GitHub 自动升级加载
-- **远程 MCP 协议原生接入（`MCPManager` · `MemoryHubModal` · `SkillLoader`）**：
-  - 全面支持 `Streamable HTTP`（含可选 `Mcp-Session-Id` 有/无状态连接、404 会话自动重连与 `close()` 异步 `DELETE` 清理）及 `Legacy HTTP + SSE`（强制同源校验与禁止跨站重定向防凭据泄露）。
-  - 全面兼容公共与第三方标准 MCP 服务及多格式配置导入（Claude Desktop `mcpServers` / VS Code `servers` / Windsurf `serverUrl`）；新增服务名规范校验、Headers 密钥脱敏掩码保护与 `${ENV_VAR}` 运行时环境变量展开；全链路异步化 `shutdown_all()`。
-- **跨网安全文件协同桥接（`mcp_file_bridge` · `LocalContextCompressor` · `ToolProtocolAdapter`）**：
-  - 新增 `mcp_upload_workspace_file` 与 `mcp_download_artifact_to_workspace` 通用跨网协同工具：上传支持可配置表单字段名 `upload_file_field`（默认 `file`）与大小校验；下载采用 `aiter_bytes()` 真流式体积熔断、严格 `2xx` 与反误写校验，落盘后自动注册资产库。
-  - 上下文旁路压缩对 `mcp__*` 工具放宽脱水阈值并保护结构化 URL 不被误截断；同步将协同工具纳入 `ToolProtocolAdapter` 核心工具与裸 JSON 兜底匹配。
-- **GitHub Releases 自动检查升级、进度条下载与重启加载（`AutoUpdaterService` · `UpdateModal`）**：
-  - 客户端启动自动静默检查 `voodooq/agenthub-local` 最新 Release 并支持手动检查；发现新版本时在侧栏与顶栏展示提醒徽标，并在弹窗中渲染 Markdown 升级日志（Release Notes）。
-  - 点击「立即升级」自动匹配当前平台产物（Windows 单文件 EXE / macOS DMG / Portable 便携包）流式下载，实时展示百分比进度条、已下载体积与速率；下载完毕后提示并支持一键重启替换加载新版本（严格保护 `data/` 与个人配置不被覆写）。
-
-### 🛡️ v1.3.x — 代码手术刀、L5 微经验与影子 Git 双回滚、会话强隔离及物理真实核验
-- **Code Surgery 与单步快照回滚（`v1.3.0 ~ v1.3.1`）**：引入 Tree-sitter 代码大纲提取与 AST 语法门禁（`validate_syntax_before_write`）、行号切片读取、`apply_search_replace_blocks` 三级容错局部补丁、行级红绿 `DiffViewerCard`、`SkillAuditor` 静态安全审计，以及基于 `agenthub_shadow.index` 的毫秒级 Git Shadow 单步回滚。
-- **L5 实战微经验库与全会话影子 Git 时光机（`v1.3.2`）**：落地 `EpisodicExperienceStore`（SQLite `FTS5 trigram` + 三路正交锚点 + 阈值分级注入 + 复用奖惩淘汰）、`ShadowCheckpointManager`（`.agenthub/shadow_git` 独立镜像仓库），以及 `/ckpt`、`/rollback`、`/remember`、`/distill` 零 Token 斜杠指令集。
-- **Loop 会话隔离、交付分离与防伪落盘物理核验（`v1.3.3 ~ v1.3.6`）**：实现 `LoopHUD` 按 `conversation_id` 强隔离与三层纯闲聊零触发；建立 `evaluate_skill_distill_eligibility` 无错沉淀门控与语义化版本原子迭代；强制分离执行过程与独立最终交付气泡；接入 CLI 原生工具越权盘中自愈、超长命令临时脚本防 `[WinError 206]` 兜底、历史库平滑守护与 `POST /api/v1/artifacts/verify-paths` 磁盘物理存在性真实核验。
-
-### ✨ v1.2.x — 三区上下文与 KV Cache 守护、性能微水表及多源算力稳定化
-- **三区上下文压缩与两级漏斗脱水**：确立 Zone 1（恒定前缀）/ Zone 2（只增不改热区 + 36k 软上限坍缩）/ Zone 3（零残留尾注）物理隔离，配合工具长输出 `ToolRef` 旁路脱水与 `180s` 闲置记忆提炼水位锁，最大化本地与云端 KV Cache 命中率。
-- **`llama-server` 深度适配与全链路 Token 水表**：原生接入 `llama.cpp`（`/health`、`/props`、`/tokenize`、`timings`），渲染单行实时水表（上下文水位、KV 命中率、TTFT/TPS）与 `/stats` 分角色消耗看板。
-- **多源算力熔断与体验升级**：引入模型级 `180s` 熔断冷却锁与 `300s` 地区隔离，支持需求澄清自动升舱落盘、多 Skill 串联协同、长文本半屏编辑与执行步骤单行折叠。
-
-### 🚀 v1.1.x — 项目工作区中枢、Loop 自主循环、四层记忆治理与跨平台发布体系
-- **通用工作区与增量 FTS5**：支持虚拟沙盒与本地物理目录零迁移挂载、`.gitignore` 过滤增量 trigram 索引、4KB Frontmatter + SWR 技能秒开及 `L1/L2` 同名覆盖。
-- **Loop 自主循环与 HITL 审批网关**：落地 `Planner -> Executor -> Verifier -> Reflector` 状态机、错误指纹 3 次熔断、Plan-First 引导向导与 `L0 / L1 / L2` 三级敏感操作四键审批网关。
-- **记忆治理与跨平台打包**：构建基于本地 SQLite 的四层记忆体系（`FactManager` 双时间轴事实、事件账本与凭据脱敏）、沙盒隔离上传、资产库双向溯源及 GitHub Actions 跨平台自动打包流水线。
-
-### 🌱 v1.0.x — 本地多源算力解耦与自主智能体底座奠基
-- **算力与数据完全解耦**：确立原生 SQLite WAL + FTS5 纯本地持久化架构，支持本地私有推理引擎（Ollama / vLLM / llama.cpp）与商业/开源 API 统一池化管理。
-- **桌面级私有工作台基座**：完成 FastAPI 后端、Next.js 静态前端与原生桌面窗口集成，奠定多会话持久化、流式工具调用、本地终端安全执行、Skill/MCP 扩展及中/繁/英/日四语种国际化底座。
+### 🏛️ 历史里程碑演进 (v1.0 ~ v1.4.x 架构演进归档)
+- **v1.4.x（硬件监控、远程 MCP 原生协议与动态模型识别）**：系统实时硬件监控抽屉（CPU/内存/GPU/网络吞吐/进程治理）、无版本号桌面安装包与平滑自动更新；远程 MCP 原生接入（Streamable HTTP/SSE）与跨网安全文件协同；基于 CLI 账号动态嗅探已解锁模型与一键刷新识别。
+- **v1.3.x（代码手术刀、L5 实战微经验与影子 Git 双回滚）**：Tree-sitter AST 代码大纲与局部补丁手术刀（`code_surgery`）；毫秒级单步 Git 快照与全会话影子 Git 时光机；Loop 会话强隔离、交付分离与防伪落盘物理存在性核验。
+- **v1.2.x（三区上下文与 KV Cache 守护、性能微水表及多源算力稳定化）**：Zone 1/2/3 物理隔离上下文与工具长输出旁路脱水；`llama-server` 深度适配与全链路单行性能微水表；180s 冷却熔断与长文本半屏编辑。
+- **v1.1.x（项目工作区中枢、Loop 自主循环与四层记忆治理）**：虚拟沙盒与物理目录零迁移挂载；增量 FTS5 trigram 倒排全文检索；Planner-Executor-Verifier-Reflector 状态机与 L0/L1/L2 三级敏感操作 HITL 审批网关；四层本地记忆体系。
+- **v1.0.x（本地多源算力解耦与自主智能体底座奠基）**：原生 SQLite WAL 纯本地持久化；本地私有引擎（Ollama/vLLM/llama.cpp）与商业 API 池化解耦；桌面级原生工作台与多语言国际化支持。
 
 ---
 

@@ -520,11 +520,10 @@ export function McpServerManager({ workspaceId, onServersUpdated }: McpServerMan
       {/* 提示反馈横幅 */}
       {feedback && (
         <div
-          className={`px-4 py-2.5 rounded-xl border text-xs flex items-center justify-between animate-fade-in ${
-            feedback.success
+          className={`px-4 py-2.5 rounded-xl border text-xs flex items-center justify-between animate-fade-in ${feedback.success
               ? 'bg-surface-200 border-border text-foreground'
               : 'bg-surface-200 border-border text-rose-500'
-          }`}
+            }`}
         >
           <div className="flex items-center space-x-2">
             {feedback.success ? <Check className="w-4 h-4 shrink-0" /> : <AlertCircle className="w-4 h-4 shrink-0" />}
@@ -618,11 +617,10 @@ export function McpServerManager({ workspaceId, onServersUpdated }: McpServerMan
               return (
                 <div
                   key={srvName}
-                  className={`p-4 rounded-2xl border transition-all shadow-xs ${
-                    isEnabled
+                  className={`p-4 rounded-2xl border transition-all shadow-xs ${isEnabled
                       ? 'border-border bg-surface-card'
                       : 'border-border/60 bg-surface-100 opacity-75'
-                  }`}
+                    }`}
                 >
                   <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
                     <div className="space-y-1.5 flex-1 min-w-0">
@@ -636,17 +634,16 @@ export function McpServerManager({ workspaceId, onServersUpdated }: McpServerMan
                           {transport === 'stdio'
                             ? 'LOCAL STDIO'
                             : transport === 'sse'
-                            ? 'REMOTE SSE'
-                            : 'REMOTE HTTP'}
+                              ? 'REMOTE SSE'
+                              : 'REMOTE HTTP'}
                         </span>
 
                         {/* 启停状态 */}
                         <span
-                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${
-                            isEnabled
+                          className={`text-[10px] font-mono px-2 py-0.5 rounded-full border ${isEnabled
                               ? 'border-foreground/30 bg-surface-200 text-foreground font-semibold'
                               : 'border-border bg-surface-100 text-muted-foreground'
-                          }`}
+                            }`}
                         >
                           {isEnabled ? '● 已启用' : '○ 已停用'}
                         </span>
@@ -672,11 +669,10 @@ export function McpServerManager({ workspaceId, onServersUpdated }: McpServerMan
                       {/* 测试连接结果展示 */}
                       {testRes && (
                         <div
-                          className={`mt-2 p-2 rounded-lg border text-xs font-mono flex items-start space-x-2 ${
-                            testRes.ok
+                          className={`mt-2 p-2 rounded-lg border text-xs font-mono flex items-start space-x-2 ${testRes.ok
                               ? 'bg-surface-200 border-border text-foreground'
                               : 'bg-surface-200 border-border text-rose-500'
-                          }`}
+                            }`}
                         >
                           {testRes.ok ? (
                             <CheckCircle2 className="w-4 h-4 shrink-0 text-foreground mt-0.5" />
@@ -736,11 +732,10 @@ export function McpServerManager({ workspaceId, onServersUpdated }: McpServerMan
                       <button
                         type="button"
                         onClick={() => void handleToggleServer(srvName)}
-                        className={`px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${
-                          isEnabled
+                        className={`px-2.5 py-1.5 rounded-lg border text-xs font-medium transition-colors ${isEnabled
                             ? 'border-border bg-surface-200 text-foreground hover:bg-surface-300'
                             : 'border-border bg-surface-100 text-muted-foreground hover:text-foreground'
-                        }`}
+                          }`}
                         title={isEnabled ? '点击禁用该服务' : '点击启用该服务'}
                       >
                         {isEnabled ? '停用' : '启用'}
@@ -850,11 +845,10 @@ export function McpServerManager({ workspaceId, onServersUpdated }: McpServerMan
                   <button
                     type="button"
                     onClick={() => setConnTab('stdio')}
-                    className={`p-3 rounded-xl border text-left transition-all ${
-                      connTab === 'stdio'
+                    className={`p-3 rounded-xl border text-left transition-all ${connTab === 'stdio'
                         ? 'border-foreground/40 bg-surface-200 text-foreground shadow-xs'
                         : 'border-border bg-surface-100 text-muted-foreground hover:text-foreground'
-                    }`}
+                      }`}
                   >
                     <div className="flex items-center space-x-2 font-semibold text-xs">
                       <Terminal className="w-4 h-4 text-foreground" />
@@ -868,11 +862,10 @@ export function McpServerManager({ workspaceId, onServersUpdated }: McpServerMan
                   <button
                     type="button"
                     onClick={() => setConnTab('remote')}
-                    className={`p-3 rounded-xl border text-left transition-all ${
-                      connTab === 'remote'
+                    className={`p-3 rounded-xl border text-left transition-all ${connTab === 'remote'
                         ? 'border-foreground/40 bg-surface-200 text-foreground shadow-xs'
                         : 'border-border bg-surface-100 text-muted-foreground hover:text-foreground'
-                    }`}
+                      }`}
                   >
                     <div className="flex items-center space-x-2 font-semibold text-xs">
                       <Globe className="w-4 h-4 text-foreground" />
@@ -987,11 +980,10 @@ export function McpServerManager({ workspaceId, onServersUpdated }: McpServerMan
               {/* 表单内测试连通性结果反馈 */}
               {formTestResult && (
                 <div
-                  className={`p-3 rounded-xl border text-xs font-mono flex items-start space-x-2 ${
-                    formTestResult.ok
+                  className={`p-3 rounded-xl border text-xs font-mono flex items-start space-x-2 ${formTestResult.ok
                       ? 'bg-surface-200 border-border text-foreground'
                       : 'bg-surface-200 border-border text-rose-500'
-                  }`}
+                    }`}
                 >
                   {formTestResult.ok ? (
                     <CheckCircle2 className="w-4 h-4 shrink-0 text-foreground mt-0.5" />
@@ -1132,3 +1124,4 @@ export function McpServerManager({ workspaceId, onServersUpdated }: McpServerMan
     </div>
   );
 }
+
