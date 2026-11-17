@@ -315,15 +315,15 @@ export function RightActionDrawer({ isOpen, onClose, pendingCountChange }: Right
 
   return (
     <div
-      className="fixed inset-0 z-40 flex justify-end bg-black/35 backdrop-blur-[1px]"
+      className="fixed inset-0 z-40 flex justify-end bg-black/50 animate-fade-in"
       onClick={onClose}
     >
       <div
-        className="w-full max-w-xl h-full bg-surface-card/98 backdrop-blur-xl border-l border-border shadow-2xl flex flex-col animate-slide-left text-foreground"
+        className="w-full max-w-xl h-full bg-surface-card border-l border-border shadow-2xl flex flex-col animate-slide-left text-foreground select-text"
         onClick={(e) => e.stopPropagation()}
       >
         {/* 顶部标题栏 */}
-        <div className="flex items-center justify-between px-5 py-4 border-b border-border bg-surface-100/70 shrink-0">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border bg-surface-100 shrink-0">
           <div className="flex items-center space-x-2.5 min-w-0">
             <Activity className="w-5 h-5 text-emerald-500 animate-pulse shrink-0" />
             <div className="min-w-0">

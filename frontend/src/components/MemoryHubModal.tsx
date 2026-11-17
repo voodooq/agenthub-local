@@ -1252,7 +1252,7 @@ export function MemoryHubModal({
     <div
       className={
         asView
-          ? 'flex-1 flex flex-col h-full bg-surface-base overflow-hidden'
+          ? 'flex-1 flex flex-col h-full bg-background overflow-hidden'
           : 'w-full max-w-4xl max-h-[88vh] flex flex-col rounded-2xl bg-surface-card border border-border shadow-2xl overflow-hidden text-foreground'
       }
       onClick={asView ? undefined : (e) => e.stopPropagation()}
@@ -1261,8 +1261,8 @@ export function MemoryHubModal({
       <div
         className={
           asView
-            ? 'px-6 py-5 border-b border-border flex items-center justify-between bg-surface-100/50 shrink-0'
-            : 'px-6 py-4 border-b border-border flex items-center justify-between bg-surface-100/60'
+            ? 'px-6 py-5 border-b border-border flex items-center justify-between bg-surface-100 shrink-0'
+            : 'px-6 py-4 border-b border-border flex items-center justify-between bg-surface-100'
         }
       >
         <div className="flex items-center space-x-3">

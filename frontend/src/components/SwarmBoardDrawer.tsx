@@ -430,12 +430,18 @@ export function SwarmBoardDrawer({
   const waitingCount = members.filter((m) => m.status === 'waiting').length;
 
   return (
-    <div className="fixed inset-0 z-50 flex justify-end bg-black/35 backdrop-blur-[2px] animate-fade-in">
-      <div className="w-full max-w-xl h-full bg-surface-base border-l border-border shadow-2xl flex flex-col text-foreground">
+    <div
+      className="fixed inset-0 z-50 flex justify-end bg-black/50 animate-fade-in"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-xl h-full bg-surface-card border-l border-border shadow-2xl flex flex-col text-foreground select-text"
+        onClick={(e) => e.stopPropagation()}
+      >
         {/* 顶部标题栏 */}
-        <div className="px-5 py-4 border-b border-border flex items-center justify-between bg-surface-100/70 shrink-0">
+        <div className="px-5 py-4 border-b border-border flex items-center justify-between bg-surface-100 shrink-0">
           <div className="flex items-center space-x-3 min-w-0">
-            <div className="p-2 rounded-xl bg-violet-500/15 text-violet-500 border border-violet-500/25 shrink-0">
+            <div className="p-2 rounded-xl bg-surface-200 text-foreground border border-border shrink-0">
               <Users className="w-5 h-5" />
             </div>
             <div className="min-w-0">
@@ -447,9 +453,9 @@ export function SwarmBoardDrawer({
                   <span
                     className={`text-[10px] px-2 py-0.5 rounded-full font-mono font-semibold border ${
                       swarm.status === 'running'
-                        ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 border-emerald-500/30'
+                        ? 'bg-surface-200 text-emerald-600 dark:text-emerald-400 border-border'
                         : swarm.status === 'completed'
-                          ? 'bg-sky-500/15 text-sky-600 dark:text-sky-300 border-sky-500/30'
+                          ? 'bg-surface-200 text-foreground border-border'
                           : 'bg-surface-200 text-muted-foreground border-border'
                     }`}
                   >
@@ -494,10 +500,10 @@ export function SwarmBoardDrawer({
         </div>
 
         {/* 成员状态栏 */}
-        <div className="px-5 py-3 border-b border-border bg-surface-100/40 shrink-0 space-y-2">
+        <div className="px-5 py-3 border-b border-border bg-surface-50 shrink-0 space-y-2">
           <div className="flex items-center justify-between text-[11px] text-muted-foreground">
             <span className="font-semibold text-foreground flex items-center space-x-1.5">
-              <Activity className="w-3.5 h-3.5 text-violet-500" />
+              <Activity className="w-3.5 h-3.5 text-foreground" />
               <span>蜂群节点 ({members.length})</span>
             </span>
             <span className="font-mono">
@@ -513,7 +519,7 @@ export function SwarmBoardDrawer({
                 return (
                   <div
                     key={member.name}
-                    className="p-2.5 rounded-xl bg-surface-base border border-border/80 flex items-center justify-between gap-2 text-xs shadow-xs"
+                    className="p-2.5 rounded-xl bg-surface-card border border-border flex items-center justify-between gap-2 text-xs shadow-xs"
                   >
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center space-x-1.5">
@@ -521,7 +527,7 @@ export function SwarmBoardDrawer({
                         <button
                           type="button"
                           onClick={() => handleMentionMember(member.name)}
-                          className="font-mono font-bold text-foreground hover:text-violet-500 truncate transition-colors"
+                          className="font-mono font-bold text-foreground hover:underline truncate transition-colors"
                           title={`点击 @${member.name}`}
                         >
                           @{member.name}
@@ -546,7 +552,7 @@ export function SwarmBoardDrawer({
                         type="button"
                         onClick={() => void handleKillMember(member.name)}
                         disabled={killingMember === member.name}
-                        className="px-2 py-1 rounded-lg border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 text-[10px] font-medium flex items-center space-x-1 shrink-0 transition-colors disabled:opacity-50"
+                        className="px-2 py-1 rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-rose-500 text-[10px] font-medium flex items-center space-x-1 shrink-0 transition-colors disabled:opacity-50"
                         title={`终止节点 ${member.name}`}
                       >
                         {killingMember === member.name ? (
@@ -570,17 +576,17 @@ export function SwarmBoardDrawer({
 
         {/* 错误提示横幅 */}
         {errorBanner && (
-          <div className="mx-5 mt-3 px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-500 flex items-center space-x-2 shrink-0">
+          <div className="mx-5 mt-3 px-3 py-2 rounded-xl bg-surface-200 border border-border text-xs text-rose-500 flex items-center space-x-2 shrink-0">
             <ShieldAlert className="w-4 h-4 shrink-0" />
             <span className="flex-1">{errorBanner}</span>
           </div>
         )}
 
         {/* 消息板实时时间线 */}
-        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3">
+        <div className="flex-1 overflow-y-auto px-5 py-4 space-y-3 bg-surface-card">
           <div className="flex items-center justify-between text-[11px] text-muted-foreground pb-1">
             <span className="flex items-center space-x-1.5 font-semibold text-foreground">
-              <MessageSquare className="w-3.5 h-3.5 text-emerald-500" />
+              <MessageSquare className="w-3.5 h-3.5 text-foreground" />
               <span>共享消息板时间线</span>
             </span>
             <span className="font-mono">{messages.length} 条记录</span>
@@ -588,7 +594,7 @@ export function SwarmBoardDrawer({
 
           {messages.length === 0 ? (
             <div className="py-12 text-center text-xs text-muted-foreground space-y-2">
-              <Users className="w-8 h-8 mx-auto opacity-30" />
+              <Users className="w-8 h-8 mx-auto opacity-30 text-foreground" />
               <p>消息板暂无广播记录，可在下方发送人工插话指令调度专家。</p>
             </div>
           ) : (
@@ -600,8 +606,8 @@ export function SwarmBoardDrawer({
                   key={`${msg.seq}_${msg.sender}`}
                   className={`p-3 rounded-2xl border text-xs space-y-1.5 transition-all ${
                     isHuman
-                      ? 'bg-emerald-500/10 border-emerald-500/30'
-                      : 'bg-surface-100/70 border-border/80'
+                      ? 'bg-surface-50 border-emerald-500/40 text-foreground'
+                      : 'bg-surface-100 border-border text-foreground'
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
@@ -613,7 +619,7 @@ export function SwarmBoardDrawer({
                         type="button"
                         onClick={() => handleMentionMember(msg.sender)}
                         className={`font-mono font-bold truncate ${
-                          isHuman ? 'text-emerald-600 dark:text-emerald-400' : 'text-foreground hover:text-violet-500'
+                          isHuman ? 'text-emerald-600 dark:text-emerald-400' : 'text-foreground hover:underline'
                         }`}
                       >
                         {isHuman ? '人工督导 (User)' : `@${msg.sender}`}
@@ -624,7 +630,7 @@ export function SwarmBoardDrawer({
                     </span>
                   </div>
 
-                  <div className="text-[12.5px] leading-relaxed text-foreground/95 whitespace-pre-wrap break-words">
+                  <div className="text-[12.5px] leading-relaxed text-foreground whitespace-pre-wrap break-words">
                     {renderHighlightedSwarmText(rawBody)}
                   </div>
                 </div>
@@ -637,7 +643,7 @@ export function SwarmBoardDrawer({
         {/* 底部人工插话输入框 */}
         <form
           onSubmit={handleSendIntervention}
-          className="p-4 border-t border-border bg-surface-100/70 shrink-0 space-y-2"
+          className="p-4 border-t border-border bg-surface-100 shrink-0 space-y-2"
         >
           {members.length > 0 && (
             <div className="flex items-center space-x-1.5 overflow-x-auto pb-1">
@@ -652,7 +658,7 @@ export function SwarmBoardDrawer({
                     key={m.name}
                     type="button"
                     onClick={() => handleMentionMember(m.name)}
-                    className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-surface-200 hover:bg-violet-500/15 hover:text-violet-500 border border-border/70 transition-colors shrink-0"
+                    className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-surface-200 hover:bg-surface-300 border border-border text-foreground transition-colors shrink-0"
                   >
                     @{m.name}
                   </button>
@@ -671,12 +677,12 @@ export function SwarmBoardDrawer({
                   ? '输入人工插话指令（如 @专家名 请优先检查边界条件）...'
                   : '请先在对话中启动蜂群协作模式'
               }
-              className="flex-1 px-3.5 py-2 rounded-xl bg-surface-base border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-violet-500 disabled:opacity-50"
+              className="flex-1 px-3.5 py-2 rounded-xl bg-surface-200 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-border-hover disabled:opacity-50"
             />
             <button
               type="submit"
               disabled={!effectiveSwarmId || !inputText.trim() || sending}
-              className="px-4 py-2 rounded-xl bg-violet-500 hover:bg-violet-600 text-white text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none"
+              className="px-4 py-2 rounded-xl bg-foreground text-background hover:opacity-90 text-xs font-semibold flex items-center space-x-1.5 shadow-sm transition-all active:scale-95 disabled:opacity-40 disabled:pointer-events-none"
             >
               {sending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Send className="w-3.5 h-3.5" />}
               <span>广播</span>

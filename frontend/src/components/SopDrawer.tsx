@@ -323,7 +323,7 @@ export function SopDrawer({
   };
 
   return (
-    <div className="fixed inset-y-0 right-0 z-50 w-full sm:w-[500px] bg-surface-card border-l border-border shadow-2xl flex flex-col backdrop-blur-md animate-in slide-in-from-right duration-200 select-text">
+    <div className="fixed inset-y-0 right-0 z-50 w-full sm:w-[500px] bg-surface-card border-l border-border shadow-2xl flex flex-col animate-in slide-in-from-right duration-200 select-text">
       {/* 顶部标题栏 */}
       <div className="flex items-center justify-between px-5 py-4 border-b border-border bg-surface-50">
         <div className="flex items-center space-x-2.5 min-w-0">

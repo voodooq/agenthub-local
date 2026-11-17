@@ -13,6 +13,7 @@ module.exports = {
         foreground: 'var(--color-foreground)',
         'muted-foreground': 'var(--color-foreground-muted)',
         surface: {
+          base: 'var(--bg-card)',
           50: 'var(--bg-surface-50)',
           100: 'var(--bg-surface-100)',
           200: 'var(--bg-surface-200)',

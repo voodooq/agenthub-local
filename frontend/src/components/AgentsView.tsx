@@ -639,9 +639,9 @@ export function AgentsView({
   allSkills.forEach((s) => skillMap.set(s.id, s));
 
   return (
-    <div className="flex-1 flex flex-col h-full bg-surface-base overflow-hidden">
+    <div className="flex-1 flex flex-col h-full bg-background overflow-hidden">
       {/* 头部标题与操作区 */}
-      <div className="p-6 border-b border-border flex items-center justify-between shrink-0 bg-surface-base">
+      <div className="p-6 border-b border-border flex items-center justify-between shrink-0 bg-background">
         <div>
           <div className="flex items-center space-x-2.5">
             <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
@@ -688,7 +688,7 @@ export function AgentsView({
             onClick={() => setFilterOwnership('all')}
             className={`px-3 py-1 rounded-md transition-colors ${
               filterOwnership === 'all'
-                ? 'bg-surface-base text-foreground font-semibold shadow-sm'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
                 : 'text-muted-foreground hover:text-foreground'
             }`}
           >
@@ -698,7 +698,7 @@ export function AgentsView({
             onClick={() => setFilterOwnership('official')}
             className={`px-3 py-1 rounded-md transition-colors ${
               filterOwnership === 'official'
-                ? 'bg-surface-base text-foreground font-semibold shadow-sm'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
                 : 'text-muted-foreground hover:text-foreground'
             }`}
           >
@@ -708,7 +708,7 @@ export function AgentsView({
             onClick={() => setFilterOwnership('custom')}
             className={`px-3 py-1 rounded-md transition-colors ${
               filterOwnership === 'custom'
-                ? 'bg-surface-base text-foreground font-semibold shadow-sm'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
                 : 'text-muted-foreground hover:text-foreground'
             }`}
           >
