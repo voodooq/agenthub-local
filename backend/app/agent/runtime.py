@@ -1495,14 +1495,16 @@ class AgentRuntime:
             eff_loop = await _ensure_active_loop(initial_status="waiting_approval")
             loop_id = eff_loop.id if eff_loop else f"loop_{conv_id}"
             call_id = f"call_{uuid.uuid4().hex[:8]}"
-            approval_payload = {
-                "call_id": call_id,
-                "tool_name": t_name,
-                "arguments": t_args,
-                "policy_level": "L2",
-                "risk_reason": r_reason,
-                "snapshot_path": snap_path,
-            }
+            from ..schema.loop_schema import PendingApprovalCall
+            pending_call = PendingApprovalCall(
+                call_id=call_id,
+                tool_name=t_name,
+                arguments=t_args,
+                policy_level="L2",
+                risk_reason=r_reason,
+                snapshot_path=snap_path,
+            )
+            approval_payload = pending_call.model_dump()
 
             await TaskLoopRepository.update_loop_status(
                 loop_id=loop_id,
@@ -1511,8 +1513,7 @@ class AgentRuntime:
             )
             if active_loop_obj:
                 active_loop_obj.loop_status = "waiting_approval"
-                from ..schema.loop_schema import PendingApprovalCall
-                active_loop_obj.pending_approval_call = PendingApprovalCall(**approval_payload)
+                active_loop_obj.pending_approval_call = pending_call
 
             # 2. 推送 SSE 事件让前端呼出 ApprovalCard（启动 15s 倒计时）
             yield {
@@ -3204,7 +3205,6 @@ class AgentRuntime:
                         from app.tools.background_process import list_background_processes as bg_list_fn
                         list_res = bg_list_fn(workspace_id=ws_id)
                         procs = list_res.get("processes", [])
-                        import json
                         tool_output = json.dumps(procs, ensure_ascii=False, indent=2) if procs else "当前工作区暂无任何运行中的后台托管进程。"
                         compressed = f"[当前活跃托管进程: {len(procs)}个]"
                         yield {

@@ -414,13 +414,14 @@ class LocalShellExecutor:
 
         def _sync_exec() -> tuple[bytes, bytes, int, bool, str | None]:
             try:
-                proc = subprocess.Popen(
+                proc: subprocess.Popen[bytes] = subprocess.Popen(
                     exec_args,
                     cwd=effective_cwd,
                     stdin=subprocess.DEVNULL,  # 强制关闭标准输入，防交互式挂起
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     env=child_env,
+                    text=False,
                     start_new_session=(sys.platform != "win32"),
                     **get_silent_subprocess_kwargs(allow_gui=allow_gui_window),
                 )
@@ -431,12 +432,16 @@ class LocalShellExecutor:
                 self._running_pids.setdefault(session_id, set()).add(proc.pid)
 
             try:
-                out_bytes, err_bytes = proc.communicate(timeout=timeout)
-                return out_bytes, err_bytes, proc.returncode or 0, False, None
+                raw_out, raw_err = proc.communicate(timeout=timeout)
+                out_bytes = raw_out if isinstance(raw_out, bytes) else (raw_out.encode("utf-8") if isinstance(raw_out, str) else b"")
+                err_bytes = raw_err if isinstance(raw_err, bytes) else (raw_err.encode("utf-8") if isinstance(raw_err, str) else b"")
+                return out_bytes, err_bytes, proc.returncode if proc.returncode is not None else 0, False, None
             except subprocess.TimeoutExpired:
                 self.kill_process_tree(proc.pid)
                 try:
-                    out_bytes, err_bytes = proc.communicate(timeout=2)
+                    raw_out, raw_err = proc.communicate(timeout=2)
+                    out_bytes = raw_out if isinstance(raw_out, bytes) else (raw_out.encode("utf-8") if isinstance(raw_out, str) else b"")
+                    err_bytes = raw_err if isinstance(raw_err, bytes) else (raw_err.encode("utf-8") if isinstance(raw_err, str) else b"")
                 except Exception:
                     out_bytes, err_bytes = b"", b""
                 return out_bytes, err_bytes, -1, True, None
