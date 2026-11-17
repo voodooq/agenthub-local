@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.4.12-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.5.0-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.4.12 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.5.0 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -431,6 +431,27 @@ docker compose exec backend bash
 - **计划任务真实 Cron 调度、无头执行与状态详情（`TaskScheduler` · `scheduled` · `ScheduledView`）**：
   - 实现纯 Python 标准 5 段 Cron 解析（含 `*`、`*/n`、`a-b`、`a,b` 及 `@hourly`/`@daily` 等别名）与 `start_loop()` 防同分钟重入自动巡检；`run_task()` 真实无头调用 `agent_runtime.chat_stream`，捕获 `running` / `success` / `failed` 状态、耗时与完整输出落库至 `scheduled_task_runs`。
   - 新增 `GET /api/v1/scheduled/{task_id}/runs` 接口；前端 `ScheduledView` 升级为展示状态徽章、上次/下次运行时间、耗时及完整执行历史详情弹窗。
+
+### 🚀 v1.5.0 — 后台长驻进程托管池、只读并发子智能体、防幻觉三道防线与极致单色实底 UI
+- **后台长驻进程托管池（`BackgroundProcessManager` · `processes` · `RightActionDrawer`）**：
+  - 赋予 Agent 异步拉起长驻任务（如 `npm run dev`、`uvicorn`、长时间数据流脚本）的闭环生命周期管理，解决传统同步等待阻塞问题。
+  - 内置 1000 行固定容量环形日志缓冲区与 200 行独立错误高优环，支持按行数切片非阻塞读取；集成回环端口正则嗅探器（严格限定 `(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::\]):(\d{2,5})` 并保序去重）。
+  - 支持启动 3 秒窗口早期退出崩溃快速失败检测（Fail-Fast）；跨平台子进程树连带强制销毁（Windows `CREATE_NEW_PROCESS_GROUP` + `taskkill /F /T /PID`，POSIX `killpg` 防孤儿僵尸进程）。
+  - 单工作区并发上限（5个）熔断保护，集成 FastAPI `lifespan` 优雅关机回收与会话结束/工作区切换自动垃圾回收钩子；提供标准 RESTful API（`GET /api/v1/processes`、`GET /logs`、`POST /stop`）。
+  - 前端在「系统监控与治理」抽屉中集成「活跃长驻托管进程」卡片与单色实时强杀按钮。
+- **只读并发子智能体派发器（`SubAgentSpawner` · `dispatch_research_subagents` · `LoopHUD`）**：
+  - 支持主 Agent 一次性派发 2~3 个并发子任务展开多角度源码/文档/网络只读调研，构建微型隔离上下文与纯净独立历史。
+  - 核心硬编码只读工具白名单（`READONLY_SUBAGENT_TOOLS`），彻底剔除一切文件写、重构、Shell 及外设工具，杜绝并发写冲突。
+  - 多源算力动态并发嗅探：检测到当前使用本地推理引擎（Ollama、`llama-server`）时自动降级为单任务串行（并发度 1）以保护本地 GPU 显存，云端模型自动启用 3 任务并发；内置 6 步与 60 秒硬超时防死锁熔断。
+  - 聚合器标准化 Markdown 结论直出，严格实施 $\le 1500$ Token 单任务软截断；在 `LoopHUD` 中透出并发调研指示胶囊与全链路计费透传。
+- **专家防幻觉与严谨度三道防线（`Grounding Guardrails` · `runtime` · `AgentsView`）**：
+  - 专家沙盒提供「严谨工作模式」（T=0.1、事实锚定）与「自由构想模式」（T=0.7、发散创意）快速切换与采样温度微调。
+  - 落地三重防线约束：未检索到数据如实拒答（Fail-Fast）、工具调用真实性审计（未调用前严禁宣称完成）、输出结论强制附带事实依据与引用。
+  - 运行时程序级状态机审计：拦截未执行真实工具调用即声明任务完成的欺骗性输出。
+- **全站单色扁平化（Monochrome Flat）与 100% 纯实心底色规范（`/ui-ux-pro-max`）**：
+  - 全面清除前端所有抽屉与弹窗遮罩中的 `backdrop-blur-*` 毛玻璃模糊，彻底消除背景文字重影与透光穿透。
+  - 全局统一遮罩为高对比度纯色压暗 `bg-black/80`，抽屉与弹窗容器强制 100% 纯实心底色（`bg-surface-card` 与 `opacity: 1 !important`），保证文字阅读对比度 $\ge 4.5:1$。
+  - 全站图标全面贯彻单色扁平化设计，剔除花哨彩色图标与 emoji，回归极客沉浸体验。
 
 ### 🚀 v1.4.2 — 系统实时硬件监控与治理中枢、NVIDIA/网络吞吐探针及无版本号安装包
 - **实时硬件全景监控与多维度探针（`collector` · `RightActionDrawer`）**：

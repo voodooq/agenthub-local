@@ -288,6 +288,101 @@ class ToolProtocolAdapter:
                 },
             },
             {
+                "name": "start_background_process",
+                "description": "异步启动长驻后台进程（如 npm run dev、vite、uvicorn 等服务或长期脚本），前置探活并返回短 ID 与端口提示。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "要执行的启动终端命令行（如 npm run dev, python -m uvicorn main:app）",
+                        },
+                        "wait_seconds": {
+                            "type": "integer",
+                            "description": "前置探活等待秒数（默认 3 秒，若短时间内报错退出将直接返回错误诊断）",
+                        },
+                    },
+                    "required": ["command"],
+                },
+            },
+            {
+                "name": "read_process_logs",
+                "description": "读取指定后台托管进程的环形输出日志切片，支持仅提取错误堆栈。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "proc_id": {
+                            "type": "string",
+                            "description": "后台进程 ID（如 bg_1234abcd）",
+                        },
+                        "tail_lines": {
+                            "type": "integer",
+                            "description": "获取末尾最新行数（默认 80 行）",
+                        },
+                        "only_errors": {
+                            "type": "boolean",
+                            "description": "是否开启仅返回错误行与异常堆栈（排查崩溃时强烈建议开启）",
+                        },
+                    },
+                    "required": ["proc_id"],
+                },
+            },
+            {
+                "name": "list_background_processes",
+                "description": "列出当前工作区下所有托管的后台进程信息、运行状态及监听端口。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "dispatch_research_subagents",
+                "description": "并发派发 1~4 个只读子智能体，在独立隔离上下文并行调研不同模块代码、日志或配置，输出精炼结构化报告，不污染主会话上下文。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "tasks": {
+                            "type": "array",
+                            "description": "并发调研子任务列表（建议 1~4 个）",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "subtask_id": {
+                                        "type": "string",
+                                        "description": "子任务短标识（如 auth_flow, db_pool）",
+                                    },
+                                    "objective": {
+                                        "type": "string",
+                                        "description": "该侦察兵的具体调研目标",
+                                    },
+                                    "focus_paths": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "重点检索的目录或文件路径列表",
+                                    },
+                                },
+                                "required": ["subtask_id", "objective"],
+                            },
+                        },
+                    },
+                    "required": ["tasks"],
+                },
+            },
+            {
+                "name": "stop_background_process",
+                "description": "终止指定后台进程及其整个派生子进程树，释放监听端口与计算资源。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "proc_id": {
+                            "type": "string",
+                            "description": "待终止的后台进程 ID",
+                        },
+                    },
+                    "required": ["proc_id"],
+                },
+            },
+            {
                 "name": "cancel_background_command",
                 "description": "终止指定后台命令及进程树。",
                 "parameters": {
@@ -299,6 +394,101 @@ class ToolProtocolAdapter:
                         },
                     },
                     "required": ["job_id"],
+                },
+            },
+            {
+                "name": "start_background_process",
+                "description": "异步启动长驻后台进程（如 npm run dev、vite、uvicorn 等服务或长期脚本），前置探活并返回短 ID 与端口提示。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "要执行的启动终端命令行（如 npm run dev, python -m uvicorn main:app）",
+                        },
+                        "wait_seconds": {
+                            "type": "integer",
+                            "description": "前置探活等待秒数（默认 3 秒，若短时间内报错退出将直接返回错误诊断）",
+                        },
+                    },
+                    "required": ["command"],
+                },
+            },
+            {
+                "name": "read_process_logs",
+                "description": "读取指定后台托管进程的环形输出日志切片，支持仅提取错误堆栈。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "proc_id": {
+                            "type": "string",
+                            "description": "后台进程 ID（如 bg_1234abcd）",
+                        },
+                        "tail_lines": {
+                            "type": "integer",
+                            "description": "获取末尾最新行数（默认 80 行）",
+                        },
+                        "only_errors": {
+                            "type": "boolean",
+                            "description": "是否开启仅返回错误行与异常堆栈（排查崩溃时强烈建议开启）",
+                        },
+                    },
+                    "required": ["proc_id"],
+                },
+            },
+            {
+                "name": "list_background_processes",
+                "description": "列出当前工作区下所有托管的后台进程信息、运行状态及监听端口。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                },
+            },
+            {
+                "name": "dispatch_research_subagents",
+                "description": "并发派发 1~4 个只读子智能体，在独立隔离上下文并行调研不同模块代码、日志或配置，输出精炼结构化报告，不污染主会话上下文。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "tasks": {
+                            "type": "array",
+                            "description": "并发调研子任务列表（建议 1~4 个）",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "subtask_id": {
+                                        "type": "string",
+                                        "description": "子任务短标识（如 auth_flow, db_pool）",
+                                    },
+                                    "objective": {
+                                        "type": "string",
+                                        "description": "该侦察兵的具体调研目标",
+                                    },
+                                    "focus_paths": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "重点检索的目录或文件路径列表",
+                                    },
+                                },
+                                "required": ["subtask_id", "objective"],
+                            },
+                        },
+                    },
+                    "required": ["tasks"],
+                },
+            },
+            {
+                "name": "stop_background_process",
+                "description": "终止指定后台进程及其整个派生子进程树，释放监听端口与计算资源。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "proc_id": {
+                            "type": "string",
+                            "description": "待终止的后台进程 ID",
+                        },
+                    },
+                    "required": ["proc_id"],
                 },
             },
             {

@@ -3221,7 +3221,7 @@ export default function WorkbenchPage() {
       >
         {/* 拖拽放置上传视觉遮罩 */}
         {activeNavHub === 'chat' && isDraggingFiles && (
-          <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center p-6 bg-background/70 backdrop-blur-md animate-fade-in">
+          <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center p-6 bg-background/90 animate-fade-in">
             <div className="w-full max-w-xl rounded-3xl border-2 border-dashed border-emerald-500/80 bg-emerald-500/[0.06] px-8 py-10 flex flex-col items-center text-center shadow-2xl">
               <div className="w-14 h-14 rounded-2xl bg-emerald-500/15 border border-emerald-500/35 flex items-center justify-center mb-4">
                 <UploadCloud className="w-7 h-7 text-emerald-500 animate-bounce" />
@@ -3247,7 +3247,7 @@ export default function WorkbenchPage() {
           </div>
         )}
         {/* 顶部紧凑上下文微顶栏 */}
-        <header className="h-11 py-1.5 border-b border-border/80 px-4 md:px-6 flex items-center justify-between bg-surface-100/50 backdrop-blur-md z-10 select-none">
+        <header className="h-11 py-1.5 border-b border-border/80 px-4 md:px-6 flex items-center justify-between bg-surface-100 z-10 select-none">
           {(() => {
             const activeWs = workspaces.find((w) => w.id === activeWorkspaceId);
             const activeConvObj = conversations.find((c) => c.id === activeConvId);
@@ -4103,7 +4103,7 @@ export default function WorkbenchPage() {
 
                 {/* 全局常驻待审批卡片：无论页面向上滚动多远或思考过程多长，始终可在输入框正上方一键点击允许或拒绝 */}
                 {pendingApprovalEvent && (
-                  <div className="px-4 py-3 mb-2 rounded-2xl bg-amber-500/15 border border-amber-500/40 backdrop-blur-md flex items-center justify-between shadow-lg animate-fade-in text-xs">
+                  <div className="px-4 py-3 mb-2 rounded-2xl bg-surface-card border border-border flex items-center justify-between shadow-lg animate-fade-in text-xs">
                     <div className="flex items-center space-x-2.5 min-w-0 mr-3">
                       <div className="w-7 h-7 rounded-lg bg-amber-500/20 border border-amber-500/40 flex items-center justify-center shrink-0">
                         <AlertTriangle className="w-4 h-4 text-amber-500 animate-pulse" />

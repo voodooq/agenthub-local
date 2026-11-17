@@ -218,7 +218,13 @@ class LocalShellExecutor:
             self.kill_process_tree(pid)
         self._running_pids.pop(session_id, None)
         bg_count = self.background_manager.cancel_session_jobs(session_id)
-        return len(pids) + bg_count
+        # 联动清理 BackgroundProcessManager 中的长驻开发服务与托管进程
+        try:
+            from ..tools.background_process import BackgroundProcessManager
+            managed_bg_count = BackgroundProcessManager.get_instance().cleanup_conversation(session_id)
+        except Exception:
+            managed_bg_count = 0
+        return len(pids) + bg_count + managed_bg_count
 
     @staticmethod
     def decode_output(raw_bytes: bytes) -> str:

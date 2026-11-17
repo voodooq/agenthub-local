@@ -143,6 +143,25 @@ html.light .glass-modal {
   box-shadow: 0 20px 40px -10px rgba(0, 0, 0, 0.1);
 }
 
+/* 抽屉与模态卡片强制 100% 纯实心底色，杜绝任何透光重影 */
+.bg-surface-card {
+  background-color: var(--bg-card) !important;
+  opacity: 1 !important;
+}
+
+.bg-surface-modal {
+  background-color: var(--bg-card) !important;
+  opacity: 1 !important;
+}
+
+.bg-surface-100 {
+  background-color: var(--bg-surface-100) !important;
+}
+
+.bg-surface-200 {
+  background-color: var(--bg-surface-200) !important;
+}
+
 /* 动效光晕 */
 .glow-emerald {
   box-shadow: 0 0 15px rgba(16, 185, 129, 0.35);

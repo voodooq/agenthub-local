@@ -3079,6 +3079,219 @@ class AgentRuntime:
                             "job_id": dl_job_id or None,
                         }
 
+                    # ── 工具 1.4: 后台长驻进程托管服务 (start_background_process) ──
+                    elif func_name == "start_background_process":
+                        bg_cmd = str(args.get("command", "")).strip()
+                        bg_wait = int(args.get("wait_seconds", 3) or 3)
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": bg_cmd,
+                            "reason": "启动后台长驻服务/守护进程",
+                            "security": "AUTO_CONFIRMED",
+                        }
+
+                        # 敏感指令安全审计
+                        sec_level = shell_executor.check_security(bg_cmd)
+                        if sec_level == "DENY":
+                            l2_gate_res: dict[str, Any] = {}
+                            async for evt in _eval_and_wait_l2_approval(
+                                t_name=func_name,
+                                t_args={"command": bg_cmd, "wait_seconds": bg_wait},
+                                r_reason=f"后台启动命令包含高危敏感特征: {bg_cmd[:60]}",
+                                result_holder=l2_gate_res,
+                            ):
+                                yield evt
+
+                            if not l2_gate_res.get("allowed", False):
+                                deny_reason = f"Denied: 【高危拦截已阻断】{l2_gate_res.get('guidance', '用户拒绝了该项后台长驻操作')}"
+                                tool_output = deny_reason
+                                yield {
+                                    "type": "tool_end",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": bg_cmd,
+                                    "status": "denied",
+                                    "output": tool_output,
+                                    "compressed": f"[高危操作阻断 `{bg_cmd[:45]}`]",
+                                }
+                                bg_cmd = ""
+
+                        if bg_cmd:
+                            from app.tools.background_process import start_background_process as bg_start_fn
+                            ws_cwd = str(ctx.get("current_cwd") or os.getcwd())
+                            bg_res = bg_start_fn(
+                                command=bg_cmd,
+                                wait_seconds=bg_wait,
+                                workspace_id=ws_id,
+                                conversation_id=conv_id,
+                                cwd=ws_cwd,
+                            )
+                            is_ok = bool(bg_res.get("success"))
+                            tool_status = bg_res.get("status", "running" if is_ok else "error")
+                            tool_exit = bg_res.get("exit_code", 0 if is_ok else -1)
+                            ports = bg_res.get("port_hints", [])
+                            port_str = f", 监听端口: {ports}" if ports else ""
+                            tool_output = (
+                                f"后台进程启动成功 (ID: {bg_res.get('proc_id')}, PID: {bg_res.get('pid')}{port_str})\n"
+                                f"初始输出摘要:\n" + "\n".join(bg_res.get("initial_logs", []))
+                                if is_ok else
+                                f"后台进程启动失败 ({tool_status}): {bg_res.get('error')}\n" + "\n".join(bg_res.get("diagnostics", []))
+                            )
+                            compressed = f"[后台进程 `{bg_res.get('proc_id')}` {tool_status}{port_str}]"
+                            yield {
+                                "type": "tool_end",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": bg_cmd,
+                                "status": tool_status,
+                                "exit_code": tool_exit,
+                                "output": tool_output,
+                                "compressed": compressed,
+                                "proc_id": bg_res.get("proc_id"),
+                                "port_hints": ports,
+                            }
+
+                    # ── 工具 1.5: 读取后台长驻进程日志 (read_process_logs) ──
+                    elif func_name == "read_process_logs":
+                        p_id = str(args.get("proc_id", "")).strip()
+                        tail_n = int(args.get("tail_lines", 80) or 80)
+                        only_err = bool(args.get("only_errors", False))
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"read_process_logs('{p_id}')",
+                            "reason": f"读取后台进程 {p_id} 日志",
+                            "security": "AUTO_CONFIRMED",
+                        }
+                        from app.tools.background_process import read_process_logs as bg_read_fn
+                        log_res = bg_read_fn(proc_id=p_id, tail_lines=tail_n, only_errors=only_err)
+                        if log_res.get("success"):
+                            log_lines = log_res.get("logs", [])
+                            tool_output = "\n".join(log_lines) if log_lines else "(暂无新日志输出)"
+                            tool_status = log_res.get("status", "running")
+                            tool_exit = log_res.get("exit_code") or 0
+                            compressed = f"[{p_id} 日志读取: {len(log_lines)}行, 状态={tool_status}]"
+                        else:
+                            tool_output = f"Error: {log_res.get('error')}"
+                            tool_status = "error"
+                            tool_exit = -1
+                            compressed = f"[{p_id} 日志读取失败]"
+
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"read_process_logs('{p_id}')",
+                            "status": tool_status,
+                            "exit_code": tool_exit,
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具 1.6: 列出后台长驻进程 (list_background_processes) ──
+                    elif func_name == "list_background_processes":
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": "list_background_processes()",
+                            "reason": "列出当前工作区后台进程",
+                            "security": "AUTO_CONFIRMED",
+                        }
+                        from app.tools.background_process import list_background_processes as bg_list_fn
+                        list_res = bg_list_fn(workspace_id=ws_id)
+                        procs = list_res.get("processes", [])
+                        import json
+                        tool_output = json.dumps(procs, ensure_ascii=False, indent=2) if procs else "当前工作区暂无任何运行中的后台托管进程。"
+                        compressed = f"[当前活跃托管进程: {len(procs)}个]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": "list_background_processes()",
+                            "status": "completed",
+                            "exit_code": 0,
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具 1.7: 终止后台长驻进程 (stop_background_process) ──
+                    elif func_name == "stop_background_process":
+                        p_id = str(args.get("proc_id", "")).strip()
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"stop_background_process('{p_id}')",
+                            "reason": f"终止后台进程 {p_id}",
+                            "security": "AUTO_CONFIRMED",
+                        }
+                        from app.tools.background_process import stop_background_process as bg_stop_fn
+                        stop_res = bg_stop_fn(proc_id=p_id)
+                        if stop_res.get("success"):
+                            tool_output = stop_res.get("message", "进程已终止")
+                            tool_status = "killed"
+                            tool_exit = 0
+                            compressed = f"[已终止后台进程 `{p_id}`]"
+                        else:
+                            tool_output = f"Error: {stop_res.get('error')}"
+                            tool_status = "error"
+                            tool_exit = -1
+                            compressed = f"[终止后台进程 `{p_id}` 失败]"
+
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"stop_background_process('{p_id}')",
+                            "status": tool_status,
+                            "exit_code": tool_exit,
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具 1.8: 只读并发子智能体派发器 (dispatch_research_subagents) ──
+                    elif func_name == "dispatch_research_subagents":
+                        raw_tasks = args.get("tasks") or []
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"dispatch_research_subagents(tasks_count={len(raw_tasks)})",
+                            "reason": f"并发派发 {len(raw_tasks)} 个只读侦察兵子智能体进行代码与架构调研",
+                            "security": "SAFE",
+                        }
+                        from app.tools.sub_agent import dispatch_research_subagents as sub_spawner_fn
+                        ws_cwd = str(ctx.get("current_cwd") or os.getcwd())
+                        # 嗅探当前模型是否为本地引擎
+                        is_local_eng = any(k in str(model_name).lower() for k in ("ollama", "local", "llama", "qwen-local"))
+                        sub_res = await sub_spawner_fn(
+                            tasks=raw_tasks,
+                            workspace_root=ws_cwd,
+                            is_local_engine=is_local_eng,
+                        )
+                        tool_status = "completed" if sub_res.get("success") else "error"
+                        tool_output = sub_res.get("summary_markdown", "") or f"Sub-Agent 派发失败: {sub_res.get('error')}"
+                        compressed = f"[并发调研完成: {sub_res.get('tasks_count', 0)}任务, 耗时{sub_res.get('total_duration', 0)}s, {sub_res.get('total_tokens', 0)} tokens]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"dispatch_research_subagents({len(raw_tasks)} tasks)",
+                            "status": tool_status,
+                            "exit_code": 0 if sub_res.get("success") else -1,
+                            "output": tool_output,
+                            "compressed": compressed,
+                            "subagent_metrics": {
+                                "tasks_count": sub_res.get("tasks_count", 0),
+                                "total_tokens": sub_res.get("total_tokens", 0),
+                                "duration": sub_res.get("total_duration", 0),
+                            },
+                        }
+
                     # ── 工具 1.5: 按需 FTS5 记忆与工作区历史检索 (search_memory_history) ──
                     elif func_name == "search_memory_history":
                         mem_query = str(args.get("query", "")).strip()

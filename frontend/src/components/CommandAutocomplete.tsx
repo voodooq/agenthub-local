@@ -549,7 +549,7 @@ export function CommandAutocomplete({
     <div
       className={`absolute bottom-full left-0 mb-2 w-full ${
         activePreviewItem ? 'max-w-3xl' : 'max-w-xl'
-      } bg-surface-100/95 backdrop-blur-xl border border-border rounded-2xl shadow-2xl p-2.5 z-30 animate-scale-in transition-all`}
+      } bg-surface-card border border-border rounded-2xl shadow-2xl p-2.5 z-30 animate-scale-in transition-all`}
     >
       <div className="px-3 py-1.5 text-[11px] font-medium text-muted-foreground border-b border-border/60 flex items-center justify-between gap-2">
         <span className="truncate font-semibold text-foreground/85">

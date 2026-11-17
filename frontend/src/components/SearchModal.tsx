@@ -73,7 +73,7 @@ export function SearchModal({ isOpen, onClose, onSelectResult }: SearchModalProp
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4 bg-black/70 backdrop-blur-sm animate-fade-in"
+      className="fixed inset-0 z-50 flex items-start justify-center pt-20 px-4 bg-black/80 animate-fade-in"
       onClick={onClose}
     >
       <div

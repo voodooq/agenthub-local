@@ -14,6 +14,8 @@ import {
   Wifi,
   X,
   Zap,
+  Terminal,
+  Square,
 } from 'lucide-react';
 import { apiFetch } from '@/utils/apiClient';
 
@@ -21,6 +23,19 @@ interface RightActionDrawerProps {
   isOpen: boolean;
   onClose: () => void;
   pendingCountChange?: (count: number) => void;
+}
+
+interface ManagedProcessItem {
+  proc_id: string;
+  workspace_id: string;
+  command: string;
+  pid: number;
+  status: string;
+  exit_code?: number | null;
+  running_seconds: number;
+  port_hints: number[];
+  log_lines_count?: number;
+  has_errors: boolean;
 }
 
 interface HardwareProcessItem {
@@ -111,6 +126,39 @@ export function RightActionDrawer({ isOpen, onClose, pendingCountChange }: Right
   const [portInput, setPortInput] = useState('');
   const [inspectingPort, setInspectingPort] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [managedProcesses, setManagedProcesses] = useState<ManagedProcessItem[]>([]);
+  const [loadingProcesses, setLoadingProcesses] = useState(false);
+  const [stoppingProcId, setStoppingProcId] = useState<string | null>(null);
+
+  const fetchManagedProcesses = useCallback(async () => {
+    try {
+      const res = await apiFetch('/api/v1/processes');
+      if (res.ok) {
+        const data = await res.json();
+        setManagedProcesses(data.processes || []);
+      }
+    } catch (e) {
+      console.warn('获取托管进程失败:', e);
+    }
+  }, []);
+
+  const handleStopManagedProcess = async (procId: string) => {
+    setStoppingProcId(procId);
+    try {
+      const res = await apiFetch(`/api/v1/processes/${procId}/stop`, { method: 'POST' });
+      if (res.ok) {
+        setActionFeedback({ ok: true, msg: `已成功终止后台进程树 [${procId}]。` });
+        await fetchManagedProcesses();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        setActionFeedback({ ok: false, msg: err.detail || '终止后台进程失败' });
+      }
+    } catch (e: any) {
+      setActionFeedback({ ok: false, msg: e?.message || '终止进程异常' });
+    } finally {
+      setStoppingProcId(null);
+    }
+  };
 
   const fetchProposals = useCallback(async () => {
     setLoadingProposals(true);
@@ -153,13 +201,15 @@ export function RightActionDrawer({ isOpen, onClose, pendingCountChange }: Right
     setActionFeedback(null);
     fetchSnapshot(false);
     fetchProposals();
+    fetchManagedProcesses();
 
-    // 抽屉展开期间每 3 秒自动刷新实时硬件与网络指标
+    // 抽屉展开期间每 3 秒自动刷新实时硬件与网络指标及活跃后台托管进程
     const timer = setInterval(() => {
       fetchSnapshot(true);
+      fetchManagedProcesses();
     }, 3000);
     return () => clearInterval(timer);
-  }, [isOpen, fetchSnapshot, fetchProposals]);
+  }, [isOpen, fetchSnapshot, fetchProposals, fetchManagedProcesses]);
 
   const handleRefreshAll = () => {
     fetchSnapshot(false);
@@ -315,7 +365,7 @@ export function RightActionDrawer({ isOpen, onClose, pendingCountChange }: Right
 
   return (
     <div
-      className="fixed inset-0 z-40 flex justify-end bg-black/50 animate-fade-in"
+      className="fixed inset-0 z-40 flex justify-end bg-black/80 animate-fade-in"
       onClick={onClose}
     >
       <div
@@ -528,6 +578,82 @@ export function RightActionDrawer({ isOpen, onClose, pendingCountChange }: Right
                             style={{ width: `${Math.min(100, d.percent)}%` }}
                           />
                         </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          </section>
+
+          {/* ==================== 1.5. 活跃长驻托管进程 ==================== */}
+          <section className="space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center space-x-1.5">
+                <Terminal className="w-4 h-4 text-foreground" />
+                <h4 className="text-[11px] font-bold text-muted-foreground uppercase tracking-wider">
+                  活跃长驻托管进程 ({managedProcesses.filter((p) => p.status === 'running' || p.status === 'starting').length})
+                </h4>
+              </div>
+              <span className="text-[10px] text-muted-foreground font-mono">
+                并发上限 5 个
+              </span>
+            </div>
+
+            <div className="p-3.5 rounded-2xl bg-surface-100 border border-border space-y-2.5">
+              {managedProcesses.length === 0 ? (
+                <div className="text-center py-4 text-muted-foreground text-[11px]">
+                  当前工作区暂无运行中的长驻开发服务或后台进程
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {managedProcesses.map((proc) => {
+                    const isAlive = proc.status === 'running' || proc.status === 'starting';
+                    return (
+                      <div
+                        key={proc.proc_id}
+                        className="p-2.5 rounded-xl bg-surface-200 border border-border flex items-center justify-between gap-3 text-xs"
+                      >
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex items-center space-x-2">
+                            <span className="font-mono font-bold text-foreground truncate max-w-[140px]">
+                              {proc.proc_id}
+                            </span>
+                            <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-surface-100 border border-border text-muted-foreground">
+                              PID: {proc.pid}
+                            </span>
+                            <span
+                              className={`text-[10px] px-1.5 py-0.2 rounded border font-mono ${
+                                isAlive
+                                  ? 'bg-surface-100 text-foreground border-foreground/30 font-semibold'
+                                  : 'bg-surface-100 text-muted-foreground border-border'
+                              }`}
+                            >
+                              {proc.status}
+                            </span>
+                            {proc.port_hints && proc.port_hints.length > 0 && (
+                              <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-surface-100 border border-border text-foreground font-bold">
+                                {proc.port_hints.map((p) => `:${p}`).join(' ')}
+                              </span>
+                            )}
+                          </div>
+                          <div className="font-mono text-[11px] text-muted-foreground truncate" title={proc.command}>
+                            {proc.command}
+                          </div>
+                        </div>
+
+                        {isAlive && (
+                          <button
+                            type="button"
+                            onClick={() => handleStopManagedProcess(proc.proc_id)}
+                            disabled={stoppingProcId === proc.proc_id}
+                            className="px-2.5 py-1 rounded-lg bg-surface-100 hover:bg-surface-50 border border-border text-foreground text-[11px] font-medium transition-colors shrink-0 flex items-center space-x-1"
+                            title="终止该进程及其派生的整个子进程树"
+                          >
+                            <Square className="w-3 h-3 text-foreground" />
+                            <span>{stoppingProcId === proc.proc_id ? '终止中' : '终止'}</span>
+                          </button>
+                        )}
                       </div>
                     );
                   })}

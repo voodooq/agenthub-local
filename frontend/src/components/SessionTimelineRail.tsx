@@ -379,7 +379,7 @@ export function SessionTimelineRail({ messages, containerRef }: SessionTimelineR
         <div
           onMouseEnter={handlePopoverMouseEnter}
           onMouseLeave={handlePopoverMouseLeave}
-          className="absolute right-8 z-50 w-72 rounded-xl bg-surface-100/95 dark:bg-surface-200/95 text-foreground border border-border shadow-2xl backdrop-blur-xl p-3 text-xs animate-scale-in origin-right transition-all duration-150 pointer-events-auto"
+          className="absolute right-8 z-50 w-72 rounded-xl bg-surface-card text-foreground border border-border shadow-2xl p-3 text-xs animate-scale-in origin-right transition-all duration-150 pointer-events-auto"
           style={{
             top: Math.max(0, Math.min(window.innerHeight - 360, hoveredNode.anchorTop - 28)),
           }}

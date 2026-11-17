@@ -167,6 +167,13 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
           <span className="text-xs text-foreground truncate max-w-[280px] sm:max-w-[420px] font-mono">
             {loop.goal_prompt}
           </span>
+
+          {loop.loop_status === 'executing' && loop.scratchpad_md?.includes('Sub-Agent') && (
+            <span className="text-[10px] px-2 py-0.5 rounded-full bg-surface-200 border border-border text-foreground font-mono flex items-center space-x-1 shrink-0">
+              <span className="w-1.5 h-1.5 rounded-full bg-foreground animate-pulse"></span>
+              <span>只读侦察兵并发中</span>
+            </span>
+          )}
         </div>
 
         <div className="flex items-center space-x-1.5 flex-shrink-0">

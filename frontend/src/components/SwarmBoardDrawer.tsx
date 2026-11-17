@@ -43,7 +43,7 @@ function renderHighlightedSwarmText(rawText: string): React.ReactNode {
       return (
         <span
           key={idx}
-          className="inline-flex items-center px-1.5 py-0.2 mx-0.5 rounded bg-violet-500/15 text-violet-600 dark:text-violet-300 border border-violet-500/30 font-mono text-[11px] font-semibold"
+          className="inline-flex items-center px-1.5 py-0.2 mx-0.5 rounded bg-surface-200 text-foreground border border-border font-mono text-[11px] font-semibold"
         >
           {part}
         </span>
@@ -431,7 +431,7 @@ export function SwarmBoardDrawer({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex justify-end bg-black/50 animate-fade-in"
+      className="fixed inset-0 z-50 flex justify-end bg-black/80 animate-fade-in"
       onClick={onClose}
     >
       <div

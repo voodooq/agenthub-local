@@ -386,7 +386,7 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
 
       {/* 任务执行详情与运行历史弹窗 */}
       {detailTask && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
           <div className="w-full max-w-4xl max-h-[85vh] rounded-2xl border border-border bg-surface-card shadow-2xl flex flex-col overflow-hidden">
             {/* 弹窗头部 */}
             <div className="px-6 py-4 border-b border-border flex items-center justify-between gap-4">

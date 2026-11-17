@@ -64,7 +64,7 @@ class PolicyInterceptor:
         read_only_tools = {
             "read_file", "search_files", "list_dir", "get_file_info", 
             "fts_search", "web_search", "inspect_code", "ask_question",
-            "read_process_logs", "list_background_processes",
+            "read_process_logs", "list_background_processes", "dispatch_research_subagents",
         }
         if tool_name in read_only_tools:
             return PolicyDecision(allowed=True, level="L0")

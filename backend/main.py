@@ -206,6 +206,13 @@ async def lifespan(app: FastAPI):
             await mcp_manager.shutdown_all()
         except Exception as e:
             logger.debug(f"关闭 MCP 进程池异常: {e}")
+        try:
+            from app.tools.background_process import BackgroundProcessManager
+            cleaned_bg = BackgroundProcessManager.get_instance().cleanup_all()
+            if cleaned_bg:
+                logger.info(f"[BackgroundProcessManager] 优雅关机：已回收 {cleaned_bg} 个活跃托管后台进程树")
+        except Exception as bg_clean_err:
+            logger.debug(f"[BackgroundProcessManager] 关机清理后台进程异常: {bg_clean_err}")
 
 
 app = FastAPI(

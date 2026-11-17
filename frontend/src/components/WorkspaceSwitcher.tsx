@@ -358,7 +358,7 @@ export function WorkspaceSwitcher({
 
       {/* 挂载本地工程目录确认弹窗 */}
       {isMountingModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 animate-fade-in">
           <div className="glass-modal border border-border w-full max-w-md rounded-2xl p-5 shadow-2xl space-y-4 animate-scale-in">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
@@ -456,7 +456,7 @@ export function WorkspaceSwitcher({
 
       {/* 新建托管沙盒工作区弹窗 */}
       {isCreatingVirtual && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 animate-fade-in">
           <div className="glass-modal border border-border w-full max-w-sm rounded-2xl p-5 shadow-2xl space-y-4 animate-scale-in">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">

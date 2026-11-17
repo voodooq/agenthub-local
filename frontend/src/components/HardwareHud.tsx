@@ -49,7 +49,7 @@ export function HardwareHud({ isOpen, onToggle, onProposeProcessKill }: Hardware
   const cpuColor = cpuPercent > 80 ? 'text-rose-600 dark:text-rose-400' : cpuPercent > 50 ? 'text-amber-600 dark:text-amber-400' : 'text-emerald-600 dark:text-emerald-400';
 
   return (
-    <div className="w-full bg-surface-100/95 backdrop-blur-md border-t border-border p-4 transition-all animate-slide-up shadow-2xl z-20">
+    <div className="w-full bg-surface-card border-t border-border p-4 transition-all animate-slide-up shadow-2xl z-20">
       <div className="max-w-6xl mx-auto space-y-4">
         {/* 顶部标题与控制器 */}
         <div className="flex items-center justify-between border-b border-border pb-2.5">

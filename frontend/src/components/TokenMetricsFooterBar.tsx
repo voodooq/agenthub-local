@@ -73,8 +73,8 @@ export function TokenMetricsFooterBar({ stats, onOpenStats }: TokenMetricsFooter
       >
         {/* 轮次与上下文水位 */}
         <span className="inline-flex items-center space-x-1">
-          <BarChart3 className="w-3 h-3 text-emerald-500 shrink-0" />
-          <span className="font-mono text-[10px] text-foreground/80 font-semibold">[Turn {stats.turn_id}]</span>
+          <BarChart3 className="w-3 h-3 text-foreground shrink-0" />
+          <span className="font-mono text-[10px] text-foreground font-semibold">[Turn {stats.turn_id}]</span>
           <span>上下文:</span>
           <span className={`font-mono ${contextBadgeClass}`}>{contextText}</span>
         </span>
@@ -83,15 +83,15 @@ export function TokenMetricsFooterBar({ stats, onOpenStats }: TokenMetricsFooter
 
         {/* KV Cache 命中率 */}
         <span className="inline-flex items-center space-x-1">
-          <Zap className={`w-3 h-3 shrink-0 ${stats.cached_tokens > 0 ? 'text-amber-500' : 'text-muted-foreground/60'}`} />
+          <Zap className="w-3 h-3 text-foreground shrink-0" />
           <span>缓存命中:</span>
-          <span className={`font-mono ${stats.cached_tokens > 0 ? 'text-amber-600 dark:text-amber-300 font-medium' : ''}`}>
+          <span className="font-mono text-foreground font-medium">
             {cacheText}
           </span>
           {showLocalCacheMissWarn && (
             <span
               title="本地引擎多轮对话未复用 KV Cache：请确认 llama-server 已添加 --cache-reuse 256，且多并发时按总上下文除以 -np 设置单槽位上限"
-              className="inline-flex items-center space-x-0.5 px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-600 dark:text-amber-300 border border-amber-500/30 text-[10px] font-medium"
+              className="inline-flex items-center space-x-0.5 px-1.5 py-0.2 rounded bg-surface-200 text-foreground border border-border text-[10px] font-medium"
             >
               <AlertTriangle className="w-2.5 h-2.5" />
               <span>未复用缓存</span>
@@ -103,9 +103,9 @@ export function TokenMetricsFooterBar({ stats, onOpenStats }: TokenMetricsFooter
 
         {/* 旁路脱水与坍缩节省 */}
         <span className="inline-flex items-center space-x-1">
-          <Scissors className="w-3 h-3 text-teal-500 shrink-0" />
+          <Scissors className="w-3 h-3 text-foreground shrink-0" />
           <span>已脱水节省:</span>
-          <span className={`font-mono ${stats.saved_tokens > 0 ? 'text-teal-600 dark:text-teal-300 font-medium' : ''}`}>
+          <span className="font-mono text-foreground font-medium">
             {formatCompactTokens(stats.saved_tokens)} tokens
           </span>
         </span>
@@ -114,9 +114,9 @@ export function TokenMetricsFooterBar({ stats, onOpenStats }: TokenMetricsFooter
 
         {/* 首字延迟与生成吞吐 */}
         <span className="inline-flex items-center space-x-1">
-          <Timer className="w-3 h-3 text-indigo-500 shrink-0" />
+          <Timer className="w-3 h-3 text-foreground shrink-0" />
           <span>TTFT:</span>
-          <span className="font-mono text-foreground/85">{latencyText}</span>
+          <span className="font-mono text-foreground">{latencyText}</span>
           {stats.is_estimated && (
             <span
               title="当前底层推理通道未返回原生精确 usage 字节计数，数值基于本地分词器估算"

@@ -930,7 +930,7 @@ export function AgentsView({
             setIsModalOpen(false);
             setEditingAgent(null);
           }}
-          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 animate-fade-in"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 animate-fade-in"
         >
           <div 
             onClick={(e) => e.stopPropagation()}
