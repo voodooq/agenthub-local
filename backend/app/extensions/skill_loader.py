@@ -321,7 +321,7 @@ class SkillLoader:
         return clean or "custom-skill"
 
     @classmethod
-    def _parse_frontmatter(cls, md_text: str, fallback_name: str) -> dict[str, str]:
+    def _parse_frontmatter(cls, md_text: str, fallback_name: str) -> dict[str, Any]:
         """解析 SKILL.md 顶部的 YAML Frontmatter，并提取去除 Frontmatter 后的纯正文"""
         safe_fallback = cls._sanitize_skill_id(fallback_name)
         name = safe_fallback
