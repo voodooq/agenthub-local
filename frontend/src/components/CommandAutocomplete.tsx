@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
-import { SkillCategoryTabs, ALL_CATEGORY, resolveSkillCategory } from './SkillCategoryTabs';
+import { SkillCategoryTabs, SkillEnvironmentBadge, ALL_CATEGORY, resolveSkillCategory } from './SkillCategoryTabs';
 import {
   Cpu,
   Terminal,
@@ -41,6 +41,7 @@ interface CommandItem {
   hasDoc?: boolean;
   skillId?: string;
   category?: string;
+  envBadge?: string;
   mcpServer?: string;
   mcpEnabled?: boolean | null;
 }
@@ -251,7 +252,9 @@ function mapExtensionSkillsToCommands(skills: ExtensionSkillItem[]): CommandItem
       docBody: docText ? String(docText) : undefined,
       hasDoc: Boolean(docText || sk.has_content || skillId),
       skillId,
-      category: resolveSkillCategory({ ...sk, id: skillId }),      mcpServer: sk.mcp_server || undefined,
+      category: resolveSkillCategory({ ...sk, id: skillId }),
+      envBadge: sk.env_badge || undefined,
+      mcpServer: sk.mcp_server || undefined,
       mcpEnabled: sk.mcp_enabled ?? null,
     });
   }
@@ -635,6 +638,9 @@ export function CommandAutocomplete({
                         >
                           {item.badge}
                         </span>
+                      )}
+                      {item.envBadge && (
+                        <SkillEnvironmentBadge skill={{ env_badge: item.envBadge }} />
                       )}
                     </div>
                     <div className="text-[11px] text-muted-foreground truncate">{item.description}</div>

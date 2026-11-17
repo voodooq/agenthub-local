@@ -81,19 +81,39 @@ DEFAULT_SKILL_CATEGORY = "工程与架构"
 
 # NOTE: 已知技能 ID 的精确映射优先；未知技能再按关键词推断
 _SKILL_CATEGORY_BY_ID: dict[str, str] = {
-    **dict.fromkeys(("office-excel", "office-ppt", "email-assistant", "knowledge-base-master", "slides", "to-spec"), "办公与文档"),
+    # 1. 办公与文档
     **dict.fromkeys(
-        ("git-commit-helper", "code-review", "codebase-design", "diagnosing-bugs", "tdd", "to-tickets",
-         "grill-me", "grill-with-docs", "permissioned-github"),
+        ("excel-data-suite", "office-ppt", "interactive-slides", "mail-assistant", "knowledge-base-master",
+         "office-excel", "email-assistant", "slides", "to-spec"),
+        "办公与文档",
+    ),
+    # 2. 工程与架构
+    **dict.fromkeys(
+        ("code-architecture-review", "tdd", "diagnosing-bugs",
+         "git-commit-helper", "code-review", "codebase-design"),
         "工程与架构",
     ),
+    # 3. 视觉与设计
     **dict.fromkeys(
-        ("banner-design", "brand", "design", "design-system", "ui-styling", "ui-ux-pro-max", "generative-ui"),
+        ("ui-ux-design-pro", "brand-visual-design", "generative-ui",
+         "banner-design", "brand", "design", "design-system", "ui-styling", "ui-ux-pro-max"),
         "视觉与设计",
     ),
-    **dict.fromkeys(("research", "data-audit"), "调研与分析"),
-    **dict.fromkeys(("plugin", "mcp-app-development", "skill-creator"), "插件与扩展"),
-    **dict.fromkeys(("local-env-doctor", "windows-app-master", "windows-gui-operator"), "系统与自动化"),
+    # 4. 调研与分析
+    **dict.fromkeys(
+        ("spec-architect", "deep-research", "research", "data-audit", "grill-me", "grill-with-docs", "to-tickets"),
+        "调研与分析",
+    ),
+    # 5. 插件与扩展
+    **dict.fromkeys(
+        ("extension-creator", "plugin", "mcp-app-development", "skill-creator", "permissioned-github"),
+        "插件与扩展",
+    ),
+    # 6. 系统与自动化
+    **dict.fromkeys(
+        ("windows-system-operator", "local-env-doctor", "windows-app-master", "windows-gui-operator"),
+        "系统与自动化",
+    ),
 }
 _SKILL_CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("插件与扩展", ("mcp", "plugin", "插件", "扩展")),
@@ -124,6 +144,68 @@ def infer_skill_category(
         if any(w in haystack for w in words):
             return category
     return DEFAULT_SKILL_CATEGORY
+
+
+def get_current_os() -> str:
+    """获取当前宿主机操作系统标识：windows / linux / macos。"""
+    if sys.platform.startswith("win"):
+        return "windows"
+    if sys.platform.startswith("darwin"):
+        return "macos"
+    return "linux"
+
+
+def evaluate_skill_environment(env_raw: Any) -> dict[str, Any]:
+    """
+    根据当前宿主机环境判定技能的兼容性，并输出环境元数据字典。
+    支持在 SKILL.md Frontmatter 中配置：
+      environment:
+        os: ["windows"] # 或 ["all"] / ["linux", "macos"]
+        requires_gui: true/false
+        requires_runtime: ["python", "powershell", "node"]
+        requires_cli: ["git", "docker"]
+    """
+    current_os = get_current_os()
+    if not isinstance(env_raw, dict):
+        return {
+            "os": ["all"],
+            "requires_gui": False,
+            "requires_runtime": [],
+            "requires_cli": [],
+            "compatible": True,
+            "env_badge": "跨平台",
+        }
+
+    raw_os = env_raw.get("os")
+    os_list: list[str] = []
+    if isinstance(raw_os, list):
+        os_list = [str(x).strip().lower() for x in raw_os if str(x).strip()]
+    elif isinstance(raw_os, str) and raw_os.strip():
+        os_list = [raw_os.strip().lower()]
+    if not os_list:
+        os_list = ["all"]
+
+    # 操作系统兼容性判定
+    is_compatible = "all" in os_list or "cross-platform" in os_list or current_os in os_list
+
+    # 环境徽标计算
+    if "windows" in os_list and len(os_list) == 1:
+        badge = "Windows"
+    elif "linux" in os_list and len(os_list) == 1:
+        badge = "Linux"
+    elif "macos" in os_list and len(os_list) == 1:
+        badge = "macOS"
+    else:
+        badge = "跨平台"
+
+    return {
+        "os": os_list,
+        "requires_gui": bool(env_raw.get("requires_gui", False)),
+        "requires_runtime": list(env_raw.get("requires_runtime") or []),
+        "requires_cli": list(env_raw.get("requires_cli") or []),
+        "compatible": is_compatible,
+        "env_badge": badge,
+    }
 
 
 def parse_yaml_frontmatter_kv(yaml_block: str) -> dict[str, str]:
@@ -174,11 +256,12 @@ class SkillLoader:
     """本地 Skill 四元组容器扫描、FTS5 领域知识同步、随包算子执行与热插拔加载器"""
 
     BUILTIN_IDS = {
-        "git-commit-helper",
-        "local-env-doctor",
-        "windows-app-master",
-        "windows-gui-operator",
-        "skill-creator",
+        "code-architecture-review",
+        "windows-system-operator",
+        "extension-creator",
+        "ui-ux-design-pro",
+        "spec-architect",
+        "excel-data-suite",
     }
 
     def __init__(
@@ -213,85 +296,10 @@ class SkillLoader:
             pass
 
     def _ensure_default_skills(self) -> None:
-        """确保本地 skills 目录存在，先增量释放只读 Bundle 内嵌技能，再兜底补全标准 Skill"""
+        """确保本地 skills 目录存在，并增量释放只读 Bundle 内嵌技能"""
         try:
             self.skills_dir.mkdir(parents=True, exist_ok=True)
             seed_builtin_skills(get_bundle_root(), self.skills_dir)
-
-            # 1. Git 提交助手
-            git_skill_dir = self.skills_dir / "git-commit-helper"
-            if not (git_skill_dir / "SKILL.md").exists():
-                git_skill_dir.mkdir(parents=True, exist_ok=True)
-                (git_skill_dir / "SKILL.md").write_text(
-                    "---\n"
-                    "name: git-commit-helper\n"
-                    "command: /git\n"
-                    "type: skill\n"
-                    "description: 遵循 Conventional Commits 规范审查 Git 改动并生成高质量中英文提交信息。\n"
-                    "---\n\n"
-                    "# Git 提交规范助手 (Git Commit Helper)\n\n"
-                    "## 适用场景\n"
-                    "- 审查当前工作区改动并生成符合规范的 Git Commit Message。\n\n"
-                    "## 执行步骤\n"
-                    "1. 先使用 `execute_local_command` 执行 `git status` 和 `git diff --stat` 查看变更范围；\n"
-                    "2. 严格遵循 `<type>(<scope>): <subject>` 格式（如 `feat`, `fix`, `refactor`, `docs`）；\n"
-                    "3. 严禁将 `.env`、`*.db`、`*.log` 或含个人密钥的文件纳入暂存区。\n",
-                    encoding="utf-8",
-                )
-
-            # 2. 本机研发环境诊断专家
-            doctor_skill_dir = self.skills_dir / "local-env-doctor"
-            if not (doctor_skill_dir / "SKILL.md").exists():
-                doctor_skill_dir.mkdir(parents=True, exist_ok=True)
-                (doctor_skill_dir / "SKILL.md").write_text(
-                    "---\n"
-                    "name: local-env-doctor\n"
-                    "command: /doctor\n"
-                    "type: skill\n"
-                    "description: 排查本机端口占用、僵尸进程、Python/Node 环境依赖冲突与磁盘空间告警。\n"
-                    "---\n\n"
-                    "# 本机研发环境诊断专家 (Local Env Doctor)\n\n"
-                    "## 适用场景\n"
-                    "- 本地开发端口死锁、僵尸进程清理、虚拟环境依赖诊断。\n\n"
-                    "## 执行步骤\n"
-                    "1. 排查端口占用时，先通过 `netstat -ano` 查找对应 PID，再通过 `tasklist` 核实进程名；\n"
-                    "2. 发现目标 PID 与进程名称后，立即调用 `update_working_memory` 记录到任务草稿纸；\n"
-                    "3. 若需终止进程，调用 `execute_local_command` 发起 `taskkill /PID <pid> /F`。\n",
-                    encoding="utf-8",
-                )
-
-            # 3. 3分钟零门槛建 Skill 母技能 (Built-in Skill Creator)
-            creator_dir = self.skills_dir / "skill-creator"
-            if not (creator_dir / "SKILL.md").exists():
-                creator_dir.mkdir(parents=True, exist_ok=True)
-                (creator_dir / "SKILL.md").write_text(
-                    "---\n"
-                    "name: skill-creator\n"
-                    "command: /new-skill\n"
-                    "type: skill\n"
-                    "description: 【系统母技能】通过自然语言对话或总结刚才的操作步骤，3分钟自动生成标准四元组 Skill 技能包并热加载。\n"
-                    "---\n\n"
-                    "# 智能 Skill 构建母技能 (Built-in Skill Creator)\n\n"
-                    "## 1. 功能定位\n"
-                    "当用户输入 `/new-skill <需求描述>` 或要求“把刚才我们执行的步骤保存为一个新 Skill”时，自动在 `skills/<skill-id>/` 下创建符合 AgentHub 四元组标准的技能容器。\n\n"
-                    "## 2. 标准四元组目录结构 (Skill-as-a-Folder)\n"
-                    "```text\n"
-                    "skills/<skill-id>/\n"
-                    "├── SKILL.md                      # [必选] YAML 头信息 (name, command, type, description) + 详细 SOP 规程\n"
-                    "├── tools/                        # [可选] 确定性 Python 算子脚本 (如 tools/calculator.py)，接收命令行 JSON 参数并输出标准结果\n"
-                    "├── knowledge/                    # [可选] 领域参考文档 (*.md / *.txt / *.csv)，系统自动切块挂载至 SQLite FTS5 引擎\n"
-                    "│   └── experience_playbook.md    # [演进] 实战避坑守则与报错恢复三元组经验本\n"
-                    "└── schema.json                   # [可选] 结构化输出 JSON Schema 校验契约\n"
-                    "```\n\n"
-                    "## 3. 构建与参数化沉淀规范\n"
-                    "1. 提炼用户需求或当前会话已跑通的操作流程，确定 `kebab-case` 格式的 `<skill-id>` 与 `/<command>`；\n"
-                    "2. 调用 `write_local_file` 创建 `skills/<skill-id>/SKILL.md`；需要动态输入的参数统一采用 `{{参数名:默认值}}` 模板占位符标注；\n"
-                    "3. 若任务涉及精确计算、表格核验或外部接口调用，在 `skills/<skill-id>/tools/` 下编写对应的 Python 脚本；\n"
-                    "4. 若任务包含特定规程、模板或实战报错自愈经验，写入 `skills/<skill-id>/knowledge/experience_playbook.md`；\n"
-                    "5. 若具备固定交付字段或参数契约，同步生成 `skills/<skill-id>/schema.json`（含 `required` 字段校验）；\n"
-                    "6. 告知用户技能已热加载就绪，可直接在输入框输入 `/<command>` 查看说明并调用。\n",
-                    encoding="utf-8",
-                )
         except Exception as e:
             logger.warning(f"初始化默认 skills 目录失败: {e}")
 
@@ -315,12 +323,22 @@ class SkillLoader:
         version = "1.0.0"
         updated_at = ""
         declared_category = ""
+        env_raw: Any = None
         body = md_text.strip()
 
         match = re.match(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?(.*)", md_text, re.DOTALL)
         if match:
             yaml_block = match.group(1)
             body = match.group(2).strip()
+            # 优先使用 safe_load 解析复杂结构
+            try:
+                import yaml
+                loaded = yaml.safe_load(yaml_block)
+                if isinstance(loaded, dict):
+                    env_raw = loaded.get("environment")
+            except Exception:
+                pass
+
             kv = parse_yaml_frontmatter_kv(yaml_block)
             if kv.get("name"):
                 name = cls._sanitize_skill_id(kv["name"])
@@ -352,6 +370,8 @@ class SkillLoader:
             m_title = re.search(r"^#\s+(.+)$", body, re.MULTILINE)
             description = m_title.group(1).strip()[:80] if m_title else "本地扩展专业技能包"
 
+        env_info = evaluate_skill_environment(env_raw)
+
         return {
             "name": name,
             "command": command,
@@ -363,6 +383,10 @@ class SkillLoader:
             "updated_at": updated_at,
             "description": description,
             "body": body,
+            "environment": env_info,
+            "compatible": env_info["compatible"],
+            "env_badge": env_info["env_badge"],
+            "supported_os": env_info["os"],
         }
 
     @staticmethod
@@ -794,6 +818,10 @@ class SkillLoader:
                 "description": meta["description"],
                 "path": str(skill_md.resolve()),
                 "is_builtin": item.name in self.BUILTIN_IDS,
+                "environment": meta.get("environment") or {},
+                "compatible": meta.get("compatible", True),
+                "env_badge": meta.get("env_badge", "跨平台"),
+                "supported_os": meta.get("supported_os", ["all"]),
                 "has_content": True,
             }
 
@@ -847,6 +875,10 @@ class SkillLoader:
             "description": cached_base["description"],
             "path": cached_base["path"],
             "is_builtin": cached_base["is_builtin"],
+            "environment": cached_base.get("environment") or {},
+            "compatible": cached_base.get("compatible", True),
+            "env_badge": cached_base.get("env_badge", "跨平台"),
+            "supported_os": cached_base.get("supported_os", ["all"]),
             "has_content": True,
         }
         if include_content:
@@ -1639,17 +1671,23 @@ class SkillLoader:
         )
 
     def get_skills_summary_prompt(self, include_dev_spec: bool = False) -> str:
-        """生成极简的可用 Skill/MCP 列表摘要；开发规范仅在 include_dev_spec=True 时按需附加"""
+        """生成适配当前宿主机环境的可用 Skill/MCP 列表摘要；自动过滤不兼容当前环境的技能"""
         skills = self.list_skills(include_content=False)
-        lines = ["### 🧩 已挂载的本地专业技能包与 MCP 封装规程 (Skills & MCP Summary)："]
-        if skills:
+        # 环境过滤：当前系统完全兼容的技能优先展示，不兼容的技能不注入提示词
+        compatible_skills = [s for s in skills if s.get("compatible", True)]
+        current_os_desc = get_current_os().upper()
+        lines = [f"### 🧩 已挂载的本地专业技能包与 MCP 封装规程 (环境: {current_os_desc})："]
+        if compatible_skills:
             lines.append(
                 "当任务匹配以下技能或用户输入对应 `/命令` 时，请调用 `load_skill_detail(skill_name)` 激活；"
                 "若技能含 `knowledge/` 可调用 `search_skill_knowledge` 检索规程，含 `tools/` 可调用 `run_skill_tool` 执行随包算子："
             )
-            for s in skills:
+            for s in compatible_skills:
                 tag = "[MCP封装]" if s.get("type") == "mcp" else ("[Pro套件]" if s.get("type") == "suite" else "[SKILL]")
                 extras = []
+                badge = s.get("env_badge")
+                if badge and badge != "跨平台":
+                    extras.append(f"🖥️{badge}")
                 if s.get("has_tools"):
                     extras.append("🔧含算子")
                 if s.get("has_knowledge"):
@@ -1660,7 +1698,7 @@ class SkillLoader:
                 ver_tag = f" v{s.get('version', '1.0.0')}"
                 lines.append(f"- {tag} `{s['name']}`{ver_tag} (快捷命令 `{s['command']}`){extra_str}: {s['description']}")
         else:
-            lines.append("（当前暂无本地技能包）")
+            lines.append("（当前暂无适用于本环境的本地技能包）")
 
         if include_dev_spec:
             lines.append("\n" + self.get_skill_dev_spec_prompt())

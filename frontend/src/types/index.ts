@@ -476,6 +476,15 @@ export interface SkillItem {
   has_playbook?: boolean;
   sop_content?: string;
   experience_highlights?: string;
+  compatible?: boolean;
+  env_badge?: string;
+  environment?: {
+    os?: string[];
+    requires_gui?: boolean;
+    requires_runtime?: string[];
+    requires_cli?: string[];
+  };
+  supported_os?: string[];
 }
 
 export interface ExtensionSkillItem {
@@ -500,6 +509,15 @@ export interface ExtensionSkillItem {
   has_content?: boolean;
   content?: string;
   body?: string;
+  compatible?: boolean;
+  env_badge?: string;
+  environment?: {
+    os?: string[];
+    requires_gui?: boolean;
+    requires_runtime?: string[];
+    requires_cli?: string[];
+  };
+  supported_os?: string[];
 }
 
 export interface SkillVersionItem {

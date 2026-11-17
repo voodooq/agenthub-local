@@ -26,7 +26,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { Workspace, SkillItem, AgentItem } from '@/types';
-import { SkillCategoryTabs, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
+import { SkillCategoryTabs, SkillEnvironmentBadge, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
 import { ModelOption } from '@/components/ModelSelector';
 import { apiFetch } from '@/utils/apiClient';
 import {
@@ -1019,6 +1019,7 @@ export function AgentsView({
                                         {sk.command}
                                       </span>
                                     )}
+                                    <SkillEnvironmentBadge skill={sk} />
                                   </div>
                                   <div className="text-[11px] text-muted-foreground truncate mt-0.5">
                                     {sk.description || '标准执行 SOP 技能包'}

@@ -1,8 +1,16 @@
 ---
 name: diagnosing-bugs
-description: "疑难缺陷假设排查：建立系统化的根因假设与证据链排查循环，快速收敛复杂 Bug 和性能退化问题。当遇到难以复现的复杂 Bug 或系统卡顿报错时使用。"
-version: 1.0.0
+command: /debug
+version: 1.1.0
 category: 工程与架构
+type: skill
+environment:
+  os:
+    - all
+  requires_gui: false
+  requires_runtime:
+    - python
+description: 疑难缺陷假设排查：建立系统化的根因假设与证据链排查循环，快速收敛复杂 Bug 和性能退化问题。当遇到难以复现的复杂 Bug 或系统卡顿报错时使用。
 ---
 # Diagnosing Bugs
 

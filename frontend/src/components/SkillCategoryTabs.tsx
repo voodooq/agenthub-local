@@ -14,6 +14,42 @@ interface CategorizableSkill {
   name?: string;
   command?: string;
   category?: string;
+  env_badge?: string;
+  compatible?: boolean;
+}
+
+/**
+ * 渲染技能运行环境徽标 (Windows / 跨平台 / Linux / macOS)
+ */
+export function SkillEnvironmentBadge({ skill }: { skill: CategorizableSkill }) {
+  const badge = skill.env_badge || '跨平台';
+  const isWindows = badge.includes('Windows') || badge.includes('win');
+  const isLinux = badge.includes('Linux');
+  const isMac = badge.includes('macOS') || badge.includes('Mac');
+
+  let icon = '🌐';
+  let colorClass = 'bg-sky-500/10 text-sky-600 dark:text-sky-400 border-sky-500/20';
+
+  if (isWindows) {
+    icon = '🪟';
+    colorClass = 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20';
+  } else if (isLinux) {
+    icon = '🐧';
+    colorClass = 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20';
+  } else if (isMac) {
+    icon = '🍎';
+    colorClass = 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20';
+  }
+
+  return (
+    <span
+      className={`inline-flex items-center gap-1 px-1.5 py-0.2 rounded text-[10px] font-medium border ${colorClass}`}
+      title={isWindows ? '仅限 Windows 宿主机运行' : '全平台通用'}
+    >
+      <span>{icon}</span>
+      <span>{badge}</span>
+    </span>
+  );
 }
 
 /**

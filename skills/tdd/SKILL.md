@@ -1,8 +1,14 @@
 ---
 name: tdd
-description: "测试驱动开发：严格执行红-绿-重构（Red-Green-Refactor）TDD 循环，先写失败用例再写最小实现。当需要测试先行开发新功能、修 Bug 或编写高可靠单测时使用。"
-version: 1.0.0
+command: /tdd
+version: 1.1.0
 category: 工程与架构
+type: skill
+environment:
+  os:
+    - all
+  requires_gui: false
+description: 测试驱动开发（TDD）：严格执行红-绿-重构（Red-Green-Refactor）TDD 循环，先写失败用例再写最小实现。当需要测试先行开发新功能、修 Bug 或编写高可靠单测时使用。
 ---
 # Test-Driven Development
 

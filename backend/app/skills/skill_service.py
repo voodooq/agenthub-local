@@ -73,16 +73,25 @@ def _resolve_project_root() -> Path:
     return writable_root
 
 
-def _extract_frontmatter_fields(fm_text: str, default_name: str) -> dict[str, str]:
-    """从 YAML Frontmatter 块提取核心展示字段（兼容多行 YAML 描述）。"""
-    from ..extensions.skill_loader import normalize_version_str, parse_yaml_frontmatter_kv
+def _extract_frontmatter_fields(fm_text: str, default_name: str) -> dict[str, Any]:
+    """从 YAML Frontmatter 块提取核心展示字段与环境配置（兼容多行 YAML 描述）。"""
+    from ..extensions.skill_loader import evaluate_skill_environment, normalize_version_str, parse_yaml_frontmatter_kv
 
-    parsed = {
+    parsed: dict[str, Any] = {
         "name": default_name,
         "command": f"/{default_name}",
         "description": "",
         "version": "1.0.0",
     }
+    env_raw = None
+    try:
+        import yaml
+        loaded = yaml.safe_load(fm_text)
+        if isinstance(loaded, dict):
+            env_raw = loaded.get("environment")
+    except Exception:
+        pass
+
     kv = parse_yaml_frontmatter_kv(fm_text)
     for k in ("name", "command", "description", "version", "updated_at", "category"):
         v = kv.get(k)
@@ -94,6 +103,12 @@ def _extract_frontmatter_fields(fm_text: str, default_name: str) -> dict[str, st
             parsed[k] = re.sub(r"\s+", " ", v).strip()
         else:
             parsed[k] = v
+
+    env_info = evaluate_skill_environment(env_raw)
+    parsed["environment"] = env_info
+    parsed["compatible"] = env_info["compatible"]
+    parsed["env_badge"] = env_info["env_badge"]
+    parsed["supported_os"] = env_info["os"]
     return parsed
 
 
@@ -199,6 +214,10 @@ class SkillService:
             "category": infer_skill_category(
                 Path(folder_path).name, skill_name, parsed.get("description", ""), parsed.get("category")
             ),
+            "environment": parsed.get("environment") or {},
+            "compatible": parsed.get("compatible", True),
+            "env_badge": parsed.get("env_badge", "跨平台"),
+            "supported_os": parsed.get("supported_os", ["all"]),
         }
         if parsed.get("updated_at"):
             record["updated_at"] = parsed["updated_at"]

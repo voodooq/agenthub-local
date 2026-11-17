@@ -1,9 +1,14 @@
 ---
 name: knowledge-base-master
 command: /kb
-description: 加载知识库管理与交互技能（支持权重分级、去重清洗、Markdown 知识图谱增删改查落盘）
-version: 1.0.0
+version: 1.1.0
 category: 办公与文档
+type: skill
+environment:
+  os:
+    - all
+  requires_gui: false
+description: 知识库中枢与交互技能：支持知识库权重分级、去重清洗、以及本地 Markdown 知识图谱增删改查。
 ---
 # 知识库管理与交互技能 (Knowledge Base Master)
 

@@ -1,8 +1,14 @@
 ---
 name: generative-ui
-description: How to render rich interactive HTML widgets inline in the chat or as standalone artifacts. Use this skill when you want to show the user diagrams, data visualizations, interactive controls, educational walkthroughs, or any rich visual content beyond plain text and markdown.
-version: 1.0.0
+command: /gen-ui
+version: 1.1.0
 category: 视觉与设计
+type: skill
+environment:
+  os:
+    - all
+  requires_gui: false
+description: 动态交互 UI 渲染：为用户生成富交互式 HTML/SVG Widget 卡片、图表与数据可视化演示组件，支持即时预览与交互反馈。
 ---
 # Generative UI
 
