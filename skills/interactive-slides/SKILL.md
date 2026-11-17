@@ -1,4 +1,4 @@
----
+<!--  -->---
 name: interactive-slides
 command: /slides
 version: 1.1.0

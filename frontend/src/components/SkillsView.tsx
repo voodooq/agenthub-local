@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { SkillCategoryTabs, SkillEnvironmentBadge, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
+import { SkillCategoryTabs, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
 import {
   Layers,
   Sparkles,
@@ -363,7 +363,6 @@ export function SkillsView({ workspace }: SkillsViewProps) {
                                 {t('全局底座')}
                               </span>
                             )}
-                            <SkillEnvironmentBadge skill={sk} />
                           </div>
 
                           <p className="text-xs text-muted-foreground mt-1 line-clamp-2">

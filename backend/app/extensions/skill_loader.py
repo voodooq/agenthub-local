@@ -69,6 +69,16 @@ def bump_semver(raw: str | None, level: str = "minor") -> str:
     return f"{major}.{minor + 1}.0"
 
 
+# 已废弃并被合并重组的历史技能 ID 集合：系统底层严禁再次扫描加载或暴露
+DEPRECATED_OLD_SKILL_IDS: frozenset[str] = frozenset({
+    "banner-design", "brand", "code-review", "codebase-design", "data-audit",
+    "design", "design-system", "email-assistant", "git-commit-helper",
+    "grill-me", "grill-with-docs", "local-env-doctor", "mcp-app-development",
+    "office-excel", "permissioned-github", "plugin", "research",
+    "skill-creator", "slides", "to-spec", "to-tickets", "ui-styling",
+    "ui-ux-pro-max", "windows-app-master", "windows-gui-operator",
+})
+
 SKILL_CATEGORIES: tuple[str, ...] = (
     "办公与文档",
     "工程与架构",
@@ -1014,6 +1024,8 @@ class SkillLoader:
                 continue
 
             for entry in dir_entries:
+                if entry.name in DEPRECATED_OLD_SKILL_IDS:
+                    continue
                 item = Path(entry.path)
                 skill_md = item / "SKILL.md"
                 try:
@@ -1029,6 +1041,11 @@ class SkillLoader:
                         mcp_servers=mcp_servers,
                         include_content=include_content,
                     )
+                    # 自动检测操作系统支持度：当前环境不能使用的就不显示、不加载
+                    if not record.get("compatible", True):
+                        continue
+                    if record.get("name") in DEPRECATED_OLD_SKILL_IDS or record.get("id") in DEPRECATED_OLD_SKILL_IDS:
+                        continue
                     if record.get("mcp_server"):
                         bound_mcp_names.add(record["mcp_server"])
                     results.append(record)

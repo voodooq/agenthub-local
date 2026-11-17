@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
-import { SkillCategoryTabs, SkillEnvironmentBadge, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
+import { SkillCategoryTabs, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
 import { Folder, Globe, FileText, X, ChevronDown } from 'lucide-react';
 import { SkillItem } from '@/types';
 import { useLanguage } from '@/context/LanguageContext';
@@ -216,7 +216,6 @@ export function SkillPickerModal({
                             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface-200 text-muted-foreground border border-border/70 flex-shrink-0">
                               v{sk.version || '1.0.0'}
                             </span>
-                            <SkillEnvironmentBadge skill={sk} />
                             <span className="text-xs text-foreground truncate">{sk.description || sk.name}</span>
                             {sk.is_override && (
                               <span className="text-[10px] bg-amber-500/20 text-amber-600 dark:text-amber-300 border border-amber-500/30 px-1.5 py-0.2 rounded flex-shrink-0">
@@ -266,7 +265,6 @@ export function SkillPickerModal({
                             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-surface-200 text-muted-foreground border border-border/70 flex-shrink-0">
                               v{sk.version || '1.0.0'}
                             </span>
-                            <SkillEnvironmentBadge skill={sk} />
                             <span className="text-xs text-foreground truncate">{sk.description || sk.name}</span>
                           </div>
                           <button

@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
-import { SkillCategoryTabs, SkillEnvironmentBadge, ALL_CATEGORY, resolveSkillCategory } from './SkillCategoryTabs';
+import { SkillCategoryTabs, ALL_CATEGORY, resolveSkillCategory } from './SkillCategoryTabs';
 import {
   Cpu,
   Terminal,
@@ -638,9 +638,6 @@ export function CommandAutocomplete({
                         >
                           {item.badge}
                         </span>
-                      )}
-                      {item.envBadge && (
-                        <SkillEnvironmentBadge skill={{ env_badge: item.envBadge }} />
                       )}
                     </div>
                     <div className="text-[11px] text-muted-foreground truncate">{item.description}</div>

@@ -23,8 +23,24 @@ export interface SkillsUpdatedDetail {
   skillName?: string;
 }
 
-const WS_STORAGE_PREFIX = 'agenthub_skills_ws_cache_v1:';
-const EXT_STORAGE_KEY = 'agenthub_skills_ext_cache_v1';
+const WS_STORAGE_PREFIX = 'agenthub_skills_ws_cache_v2:';
+const EXT_STORAGE_KEY = 'agenthub_skills_ext_cache_v2';
+
+// 初始化时自动清理 v1 历史废弃旧缓存
+if (typeof window !== 'undefined') {
+  try {
+    const keysToRemove: string[] = [];
+    for (let i = 0; i < window.sessionStorage.length; i += 1) {
+      const k = window.sessionStorage.key(i);
+      if (k && (k.includes('_v1') || k.includes('agenthub_skills_ws_cache_v1'))) {
+        keysToRemove.push(k);
+      }
+    }
+    keysToRemove.forEach((k) => window.sessionStorage.removeItem(k));
+  } catch {
+    // 忽略 session storage 访问异常
+  }
+}
 
 const workspaceSkillsCache = new Map<string, SkillItem[]>();
 const workspaceInFlight = new Map<string, Promise<SkillItem[]>>();
@@ -124,7 +140,9 @@ export async function fetchWorkspaceSkills(
       throw new Error(`HTTP ${res.status}`);
     }
     const data = await res.json();
-    const list: SkillItem[] = Array.isArray(data.skills) ? data.skills : [];
+    const list: SkillItem[] = Array.isArray(data.skills)
+      ? data.skills.filter((s: SkillItem) => s.compatible !== false)
+      : [];
     workspaceSkillsCache.set(key, list);
     writeStorageJson(`${WS_STORAGE_PREFIX}${key}`, list);
     return list;
@@ -298,7 +316,9 @@ export async function fetchExtensionSkills(
       throw new Error(`HTTP ${res.status}`);
     }
     const data = await res.json();
-    const list: ExtensionSkillItem[] = Array.isArray(data.skills) ? data.skills : [];
+    const list: ExtensionSkillItem[] = Array.isArray(data.skills)
+      ? data.skills.filter((s: ExtensionSkillItem) => s.compatible !== false)
+      : [];
     extensionSkillsCache = list;
     writeStorageJson(EXT_STORAGE_KEY, list);
     return list;

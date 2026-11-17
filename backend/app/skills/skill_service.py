@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 from ..core.logging_config import logger
 from ..core.runtime_paths import get_bundle_root, get_writable_app_root
+from ..extensions.skill_loader import DEPRECATED_OLD_SKILL_IDS
 
 # 仅解析摘要元数据时的最大读取字符数，避免长篇 SOP 全文读盘与正则开销
 _HEADER_READ_CHARS = 4096
@@ -251,7 +252,7 @@ class SkillService:
         try:
             with os.scandir(root_dir) as it:
                 for entry in it:
-                    if entry.name.startswith(".") or not entry.is_dir():
+                    if entry.name.startswith(".") or not entry.is_dir() or entry.name in DEPRECATED_OLD_SKILL_IDS:
                         continue
                     skill_file = Path(entry.path) / "SKILL.md"
                     try:
@@ -263,7 +264,8 @@ class SkillService:
                         include_content=include_content,
                         file_stat=st,
                     )
-                    if parsed:
+                    # 自动检测操作系统支持度：当前环境不能使用的就不显示、不加载
+                    if parsed and parsed.get("compatible", True) and parsed.get("name") not in DEPRECATED_OLD_SKILL_IDS:
                         items.append((entry.path, parsed))
         except OSError as e:
             logger.warning(f"扫描技能目录失败 {root_dir}: {e}")
