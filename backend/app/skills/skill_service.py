@@ -84,7 +84,7 @@ def _extract_frontmatter_fields(fm_text: str, default_name: str) -> dict[str, st
         "version": "1.0.0",
     }
     kv = parse_yaml_frontmatter_kv(fm_text)
-    for k in ("name", "command", "description", "version", "updated_at"):
+    for k in ("name", "command", "description", "version", "updated_at", "category"):
         v = kv.get(k)
         if not v:
             continue
@@ -179,6 +179,8 @@ class SkillService:
         is_override: bool,
         include_content: bool,
     ) -> dict[str, Any]:
+        from ..extensions.skill_loader import infer_skill_category
+
         skill_name = parsed["name"]
         prefix = "l2" if scope == "workspace" else "l1"
         playbook_file = Path(folder_path) / "knowledge" / "experience_playbook.md"
@@ -194,6 +196,9 @@ class SkillService:
             "has_sop": bool(parsed.get("has_sop", True)),
             "has_playbook": has_playbook,
             "version": parsed.get("version") or "1.0.0",
+            "category": infer_skill_category(
+                Path(folder_path).name, skill_name, parsed.get("description", ""), parsed.get("category")
+            ),
         }
         if parsed.get("updated_at"):
             record["updated_at"] = parsed["updated_at"]

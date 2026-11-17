@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
+import { SkillCategoryTabs, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
 import {
   Layers,
   Sparkles,
@@ -31,6 +32,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
   const { t } = useLanguage();
   const [activeTab, setActiveTab] = useState<'explore' | 'mcp' | 'skills'>('skills');
   const [searchQuery, setSearchQuery] = useState('');
+  const [activeCategory, setActiveCategory] = useState(ALL_CATEGORY);
   const [skills, setSkills] = useState<SkillItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [selectedSkill, setSelectedSkill] = useState<SkillItem | null>(null);
@@ -150,7 +152,7 @@ export function SkillsView({ workspace }: SkillsViewProps) {
     }
   };
 
-  const filteredSkills = skills.filter(
+  const filteredSkills = filterSkillsByCategory(skills, activeCategory).filter(
     (s) =>
       s.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       (s.command && s.command.toLowerCase().includes(searchQuery.toLowerCase())) ||
@@ -314,6 +316,10 @@ export function SkillsView({ workspace }: SkillsViewProps) {
                 />
               </div>
             </div>
+
+            {skills.length > 0 && (
+              <SkillCategoryTabs skills={skills} active={activeCategory} onChange={setActiveCategory} />
+            )}
 
             {loading ? (
               <div className="text-center py-12 text-muted-foreground text-xs flex items-center justify-center space-x-2">

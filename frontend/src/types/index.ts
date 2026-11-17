@@ -464,6 +464,7 @@ export interface ScheduledTaskRunItem {
 }
 
 export interface SkillItem {
+  category?: string;
   id: string;
   name: string;
   command?: string;
@@ -478,6 +479,7 @@ export interface SkillItem {
 }
 
 export interface ExtensionSkillItem {
+  category?: string;
   id: string;
   name: string;
   command: string;

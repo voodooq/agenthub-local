@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
+import { SkillCategoryTabs, ALL_CATEGORY, resolveSkillCategory } from './SkillCategoryTabs';
 import {
   Cpu,
   Terminal,
@@ -39,6 +40,7 @@ interface CommandItem {
   docBody?: string;
   hasDoc?: boolean;
   skillId?: string;
+  category?: string;
   mcpServer?: string;
   mcpEnabled?: boolean | null;
 }
@@ -249,7 +251,7 @@ function mapExtensionSkillsToCommands(skills: ExtensionSkillItem[]): CommandItem
       docBody: docText ? String(docText) : undefined,
       hasDoc: Boolean(docText || sk.has_content || skillId),
       skillId,
-      mcpServer: sk.mcp_server || undefined,
+      category: resolveSkillCategory({ ...sk, id: skillId }),      mcpServer: sk.mcp_server || undefined,
       mcpEnabled: sk.mcp_enabled ?? null,
     });
   }
@@ -315,6 +317,7 @@ export function CommandAutocomplete({
   const [dynamicItems, setDynamicItems] = useState<CommandItem[]>([]);
   const [agentItems, setAgentItems] = useState<CommandItem[]>([]);
   const [previewItemId, setPreviewItemId] = useState<string | null>(null);
+  const [activeCategory, setActiveCategory] = useState(ALL_CATEGORY);
   const [detailCache, setDetailCache] = useState<Record<string, string>>({});
   const [loadingDocId, setLoadingDocId] = useState<string | null>(null);
   const [dismissedTokenKey, setDismissedTokenKey] = useState<string | null>(null);
@@ -507,6 +510,11 @@ export function CommandAutocomplete({
     return merged;
   }, [dynamicItems, agentItems]);
 
+  const skillItems = useMemo(
+    () => allCommands.filter((i) => i.trigger === '/' && i.skillId),
+    [allCommands]
+  );
+
   const filtered = useMemo(() => {
     if (!isTriggered) return [];
     const trigger = lastWord[0];
@@ -515,14 +523,15 @@ export function CommandAutocomplete({
       .filter(
         (item) =>
           item.trigger === trigger &&
+          (activeCategory === ALL_CATEGORY || trigger !== '/' || item.category === activeCategory) &&
           (item.label.toLowerCase().includes(filterKey) ||
             item.description.toLowerCase().includes(filterKey) ||
             (item.skillId && item.skillId.toLowerCase().includes(filterKey)))
       )
       .slice(0, MAX_AUTOCOMPLETE_ITEMS);
-  }, [isTriggered, lastWord, allCommands]);
+  }, [isTriggered, lastWord, allCommands, activeCategory]);
 
-  if (!isTriggered || isDismissed || filtered.length === 0) {
+  if (!isTriggered || isDismissed || (filtered.length === 0 && activeCategory === ALL_CATEGORY)) {
     return null;
   }
 
@@ -559,6 +568,17 @@ export function CommandAutocomplete({
           </button>
         </div>
       </div>
+
+      {!isAtTriggered && skillItems.length > 0 && (
+        <div className="px-2 pt-1.5">
+          <SkillCategoryTabs
+            skills={skillItems.map((i) => ({ id: i.skillId, category: i.category }))}
+            active={activeCategory}
+            onChange={setActiveCategory}
+            compact
+          />
+        </div>
+      )}
 
       <div className={`mt-1.5 ${activePreviewItem ? 'grid grid-cols-1 md:grid-cols-12 gap-2.5' : ''}`}>
         {/* 左侧：命令与技能列表 */}

@@ -4,8 +4,8 @@ command: /data-audit
 type: skill
 version: 1.0.0
 description: 只读数据审计专家技能：自动执行表格重复项、空值率、跨列逻辑一致性与 IQR 异常值检测，输出结构化 Markdown/JSON 审计报告至 output/audit/。
+category: 调研与分析
 ---
-
 # 只读数据审计规范 (Data Audit SOP)
 
 ## 1. 适用场景与安全边界

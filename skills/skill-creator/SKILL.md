@@ -3,8 +3,9 @@ name: skill-creator
 command: /new-skill
 type: skill
 description: 【系统母技能】通过自然语言对话或总结刚才的操作步骤，3分钟自动生成标准四元组 Skill 技能包并热加载。
+version: 1.0.0
+category: 插件与扩展
 ---
-
 # 智能 Skill 构建母技能 (Built-in Skill Creator)
 
 ## 1. 功能定位

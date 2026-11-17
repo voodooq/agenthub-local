@@ -26,6 +26,7 @@ import {
   Loader2,
 } from 'lucide-react';
 import { Workspace, SkillItem, AgentItem } from '@/types';
+import { SkillCategoryTabs, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
 import { ModelOption } from '@/components/ModelSelector';
 import { apiFetch } from '@/utils/apiClient';
 import {
@@ -127,6 +128,7 @@ export function AgentsView({
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [isSkillPickerOpen, setIsSkillPickerOpen] = useState(false);
   const [skillSearchQuery, setSkillSearchQuery] = useState('');
+  const [skillCategory, setSkillCategory] = useState(ALL_CATEGORY);
   const [savingAgent, setSavingAgent] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
   const [nlPrompt, setNlPrompt] = useState('');
@@ -514,7 +516,7 @@ export function AgentsView({
     return matchesSearch && matchesFilter;
   });
 
-  const filteredSkillsForPicker = allSkills.filter((s) => {
+  const filteredSkillsForPicker = filterSkillsByCategory(allSkills, skillCategory).filter((s) => {
     const q = skillSearchQuery.toLowerCase().trim();
     if (!q) return true;
     return (
@@ -977,6 +979,15 @@ export function AgentsView({
                         className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500"
                       />
                     </div>
+
+                    {allSkills.length > 0 && (
+                      <SkillCategoryTabs
+                        skills={allSkills}
+                        active={skillCategory}
+                        onChange={setSkillCategory}
+                        compact
+                      />
+                    )}
 
                     <div className="max-h-48 overflow-y-auto space-y-1 pr-1">
                       {skillsLoading ? (

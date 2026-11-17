@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useEffect, useMemo, useState } from 'react';
+import { SkillCategoryTabs, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
 import { Folder, Globe, FileText, X, ChevronDown } from 'lucide-react';
 import { SkillItem } from '@/types';
 import { useLanguage } from '@/context/LanguageContext';
@@ -32,6 +33,7 @@ export function SkillPickerModal({
   const [search, setSearch] = useState('');
   const [loading, setLoading] = useState(false);
   const [showAll, setShowAll] = useState(false);
+  const [activeCategory, setActiveCategory] = useState(ALL_CATEGORY);
 
   useEffect(() => {
     if (!isOpen) return;
@@ -93,8 +95,9 @@ export function SkillPickerModal({
 
   const filtered = useMemo(() => {
     const term = search.trim().toLowerCase();
-    if (!term) return skills;
-    return skills.filter((s) => {
+    const byCategory = filterSkillsByCategory(skills, activeCategory);
+    if (!term) return byCategory;
+    return byCategory.filter((s) => {
       const cmd = (
         s.command?.trim()
           ? (s.command.trim().startsWith('/') ? s.command.trim() : `/${s.command.trim()}`)
@@ -106,7 +109,7 @@ export function SkillPickerModal({
         (s.description && s.description.toLowerCase().includes(term))
       );
     });
-  }, [skills, search]);
+  }, [skills, search, activeCategory]);
 
   // 技能数量极多时限制首屏 DOM 挂载上限，防止浏览器弹窗重排卡顿
   const visibleItems = useMemo(() => {
@@ -173,6 +176,12 @@ export function SkillPickerModal({
             <X className="w-4 h-4" />
           </button>
         </div>
+
+        {skills.length > 0 && (
+          <div className="px-3 py-2 border-b border-border bg-surface-50">
+            <SkillCategoryTabs skills={skills} active={activeCategory} onChange={setActiveCategory} compact />
+          </div>
+        )}
 
         {/* 技能列表 */}
         <div className="flex-1 overflow-y-auto p-3 space-y-4">

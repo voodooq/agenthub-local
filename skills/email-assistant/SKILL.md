@@ -3,8 +3,9 @@ name: email-assistant
 command: /mail-assistant
 type: skill
 description: 通用多邮箱管理助手（支持 Gmail、163、Outlook、QQ），提供 IMAP 连接测试、智能分类过滤、垃圾邮件自动清理与桌面通知。
+version: 1.0.0
+category: 办公与文档
 ---
-
 ## 🚀 快速开始
 
 

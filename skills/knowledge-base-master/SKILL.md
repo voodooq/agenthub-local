@@ -2,8 +2,9 @@
 name: knowledge-base-master
 command: /kb
 description: 加载知识库管理与交互技能（支持权重分级、去重清洗、Markdown 知识图谱增删改查落盘）
+version: 1.0.0
+category: 办公与文档
 ---
-
 # 知识库管理与交互技能 (Knowledge Base Master)
 
 ## 1. 核心功能

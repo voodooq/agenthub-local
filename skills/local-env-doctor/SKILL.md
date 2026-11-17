@@ -2,8 +2,9 @@
 name: local-env-doctor
 command: /doctor
 description: 排查本机端口占用、僵尸进程、Python/Node 环境依赖冲突与磁盘空间告警。
+version: 1.0.0
+category: 系统与自动化
 ---
-
 # 本机研发环境诊断专家 (Local Env Doctor)
 
 1. 排查端口占用时，先通过 `netstat -ano` 查找对应 PID，再通过 `tasklist` 核实进程名；

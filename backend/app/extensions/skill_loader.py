@@ -69,6 +69,63 @@ def bump_semver(raw: str | None, level: str = "minor") -> str:
     return f"{major}.{minor + 1}.0"
 
 
+SKILL_CATEGORIES: tuple[str, ...] = (
+    "办公与文档",
+    "工程与架构",
+    "视觉与设计",
+    "调研与分析",
+    "插件与扩展",
+    "系统与自动化",
+)
+DEFAULT_SKILL_CATEGORY = "工程与架构"
+
+# NOTE: 已知技能 ID 的精确映射优先；未知技能再按关键词推断
+_SKILL_CATEGORY_BY_ID: dict[str, str] = {
+    **dict.fromkeys(("office-excel", "office-ppt", "email-assistant", "knowledge-base-master", "slides", "to-spec"), "办公与文档"),
+    **dict.fromkeys(
+        ("git-commit-helper", "code-review", "codebase-design", "diagnosing-bugs", "tdd", "to-tickets",
+         "grill-me", "grill-with-docs", "permissioned-github"),
+        "工程与架构",
+    ),
+    **dict.fromkeys(
+        ("banner-design", "brand", "design", "design-system", "ui-styling", "ui-ux-pro-max", "generative-ui"),
+        "视觉与设计",
+    ),
+    **dict.fromkeys(("research", "data-audit"), "调研与分析"),
+    **dict.fromkeys(("plugin", "mcp-app-development", "skill-creator"), "插件与扩展"),
+    **dict.fromkeys(("local-env-doctor", "windows-app-master", "windows-gui-operator"), "系统与自动化"),
+}
+_SKILL_CATEGORY_KEYWORDS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("插件与扩展", ("mcp", "plugin", "插件", "扩展")),
+    ("系统与自动化", ("windows", "powershell", "自动化", "automation", "系统", "环境", "gui")),
+    ("视觉与设计", ("design", "ui", "设计", "视觉", "海报", "样式")),
+    ("调研与分析", ("research", "调研", "分析", "audit", "审计", "数据")),
+    ("办公与文档", ("excel", "ppt", "word", "office", "文档", "邮件", "表格", "幻灯片", "知识库")),
+)
+
+
+def infer_skill_category(
+    skill_id: str,
+    name: str = "",
+    description: str = "",
+    declared: str | None = None,
+    skill_type: str = "",
+) -> str:
+    """推断技能所属 6 大中文分类之一：Frontmatter 声明 > ID 精确映射 > 关键词 > 默认。"""
+    if declared and declared.strip() in SKILL_CATEGORIES:
+        return declared.strip()
+    sid = (skill_id or "").strip().lower().replace("_", "-")
+    if sid in _SKILL_CATEGORY_BY_ID:
+        return _SKILL_CATEGORY_BY_ID[sid]
+    if (skill_type or "").lower() == "mcp":
+        return "插件与扩展"
+    haystack = f"{sid} {name} {description}".lower()
+    for category, words in _SKILL_CATEGORY_KEYWORDS:
+        if any(w in haystack for w in words):
+            return category
+    return DEFAULT_SKILL_CATEGORY
+
+
 def parse_yaml_frontmatter_kv(yaml_block: str) -> dict[str, str]:
     """解析 YAML Frontmatter 键值对，兼容单行值、引号包裹及多行缩进/折叠语法（| / >）。"""
     kv: dict[str, str] = {}
@@ -257,6 +314,7 @@ class SkillLoader:
         description = ""
         version = "1.0.0"
         updated_at = ""
+        declared_category = ""
         body = md_text.strip()
 
         match = re.match(r"^---\s*\r?\n(.*?)\r?\n---\s*\r?\n?(.*)", md_text, re.DOTALL)
@@ -269,7 +327,7 @@ class SkillLoader:
             if kv.get("command"):
                 clean_cmd = cls._sanitize_skill_id(kv["command"].lstrip("/"))
                 command = f"/{clean_cmd}"
-            type_val = kv.get("type") or kv.get("category") or ""
+            type_val = kv.get("type") or ""
             if type_val:
                 if "mcp" in type_val.lower():
                     skill_type = "mcp"
@@ -286,6 +344,7 @@ class SkillLoader:
                 version = normalize_version_str(kv["version"])
             if kv.get("updated_at"):
                 updated_at = kv["updated_at"]
+            declared_category = kv.get("category", "")
             if kv.get("description"):
                 description = re.sub(r"\s+", " ", kv["description"]).strip()
 
@@ -300,6 +359,7 @@ class SkillLoader:
             "tier": tier,
             "mcp_server": mcp_server,
             "version": version,
+            "category": infer_skill_category(safe_fallback, name, description, declared_category, skill_type),
             "updated_at": updated_at,
             "description": description,
             "body": body,
@@ -720,6 +780,7 @@ class SkillLoader:
                 "name": meta["name"],
                 "command": meta["command"],
                 "version": meta.get("version") or "1.0.0",
+                "category": meta.get("category") or DEFAULT_SKILL_CATEGORY,
                 "updated_at": meta.get("updated_at") or "",
                 "meta_type": meta["type"],
                 "meta_tier": meta["tier"],
@@ -772,6 +833,7 @@ class SkillLoader:
             "name": cached_base["name"],
             "command": cached_base["command"],
             "version": cached_base.get("version") or "1.0.0",
+            "category": cached_base.get("category") or DEFAULT_SKILL_CATEGORY,
             "updated_at": cached_base.get("updated_at") or "",
             "type": skill_type,
             "tier": "commercial" if cached_base["default_tier"] == "commercial" else cached_base["meta_tier"],
@@ -809,6 +871,7 @@ class SkillLoader:
             "name": safe_id,
             "command": f"/{safe_id}",
             "version": "1.0.0",
+            "category": "插件与扩展",
             "type": "mcp",
             "tier": "community",
             "mcp_server": srv_name,
@@ -1333,6 +1396,7 @@ class SkillLoader:
                             "name": meta["name"],
                             "command": meta["command"],
                             "version": meta.get("version") or "1.0.0",
+                            "category": meta.get("category") or DEFAULT_SKILL_CATEGORY,
                             "type": meta["type"] or "skill",
                             "description": meta["description"],
                             "path": str(md_file.resolve()),
@@ -1439,6 +1503,7 @@ class SkillLoader:
             "name": meta["name"],
             "command": meta["command"],
             "version": meta.get("version") or "1.0.0",
+            "category": meta.get("category") or DEFAULT_SKILL_CATEGORY,
             "updated_at": meta.get("updated_at") or "",
             "type": meta["type"],
             "description": meta["description"],

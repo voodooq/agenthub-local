@@ -4,8 +4,8 @@ command: /office-excel
 type: skill
 version: 1.0.0
 description: Excel 报表构建专家技能：支持多级合并表头、动态公式注入（SUM/AVERAGE/SUMIFS）、千分位格式、表头冻结与自适应列宽，输出至 output/sheets/。
+category: 办公与文档
 ---
-
 # Excel 专业报表构建规范 (Office Excel SOP)
 
 ## 1. 适用场景与输出约束

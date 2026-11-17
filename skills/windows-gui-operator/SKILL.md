@@ -2,8 +2,9 @@
 name: windows-gui-operator
 command: /gui
 description: Windows 桌面封闭 GUI 软件与窗口无 API 原生自动化操作指南（微信、钉钉、特定行业系统、设置弹窗等）。
+version: 1.0.0
+category: 系统与自动化
 ---
-
 # Windows GUI Operator 专业操作技能指南
 
 当用户需要你与本地正在运行的 Windows 桌面客户端交互，且该软件**没有提供开放的 HTTP API、CLI 命令行或 MCP 服务**（如微信桌面版、钉钉、播放器、办公自研系统、系统控制面板与弹窗）时，必须严格执行本规范。

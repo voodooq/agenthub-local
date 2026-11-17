@@ -16,6 +16,7 @@ from typing import Any, AsyncGenerator, Awaitable, Callable
 
 from ..core.logging_config import logger
 from ..repository.conversation_repository import ConversationRepository
+from ..repository.db import db_manager
 from ..repository.message_repository import ConversationDeletedError, MessageRepository
 from ..repository.search_repository import SearchRepository
 from ..service.agent_runner import cancel_cli_processes
@@ -741,8 +742,8 @@ class AgentRuntime:
                                    COALESCE(c.title, m.conversation_id) AS conversation_title
                             FROM messages m
                             LEFT JOIN conversations c ON c.id = m.conversation_id
-                            WHERE COALESCE(c.is_incognito, 0) = 0
-                              AND m.role IN ('user', 'assistant')
+                            WHERE COALESCE(c.incognito, 0) = 0
+                              AND m.role IN ('user', 'model', 'assistant')
                               AND substr(datetime(m.created_at, 'localtime'), 1, 10) = ?
                             ORDER BY m.created_at ASC
                             LIMIT ?;
@@ -751,7 +752,7 @@ class AgentRuntime:
                         ) as cursor:
                             day_rows = [dict(r) for r in await cursor.fetchall()]
                 except Exception as day_err:
-                    logger.debug(f"按日期召回交互记录失败 ({date_target}): {day_err}")
+                    logger.warning(f"按日期召回交互记录失败 ({date_target}): {day_err}")
 
                 if day_rows:
                     lines = [f"#### 📅 {date_target} 当日全量交互记录汇总（共 {len(day_rows)} 条）"]

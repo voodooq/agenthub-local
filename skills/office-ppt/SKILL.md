@@ -4,8 +4,8 @@ command: /office-ppt
 type: skill
 version: 1.0.0
 description: PPT 演示架构师技能：支持 16:9 宽屏排版、商务母版配色、要点精简结构与原生数据图表嵌入，输出 .pptx 至 output/slides/。
+category: 办公与文档
 ---
-
 # PPT 演示文稿架构规范 (Office PPT SOP)
 
 ## 1. 适用场景与输出约束

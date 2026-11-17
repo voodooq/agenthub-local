@@ -2,8 +2,9 @@
 name: windows-app-master
 command: /app
 description: Windows 桌面软件与后台服务精准控制（注册表自动寻路、URI深链唤起、Office COM操控、服务与Docker容器管理）。
+version: 1.0.0
+category: 系统与自动化
 ---
-
 # Windows 桌面软件与系统服务精准控制规程
 
 本规程定义了在 Windows 10/11 环境下，如何通过最稳定、无感、低幻觉的原生技术通道控制本地桌面软件与系统后台服务。
