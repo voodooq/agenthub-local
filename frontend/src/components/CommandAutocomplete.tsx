@@ -15,8 +15,11 @@ import {
   X,
   ArrowRight,
   Loader2,
+  Bot,
+  Users,
 } from 'lucide-react';
-import { ExtensionSkillItem } from '@/types';
+import { ExtensionSkillItem, AgentItem } from '@/types';
+import { apiFetch } from '@/utils/apiClient';
 import {
   fetchExtensionSkillDetail,
   fetchExtensionSkills,
@@ -189,6 +192,18 @@ const STATIC_COMMAND_LIST: CommandItem[] = [
     docBody:
       '# /clean-cache 开发缓存与临时目录体检\n\n扫描本机 `npm-cache`、`pip/cache` 及系统 `Temp` 目录体积，生成可审计的空間释放清单。',
   },
+  {
+    id: 'slash_swarm',
+    trigger: '/',
+    label: '/swarm',
+    description: '开启/切换多专家蜂群协作模式，支持 @专家名 协同调度与实时看板',
+    insertText: '/swarm ',
+    icon: Users,
+    badge: '蜂群协作',
+    hasDoc: true,
+    docBody:
+      '# /swarm 多专家蜂群协作模式\n\n## 用法示例\n- `/swarm`：一键开启或切换当前会话的蜂群协作模式\n- `/swarm @代码重构与架构导师 请协同完成模块重构`：开启蜂群并定向点名专家执行任务',
+  },
 ];
 
 function mapExtensionSkillsToCommands(skills: ExtensionSkillItem[]): CommandItem[] {
@@ -242,6 +257,43 @@ function mapExtensionSkillsToCommands(skills: ExtensionSkillItem[]): CommandItem
   return items;
 }
 
+const AGENTS_CACHE_TTL_MS = 15000;
+let cachedAgentsSnapshot: { ts: number; agents: AgentItem[] } | null = null;
+
+function mapAgentsToCommands(agents: AgentItem[]): CommandItem[] {
+  const items: CommandItem[] = [];
+  const seen = new Set<string>();
+
+  for (const ag of agents) {
+    const name = String(ag.name || ag.id || '').trim();
+    if (!name || seen.has(name.toLowerCase())) continue;
+    seen.add(name.toLowerCase());
+
+    const toolsNote =
+      ag.allowed_tools && ag.allowed_tools.length > 0
+        ? `\n\n- **工具白名单**: \`${ag.allowed_tools.join('`, `')}\``
+        : '';
+    const dirsNote =
+      ag.allowed_write_dirs && ag.allowed_write_dirs.length > 0
+        ? `\n- **写入目录隔离**: \`${ag.allowed_write_dirs.join('`, `')}\``
+        : '';
+
+    items.push({
+      id: `agent_${ag.id}`,
+      trigger: '@',
+      label: `@${name}`,
+      description: ag.description || `点名调度专家 ${name}`,
+      insertText: `@${name} `,
+      icon: Bot,
+      badge: ag.ownership === 'official' ? '官方专家' : '个人专家',
+      hasDoc: true,
+      docBody: `# @${name}\n\n${ag.description || ''}\n\n- **基座模型**: \`${ag.base_model}\`${toolsNote}${dirsNote}`,
+    });
+  }
+
+  return items;
+}
+
 interface CommandAutocompleteProps {
   input: string;
   cursorPosition?: number;
@@ -256,6 +308,7 @@ export function CommandAutocomplete({
   onClose,
 }: CommandAutocompleteProps) {
   const [dynamicItems, setDynamicItems] = useState<CommandItem[]>([]);
+  const [agentItems, setAgentItems] = useState<CommandItem[]>([]);
   const [previewItemId, setPreviewItemId] = useState<string | null>(null);
   const [detailCache, setDetailCache] = useState<Record<string, string>>({});
   const [loadingDocId, setLoadingDocId] = useState<string | null>(null);
@@ -288,10 +341,59 @@ export function CommandAutocomplete({
       end,
       isTriggered,
       isSlashTriggered: isTriggered && token.startsWith('/'),
+      isAtTriggered: isTriggered && token.startsWith('@'),
     };
   }, [input, cursorPosition]);
 
-  const { token: lastWord, start: tokenStart, end: tokenEnd, isTriggered, isSlashTriggered } = activeTokenInfo;
+  const {
+    token: lastWord,
+    start: tokenStart,
+    end: tokenEnd,
+    isTriggered,
+    isSlashTriggered,
+    isAtTriggered,
+  } = activeTokenInfo;
+
+  // 触发 '@' 时加载持久化专家列表（带短时缓存与本地存储回退）
+  useEffect(() => {
+    if (!isAtTriggered) return;
+    let cancelled = false;
+
+    if (cachedAgentsSnapshot && Date.now() - cachedAgentsSnapshot.ts < AGENTS_CACHE_TTL_MS) {
+      setAgentItems(mapAgentsToCommands(cachedAgentsSnapshot.agents));
+      return;
+    }
+
+    const fallbackFromLocal = () => {
+      try {
+        const raw = localStorage.getItem('agenthub_custom_agents_v1');
+        if (raw) {
+          const parsed: AgentItem[] = JSON.parse(raw);
+          if (!cancelled && Array.isArray(parsed)) {
+            setAgentItems(mapAgentsToCommands(parsed));
+          }
+        }
+      } catch { }
+    };
+
+    apiFetch('/api/v1/agents')
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const agents: AgentItem[] = Array.isArray(data?.agents) ? data.agents : [];
+        cachedAgentsSnapshot = { ts: Date.now(), agents };
+        if (!cancelled) {
+          setAgentItems(mapAgentsToCommands(agents));
+        }
+      })
+      .catch(() => {
+        fallbackFromLocal();
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [isAtTriggered]);
 
   // 仅在首次触发 '/' 时同步读取缓存秒显并后台刷新一次，不再随敲字重复请求全量扫描接口
   useEffect(() => {
@@ -362,15 +464,15 @@ export function CommandAutocomplete({
   );
 
   const allCommands = useMemo(() => {
-    const merged: CommandItem[] = [...dynamicItems];
-    const existingLabels = new Set(dynamicItems.map((i) => i.label.toLowerCase()));
+    const merged: CommandItem[] = [...dynamicItems, ...agentItems];
+    const existingLabels = new Set(merged.map((i) => i.label.toLowerCase()));
     for (const st of STATIC_COMMAND_LIST) {
       if (!existingLabels.has(st.label.toLowerCase())) {
         merged.push(st);
       }
     }
     return merged;
-  }, [dynamicItems]);
+  }, [dynamicItems, agentItems]);
 
   const filtered = useMemo(() => {
     if (!isTriggered) return [];

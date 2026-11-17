@@ -252,6 +252,16 @@ export interface Message {
     status?: 'pending' | 'approved' | 'rejected';
   };
   token_stats?: TurnTokenMetrics | null;
+  agent_id?: string | null;
+  agent_name?: string | null;
+  swarm_id?: string | null;
+  swarm_summary?: {
+    swarm_id: string;
+    title?: string;
+    status?: string;
+    member_count?: number;
+    active_count?: number;
+  } | null;
 }
 
 /** 单轮聚合 Token 消耗、KV Cache 命中与推理延迟水表指标 */
@@ -598,4 +608,60 @@ export interface UpdateStatusData {
   error_message: string;
   checked_at: number;
 }
+
+/** 持久化专家智能体配置 */
+export interface AgentItem {
+  id: string;
+  name: string;
+  description: string;
+  base_model: string;
+  context_prompt?: string;
+  skill_ids: string[];
+  tools_count: number;
+  ownership: 'official' | 'custom';
+  status: 'active' | 'draft';
+  allowed_tools?: string[];
+  allowed_write_dirs?: string[];
+  created_at: string;
+  updated_at: string;
+}
+
+/** 蜂群协同主信息 */
+export interface SwarmInfo {
+  id: string;
+  session_id?: string;
+  workspace_id?: string;
+  title?: string;
+  status: 'running' | 'completed' | 'failed' | 'idle' | 'paused' | string;
+  coordinator_id?: string;
+  created_at: string;
+  updated_at?: string;
+}
+
+/** 蜂群成员节点状态 */
+export interface SwarmMember {
+  name: string;
+  agent_id?: string;
+  role?: string;
+  model?: string;
+  status: 'working' | 'waiting' | 'stopped' | 'killed' | string;
+  task_summary?: string;
+  allowed_tools?: string[];
+  allowed_write_dirs?: string[];
+  updated_at?: string;
+}
+
+/** 蜂群消息板记录 */
+export interface SwarmMessage {
+  seq: number;
+  id?: string | number;
+  swarm_id?: string;
+  sender: string;
+  content: string;
+  text?: string;
+  mentions?: string[];
+  message_type?: string;
+  created_at: string;
+}
+
 

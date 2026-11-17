@@ -11,6 +11,11 @@ from fastapi.responses import StreamingResponse, FileResponse
 from ...schema.chat_schema import ChatStreamRequest, ToolApprovalRequest, StopChatRequest
 from ...agent.runtime import agent_runtime
 from ...agent.shell_executor import shell_executor
+from ...agent.swarm_manager import swarm_manager
+from ...repository.agent_repository import AgentProfileRepository
+from ...repository.conversation_repository import ConversationRepository
+from ...repository.swarm_repository import SwarmRepository
+from ...repository.workspace_repository import WorkspaceRepository
 from ...core.config import settings
 from ...core.logging_config import logger
 from ...service.attachment_service import attachment_service, AttachmentValidationError
@@ -150,34 +155,192 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
         active_conv_id = req.conversation_id
         queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
 
+        stripped_msg = (req.message or "").strip()
+        is_slash_swarm = stripped_msg.lower().startswith("/swarm")
+        effective_msg = stripped_msg[6:].strip() if is_slash_swarm else req.message
+        if is_slash_swarm and not effective_msg:
+            effective_msg = "请统筹协调蜂群成员完成当前任务。"
+
+        has_target_agents = bool(req.target_agent_ids and len(req.target_agent_ids) > 0)
+        use_swarm = bool(req.swarm_mode or is_slash_swarm or req.swarm_id or has_target_agents)
+
         async def _producer() -> None:
+            swarm_sub_task: asyncio.Task[None] | None = None
             try:
-                async for event in agent_runtime.chat_stream(
-                    conversation_id=req.conversation_id,
-                    user_message=req.message,
-                    model_name=req.model_name,
-                    thinking_level=req.thinking_level,
-                    system_override=req.system_override,
-                    temperature=req.temperature,
-                    context_rounds=req.context_rounds,
-                    attachments=req.attachments,
-                    scene_mode=req.scene_mode,
-                    incognito=req.incognito,
-                    workspace_id=req.workspace_id,
-                    execution_strategy=req.execution_strategy,
-                    clarify_mode=req.clarify_mode,
-                    approved_plan_steps=req.approved_plan_steps,
-                    confirmed_facts=req.confirmed_facts,
-                    inquiry_confirmed=req.inquiry_confirmed,
-                    inquiry_action=req.inquiry_action,
-                    is_disconnected=request.is_disconnected,
-                ):
-                    await queue.put(("event", event))
+                if not use_swarm:
+                    async for event in agent_runtime.chat_stream(
+                        conversation_id=req.conversation_id,
+                        user_message=req.message,
+                        model_name=req.model_name,
+                        thinking_level=req.thinking_level,
+                        system_override=req.system_override,
+                        temperature=req.temperature,
+                        context_rounds=req.context_rounds,
+                        attachments=req.attachments,
+                        scene_mode=req.scene_mode,
+                        incognito=req.incognito,
+                        workspace_id=req.workspace_id,
+                        execution_strategy=req.execution_strategy,
+                        clarify_mode=req.clarify_mode,
+                        approved_plan_steps=req.approved_plan_steps,
+                        confirmed_facts=req.confirmed_facts,
+                        inquiry_confirmed=req.inquiry_confirmed,
+                        inquiry_action=req.inquiry_action,
+                        is_disconnected=request.is_disconnected,
+                    ):
+                        await queue.put(("event", event))
+                    await queue.put(("done", None))
+                    return
+
+                # ── Swarm 统一收口模式（支持 /swarm 蜂群编排与 @专家名 轻量点名） ──
+                conv_id = req.conversation_id or str(uuid.uuid4())
+                is_new_conv = False
+                ws_id = req.workspace_id or "default"
+                target_cwd: str | None = None
+                try:
+                    ws = await WorkspaceRepository.get_by_id(ws_id)
+                    if ws and ws.get("root_path"):
+                        target_cwd = ws["root_path"]
+                except Exception:
+                    pass
+
+                existing_conv = await ConversationRepository.get_by_id(conv_id)
+                if not existing_conv:
+                    is_new_conv = True
+                    await ConversationRepository.create({
+                        "id": conv_id,
+                        "title": (effective_msg or "Swarm 协作").split("\n")[0][:24],
+                        "model_name": req.model_name,
+                        "scene_mode": req.scene_mode or "agent",
+                        "incognito": 1 if req.incognito else 0,
+                        "workspace_id": ws_id,
+                        "current_cwd": target_cwd,
+                    })
+
+                swarm = await swarm_manager.get_or_create_swarm(
+                    session_id=conv_id,
+                    swarm_id=req.swarm_id,
+                    workspace_id=ws_id,
+                    cwd=target_cwd,
+                    default_model=req.model_name,
+                )
+                eff_swarm_id = swarm["id"]
+
+                await queue.put((
+                    "event",
+                    {
+                        "type": "conv_init",
+                        "conversation_id": conv_id,
+                        "is_new": is_new_conv,
+                        "swarm_id": eff_swarm_id,
+                    },
+                ))
+                await queue.put((
+                    "event",
+                    {
+                        "type": "swarm_update",
+                        "swarm_id": eff_swarm_id,
+                        "swarm": swarm,
+                        "members": await SwarmRepository.list_members(eff_swarm_id),
+                    },
+                ))
+
+                # 订阅蜂群实时事件并合流到当前 SSE 队列
+                active_worker_names: set[str] = set()
+                finished_worker_names: set[str] = set()
+                workers_done_event = asyncio.Event()
+
+                async def _forward_swarm_events() -> None:
+                    sub = swarm_manager.subscribe(eff_swarm_id)
+                    try:
+                        async for sw_evt in sub:
+                            await queue.put(("event", sw_evt))
+                            if sw_evt.get("type") == "agent_turn":
+                                inner = sw_evt.get("event") or {}
+                                m_name = str(sw_evt.get("member_name") or "")
+                                if inner.get("type") in ("done", "error") and m_name in active_worker_names:
+                                    finished_worker_names.add(m_name)
+                                    if active_worker_names and active_worker_names.issubset(finished_worker_names):
+                                        workers_done_event.set()
+                    finally:
+                        await sub.aclose()
+
+                swarm_sub_task = asyncio.create_task(_forward_swarm_events())
+
+                # 若传入 target_agent_ids，直接注册并唤醒对应专家 Worker
+                if has_target_agents:
+                    mention_tags: list[str] = []
+                    for aid in req.target_agent_ids or []:
+                        profile = await AgentProfileRepository.get_agent(aid)
+                        m_name = aid
+                        if profile and profile.get("name"):
+                            # 使用稳定无空格标识作为成员名，兼容 @mention 解析
+                            m_name = aid
+                        active_worker_names.add(m_name)
+                        await swarm_manager.add_member(
+                            eff_swarm_id,
+                            name=m_name,
+                            brief="",
+                            role="worker",
+                            agent_id=aid,
+                            workspace_id=ws_id,
+                            cwd=target_cwd,
+                        )
+                        mention_tags.append(f"@{m_name}")
+
+                    await swarm_manager.post_message(
+                        eff_swarm_id,
+                        sender="user",
+                        text=f"{' '.join(mention_tags)} {effective_msg}".strip(),
+                        kind="message",
+                    )
+
+                # 若同时开启了 swarm_mode（或 /swarm）且未仅限单次点名，由 Coordinator 主控运行
+                if req.swarm_mode or is_slash_swarm or not has_target_agents:
+                    async for event in agent_runtime.chat_stream(
+                        conversation_id=conv_id,
+                        user_message=effective_msg,
+                        model_name=req.model_name,
+                        thinking_level=req.thinking_level,
+                        system_override=req.system_override,
+                        temperature=req.temperature,
+                        context_rounds=req.context_rounds,
+                        attachments=req.attachments,
+                        scene_mode=req.scene_mode or "agent",
+                        incognito=req.incognito,
+                        workspace_id=ws_id,
+                        execution_strategy=req.execution_strategy,
+                        clarify_mode=req.clarify_mode,
+                        approved_plan_steps=req.approved_plan_steps,
+                        confirmed_facts=req.confirmed_facts,
+                        inquiry_confirmed=req.inquiry_confirmed,
+                        inquiry_action=req.inquiry_action,
+                        is_disconnected=request.is_disconnected,
+                        swarm_mode=True,
+                        swarm_id=eff_swarm_id,
+                        swarm_role="coordinator",
+                    ):
+                        await queue.put(("event", event))
+                else:
+                    # 轻量 @专家点名直通模式：等待被点名专家 Worker 完成当前轮次
+                    try:
+                        await asyncio.wait_for(workers_done_event.wait(), timeout=300.0)
+                    except asyncio.TimeoutError:
+                        pass
+                    await queue.put(("event", {"type": "done", "swarm_id": eff_swarm_id}))
+
                 await queue.put(("done", None))
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 await queue.put(("error", exc))
+            finally:
+                if swarm_sub_task and not swarm_sub_task.done():
+                    swarm_sub_task.cancel()
+                    try:
+                        await swarm_sub_task
+                    except BaseException:
+                        pass
 
         producer_task = asyncio.create_task(_producer())
         try:

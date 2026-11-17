@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "OfficePPTInput",
+  "type": "object",
+  "required": ["slides"],
+  "properties": {
+    "output_path": {
+      "type": "string",
+      "default": "output/slides/presentation.pptx",
+      "description": "输出 .pptx 文件路径（建议位于 output/slides/）"
+    },
+    "theme": {
+      "type": "string",
+      "enum": ["navy", "slate", "emerald"],
+      "default": "navy",
+      "description": "母版配色主题"
+    },
+    "slides": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["layout", "title"],
+        "properties": {
+          "layout": {
+            "type": "string",
+            "enum": ["cover", "agenda", "bullets", "two_column", "chart", "closing"]
+          },
+          "title": { "type": "string" },
+          "subtitle": { "type": "string" },
+          "meta": { "type": "string" },
+          "bullets": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "left_title": { "type": "string" },
+          "left_bullets": { "type": "array", "items": { "type": "string" } },
+          "right_title": { "type": "string" },
+          "right_bullets": { "type": "array", "items": { "type": "string" } },
+          "chart_type": { "type": "string", "enum": ["bar", "line", "pie"] },
+          "categories": { "type": "array", "items": { "type": "string" } },
+          "series": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "values"],
+              "properties": {
+                "name": { "type": "string" },
+                "values": { "type": "array", "items": { "type": "number" } }
+              }
+            }
+          },
+          "takeaway": { "type": "string" }
+        }
+      }
+    }
+  }
+}

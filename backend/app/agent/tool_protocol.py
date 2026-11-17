@@ -673,6 +673,125 @@ class ToolProtocolAdapter:
         ]
 
     @staticmethod
+    def get_swarm_tools() -> list[dict[str, Any]]:
+        """
+        返回原生蜂群协作 (Swarm) 四大核心原语工具定义。
+        仅在 swarm_mode=True 或角色为 Swarm 成员时按需挂载，绝不污染普通模式 < 3600 门控。
+        """
+        return [
+            {
+                "name": "swarm_control",
+                "description": (
+                    "管理蜂群成员与协作任务（Coordinator 专用）。"
+                    "支持 add（创建或唤醒专家 Worker 并下发 brief）、status（查看成员状态）、kill（永久终止成员）、title（命名蜂群）。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["add", "status", "kill", "title"],
+                            "description": "控制动作类型。",
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "成员短名称（小写英文或专家标识，如 word-expert）。",
+                        },
+                        "brief": {
+                            "type": "string",
+                            "description": "当 action=add 时必填，明确成员职责边界与完成标准。",
+                        },
+                        "agent_id": {
+                            "type": "string",
+                            "description": "可选：关联的 AgentProfile ID，自动继承其模型、Skill 与工具/目录隔离配置。",
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": "可选：指定运行模型名称。",
+                        },
+                        "title": {
+                            "type": "string",
+                            "description": "当 action=title 时填写，设置蜂群主题标题。",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "swarm_post",
+                "description": (
+                    "向蜂群共享消息板发布消息。支持使用 @成员名 唤醒特定成员，或使用 @all 广播；"
+                    "任务完成交付时请以 @coordinator [done] 开头汇报结果摘要。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "消息内容，可包含 @成员名 与结果路径。",
+                        },
+                        "kind": {
+                            "type": "string",
+                            "enum": ["message", "done", "brief"],
+                            "description": "消息类型，默认 message；最终交付请使用 done。",
+                        },
+                    },
+                    "required": ["text"],
+                },
+            },
+            {
+                "name": "swarm_read",
+                "description": (
+                    "增量读取蜂群共享消息板或查看当前成员状态。"
+                    "传入 since（上次已读最大 seq）仅获取之后的新消息。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "since": {
+                            "type": "integer",
+                            "description": "起始 seq 水位（返回 seq > since 的消息），默认 0。",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "最多返回条数，默认 20。",
+                        },
+                        "status": {
+                            "type": "boolean",
+                            "description": "为 true 时返回成员状态表而非消息列表。",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "swarm_wait",
+                "description": (
+                    "零轮询挂起等待，直到蜂群消息板出现 @自己 或 @all 的新消息到达时立即唤醒。"
+                    "必须传入已读最大 seq 作为 since。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "since": {
+                            "type": "integer",
+                            "description": "已读最大 seq 水位（必填，传 0 等待全量消息）。",
+                        },
+                        "mentions_only": {
+                            "type": "boolean",
+                            "description": "是否仅在被 @自己 或 @all 点名时唤醒，默认 true。",
+                        },
+                        "timeout_seconds": {
+                            "type": "number",
+                            "description": "最长挂起等待秒数，默认 120。",
+                        },
+                    },
+                    "required": ["since"],
+                },
+            },
+        ]
+
+    @staticmethod
     def _compact_param_type(prop_schema: dict[str, Any]) -> str:
         """将 JSON Schema 参数类型压缩为高密度短标识。"""
         raw_type = str(prop_schema.get("type") or "any").lower()

@@ -284,12 +284,13 @@ class BackgroundCommandManager:
         os.close(fd)
         log_path = Path(log_name)
 
-        proc = subprocess.Popen(
+        proc: subprocess.Popen[bytes] = subprocess.Popen(
             exec_args,
             cwd=cwd,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            text=False,
             env=env,
             start_new_session=(sys.platform != "win32"),
             **get_silent_subprocess_kwargs(allow_gui=allow_gui_window),

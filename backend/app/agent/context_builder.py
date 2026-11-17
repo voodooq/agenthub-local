@@ -120,6 +120,10 @@ class ContextBuilder:
         model_name: str = "",
         frozen_tail_prompt: str | None = None,
         mcp_catalog_prompt: str | None = None,
+        swarm_mode: bool = False,
+        swarm_role: str | None = None,
+        swarm_member_name: str | None = None,
+        swarm_brief: str | None = None,
     ) -> dict[str, Any]:
         """
         为当前推理步骤构建严格物理分区的三层上下文载荷 (Zone 1 + Zone 2 + Zone 3)。
@@ -257,6 +261,32 @@ class ContextBuilder:
             zone3_parts: list[str] = []
             if current_cwd:
                 zone3_parts.append(f"当前本地终端持久化工作目录 (CWD): `{current_cwd}`")
+
+            # 原生蜂群协作规约（仅在 swarm_mode=True 或角色为 Swarm 成员时按需注入，绝不污染普通模式）
+            if swarm_mode or swarm_role:
+                if swarm_role == "worker":
+                    worker_name = swarm_member_name or "worker"
+                    brief_line = f"\n你的职责简报：{swarm_brief}" if swarm_brief else ""
+                    zone3_parts.append(
+                        "<swarm_worker>\n"
+                        f"你是蜂群成员 `{worker_name}`（角色：worker）。{brief_line}\n"
+                        "协作铁律：\n"
+                        "1. 收到任务后直接调用本地/技能工具完成交付，严禁空谈。\n"
+                        "2. 需要与其他成员沟通或遇到阻塞时调用 `swarm_post(text=\"@成员名 ...\")`。\n"
+                        "3. 任务完成后必须调用 `swarm_post(text=\"@coordinator [done] <产出物路径与关键结果摘要>\", kind=\"done\")` 汇报，"
+                        "随后可调用 `swarm_wait(since=<已读最大seq>)` 挂起等待后续指令。\n"
+                        "</swarm_worker>"
+                    )
+                else:
+                    zone3_parts.append(
+                        "<swarm_coordinator>\n"
+                        "当前处于【蜂群协作协调者 (Swarm Coordinator)】模式。\n"
+                        "协作铁律：\n"
+                        "1. 复杂跨领域任务可通过 `swarm_control(action=\"add\", name=..., brief=..., agent_id=...)` 派发专家 Worker 并行执行。\n"
+                        "2. 通过 `swarm_wait(since=...)` 零轮询挂起等待成员汇报 `[done]`，或通过 `swarm_read` 查看增量消息。\n"
+                        "3. 所有成员交付验收完毕后，汇总完整结论与交付物链接回复用户。\n"
+                        "</swarm_coordinator>"
+                    )
 
             # Plan-First / Execute-Unlock / Clarify 状态门控放到 Zone 3，避免状态切换时击穿 Zone 1 前缀缓存
             effective_planning_gate = (

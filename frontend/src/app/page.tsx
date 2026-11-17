@@ -32,6 +32,8 @@ import {
   ArrowUpRight,
   FolderGit2,
   Box,
+  Users,
+  Bot,
 } from 'lucide-react';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
@@ -53,6 +55,7 @@ import { UpdateModal } from '@/components/UpdateModal';
 import { WorkMode } from '@/components/TopModeSwitcher';
 import { HardwareHud } from '@/components/HardwareHud';
 import { RightActionDrawer } from '@/components/RightActionDrawer';
+import { SwarmBoardDrawer } from '@/components/SwarmBoardDrawer';
 import { CommandAutocomplete } from '@/components/CommandAutocomplete';
 import { ThemeToggle } from '@/components/ThemeToggle';
 import { LanguageToggle } from '@/components/LanguageToggle';
@@ -97,6 +100,9 @@ import {
   TurnTokenMetrics,
   EditedFileItem,
   UpdateStatusData,
+  SwarmInfo,
+  SwarmMember,
+  SwarmMessage,
 } from '@/types';
 import { apiFetch, downloadWorkspaceFile, getAccessToken } from '@/utils/apiClient';
 import {
@@ -316,7 +322,72 @@ export default function WorkbenchPage() {
   const [isHudOpen, setIsHudOpen] = useState(false);
   const [isActionDrawerOpen, setIsActionDrawerOpen] = useState(false);
   const [pendingActionCount, setPendingActionCount] = useState(0);
+  const [swarmMode, setSwarmMode] = useState(false);
+  const [isSwarmDrawerOpen, setIsSwarmDrawerOpen] = useState(false);
+  const [activeSwarmId, setActiveSwarmId] = useState<string | null>(null);
+  const [activeSwarmInfo, setActiveSwarmInfo] = useState<SwarmInfo | null>(null);
+  const [activeSwarmMembers, setActiveSwarmMembers] = useState<SwarmMember[]>([]);
+  const [activeSwarmMessages, setActiveSwarmMessages] = useState<SwarmMessage[]>([]);
+  const [knownAgents, setKnownAgents] = useState<AgentItem[]>([]);
   const [workspacePath, setWorkspacePath] = useState<string>('AgentHub Workspace');
+
+  // 初始化加载专家列表（用于发送时解析 @专家名 -> target_agent_ids）
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/api/v1/agents')
+      .then(async (res) => {
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled && Array.isArray(data?.agents)) {
+          setKnownAgents(data.agents);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // 切换会话时同步关联的蜂群看板状态
+  useEffect(() => {
+    if (!activeConvId) {
+      setActiveSwarmId(null);
+      setActiveSwarmInfo(null);
+      setActiveSwarmMembers([]);
+      setActiveSwarmMessages([]);
+      return;
+    }
+    let cancelled = false;
+    apiFetch(`/api/v1/swarms/by-session/${encodeURIComponent(activeConvId)}`)
+      .then(async (res) => {
+        if (!res.ok) {
+          if (!cancelled) {
+            setActiveSwarmId(null);
+            setActiveSwarmInfo(null);
+            setActiveSwarmMembers([]);
+            setActiveSwarmMessages([]);
+          }
+          return;
+        }
+        const data = await res.json();
+        if (cancelled) return;
+        if (data?.swarm) {
+          setActiveSwarmId(data.swarm.id || null);
+          setActiveSwarmInfo(data.swarm);
+          setActiveSwarmMembers(Array.isArray(data.members) ? data.members : []);
+          setActiveSwarmMessages(Array.isArray(data.messages) ? data.messages : []);
+        } else {
+          setActiveSwarmId(null);
+          setActiveSwarmInfo(null);
+          setActiveSwarmMembers([]);
+          setActiveSwarmMessages([]);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [activeConvId]);
   const { getVerifiedFile, invalidateVerification } = useVerifiedWorkspacePaths(
     activeWorkspaceId,
     messages,
@@ -1400,7 +1471,45 @@ export default function WorkbenchPage() {
       return;
     }
 
+    // 识别 /swarm 指令：纯 /swarm 切换蜂群开关；/swarm <任务> 自动开启蜂群模式并继续发送
+    let effectiveSwarmMode = swarmMode;
     let promptToSend = rawPrompt;
+    if (lowerSlashCmd === '/swarm') {
+      if (!customPrompt) {
+        setInputPrompt('');
+        setIsInputExpanded(false);
+        setInputCursorPos(0);
+      }
+      setSwarmMode((prev) => !prev);
+      return;
+    } else if (lowerSlashCmd.startsWith('/swarm ')) {
+      effectiveSwarmMode = true;
+      if (!swarmMode) setSwarmMode(true);
+      promptToSend = rawPrompt.slice(7).trim();
+      if (!promptToSend) {
+        if (!customPrompt) {
+          setInputPrompt('');
+          setIsInputExpanded(false);
+          setInputCursorPos(0);
+        }
+        return;
+      }
+    }
+
+    // 解析 @专家名 映射到 target_agent_ids
+    const targetAgentIds: string[] = [];
+    if (knownAgents.length > 0 && promptToSend.includes('@')) {
+      for (const ag of knownAgents) {
+        const byName = ag.name ? `@${ag.name}` : '';
+        const byId = ag.id ? `@${ag.id}` : '';
+        if ((byName && promptToSend.includes(byName)) || (byId && promptToSend.includes(byId))) {
+          if (!targetAgentIds.includes(ag.id)) {
+            targetAgentIds.push(ag.id);
+          }
+        }
+      }
+    }
+
     let effectiveConvId = activeConvId;
     if (!customPrompt) {
       setInputPrompt('');
@@ -1661,6 +1770,9 @@ export default function WorkbenchPage() {
           confirmed_facts: confirmedFactsForRequest && confirmedFactsForRequest.length > 0 ? confirmedFactsForRequest : null,
           inquiry_confirmed: Boolean(options?.inquiryConfirmed),
           inquiry_action: options?.inquiryAction || null,
+          swarm_mode: effectiveSwarmMode,
+          target_agent_ids: targetAgentIds.length > 0 ? targetAgentIds : undefined,
+          swarm_id: activeSwarmId || null,
           attachments: currentAttachments.map((a) => ({
             name: a.name,
             file_path: a.filePath,
@@ -1840,6 +1952,55 @@ export default function WorkbenchPage() {
             });
           } else if (parsed.type === 'scratchpad_update') {
             setWorkingMemory(parsed.working_memory || {});
+          } else if (parsed.type === 'swarm_update') {
+            const nextSwarmId = parsed.swarm_id || parsed.swarm?.id || activeSwarmId;
+            if (nextSwarmId) setActiveSwarmId(nextSwarmId);
+            if (parsed.swarm) setActiveSwarmInfo(parsed.swarm);
+            if (Array.isArray(parsed.members)) setActiveSwarmMembers(parsed.members);
+            if (Array.isArray(parsed.messages)) setActiveSwarmMessages(parsed.messages);
+
+            const memberCount = Array.isArray(parsed.members)
+              ? parsed.members.length
+              : parsed.member_count ?? activeSwarmMembers.length;
+            const activeCount = Array.isArray(parsed.members)
+              ? parsed.members.filter((m: SwarmMember) => m.status === 'working').length
+              : parsed.active_count;
+
+            if (nextSwarmId) {
+              updateStreamMessages((prev) => {
+                const updated = [...prev];
+                const last = updated[updated.length - 1];
+                if (last && last.role === 'model') {
+                  updated[updated.length - 1] = {
+                    ...last,
+                    swarm_id: nextSwarmId,
+                    swarm_summary: {
+                      swarm_id: nextSwarmId,
+                      title: parsed.swarm?.title || parsed.title || '蜂群协作任务',
+                      status: parsed.swarm?.status || parsed.status || 'running',
+                      member_count: memberCount,
+                      active_count: activeCount,
+                    },
+                  };
+                }
+                return updated;
+              });
+            }
+          } else if (parsed.type === 'agent_turn') {
+            const turnAgentId = parsed.agent_id || null;
+            const turnAgentName = parsed.agent_name || parsed.name || parsed.agent_id || null;
+            updateStreamMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                updated[updated.length - 1] = {
+                  ...last,
+                  agent_id: turnAgentId,
+                  agent_name: turnAgentName,
+                };
+              }
+              return updated;
+            });
           } else if (parsed.type === 'loop_step') {
             const evtConvId = parsed.conversation_id || effectiveConvId || activeConvId;
             const nextStatus = parsed.status ?? 'executing';
@@ -3369,6 +3530,33 @@ export default function WorkbenchPage() {
                                   调度: {msg.executed_by_account}
                                 </span>
                               )}
+                              {(msg.agent_name || msg.agent_id) && (
+                                <span className="inline-flex items-center space-x-1 text-[10px] px-2 py-0.5 rounded-full bg-violet-500/15 text-violet-600 dark:text-violet-300 border border-violet-500/30 font-medium">
+                                  <Bot className="w-3 h-3 shrink-0" />
+                                  <span>{msg.agent_name || msg.agent_id}</span>
+                                </span>
+                              )}
+                              {(msg.swarm_id || msg.swarm_summary) && (
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const sid = msg.swarm_summary?.swarm_id || msg.swarm_id || null;
+                                    if (sid) setActiveSwarmId(sid);
+                                    setIsSwarmDrawerOpen(true);
+                                  }}
+                                  className="inline-flex items-center space-x-1.5 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/12 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 font-medium transition-colors"
+                                  title="点击打开实时蜂群协作看板"
+                                >
+                                  <Users className="w-3 h-3 shrink-0" />
+                                  <span>
+                                    蜂群看板
+                                    {msg.swarm_summary?.status ? ` · ${msg.swarm_summary.status}` : ''}
+                                    {typeof msg.swarm_summary?.member_count === 'number'
+                                      ? ` (${msg.swarm_summary.member_count}节点)`
+                                      : ''}
+                                  </span>
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>
@@ -4243,6 +4431,38 @@ export default function WorkbenchPage() {
                         <span className="hidden sm:inline">无痕</span>
                       </button>
 
+                      {/* 蜂群协作模式开关 (/swarm) */}
+                      <button
+                        type="button"
+                        onClick={() => setSwarmMode((prev) => !prev)}
+                        title={
+                          swarmMode
+                            ? '已开启蜂群协作模式（支持多专家协同与实时看板，也可输入 /swarm 切换）'
+                            : '点击开启蜂群协作模式（支持 @专家名 协同调度）'
+                        }
+                        className={`flex items-center space-x-1 px-2 py-1.5 rounded-xl text-[11px] border transition-all ${
+                          swarmMode
+                            ? 'bg-violet-500/15 border-violet-500/40 text-violet-600 dark:text-violet-300 font-semibold shadow-xs'
+                            : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-surface-200/60'
+                        }`}
+                      >
+                        <Users className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">蜂群协作</span>
+                      </button>
+
+                      {/* 实时蜂群看板快捷入口（当前会话存在蜂群或开启蜂群时显示） */}
+                      {(activeSwarmId || swarmMode) && (
+                        <button
+                          type="button"
+                          onClick={() => setIsSwarmDrawerOpen(true)}
+                          title="打开右侧实时蜂群协作看板"
+                          className="flex items-center space-x-1 px-2 py-1.5 rounded-xl text-[11px] border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 font-medium transition-all"
+                        >
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                          <span>看板</span>
+                        </button>
+                      )}
+
                       {/* 字数提示微标（半屏展开或输入内容后展示） */}
                       {(isInputExpanded || inputPrompt.length > 0) && (
                         <span className="text-[10px] font-mono text-muted-foreground/80 px-1">
@@ -4448,6 +4668,24 @@ export default function WorkbenchPage() {
         isOpen={isActionDrawerOpen}
         onClose={handleCloseActionDrawer}
         pendingCountChange={(count) => setPendingActionCount(count)}
+      />
+
+      {/* 右侧实时蜂群协作看板抽屉 */}
+      <SwarmBoardDrawer
+        isOpen={isSwarmDrawerOpen}
+        onClose={() => setIsSwarmDrawerOpen(false)}
+        swarmId={activeSwarmId}
+        sessionId={activeConvId}
+        initialSwarm={activeSwarmInfo}
+        initialMembers={activeSwarmMembers}
+        initialMessages={activeSwarmMessages}
+        onSwarmUpdated={(nextSwarm, nextMembers) => {
+          if (nextSwarm) {
+            setActiveSwarmInfo(nextSwarm);
+            setActiveSwarmId(nextSwarm.id);
+          }
+          setActiveSwarmMembers(nextMembers);
+        }}
       />
 
       {/* 全局 Ctrl + K 检索模态框 */}

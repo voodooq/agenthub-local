@@ -793,11 +793,65 @@ class DatabaseManager:
             );
             CREATE INDEX IF NOT EXISTS idx_checkpoints_conv
                 ON session_checkpoints(conversation_id, turn_id DESC, created_at DESC);
+
+            -- 23. 原生蜂群协作表 (Swarms / Swarm Members / Swarm Messages)
+            CREATE TABLE IF NOT EXISTS swarms (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT 'Swarm 协作',
+                status TEXT NOT NULL DEFAULT 'active',
+                head_seq INTEGER NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS idx_swarms_session
+                ON swarms(session_id, created_at DESC);
+
+            CREATE TABLE IF NOT EXISTS swarm_members (
+                id TEXT PRIMARY KEY,
+                swarm_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                role TEXT NOT NULL DEFAULT 'worker',
+                agent_id TEXT,
+                conv_id TEXT,
+                model TEXT,
+                state TEXT NOT NULL DEFAULT 'waiting',
+                allowed_tools_json TEXT,
+                allowed_write_dirs_json TEXT,
+                skill_ids_json TEXT NOT NULL DEFAULT '[]',
+                system_prompt TEXT NOT NULL DEFAULT '',
+                last_seq INTEGER NOT NULL DEFAULT 0,
+                brief TEXT NOT NULL DEFAULT '',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(swarm_id, name),
+                FOREIGN KEY(swarm_id) REFERENCES swarms(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS swarm_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                swarm_id TEXT NOT NULL,
+                seq INTEGER NOT NULL,
+                sender TEXT NOT NULL,
+                text TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'message',
+                mentions_json TEXT NOT NULL DEFAULT '[]',
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(swarm_id, seq),
+                FOREIGN KEY(swarm_id) REFERENCES swarms(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_swarm_messages_seq
+                ON swarm_messages(swarm_id, seq);
             """)
 
             await conn.commit()
+            try:
+                from .agent_repository import AgentProfileRepository
+                await AgentProfileRepository.ensure_initialized()
+            except Exception as agent_init_err:
+                logger.warning(f"初始化 agent_profiles 表及官方专家种子跳过: {agent_init_err}")
             logger.info(
-                "SQLite 全景架构表 (conversations/messages/long_term_memories/memory_facts/event_ledger/session_summaries/experience_proposals/task_loop_runs/workspace_artifacts/scheduled_tasks/experience_cases/session_checkpoints) 初始化完成"
+                "SQLite 全景架构表 (conversations/messages/long_term_memories/memory_facts/event_ledger/session_summaries/experience_proposals/task_loop_runs/workspace_artifacts/scheduled_tasks/experience_cases/session_checkpoints/swarms/agent_profiles) 初始化完成"
             )
 
 

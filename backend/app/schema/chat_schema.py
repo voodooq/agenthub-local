@@ -41,6 +41,9 @@ class ChatStreamRequest(BaseModel):
     confirmed_facts: list[ConfirmedFactItem] | None = Field(default=None, description="对齐卡确认的结构化事实参数列表")
     inquiry_confirmed: bool = Field(default=False, description="用户是否已在前端交互卡片完成分步确认")
     inquiry_action: str | None = Field(default=None, description="交互确认卡片触发动作: execute_now(确认后统一执行) | clarify_only(仅细化方案)")
+    swarm_mode: bool = Field(default=False, description="是否开启 /swarm 蜂群协作模式")
+    target_agent_ids: list[str] | None = Field(default=None, description="@专家名轻量点名唤起的目标专家 ID 列表")
+    swarm_id: str | None = Field(default=None, description="可选关联的已有 Swarm ID")
 
 
 class ToolApprovalRequest(BaseModel):

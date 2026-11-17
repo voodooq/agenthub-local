@@ -21,28 +21,18 @@ import {
   Filter,
   Pencil,
   Lock,
+  FolderLock,
 } from 'lucide-react';
-import { Workspace, SkillItem } from '@/types';
+import { Workspace, SkillItem, AgentItem } from '@/types';
 import { ModelOption } from '@/components/ModelSelector';
+import { apiFetch } from '@/utils/apiClient';
 import {
   fetchWorkspaceSkills,
   getCachedWorkspaceSkills,
   subscribeSkillsUpdated,
 } from '@/utils/skillCache';
 
-export interface AgentItem {
-  id: string;
-  name: string;
-  description: string;
-  base_model: string;
-  context_prompt?: string;
-  skill_ids: string[];
-  tools_count: number;
-  ownership: 'official' | 'custom';
-  status: 'active' | 'draft';
-  created_at: string;
-  updated_at: string;
-}
+export type { AgentItem } from '@/types';
 
 interface AgentsViewProps {
   workspace: Workspace | undefined;
@@ -130,9 +120,13 @@ export function AgentsView({
   const [formName, setFormName] = useState('');
   const [formDesc, setFormDesc] = useState('');
   const [formModel, setFormModel] = useState('');
+  const [formAllowedTools, setFormAllowedTools] = useState('');
+  const [formAllowedWriteDirs, setFormAllowedWriteDirs] = useState('');
   const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
   const [isSkillPickerOpen, setIsSkillPickerOpen] = useState(false);
   const [skillSearchQuery, setSkillSearchQuery] = useState('');
+  const [savingAgent, setSavingAgent] = useState(false);
+  const [apiError, setApiError] = useState<string | null>(null);
 
   // 初始化拉取系统真实技能
   useEffect(() => {
@@ -168,26 +162,57 @@ export function AgentsView({
     };
   }, [workspace?.id]);
 
-  // 从本地持久化存储加载专家
+  // 辅助：将后端或本地专家列表规范化并回写本地缓存（仅缓存自定义专家）
+  const syncCustomAgentsLocalCache = (list: AgentItem[]) => {
+    try {
+      const customs = list.filter((a) => a.ownership === 'custom');
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(customs));
+    } catch { }
+  };
+
+  // 从后端 /api/v1/agents 加载专家（失败时平滑回退本地持久化）
   useEffect(() => {
+    let isMounted = true;
     const effectiveModel = currentModel || (availableModels[0]?.id ?? 'gemini-2.5-flash');
     const initedOfficial = DEFAULT_OFFICIAL_AGENTS.map((a) => ({
       ...a,
       base_model: effectiveModel,
     }));
 
-    try {
-      const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
-      if (saved) {
-        const parsed: AgentItem[] = JSON.parse(saved);
-        // 分离个人自定义智能体和官方智能体，保证官方智能体始终不可被外部篡改
-        const customAgents = parsed.filter((a) => a.ownership === 'custom');
-        setAgents([...customAgents, ...initedOfficial]);
-        return;
-      }
-    } catch { }
+    const loadFallback = () => {
+      try {
+        const saved = localStorage.getItem(LOCAL_STORAGE_KEY);
+        if (saved) {
+          const parsed: AgentItem[] = JSON.parse(saved);
+          const customAgents = parsed.filter((a) => a.ownership === 'custom');
+          if (isMounted) setAgents([...customAgents, ...initedOfficial]);
+          return;
+        }
+      } catch { }
+      if (isMounted) setAgents(initedOfficial);
+    };
 
-    setAgents(initedOfficial);
+    apiFetch('/api/v1/agents')
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const remoteAgents: AgentItem[] = Array.isArray(data?.agents) ? data.agents : [];
+        if (remoteAgents.length > 0) {
+          if (isMounted) {
+            setAgents(remoteAgents);
+            syncCustomAgentsLocalCache(remoteAgents);
+          }
+        } else {
+          loadFallback();
+        }
+      })
+      .catch(() => {
+        loadFallback();
+      });
+
+    return () => {
+      isMounted = false;
+    };
   }, [currentModel, availableModels]);
 
   // 当打开创建模态框时，同步默认选中的真实模型
@@ -197,9 +222,12 @@ export function AgentsView({
     setFormName('');
     setFormDesc('');
     setFormModel(defaultModelId);
+    setFormAllowedTools('');
+    setFormAllowedWriteDirs('');
     setSelectedSkillIds([]);
     setIsSkillPickerOpen(false);
     setSkillSearchQuery('');
+    setApiError(null);
     setIsModalOpen(true);
   };
 
@@ -213,9 +241,12 @@ export function AgentsView({
     setFormName(agent.name);
     setFormDesc(agent.context_prompt || agent.description || '');
     setFormModel(agent.base_model || (availableModels[0]?.id ?? 'gemini-2.5-flash'));
+    setFormAllowedTools((agent.allowed_tools || []).join(', '));
+    setFormAllowedWriteDirs((agent.allowed_write_dirs || []).join(', '));
     setSelectedSkillIds([...(agent.skill_ids || [])]);
     setIsSkillPickerOpen(false);
     setSkillSearchQuery('');
+    setApiError(null);
     setIsModalOpen(true);
   };
 
@@ -225,70 +256,138 @@ export function AgentsView({
     );
   };
 
-  // 保存专家（创建或修改）
-  const handleSaveAgent = (e: React.FormEvent) => {
+  const parseCommaList = (raw: string): string[] =>
+    raw
+      .split(/[,，\n]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+
+  // 保存专家（创建或修改，优先走后端持久化，兼容回退本地）
+  const handleSaveAgent = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!formName.trim()) return;
+    if (!formName.trim() || savingAgent) return;
 
     const todayStr = new Date().toISOString().split('T')[0];
     const targetModel = formModel || (availableModels[0]?.id ?? 'gemini-2.5-flash');
     const targetPrompt = formDesc.trim();
+    const allowedTools = parseCommaList(formAllowedTools);
+    const allowedWriteDirs = parseCommaList(formAllowedWriteDirs);
+    const descText = targetPrompt || '自定义专业智能体，搭载专属技能集与独立沙盒运行环境。';
 
-    if (editingAgent) {
-      // 严格安全防卫：禁止修改官方智能体
-      if (editingAgent.ownership === 'official') return;
+    setSavingAgent(true);
+    setApiError(null);
 
-      const nextList = agents.map((a) => {
-        if (a.id === editingAgent.id) {
+    try {
+      if (editingAgent) {
+        // 严格安全防卫：禁止修改官方智能体
+        if (editingAgent.ownership === 'official') return;
+
+        let savedAgent: AgentItem | null = null;
+        try {
+          const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(editingAgent.id)}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: formName.trim(),
+              description: descText,
+              base_model: targetModel,
+              context_prompt: targetPrompt || undefined,
+              skill_ids: selectedSkillIds,
+              allowed_tools: allowedTools,
+              allowed_write_dirs: allowedWriteDirs,
+            }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.agent) savedAgent = data.agent;
+          } else if (res.status === 403 || res.status === 400) {
+            const errJson = await res.json().catch(() => ({}));
+            setApiError(errJson?.detail || '修改专家失败');
+            return;
+          }
+        } catch {
+          // 后端不可达时平滑回退本地更新
+        }
+
+        const nextList = agents.map((a) => {
+          if (a.id !== editingAgent.id) return a;
+          if (savedAgent) return savedAgent;
           return {
             ...a,
             name: formName.trim(),
-            description: formDesc.trim() || '自定义专业智能体，搭载专属技能集与独立沙盒运行环境。',
+            description: descText,
             base_model: targetModel,
             context_prompt: targetPrompt || undefined,
             skill_ids: selectedSkillIds,
             tools_count: Math.max(2, selectedSkillIds.length * 2),
+            allowed_tools: allowedTools,
+            allowed_write_dirs: allowedWriteDirs,
             updated_at: todayStr,
           };
+        });
+
+        setAgents(nextList);
+        syncCustomAgentsLocalCache(nextList);
+      } else {
+        // 创建全新个人智能体
+        let createdAgent: AgentItem | null = null;
+        try {
+          const res = await apiFetch('/api/v1/agents', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              name: formName.trim(),
+              description: descText,
+              base_model: targetModel,
+              context_prompt: targetPrompt || undefined,
+              skill_ids: selectedSkillIds,
+              allowed_tools: allowedTools,
+              allowed_write_dirs: allowedWriteDirs,
+              status: 'active',
+            }),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            if (data?.agent) createdAgent = data.agent;
+          } else if (res.status >= 400 && res.status < 500) {
+            const errJson = await res.json().catch(() => ({}));
+            setApiError(errJson?.detail || '创建专家失败');
+            return;
+          }
+        } catch {
+          // 后端不可达时平滑回退本地创建
         }
-        return a;
-      });
 
-      setAgents(nextList);
-      try {
-        const customs = nextList.filter((a) => a.ownership === 'custom');
-        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(customs));
-      } catch { }
-    } else {
-      // 创建全新个人智能体
-      const newAgent: AgentItem = {
-        id: `agent_${Date.now().toString(36)}`,
-        name: formName.trim(),
-        description: formDesc.trim() || '自定义专业智能体，搭载专属技能集与独立沙盒运行环境。',
-        base_model: targetModel,
-        context_prompt: targetPrompt || undefined,
-        skill_ids: selectedSkillIds,
-        tools_count: Math.max(2, selectedSkillIds.length * 2),
-        ownership: 'custom',
-        status: 'active',
-        created_at: todayStr,
-        updated_at: todayStr,
-      };
+        const newAgent: AgentItem = createdAgent || {
+          id: `agent_${Date.now().toString(36)}`,
+          name: formName.trim(),
+          description: descText,
+          base_model: targetModel,
+          context_prompt: targetPrompt || undefined,
+          skill_ids: selectedSkillIds,
+          tools_count: Math.max(2, selectedSkillIds.length * 2),
+          ownership: 'custom',
+          status: 'active',
+          allowed_tools: allowedTools,
+          allowed_write_dirs: allowedWriteDirs,
+          created_at: todayStr,
+          updated_at: todayStr,
+        };
 
-      const nextList = [newAgent, ...agents];
-      setAgents(nextList);
-      try {
-        const customs = nextList.filter((a) => a.ownership === 'custom');
-        localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(customs));
-      } catch { }
+        const nextList = [newAgent, ...agents.filter((a) => a.id !== newAgent.id)];
+        setAgents(nextList);
+        syncCustomAgentsLocalCache(nextList);
+      }
+
+      setIsModalOpen(false);
+      setEditingAgent(null);
+    } finally {
+      setSavingAgent(false);
     }
-
-    setIsModalOpen(false);
-    setEditingAgent(null);
   };
 
   // 删除个人专家
-  const handleDeleteAgent = (agent: AgentItem, e: React.MouseEvent) => {
+  const handleDeleteAgent = async (agent: AgentItem, e: React.MouseEvent) => {
     e.stopPropagation();
     // 严格安全防卫：官方专家不可删除
     if (agent.ownership === 'official') return;
@@ -298,12 +397,20 @@ export function AgentsView({
     );
     if (!confirmed) return;
 
+    try {
+      const res = await apiFetch(`/api/v1/agents/${encodeURIComponent(agent.id)}`, {
+        method: 'DELETE',
+      });
+      if (!res.ok && res.status === 403) {
+        return;
+      }
+    } catch {
+      // 后端不可达时平滑回退本地删除
+    }
+
     const nextList = agents.filter((a) => a.id !== agent.id);
     setAgents(nextList);
-    try {
-      const customs = nextList.filter((a) => a.ownership === 'custom');
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(customs));
-    } catch { }
+    syncCustomAgentsLocalCache(nextList);
   };
 
   const filteredAgents = agents.filter((agent) => {
@@ -512,6 +619,37 @@ export function AgentsView({
                         )}
                       </div>
                     </div>
+
+                    {/* 工具白名单与目录隔离徽标 */}
+                    {((agent.allowed_tools && agent.allowed_tools.length > 0) ||
+                      (agent.allowed_write_dirs && agent.allowed_write_dirs.length > 0)) && (
+                      <div className="flex flex-wrap gap-1.5 pt-1">
+                        {agent.allowed_tools && agent.allowed_tools.length > 0 && (
+                          <span
+                            className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md bg-violet-500/10 text-violet-500 dark:text-violet-300 border border-violet-500/25 text-[10px] font-mono"
+                            title={`工具白名单: ${agent.allowed_tools.join(', ')}`}
+                          >
+                            <Wrench className="w-2.5 h-2.5 shrink-0" />
+                            <span>
+                              工具隔离 ({agent.allowed_tools.length}): {agent.allowed_tools.slice(0, 2).join(', ')}
+                              {agent.allowed_tools.length > 2 ? '…' : ''}
+                            </span>
+                          </span>
+                        )}
+                        {agent.allowed_write_dirs && agent.allowed_write_dirs.length > 0 && (
+                          <span
+                            className="inline-flex items-center space-x-1 px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-300 border border-amber-500/25 text-[10px] font-mono"
+                            title={`允许写入目录: ${agent.allowed_write_dirs.join(', ')}`}
+                          >
+                            <FolderLock className="w-2.5 h-2.5 shrink-0" />
+                            <span>
+                              目录隔离: {agent.allowed_write_dirs.slice(0, 2).join(', ')}
+                              {agent.allowed_write_dirs.length > 2 ? '…' : ''}
+                            </span>
+                          </span>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -752,6 +890,41 @@ export function AgentsView({
                   </div>
                 )}
               </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+                <div>
+                  <label className="block text-xs font-semibold text-foreground mb-1 flex items-center space-x-1">
+                    <Wrench className="w-3 h-3 text-violet-400" />
+                    <span>工具白名单 (可选，逗号分隔)</span>
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="如: read_file, write_file, run_command"
+                    value={formAllowedTools}
+                    onChange={(e) => setFormAllowedTools(e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl bg-surface-100 border border-border text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-foreground mb-1 flex items-center space-x-1">
+                    <FolderLock className="w-3 h-3 text-amber-400" />
+                    <span>允许写入目录 (可选，逗号分隔)</span>
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="如: frontend/, docs/"
+                    value={formAllowedWriteDirs}
+                    onChange={(e) => setFormAllowedWriteDirs(e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-xl bg-surface-100 border border-border text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500"
+                  />
+                </div>
+              </div>
+
+              {apiError && (
+                <div className="px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-500">
+                  {apiError}
+                </div>
+              )}
 
               <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-muted-foreground space-y-1">
                 <div className="font-semibold text-emerald-600 dark:text-emerald-400 flex items-center space-x-1">

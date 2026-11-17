@@ -195,6 +195,29 @@ class AgentRuntime:
             logger.debug(f"[AgentRuntime] 附带单工具 Schema 提示跳过: {hint_err}")
         return out_str
 
+    @staticmethod
+    def _is_path_in_allowed_dirs(
+        target_file: Path,
+        allowed_write_dirs: list[str] | None,
+        base_dir: Path,
+    ) -> bool:
+        """校验目标写入路径是否落在授权目录白名单内（allowed_write_dirs 为空时放行）。"""
+        if not allowed_write_dirs:
+            return True
+        resolved_target = target_file.resolve()
+        for raw_dir in allowed_write_dirs:
+            d_str = str(raw_dir or "").strip()
+            if not d_str:
+                continue
+            cand = Path(d_str)
+            if not cand.is_absolute():
+                cand = (base_dir / cand).resolve()
+            else:
+                cand = cand.resolve()
+            if resolved_target == cand or resolved_target.is_relative_to(cand):
+                return True
+        return False
+
     @classmethod
     async def _assemble_agent_tools(
         cls,
@@ -203,10 +226,14 @@ class AgentRuntime:
         user_message: str,
         collapse_anchor_turn_id: int = 0,
         extra_activate_servers: list[str] | set[str] | None = None,
+        allowed_tools: list[str] | None = None,
+        include_swarm: bool = False,
     ) -> tuple[list[dict[str, Any]], str]:
-        """装配 Agent 模式可用工具集（支持 MCP 两段式目录与按需 Schema 延迟挂载）。"""
+        """装配 Agent 模式可用工具集（支持 MCP 两段式目录、Swarm 原语按需挂载与工具白名单过滤）。"""
         all_builtin = ToolProtocolAdapter.get_builtin_tools()
         active_tools: list[dict[str, Any]] = list(all_builtin)
+        if include_swarm:
+            active_tools.extend(ToolProtocolAdapter.get_swarm_tools())
         mcp_catalog_prompt = ""
 
         prev_anchor = cls._mcp_anchor_by_conv.get(conv_id, 0)
@@ -218,23 +245,31 @@ class AgentRuntime:
 
         activated_set = cls._activated_mcp_servers_by_conv.setdefault(conv_id, set())
 
+        def _filter_allowed(tools_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            if not allowed_tools:
+                return tools_list
+            allow_set = {str(t).strip() for t in allowed_tools if str(t).strip()}
+            if not allow_set:
+                return tools_list
+            return [t for t in tools_list if str(t.get("name", "")).strip() in allow_set]
+
         try:
             catalog = await mcp_manager.get_mcp_catalog_summary()
         except Exception as e:
             logger.warning(f"加载 MCP 目录摘要异常: {e}")
-            return active_tools, mcp_catalog_prompt
+            return _filter_allowed(active_tools), mcp_catalog_prompt
 
         total_tools = int(catalog.get("total_tools") or 0)
         total_schema_chars = int(catalog.get("total_schema_chars") or 0)
         servers_meta: dict[str, list[dict[str, str]]] = catalog.get("servers") or {}
 
         if total_tools == 0:
-            return active_tools, ""
+            return _filter_allowed(active_tools), ""
 
         # 工具总数 <= 5 且 Schema 体积 <= 2000 字符时直接全量挂载，免去额外 discover 往返
         if total_tools <= 5 and total_schema_chars <= 2000:
             active_tools.extend(catalog.get("all_tools") or [])
-            return active_tools, ""
+            return _filter_allowed(active_tools), ""
 
         # 两段式延迟挂载：按显式请求、关键词与热区历史单调递增激活 Server
         if extra_activate_servers:
@@ -268,7 +303,7 @@ class AgentRuntime:
                 logger.warning(f"按需加载已激活 MCP 工具异常: {act_err}")
 
         mcp_catalog_prompt = str(catalog.get("catalog_text") or "").strip()
-        return active_tools, mcp_catalog_prompt
+        return _filter_allowed(active_tools), ("" if allowed_tools else mcp_catalog_prompt)
 
     _CHITCHAT_GREETING_RE = re.compile(
         r"^\s*(?:你好|您好|hi+|hello+|hey+|早安|早上好|下午好|晚上好|在吗|在不在|谢谢|多谢|感谢|再见|拜拜|晚安|你是谁|你叫什么|你能做什么|你会什么|介绍一下你自己|讲个笑话|陪我聊聊天)[！!。.?？\s]*$",
@@ -802,6 +837,13 @@ class AgentRuntime:
         inquiry_confirmed: bool = False,
         inquiry_action: str | None = None,
         is_disconnected: Callable[[], Awaitable[bool]] | None = None,
+        allowed_tools: list[str] | None = None,
+        allowed_write_dirs: list[str] | None = None,
+        swarm_mode: bool = False,
+        swarm_id: str | None = None,
+        swarm_member_name: str | None = None,
+        swarm_role: str | None = None,
+        swarm_brief: str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行双层循环流式推理与工具编排，向外输出标准化 SSE 字典事件流。
@@ -1183,16 +1225,29 @@ class AgentRuntime:
             except Exception:
                 conv_collapse_anchor = 0
 
+        include_swarm_tools = bool(swarm_mode or swarm_role)
+        allowed_tools_set: set[str] | None = (
+            {str(t).strip() for t in allowed_tools if str(t).strip()}
+            if allowed_tools
+            else None
+        )
+
         if active_scene == "agent":
             if is_planning_phase:
                 # 🛡️ 物理只读硬门控：规划态仅向模型暴露 L0 只读与记忆探测工具，写盘与终端完全隔离
                 all_builtin = ToolProtocolAdapter.get_builtin_tools()
-                active_tools.extend([t for t in all_builtin if t.get("name") in PLANNING_SAFE_TOOLS])
+                active_tools.extend([
+                    t for t in all_builtin
+                    if t.get("name") in PLANNING_SAFE_TOOLS
+                    and (allowed_tools_set is None or t.get("name") in allowed_tools_set)
+                ])
             else:
                 active_tools, mcp_catalog_prompt = await self._assemble_agent_tools(
                     conv_id=conv_id,
                     user_message=user_message,
                     collapse_anchor_turn_id=conv_collapse_anchor,
+                    allowed_tools=allowed_tools,
+                    include_swarm=include_swarm_tools,
                 )
 
         # 若用户已批准方案，将执行步骤持久化写入工作区 .agenthub/scratchpad.md
@@ -1769,6 +1824,10 @@ class AgentRuntime:
                     model_name=model_name,
                     frozen_tail_prompt=frozen_turn_tail_prompt,
                     mcp_catalog_prompt=mcp_catalog_prompt if (active_scene == "agent" and not is_planning_phase) else None,
+                    swarm_mode=swarm_mode,
+                    swarm_role=swarm_role,
+                    swarm_member_name=swarm_member_name,
+                    swarm_brief=swarm_brief,
                 )
 
                 if await _check_cancelled():
@@ -2342,6 +2401,35 @@ class AgentRuntime:
                     args_hash = self._compute_tool_args_hash(args)
                     sig_key = (func_name, args_hash)
 
+                    # 🛡️ 工具白名单强隔离门控：allowed_tools 非空时严格拦截白名单外工具
+                    if allowed_tools_set is not None and func_name not in allowed_tools_set:
+                        deny_tool_msg = (
+                            f"Denied: 【工具权限隔离拦截】工具 `{func_name}` 未在当前 Agent 的授权工具白名单 "
+                            f"({sorted(allowed_tools_set)}) 中，已拒绝执行。"
+                        )
+                        compressed = f"[工具白名单拦截 `{func_name}`]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "status": "denied",
+                            "output": deny_tool_msg,
+                            "compressed": compressed,
+                        }
+                        await MessageRepository.save_message(
+                            conversation_id=conv_id,
+                            turn_id=current_turn_id,
+                            role="tool",
+                            content=deny_tool_msg,
+                            compressed_content=compressed,
+                            tool_call_id=call_id,
+                        )
+                        last_step_error_info = {
+                            "tool": func_name,
+                            "summary": deny_tool_msg,
+                        }
+                        continue
+
                     # 🛡️ 物理只读硬门控拦截：若处于规划阶段，绝对禁止执行任何破坏性写入或终端命令
                     if is_planning_phase and func_name not in PLANNING_SAFE_TOOLS:
                         deny_reason = (
@@ -2405,10 +2493,10 @@ class AgentRuntime:
                         except Exception as ckpt_err:
                             logger.warning(f"[AgentRuntime] Pre-Tool 自动静默快照跳过: {ckpt_err}")
 
-                    # S10: 轮内无写操作穿插的重复工具签名拦截（连续第 2 次完全相同只读/失败调用直接拦截；豁免后台轮询）
+                    # S10: 轮内无写操作穿插的重复工具签名拦截（连续第 2 次完全相同只读/失败调用直接拦截；豁免后台轮询与 Swarm 阻塞等待/增量拉取）
                     if (
                         not args_parse_failed
-                        and func_name != "check_background_command"
+                        and func_name not in ("check_background_command", "swarm_wait", "swarm_read")
                         and sig_key in turn_tool_sig_cache
                     ):
                         s10_intercepted = True
@@ -2970,6 +3058,25 @@ class AgentRuntime:
                                     "compressed": compressed,
                                     "cwd": str(current_work_dir),
                                 }
+                            elif allowed_write_dirs and not self._is_path_in_allowed_dirs(
+                                target_file, allowed_write_dirs, current_work_dir
+                            ):
+                                tool_output = (
+                                    f"Denied: 【目录权限隔离拦截】目标路径 `{rel_display}` 不在当前 Agent 的授权写入目录 "
+                                    f"({allowed_write_dirs}) 范围内，已拒绝写入。"
+                                )
+                                compressed = f"[目录隔离拦截写入 `{rel_display}`]"
+                                yield {
+                                    "type": "tool_end",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": f"write_file({rel_display})",
+                                    "reason": "授权写入目录越界拦截",
+                                    "status": "denied",
+                                    "output": tool_output,
+                                    "compressed": compressed,
+                                    "cwd": str(current_work_dir),
+                                }
                             else:
                                 # 全自动确认直通写入物理文件，无需用户手动点击确认
                                 yield {
@@ -3122,6 +3229,24 @@ class AgentRuntime:
                                     "status": "completed",
                                     "output": tool_output,
                                     "compressed": f"[安全拦截修改附件 `{rel_display}`]",
+                                    "cwd": str(current_work_dir),
+                                }
+                            elif allowed_write_dirs and not self._is_path_in_allowed_dirs(
+                                target_file, allowed_write_dirs, current_work_dir
+                            ):
+                                tool_output = (
+                                    f"Denied: 【目录权限隔离拦截】目标路径 `{rel_display}` 不在当前 Agent 的授权写入目录 "
+                                    f"({allowed_write_dirs}) 范围内，已拒绝修改。"
+                                )
+                                yield {
+                                    "type": "tool_end",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": f"replace_in_file({rel_display})",
+                                    "reason": "授权写入目录越界拦截",
+                                    "status": "denied",
+                                    "output": tool_output,
+                                    "compressed": f"[目录隔离拦截修改 `{rel_display}`]",
                                     "cwd": str(current_work_dir),
                                 }
                             elif not target_file.exists() or not target_file.is_file():
@@ -3836,6 +3961,190 @@ class AgentRuntime:
                             "file_size": int(bridge_meta.get("file_size") or 0) if bridge_status == "completed" else 0,
                         }
 
+                    # ── Swarm 四原语执行分支 (swarm_control / swarm_post / swarm_read / swarm_wait) ──
+                    elif func_name == "swarm_control":
+                        from .swarm_manager import swarm_manager
+                        from ..repository.swarm_repository import SwarmRepository
+
+                        action = str(args.get("action") or "").strip().lower()
+                        eff_swarm_id = swarm_id
+                        if not eff_swarm_id:
+                            sw_obj = await swarm_manager.get_or_create_swarm(
+                                session_id=conv_id,
+                                workspace_id=ws_id,
+                                cwd=target_cwd,
+                                default_model=model_name,
+                            )
+                            eff_swarm_id = sw_obj["id"]
+
+                        if swarm_role == "worker":
+                            tool_output = "Denied: Worker 成员无权调用 `swarm_control` 管理蜂群拓扑。"
+                            compressed = "[Swarm 权限拦截: worker 禁止调用 swarm_control]"
+                        elif action == "add":
+                            m_name = str(args.get("name") or "").strip()
+                            m_brief = str(args.get("brief") or "").strip()
+                            m_agent_id = str(args.get("agent_id") or "").strip() or None
+                            m_model = str(args.get("model") or "").strip() or None
+                            if not m_name:
+                                tool_output = "Error: `swarm_control(action='add')` 缺少参数 `name`。"
+                            else:
+                                mem = await swarm_manager.add_member(
+                                    eff_swarm_id,
+                                    name=m_name,
+                                    brief=m_brief,
+                                    agent_id=m_agent_id,
+                                    model=m_model,
+                                    workspace_id=ws_id,
+                                    cwd=target_cwd,
+                                )
+                                tool_output = json.dumps({"status": "added", "swarm_id": eff_swarm_id, "member": mem}, ensure_ascii=False)
+                            compressed = f"[Swarm 添加成员 `{m_name}`]"
+                        elif action == "status":
+                            members = await SwarmRepository.list_members(eff_swarm_id)
+                            tool_output = json.dumps({"swarm_id": eff_swarm_id, "members": members}, ensure_ascii=False)
+                            compressed = f"[Swarm 状态查询: {len(members)} 名成员]"
+                        elif action == "kill":
+                            m_name = str(args.get("name") or "").strip()
+                            if not m_name:
+                                tool_output = "Error: `swarm_control(action='kill')` 缺少参数 `name`。"
+                            else:
+                                mem = await swarm_manager.kill_member(eff_swarm_id, m_name)
+                                tool_output = json.dumps({"status": "killed", "member": mem}, ensure_ascii=False)
+                            compressed = f"[Swarm 终止成员 `{m_name}`]"
+                        elif action == "title":
+                            new_title = str(args.get("title") or "").strip()
+                            sw_obj = await SwarmRepository.update_swarm(eff_swarm_id, title=new_title)
+                            tool_output = json.dumps({"status": "updated", "swarm": sw_obj}, ensure_ascii=False)
+                            compressed = f"[Swarm 更新标题 `{new_title}`]"
+                        else:
+                            tool_output = f"Error: 未知的 swarm_control action `{action}`。"
+                            compressed = f"[Swarm 未知动作 `{action}`]"
+
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"swarm_control({action})",
+                            "reason": "蜂群拓扑控制",
+                            "status": "denied" if tool_output.startswith("Denied:") else "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    elif func_name == "swarm_post":
+                        from .swarm_manager import swarm_manager
+
+                        eff_swarm_id = swarm_id
+                        if not eff_swarm_id:
+                            sw_obj = await swarm_manager.get_or_create_swarm(
+                                session_id=conv_id,
+                                workspace_id=ws_id,
+                                cwd=target_cwd,
+                                default_model=model_name,
+                            )
+                            eff_swarm_id = sw_obj["id"]
+
+                        post_text = str(args.get("text") or "").strip()
+                        post_kind = str(args.get("kind") or "message").strip() or "message"
+                        sender_name = swarm_member_name or (swarm_role or "coordinator")
+                        if not post_text:
+                            tool_output = "Error: `swarm_post` 缺少参数 `text`。"
+                            compressed = "[Swarm 发帖失败: 空消息]"
+                        else:
+                            msg = await swarm_manager.post_message(
+                                eff_swarm_id,
+                                sender=sender_name,
+                                text=post_text,
+                                kind=post_kind,
+                            )
+                            tool_output = json.dumps({"status": "posted", "message": msg}, ensure_ascii=False)
+                            compressed = f"[Swarm 发帖 #{msg['seq']} by {sender_name}]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"swarm_post({sender_name})",
+                            "reason": "向蜂群消息板发帖",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    elif func_name == "swarm_read":
+                        from .swarm_manager import swarm_manager
+                        from ..repository.swarm_repository import SwarmRepository
+
+                        eff_swarm_id = swarm_id
+                        if not eff_swarm_id:
+                            sw_obj = await swarm_manager.get_or_create_swarm(
+                                session_id=conv_id,
+                                workspace_id=ws_id,
+                                cwd=target_cwd,
+                                default_model=model_name,
+                            )
+                            eff_swarm_id = sw_obj["id"]
+
+                        if bool(args.get("status", False)):
+                            members = await SwarmRepository.list_members(eff_swarm_id)
+                            tool_output = json.dumps({"swarm_id": eff_swarm_id, "members": members}, ensure_ascii=False)
+                            compressed = f"[Swarm 读取成员状态: {len(members)} 名]"
+                        else:
+                            since_seq = int(args.get("since") or 0)
+                            read_limit = int(args.get("limit") or 20)
+                            msgs, head_seq = await SwarmRepository.read_messages(
+                                eff_swarm_id, since=since_seq, limit=read_limit
+                            )
+                            tool_output = json.dumps({"messages": msgs, "head": head_seq}, ensure_ascii=False)
+                            compressed = f"[Swarm 读取消息 {len(msgs)} 条 (head={head_seq})]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": "swarm_read()",
+                            "reason": "读取蜂群消息板",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    elif func_name == "swarm_wait":
+                        from .swarm_manager import swarm_manager
+
+                        eff_swarm_id = swarm_id
+                        if not eff_swarm_id:
+                            sw_obj = await swarm_manager.get_or_create_swarm(
+                                session_id=conv_id,
+                                workspace_id=ws_id,
+                                cwd=target_cwd,
+                                default_model=model_name,
+                            )
+                            eff_swarm_id = sw_obj["id"]
+
+                        since_seq = int(args.get("since") or 0)
+                        mentions_only = bool(args.get("mentions_only", True))
+                        timeout_sec = float(args.get("timeout_seconds") or 120.0)
+                        waiter_name = swarm_member_name or (swarm_role or "coordinator")
+
+                        wait_res = await swarm_manager.wait_for_messages(
+                            eff_swarm_id,
+                            member_name=waiter_name,
+                            since=since_seq,
+                            mentions_only=mentions_only,
+                            timeout_seconds=timeout_sec,
+                        )
+                        tool_output = json.dumps(wait_res, ensure_ascii=False)
+                        compressed = f"[Swarm 唤醒: 收到 {len(wait_res.get('messages') or [])} 条消息 (head={wait_res.get('head')})]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"swarm_wait(since={since_seq})",
+                            "reason": "零轮询挂起等待蜂群消息",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
                     else:
                         tool_output = f"Error: 未知的工具名称 `{func_name}`。"
                         compressed = f"[未知工具调用 `{func_name}`]"
@@ -3859,8 +4168,8 @@ class AgentRuntime:
                         has_workspace_mutations = True
                     prev_step_error = last_step_error_info
                     out_lower = tool_output_str.lower()
-                    # 后台命令刚转入后台或正在活跃轮询(running)时，豁免异常探测与 LoopBreaker 熔断
-                    if is_bg_detached or bg_poll_running:
+                    # 后台命令刚转入后台或正在活跃轮询(running)以及 Swarm 挂起等待时，豁免异常探测与 LoopBreaker 熔断
+                    if is_bg_detached or bg_poll_running or func_name == "swarm_wait":
                         is_step_abnormal = False
                     else:
                         is_step_abnormal = (
