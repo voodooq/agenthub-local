@@ -715,23 +715,67 @@ class AgentRuntime:
         clean_scope = (scope or "all").strip().lower()
         if clean_scope not in ("messages", "facts_history", "workspace", "all"):
             clean_scope = "all"
-        safe_limit = max(1, min(int(limit or 5), 20))
+        safe_limit = max(1, min(int(limit or 5), 50))
 
         sections: list[str] = []
 
-        # 1. 历史消息 FTS5 BM25（无痕模式跳过）
+        # 1. 历史消息召回：支持按日期（today/今天/今日/yesterday/昨天/YYYY-MM-DD）全量收集当日交互，或 FTS5 BM25 检索
         if not incognito and clean_scope in ("messages", "all"):
-            msg_hits = await SearchRepository.search_messages(clean_q, limit=safe_limit)
-            if msg_hits:
-                lines = ["#### 💬 历史会话消息召回 (messages_fts)"]
-                for hit in msg_hits[:safe_limit]:
-                    raw_snip = re.sub(r"<[^>]+>", "", str(hit.get("highlighted_snippet") or hit.get("content") or ""))
-                    safe_snip, _ = MemoryPolicyGuard.sanitize_text(raw_snip[:220])
-                    title = str(hit.get("conversation_title") or hit.get("conversation_id") or "")
-                    lines.append(
-                        f"- **[{hit.get('role', 'user')}]** (会话 `{title}`, {hit.get('created_at', '')}): {safe_snip}"
-                    )
-                sections.append("\n".join(lines))
+            date_target: str | None = None
+            q_lower = clean_q.lower()
+            if q_lower in ("today", "今天", "今日", "daily"):
+                date_target = datetime.now().strftime("%Y-%m-%d")
+            elif q_lower in ("yesterday", "昨天", "昨日"):
+                from datetime import timedelta
+                date_target = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d")
+            elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", clean_q):
+                date_target = clean_q
+
+            if date_target:
+                day_rows: list[dict[str, Any]] = []
+                try:
+                    async with db_manager.get_connection() as conn:
+                        async with conn.execute(
+                            """
+                            SELECT m.role, m.content, m.created_at, m.conversation_id,
+                                   COALESCE(c.title, m.conversation_id) AS conversation_title
+                            FROM messages m
+                            LEFT JOIN conversations c ON c.id = m.conversation_id
+                            WHERE COALESCE(c.is_incognito, 0) = 0
+                              AND m.role IN ('user', 'assistant')
+                              AND substr(datetime(m.created_at, 'localtime'), 1, 10) = ?
+                            ORDER BY m.created_at ASC
+                            LIMIT ?;
+                            """,
+                            (date_target, safe_limit),
+                        ) as cursor:
+                            day_rows = [dict(r) for r in await cursor.fetchall()]
+                except Exception as day_err:
+                    logger.debug(f"按日期召回交互记录失败 ({date_target}): {day_err}")
+
+                if day_rows:
+                    lines = [f"#### 📅 {date_target} 当日全量交互记录汇总（共 {len(day_rows)} 条）"]
+                    for hit in day_rows:
+                        safe_snip, _ = MemoryPolicyGuard.sanitize_text(str(hit.get("content") or "")[:300])
+                        title = str(hit.get("conversation_title") or hit.get("conversation_id") or "")
+                        lines.append(
+                            f"- **[{hit.get('role', 'user')}]** (会话 `{title}`, {hit.get('created_at', '')}): {safe_snip}"
+                        )
+                    sections.append("\n".join(lines))
+                else:
+                    sections.append(f"#### 📅 {date_target} 当日交互记录\n- 当日暂无已落库的对话消息。")
+            else:
+                msg_hits = await SearchRepository.search_messages(clean_q, limit=safe_limit)
+                if msg_hits:
+                    lines = ["#### 💬 历史会话消息召回 (messages_fts)"]
+                    for hit in msg_hits[:safe_limit]:
+                        raw_snip = re.sub(r"<[^>]+>", "", str(hit.get("highlighted_snippet") or hit.get("content") or ""))
+                        safe_snip, _ = MemoryPolicyGuard.sanitize_text(raw_snip[:220])
+                        title = str(hit.get("conversation_title") or hit.get("conversation_id") or "")
+                        lines.append(
+                            f"- **[{hit.get('role', 'user')}]** (会话 `{title}`, {hit.get('created_at', '')}): {safe_snip}"
+                        )
+                    sections.append("\n".join(lines))
 
         # 2. 双时间轴历史事实 + 非结构化长期记忆（无痕模式跳过）
         if not incognito and clean_scope in ("facts_history", "all"):

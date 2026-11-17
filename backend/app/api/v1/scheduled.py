@@ -21,6 +21,7 @@ class ScheduledTaskCreateRequest(BaseModel):
     name: str = Field(..., description="计划任务名称")
     cron_expr: str = Field(..., description="Cron 表达式或周期标识 (如 @daily, @hourly, 0 9 * * *)")
     prompt_template: str = Field(..., description="自动化执行提示词模板")
+    agent_id: str | None = Field(None, description="可选：绑定执行的专家智能体 ID")
 
 
 class ScheduleParseRequest(BaseModel):
@@ -103,10 +104,10 @@ async def create_scheduled_task(req: ScheduledTaskCreateRequest):
         await conn.execute(
             """
             INSERT INTO scheduled_tasks (
-                id, workspace_id, name, cron_expr, prompt_template, status, next_run_at, created_at
-            ) VALUES (?, ?, ?, ?, ?, 'active', ?, ?);
+                id, workspace_id, name, cron_expr, prompt_template, agent_id, status, next_run_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?);
             """,
-            (task_id, req.workspace_id, req.name, req.cron_expr, req.prompt_template, next_run_at, now_str),
+            (task_id, req.workspace_id, req.name, req.cron_expr, req.prompt_template, req.agent_id, next_run_at, now_str),
         )
         await conn.commit()
 
@@ -116,6 +117,7 @@ async def create_scheduled_task(req: ScheduledTaskCreateRequest):
         "name": req.name,
         "cron_expr": req.cron_expr,
         "prompt_template": req.prompt_template,
+        "agent_id": req.agent_id,
         "status": "active",
         "next_run_at": next_run_at,
         "created_at": now_str,

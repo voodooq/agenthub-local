@@ -282,11 +282,43 @@ class TaskScheduler:
             return active_ids[0]
         return "4 Argon"
 
-    async def _execute_headless_agent(self, workspace_id: str, prompt: str) -> dict[str, Any]:
-        """调用 AgentRuntime 在指定工作区下无头执行提示词并返回完整输出与状态。"""
+    async def _execute_headless_agent(
+        self,
+        workspace_id: str,
+        prompt: str,
+        agent_id: str | None = None,
+    ) -> dict[str, Any]:
+        """调用 AgentRuntime 在指定工作区下无头执行提示词（支持绑定专家配置）并返回完整输出与状态。"""
         from ..agent.runtime import agent_runtime
 
         model_name = await self._resolve_headless_model(workspace_id)
+        system_override: str | None = None
+        allowed_tools: list[str] | None = None
+        allowed_write_dirs: list[str] | None = None
+
+        if agent_id:
+            try:
+                from ..repository.agent_repository import AgentProfileRepository
+                profile = await AgentProfileRepository.get_agent(agent_id)
+                if profile:
+                    cand_model = str(profile.get("base_model") or "").strip()
+                    if cand_model and cand_model.lower() != "auto":
+                        model_name = cand_model
+                    parts: list[str] = []
+                    if profile.get("context_prompt"):
+                        parts.append(str(profile["context_prompt"]).strip())
+                    elif profile.get("description"):
+                        parts.append(str(profile["description"]).strip())
+                    if profile.get("skill_ids"):
+                        parts.append(f"优先调用已挂载技能: {', '.join(profile['skill_ids'])}")
+                    if parts:
+                        system_override = "\n\n".join(parts)
+                    if profile.get("allowed_tools"):
+                        allowed_tools = list(profile["allowed_tools"])
+                    if profile.get("allowed_write_dirs"):
+                        allowed_write_dirs = list(profile["allowed_write_dirs"])
+            except Exception as prof_err:
+                logger.warning(f"计划任务加载绑定专家 ({agent_id}) 失败，使用工作区默认配置: {prof_err}")
 
         output_chunks: list[str] = []
         error_messages: list[str] = []
@@ -297,9 +329,12 @@ class TaskScheduler:
             user_message=prompt,
             model_name=model_name,
             workspace_id=workspace_id,
+            system_override=system_override,
             scene_mode="agent",
             execution_strategy="direct",
             clarify_mode=False,
+            allowed_tools=allowed_tools,
+            allowed_write_dirs=allowed_write_dirs,
         ):
             etype = event.get("type")
             if etype == "conv_init":
@@ -349,6 +384,7 @@ class TaskScheduler:
         task_name = task["name"]
         prompt = task["prompt_template"]
         cron_expr = task["cron_expr"]
+        bound_agent_id = task.get("agent_id") if isinstance(task, dict) else (task["agent_id"] if "agent_id" in task.keys() else None)
 
         run_id = f"run_{uuid.uuid4().hex[:12]}"
         started_dt = datetime.now()
@@ -373,7 +409,7 @@ class TaskScheduler:
                 )
                 await conn.commit()
 
-            exec_result = await self._execute_headless_agent(workspace_id, prompt)
+            exec_result = await self._execute_headless_agent(workspace_id, prompt, agent_id=bound_agent_id)
             final_status = "success" if exec_result.get("success") else "failed"
             output_text = exec_result.get("output_text") or ""
             error_message = exec_result.get("error_message")

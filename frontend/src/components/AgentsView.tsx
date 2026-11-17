@@ -22,6 +22,8 @@ import {
   Pencil,
   Lock,
   FolderLock,
+  Clock,
+  Loader2,
 } from 'lucide-react';
 import { Workspace, SkillItem, AgentItem } from '@/types';
 import { ModelOption } from '@/components/ModelSelector';
@@ -127,6 +129,14 @@ export function AgentsView({
   const [skillSearchQuery, setSkillSearchQuery] = useState('');
   const [savingAgent, setSavingAgent] = useState(false);
   const [apiError, setApiError] = useState<string | null>(null);
+  const [nlPrompt, setNlPrompt] = useState('');
+  const [nlGenerating, setNlGenerating] = useState(false);
+  const [scheduleEnabled, setScheduleEnabled] = useState(false);
+  const [scheduleCron, setScheduleCron] = useState('0 18 * * *');
+  const [scheduleHuman, setScheduleHuman] = useState('');
+  const [scheduleName, setScheduleName] = useState('');
+  const [schedulePrompt, setSchedulePrompt] = useState('');
+  const [bannerNotice, setBannerNotice] = useState<string | null>(null);
 
   // 初始化拉取系统真实技能
   useEffect(() => {
@@ -226,7 +236,59 @@ export function AgentsView({
     setIsSkillPickerOpen(false);
     setSkillSearchQuery('');
     setApiError(null);
+    setNlPrompt('');
+    setScheduleEnabled(false);
+    setScheduleCron('0 18 * * *');
+    setScheduleHuman('');
+    setScheduleName('');
+    setSchedulePrompt('');
     setIsModalOpen(true);
+  };
+
+  // 一句话自然语言智能装配专家配置与联动定时计划
+  const handleGenerateFromNaturalLanguage = async () => {
+    const raw = nlPrompt.trim();
+    if (!raw || nlGenerating) return;
+    setNlGenerating(true);
+    setApiError(null);
+    try {
+      const res = await apiFetch('/api/v1/agents/generate-from-prompt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          user_prompt: raw,
+          workspace_id: workspace?.id || 'default',
+        }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setApiError(err?.detail || '自然语言解析失败');
+        return;
+      }
+      const data = await res.json();
+      const draft = data?.draft;
+      if (!draft) return;
+
+      if (draft.name) setFormName(draft.name);
+      if (draft.context_prompt) setFormDesc(draft.context_prompt);
+      if (Array.isArray(draft.skill_ids)) setSelectedSkillIds(draft.skill_ids);
+      if (Array.isArray(draft.allowed_tools)) setFormAllowedTools(draft.allowed_tools.join(', '));
+      if (Array.isArray(draft.allowed_write_dirs)) setFormAllowedWriteDirs(draft.allowed_write_dirs.join(', '));
+
+      if (draft.schedule && draft.schedule.enabled) {
+        setScheduleEnabled(true);
+        setScheduleCron(draft.schedule.cron_expr || '0 18 * * *');
+        setScheduleHuman(draft.schedule.human_schedule || '');
+        setScheduleName(draft.schedule.name || `${draft.name} · 定时任务`);
+        setSchedulePrompt(draft.schedule.prompt_template || raw);
+      } else {
+        setScheduleEnabled(false);
+      }
+    } catch {
+      setApiError('网络请求异常，请检查后端服务是否在线');
+    } finally {
+      setNlGenerating(false);
+    }
   };
 
   // 打开修改个人专家模态框
@@ -245,6 +307,12 @@ export function AgentsView({
     setIsSkillPickerOpen(false);
     setSkillSearchQuery('');
     setApiError(null);
+    setNlPrompt('');
+    setScheduleEnabled(false);
+    setScheduleCron('0 18 * * *');
+    setScheduleHuman('');
+    setScheduleName('');
+    setSchedulePrompt('');
     setIsModalOpen(true);
   };
 
@@ -375,6 +443,32 @@ export function AgentsView({
         const nextList = [newAgent, ...agents.filter((a) => a.id !== newAgent.id)];
         setAgents(nextList);
         syncCustomAgentsLocalCache(nextList);
+
+        // 若启用了联动定时调度，自动向 /api/v1/scheduled 注册绑定该专家的计划任务
+        if (scheduleEnabled && scheduleCron.trim()) {
+          try {
+            const schedRes = await apiFetch('/api/v1/scheduled', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                workspace_id: workspace?.id || 'default',
+                name: scheduleName.trim() || `${newAgent.name} · 定时自动执行`,
+                cron_expr: scheduleCron.trim(),
+                prompt_template: schedulePrompt.trim() || descText,
+                agent_id: newAgent.id,
+              }),
+            });
+            if (schedRes.ok) {
+              setBannerNotice(
+                `已创建专家【${newAgent.name}】并同步注册定时任务（${scheduleHuman || scheduleCron.trim()}），可在「已安排调度」中查看运行记录。`
+              );
+            } else {
+              setBannerNotice(`已创建专家【${newAgent.name}】，但关联定时任务创建失败，请前往「已安排调度」手动补充。`);
+            }
+          } catch {
+            setBannerNotice(`已创建专家【${newAgent.name}】，定时任务注册遇到网络异常。`);
+          }
+        }
       }
 
       setIsModalOpen(false);
@@ -515,6 +609,18 @@ export function AgentsView({
 
       {/* 智能体卡片与表格列表 */}
       <div className="flex-1 overflow-y-auto p-6">
+        {bannerNotice && (
+          <div className="mb-4 px-4 py-2.5 rounded-xl bg-emerald-500/12 border border-emerald-500/30 text-xs text-emerald-700 dark:text-emerald-300 flex items-center justify-between">
+            <span>{bannerNotice}</span>
+            <button
+              type="button"
+              onClick={() => setBannerNotice(null)}
+              className="p-0.5 rounded hover:bg-emerald-500/20"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        )}
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-2 gap-4">
           {filteredAgents.map((agent) => {
             const boundSkills = (agent.skill_ids || [])
@@ -720,6 +826,45 @@ export function AgentsView({
             </div>
 
             <form onSubmit={handleSaveAgent} className="flex-1 overflow-y-auto py-4 space-y-4 pr-1">
+              {!editingAgent && (
+                <div className="p-3.5 rounded-xl bg-emerald-500/8 border border-emerald-500/25 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 flex items-center space-x-1.5">
+                      <Sparkles className="w-3.5 h-3.5" />
+                      <span>一句话自然语言创建（自动装配技能 + 定时调度）</span>
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-2">
+                    <input
+                      type="text"
+                      placeholder="例如：每天18:00定时帮我收集今天所有的交互内容写日报并作记录"
+                      value={nlPrompt}
+                      onChange={(e) => setNlPrompt(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          handleGenerateFromNaturalLanguage();
+                        }
+                      }}
+                      className="flex-1 px-3 py-1.5 rounded-lg bg-surface-100 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleGenerateFromNaturalLanguage}
+                      disabled={nlGenerating || !nlPrompt.trim()}
+                      className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-semibold flex items-center space-x-1 shrink-0 transition-colors"
+                    >
+                      {nlGenerating ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <Sparkles className="w-3.5 h-3.5" />
+                      )}
+                      <span>{nlGenerating ? '解析中' : '智能装配'}</span>
+                    </button>
+                  </div>
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-semibold text-foreground mb-1">
                   专家名称 <span className="text-rose-500">*</span>
@@ -918,6 +1063,49 @@ export function AgentsView({
                   />
                 </div>
               </div>
+
+              {!editingAgent && (
+                <div className="p-3 rounded-xl bg-surface-100/80 border border-border space-y-2">
+                  <label className="flex items-center justify-between cursor-pointer">
+                    <span className="text-xs font-semibold text-foreground flex items-center space-x-1.5">
+                      <Clock className="w-3.5 h-3.5 text-emerald-500" />
+                      <span>联动定时任务调度（支持按计划自动唤醒该专家执行）</span>
+                    </span>
+                    <input
+                      type="checkbox"
+                      checked={scheduleEnabled}
+                      onChange={(e) => setScheduleEnabled(e.target.checked)}
+                      className="rounded border-border text-emerald-500 focus:ring-emerald-500"
+                    />
+                  </label>
+                  {scheduleEnabled && (
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-1">
+                      <div>
+                        <span className="block text-[10px] text-muted-foreground mb-0.5">
+                          Cron 表达式 {scheduleHuman ? `(${scheduleHuman})` : ''}
+                        </span>
+                        <input
+                          type="text"
+                          value={scheduleCron}
+                          onChange={(e) => setScheduleCron(e.target.value)}
+                          placeholder="0 18 * * *"
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-surface-200 border border-border text-xs font-mono text-foreground focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                      <div>
+                        <span className="block text-[10px] text-muted-foreground mb-0.5">计划任务名称</span>
+                        <input
+                          type="text"
+                          value={scheduleName}
+                          onChange={(e) => setScheduleName(e.target.value)}
+                          placeholder={`${formName || '专家'} · 定时执行`}
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground focus:outline-none focus:border-emerald-500"
+                        />
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
 
               {apiError && (
                 <div className="px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-500">

@@ -199,6 +199,7 @@ class DatabaseManager:
             "last_error": "TEXT",
             "last_conversation_id": "TEXT",
             "last_triggered_minute": "TEXT",
+            "agent_id": "TEXT",
         }
         for col, col_type in new_columns.items():
             if col not in columns:
