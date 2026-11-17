@@ -16,7 +16,7 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
-    base_model TEXT NOT NULL DEFAULT 'gemini-2.5-flash',
+    base_model TEXT NOT NULL DEFAULT '',
     context_prompt TEXT NOT NULL DEFAULT '',
     skill_ids_json TEXT NOT NULL DEFAULT '[]',
     allowed_tools_json TEXT NOT NULL DEFAULT '[]',
@@ -37,7 +37,7 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "id": "agent_code_architect",
         "name": "代码重构与架构导师",
         "description": "基于《软件设计的哲学》进行深模块划分与双视角代码审查，结合 TDD 保证高质量交付。",
-        "base_model": "gemini-2.5-flash",
+        "base_model": "",
         "context_prompt": (
             "你是代码重构与架构导师，基于《软件设计的哲学》指导深模块设计、"
             "消除浅模块复杂度，并严格执行红-绿-重构 TDD 与双视角代码审查。"
@@ -62,7 +62,7 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "id": "agent_deep_researcher",
         "name": "深度研究专家 (Deep Researcher)",
         "description": "结合多维度全网一手资料与官方权威文档进行深度调研，沉淀结构化技术与行业研报。",
-        "base_model": "gemini-2.5-flash",
+        "base_model": "",
         "context_prompt": (
             "你是深度研究专家 (Deep Researcher)，专注于多维度全网权威资料调研与结构化研究报告沉淀。"
             "所有论断必须基于一手信源与真实证据。"
@@ -85,7 +85,7 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "id": "agent_ui_ux_master",
         "name": "UI/UX 前端体验设计师",
         "description": "专注于响应式高质感界面打造、设计系统规范维护与 Radix/Tailwind 样式调优。",
-        "base_model": "gemini-2.5-flash",
+        "base_model": "",
         "context_prompt": (
             "你是 UI/UX 前端体验设计专家，专注于构建高质感现代 Web 界面、"
             "Tailwind 样式调优与组件设计规范。"
@@ -107,7 +107,7 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "id": "agent_plugin_builder",
         "name": "Plugin & MCP 构建专家",
         "description": "负责标准化 MCP 协议服务端构建、插件脚手架生成与自动化规范坏味道排查。",
-        "base_model": "gemini-2.5-flash",
+        "base_model": "",
         "context_prompt": (
             "你是 Plugin & MCP 构建专家，负责标准化 MCP 协议服务端开发、"
             "自定义 Skill 打包与工具测试。"
@@ -131,7 +131,7 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "id": "data-auditor",
         "name": "数据审计专家 (Data Auditor)",
         "description": "专注于只读数据审计：重复项检测、空值扫描、逻辑与跨列一致性校验、异常值识别，输出结构化 Markdown/JSON 报告。",
-        "base_model": "gemini-2.5-flash",
+        "base_model": "",
         "context_prompt": (
             "你是数据审计专家 (Data Auditor)。严格以只读方式分析数据源，严禁修改原始业务文件。"
             "优先调用 data-audit 技能的 scripts/audit_table.py 确定性算子执行重复项、空值、跨列逻辑与异常值检测，"
@@ -155,7 +155,7 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "id": "excel-builder",
         "name": "Excel 报表构建专家 (Excel Builder)",
         "description": "专注于多表头专业报表生成、动态公式注入（SUMIFS/AVERAGE 等）、自适应列宽、表头冻结与千分位格式渲染。",
-        "base_model": "gemini-2.5-flash",
+        "base_model": "",
         "context_prompt": (
             "你是 Excel 报表构建专家 (Excel Builder)。负责将结构化数据与审计结论转化为专业 Excel 报表。"
             "优先调用 office-excel 技能的 scripts/build_excel.py 算子注入动态公式、冻结窗格与千分位数字格式，"
@@ -179,7 +179,7 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "id": "ppt-architect",
         "name": "PPT 演示架构师 (PPT Architect)",
         "description": "专注于 16:9 宽屏演示文稿架构、母版配色排版、要点精简提炼与高颜值数据图表嵌入，输出专业 .pptx 文件。",
-        "base_model": "gemini-2.5-flash",
+        "base_model": "",
         "context_prompt": (
             "你是 PPT 演示架构师 (PPT Architect)。负责将分析报告与核心结论提炼为高管级 16:9 演示文稿。"
             "遵循每页单主题、要点精简原则，优先调用 office-ppt 技能的 scripts/build_ppt.py 算子生成 .pptx 至 output/slides/ 目录。"
@@ -364,7 +364,7 @@ class AgentProfileRepository:
                     agent_id,
                     name,
                     str(data.get("description") or "").strip(),
-                    str(data.get("base_model") or "gemini-2.5-flash").strip(),
+                    str(data.get("base_model") or "").strip(),
                     str(data.get("context_prompt") or "").strip(),
                     json.dumps(skill_ids, ensure_ascii=False),
                     json.dumps(allowed_tools, ensure_ascii=False),

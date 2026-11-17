@@ -47,7 +47,7 @@ const DEFAULT_OFFICIAL_AGENTS: AgentItem[] = [
     id: 'agent_code_architect',
     name: '代码重构与架构导师',
     description: '基于《软件设计的哲学》进行深模块划分与双视角代码审查，结合 TDD 保证高质量交付。',
-    base_model: 'gemini-2.5-flash',
+    base_model: '',
     context_prompt: '你是代码重构与架构导师，基于《软件设计的哲学》指导深模块设计、消除浅模块复杂度，并严格执行红-绿-重构 TDD 与双视角代码审查。',
     skill_ids: ['codebase-design', 'code-review', 'tdd', 'diagnosing-bugs'],
     tools_count: 8,
@@ -60,7 +60,7 @@ const DEFAULT_OFFICIAL_AGENTS: AgentItem[] = [
     id: 'agent_deep_researcher',
     name: '深度研究专家 (Deep Researcher)',
     description: '结合多维度全网一手资料与官方权威文档进行深度调研，沉淀结构化技术与行业研报。',
-    base_model: 'gemini-2.5-flash',
+    base_model: '',
     context_prompt: '你是深度研究专家 (Deep Researcher)，专注于多维度全网权威资料调研与结构化研究报告沉淀。所有论断必须基于一手信源与真实证据。',
     skill_ids: ['research', 'generative_ui', 'slides'],
     tools_count: 6,
@@ -73,7 +73,7 @@ const DEFAULT_OFFICIAL_AGENTS: AgentItem[] = [
     id: 'agent_ui_ux_master',
     name: 'UI/UX 前端体验设计师',
     description: '专注于响应式高质感界面打造、设计系统规范维护与 Radix/Tailwind 样式调优。',
-    base_model: 'gemini-2.5-flash',
+    base_model: '',
     context_prompt: '你是 UI/UX 前端体验设计专家，专注于构建高质感现代 Web 界面、Tailwind 样式调优与组件设计规范。',
     skill_ids: ['ui-ux-pro-max', 'ui-styling', 'design-system'],
     tools_count: 5,
@@ -86,7 +86,7 @@ const DEFAULT_OFFICIAL_AGENTS: AgentItem[] = [
     id: 'agent_plugin_builder',
     name: 'Plugin & MCP 构建专家',
     description: '负责标准化 MCP 协议服务端构建、插件脚手架生成与自动化规范坏味道排查。',
-    base_model: 'gemini-2.5-flash',
+    base_model: '',
     context_prompt: '你是 Plugin & MCP 构建专家，负责标准化 MCP 协议服务端开发、自定义 Skill 打包与工具测试。',
     skill_ids: ['plugin', 'generative_ui'],
     tools_count: 7,
@@ -173,10 +173,9 @@ export function AgentsView({
   // 从后端 /api/v1/agents 加载专家（失败时平滑回退本地持久化）
   useEffect(() => {
     let isMounted = true;
-    const effectiveModel = currentModel || (availableModels[0]?.id ?? 'gemini-2.5-flash');
     const initedOfficial = DEFAULT_OFFICIAL_AGENTS.map((a) => ({
       ...a,
-      base_model: effectiveModel,
+      base_model: '',
     }));
 
     const loadFallback = () => {
@@ -215,13 +214,12 @@ export function AgentsView({
     };
   }, [currentModel, availableModels]);
 
-  // 当打开创建模态框时，同步默认选中的真实模型
+  // 当打开创建模态框时，默认跟随当前会话模型（也可按需指定）
   const handleOpenCreateModal = () => {
-    const defaultModelId = currentModel || (availableModels[0]?.id ?? 'gemini-2.5-flash');
     setEditingAgent(null);
     setFormName('');
     setFormDesc('');
-    setFormModel(defaultModelId);
+    setFormModel('');
     setFormAllowedTools('');
     setFormAllowedWriteDirs('');
     setSelectedSkillIds([]);
@@ -240,7 +238,7 @@ export function AgentsView({
     setEditingAgent(agent);
     setFormName(agent.name);
     setFormDesc(agent.context_prompt || agent.description || '');
-    setFormModel(agent.base_model || (availableModels[0]?.id ?? 'gemini-2.5-flash'));
+    setFormModel(agent.base_model && agent.base_model.toLowerCase() !== 'auto' ? agent.base_model : '');
     setFormAllowedTools((agent.allowed_tools || []).join(', '));
     setFormAllowedWriteDirs((agent.allowed_write_dirs || []).join(', '));
     setSelectedSkillIds([...(agent.skill_ids || [])]);
@@ -268,7 +266,7 @@ export function AgentsView({
     if (!formName.trim() || savingAgent) return;
 
     const todayStr = new Date().toISOString().split('T')[0];
-    const targetModel = formModel || (availableModels[0]?.id ?? 'gemini-2.5-flash');
+    const targetModel = formModel.trim();
     const targetPrompt = formDesc.trim();
     const allowedTools = parseCommaList(formAllowedTools);
     const allowedWriteDirs = parseCommaList(formAllowedWriteDirs);
@@ -594,7 +592,11 @@ export function AgentsView({
                       <Zap className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                       <span className="text-muted-foreground">基座模型:</span>
                       <span className="font-mono font-medium text-foreground bg-surface-200/80 px-2 py-0.5 rounded border border-border/60">
-                        {agent.base_model}
+                        {agent.base_model
+                          ? agent.base_model
+                          : currentModel
+                          ? `跟随当前模型 (${currentModel})`
+                          : '跟随当前会话模型'}
                       </span>
                     </div>
 
@@ -758,17 +760,14 @@ export function AgentsView({
                   onChange={(e) => setFormModel(e.target.value)}
                   className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border text-xs text-foreground focus:outline-none focus:border-emerald-500 font-mono"
                 >
-                  {availableModels.length > 0 ? (
-                    availableModels.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.name || m.id} ({m.provider || 'Ready'}{m.badge ? ` · ${m.badge}` : ''})
-                      </option>
-                    ))
-                  ) : (
-                    <option value={currentModel || 'gemini-2.5-flash'}>
-                      {currentModel || 'gemini-2.5-flash'} (当前默认)
+                  <option value="">
+                    跟随当前会话模型 (自动继承{currentModel ? ` · ${currentModel}` : ''})
+                  </option>
+                  {availableModels.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.name || m.id} ({m.provider || 'Ready'}{m.badge ? ` · ${m.badge}` : ''})
                     </option>
-                  )}
+                  ))}
                 </select>
               </div>
 

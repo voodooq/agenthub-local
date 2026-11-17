@@ -18,7 +18,7 @@ class AgentCreateRequest(BaseModel):
     id: str | None = Field(None, description="可选自定义 ID，留空则自动生成")
     name: str = Field(..., min_length=1, max_length=120, description="专家名称")
     description: str = Field("", max_length=1000, description="专家职责简介")
-    base_model: str = Field("gemini-2.5-flash", max_length=120, description="默认底座模型")
+    base_model: str = Field("", max_length=120, description="默认底座模型（留空表示跟随当前会话模型）")
     context_prompt: str = Field("", max_length=8000, description="专家角色系统提示词")
     skill_ids: list[str] = Field(default_factory=list, description="挂载的技能 ID 列表")
     allowed_tools: list[str] = Field(default_factory=list, description="允许调用的工具白名单")

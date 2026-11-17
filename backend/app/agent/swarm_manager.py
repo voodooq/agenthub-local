@@ -155,7 +155,9 @@ class SwarmManager:
                 profile = await AgentProfileRepository.get_agent(agent_id)
                 if profile:
                     if not eff_model:
-                        eff_model = profile.get("base_model") or profile.get("model_name") or profile.get("model")
+                        cand_model = str(profile.get("base_model") or profile.get("model_name") or profile.get("model") or "").strip()
+                        if cand_model and cand_model.lower() != "auto":
+                            eff_model = cand_model
                     if eff_tools is None and profile.get("allowed_tools"):
                         eff_tools = list(profile["allowed_tools"])
                     if eff_dirs is None and profile.get("allowed_write_dirs"):

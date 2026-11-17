@@ -278,6 +278,11 @@ function mapAgentsToCommands(agents: AgentItem[]): CommandItem[] {
         ? `\n- **写入目录隔离**: \`${ag.allowed_write_dirs.join('`, `')}\``
         : '';
 
+    const modelDisplay =
+      ag.base_model && ag.base_model.trim() && ag.base_model.trim().toLowerCase() !== 'auto'
+        ? `\`${ag.base_model}\``
+        : '跟随当前会话默认模型';
+
     items.push({
       id: `agent_${ag.id}`,
       trigger: '@',
@@ -287,7 +292,7 @@ function mapAgentsToCommands(agents: AgentItem[]): CommandItem[] {
       icon: Bot,
       badge: ag.ownership === 'official' ? '官方专家' : '个人专家',
       hasDoc: true,
-      docBody: `# @${name}\n\n${ag.description || ''}\n\n- **基座模型**: \`${ag.base_model}\`${toolsNote}${dirsNote}`,
+      docBody: `# @${name}\n\n${ag.description || ''}\n\n- **基座模型**: ${modelDisplay}${toolsNote}${dirsNote}`,
     });
   }
 
