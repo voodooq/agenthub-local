@@ -59,3 +59,4 @@ async def kill_process(proc_id: str) -> StopProcessResponse:
         status=res.get("status", "killed"),
         message=res.get("message", "进程已成功终止"),
     )
+

@@ -365,7 +365,7 @@ export function RightActionDrawer({ isOpen, onClose, pendingCountChange }: Right
 
   return (
     <div
-      className="fixed inset-0 z-40 flex justify-end bg-black/80 animate-fade-in"
+      className="fixed inset-0 z-40 flex justify-end bg-black/50 animate-fade-in"
       onClick={onClose}
     >
       <div
