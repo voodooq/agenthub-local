@@ -63,10 +63,15 @@ class PolicyInterceptor:
         # 1. 判别只读安全工具 (L0)
         read_only_tools = {
             "read_file", "search_files", "list_dir", "get_file_info", 
-            "fts_search", "web_search", "inspect_code", "ask_question"
+            "fts_search", "web_search", "inspect_code", "ask_question",
+            "read_process_logs", "list_background_processes",
         }
         if tool_name in read_only_tools:
             return PolicyDecision(allowed=True, level="L0")
+
+        # 1.1 判别后台进程受控终止工具 (L1)
+        if tool_name == "stop_background_process":
+            return PolicyDecision(allowed=True, level="L1", risk_reason="终止工作区受管后台进程")
 
         # 2. 判别文件系统写操作
         file_write_tools = {
@@ -119,8 +124,11 @@ class PolicyInterceptor:
                 require_approval=True,
             )
 
-        # 4. 判别系统命令执行工具 (Shell / Bash / Terminal)
-        exec_tools = {"run_command", "execute_command", "bash", "terminal", "shell", "execute_local_command"}
+        # 4. 判别系统命令执行工具 (Shell / Bash / Terminal / Background)
+        exec_tools = {
+            "run_command", "execute_command", "bash", "terminal", "shell", 
+            "execute_local_command", "start_background_process"
+        }
         if tool_name in exec_tools:
             cmd = arguments.get("command") or arguments.get("CommandLine") or ""
             cmd_lower = cmd.lower()
