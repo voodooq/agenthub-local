@@ -3997,12 +3997,14 @@ export default function WorkbenchPage() {
             {/* 底部悬浮输入中枢 */}
             <div className="p-4 md:px-12 lg:px-24 bg-gradient-to-t from-background via-background/95 to-transparent">
               <div className="max-w-4xl mx-auto space-y-2 relative">
-                <CommandAutocomplete
-                  input={inputPrompt}
-                  cursorPosition={inputCursorPos}
-                  onSelect={(text, range) => handleInsertCommandAtCursor(text, range)}
-                  onClose={() => { }}
-                />
+                {!isSkillPickerOpen && (
+                  <CommandAutocomplete
+                    input={inputPrompt}
+                    cursorPosition={inputCursorPos}
+                    onSelect={(text, range) => handleInsertCommandAtCursor(text, range)}
+                    onClose={() => { }}
+                  />
+                )}
 
                 {/* 附件格式限制 / 超限 / 拒收说明横幅 */}
                 {attachmentRejectionNotices.length > 0 && (
@@ -4197,9 +4199,6 @@ export default function WorkbenchPage() {
                         const cursor = e.target.selectionStart ?? val.length;
                         setInputPrompt(val);
                         setInputCursorPos(cursor);
-                        if (val === '/') {
-                          setIsSkillPickerOpen(true);
-                        }
                       }}
                       onClick={(e) => {
                         setInputCursorPos(e.currentTarget.selectionStart ?? 0);
