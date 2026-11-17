@@ -100,23 +100,23 @@ export function SyncModal({ isOpen, onClose, onSuccess }: SyncModalProps) {
       onClick={onClose}
     >
       <div
-        className="w-full max-w-lg rounded-2xl glass-modal overflow-hidden shadow-2xl border border-white/10 animate-scale-in"
+        className="w-full max-w-lg rounded-2xl glass-modal overflow-hidden shadow-2xl border border-border animate-scale-in"
         onClick={(e) => e.stopPropagation()}
       >
-        <div className="flex items-center justify-between px-5 py-4 border-b border-white/10 bg-surface-100/50">
-          <h3 className="text-base font-semibold text-slate-100">历史会话全量同步管道 (3 种途径)</h3>
-          <button onClick={onClose} className="p-1 rounded hover:bg-white/10 text-slate-400 hover:text-white">
+        <div className="flex items-center justify-between px-5 py-4 border-b border-border bg-surface-100/50">
+          <h3 className="text-base font-semibold text-foreground">历史会话全量同步管道 (3 种途径)</h3>
+          <button onClick={onClose} className="p-1 rounded hover:bg-surface-200 text-muted-foreground hover:text-foreground">
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="p-5 space-y-5 text-xs text-slate-300">
-          <div className="p-4 rounded-xl bg-surface-50/40 border border-white/10 space-y-2.5">
-            <div className="flex items-center space-x-2 font-semibold text-slate-200">
-              <Link2 className="w-4 h-4 text-emerald-400" />
+        <div className="p-5 space-y-5 text-xs text-muted-foreground">
+          <div className="p-4 rounded-xl bg-surface-50/70 border border-border space-y-2.5">
+            <div className="flex items-center space-x-2 font-semibold text-foreground">
+              <Link2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
               <span>途径 1：公开分享链接一键克隆 (可续聊分支)</span>
             </div>
-            <p className="text-slate-400 leading-relaxed">
+            <p className="text-muted-foreground leading-relaxed">
               输入在网页版 Gemini 生成的公开分享链接（形如 https://share.gemini.google/xxx 或 https://g.co/gemini/share/xxx），1 秒克隆至本地：
             </p>
             <form onSubmit={handleCloneShare} className="flex space-x-2">
@@ -125,7 +125,7 @@ export function SyncModal({ isOpen, onClose, onSuccess }: SyncModalProps) {
                 value={shareUrl}
                 onChange={(e) => setShareUrl(e.target.value)}
                 placeholder="https://share.gemini.google/..."
-                className="flex-1 px-3 py-2 rounded-lg bg-surface-200 border border-white/10 text-slate-100 placeholder-slate-500 outline-none focus:border-emerald-500"
+                className="flex-1 px-3 py-2 rounded-lg bg-surface-200 border border-border text-foreground placeholder:text-muted-foreground outline-none focus:border-emerald-500"
               />
               <button
                 type="submit"
@@ -137,33 +137,33 @@ export function SyncModal({ isOpen, onClose, onSuccess }: SyncModalProps) {
             </form>
           </div>
 
-          <div className="p-4 rounded-xl bg-surface-50/40 border border-white/10 space-y-2.5">
-            <div className="flex items-center space-x-2 font-semibold text-slate-200">
-              <Upload className="w-4 h-4 text-emerald-400" />
+          <div className="p-4 rounded-xl bg-surface-50/70 border border-border space-y-2.5">
+            <div className="flex items-center space-x-2 font-semibold text-foreground">
+              <Upload className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
               <span>途径 2：Google Takeout 批量搬迁 (MyActivity.json)</span>
             </div>
-            <p className="text-slate-400 leading-relaxed">
+            <p className="text-muted-foreground leading-relaxed">
               首次全量导入过去 1 年的历史对话，自动去除网页噪点并生成 FTS5 倒排索引：
             </p>
-            <label className="flex items-center justify-center p-4 border-2 border-dashed border-white/10 hover:border-emerald-500/50 rounded-xl cursor-pointer transition-colors bg-surface-200/40">
+            <label className="flex items-center justify-center p-4 border-2 border-dashed border-border hover:border-emerald-500/50 rounded-xl cursor-pointer transition-colors bg-surface-200/40">
               <input type="file" accept=".json" onChange={handleFileUpload} className="hidden" />
-              <span className="text-slate-400 hover:text-slate-200">点击选择或拖放 MyActivity.json</span>
+              <span className="text-muted-foreground hover:text-foreground">点击选择或拖放 MyActivity.json</span>
             </label>
           </div>
 
-          <div className="p-4 rounded-xl bg-surface-50/40 border border-white/10 space-y-2.5">
-            <div className="flex items-center space-x-2 font-semibold text-slate-200">
-              <Bookmark className="w-4 h-4 text-amber-400" />
+          <div className="p-4 rounded-xl bg-surface-50/70 border border-border space-y-2.5">
+            <div className="flex items-center space-x-2 font-semibold text-foreground">
+              <Bookmark className="w-4 h-4 text-amber-600 dark:text-amber-400" />
               <span>途径 3：网页版 Gemini 一键推送书签脚本</span>
             </div>
-            <p className="text-slate-400 leading-relaxed">
+            <p className="text-muted-foreground leading-relaxed">
               将下方脚本拖入浏览器书签栏。在 gemini.google.com 浏览时点击一下，即可直推保存回本地：
             </p>
             <button
               onClick={copyBookmarklet}
-              className="w-full flex items-center justify-center space-x-2 py-2 rounded-lg bg-surface-200 hover:bg-white/10 border border-white/10 text-slate-200 transition-colors"
+              className="w-full flex items-center justify-center space-x-2 py-2 rounded-lg bg-surface-200 hover:bg-surface-300 border border-border text-foreground transition-colors"
             >
-              {copiedBookmarklet ? <Check className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+              {copiedBookmarklet ? <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400" /> : <Copy className="w-4 h-4" />}
               <span>{copiedBookmarklet ? '已复制 Bookmarklet 代码' : '一键复制 Bookmarklet 书签脚本'}</span>
             </button>
           </div>

@@ -31,17 +31,17 @@ const ROLE_LABELS: Record<string, { label: string; colorClass: string; badgeClas
   primary: {
     label: '主力推理 (Primary)',
     colorClass: 'bg-emerald-500',
-    badgeClass: 'bg-emerald-500/15 text-emerald-400 border-emerald-500/30',
+    badgeClass: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-400 border-emerald-500/30',
   },
   scrubber: {
     label: '旁路脱水清洗 (Scrubber)',
     colorClass: 'bg-teal-500',
-    badgeClass: 'bg-teal-500/15 text-teal-300 border-teal-500/30',
+    badgeClass: 'bg-teal-500/15 text-teal-700 dark:text-teal-300 border-teal-500/30',
   },
   summarizer: {
     label: '分块坍缩摘要 (Summarizer)',
     colorClass: 'bg-indigo-500',
-    badgeClass: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
+    badgeClass: 'bg-indigo-500/15 text-indigo-700 dark:text-indigo-300 border-indigo-500/30',
   },
 };
 
@@ -170,7 +170,7 @@ export function TokenStatsModal({
         <div className="px-6 py-4 border-b border-border/70 flex items-center justify-between bg-surface-200/40">
           <div className="flex items-center space-x-3">
             <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center">
-              <BarChart3 className="w-5 h-5 text-emerald-400" />
+              <BarChart3 className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
             </div>
             <div>
               <h2 className="text-sm font-bold text-foreground flex items-center space-x-2">
@@ -303,7 +303,7 @@ export function TokenStatsModal({
                         const meta = ROLE_LABELS[bucket.agent_role] || {
                           label: bucket.agent_role,
                           colorClass: 'bg-slate-500',
-                          badgeClass: 'bg-slate-500/15 text-slate-300 border-slate-500/30',
+                          badgeClass: 'bg-surface-200 text-muted-foreground border-border',
                         };
                         const roleTotal = (bucket.prompt_tokens || 0) + (bucket.completion_tokens || 0);
                         const ratio = totalRoleTokens > 0 ? Math.min(100, Math.round((roleTotal / totalRoleTokens) * 100)) : 0;
@@ -368,7 +368,7 @@ export function TokenStatsModal({
                 <div className="px-4 py-2.5 bg-surface-200/50 border-b border-border/70 flex items-center justify-between">
                   <span className="text-xs font-semibold text-foreground">逐轮上下文水位与缓存复用明细 ({stats?.turns.length || 0} 轮)</span>
                   {summary && summary.collapse_anchor_turn_id > 0 && (
-                    <span className="text-[11px] text-indigo-400 font-mono">
+                    <span className="text-[11px] text-indigo-600 dark:text-indigo-400 font-mono">
                       已固化坍缩锚点: Turn ≤ {summary.collapse_anchor_turn_id}
                     </span>
                   )}

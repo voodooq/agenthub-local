@@ -40,20 +40,20 @@ export function MessageActions({
   };
 
   return (
-    <div className="relative flex items-center space-x-1 pt-1.5 text-slate-400 select-none">
+    <div className="relative flex items-center space-x-1 pt-1.5 text-muted-foreground select-none">
       {/* 复制 */}
       <button
         onClick={handleCopy}
-        className="p-1.5 rounded-full hover:bg-white/10 hover:text-slate-200 transition-colors"
+        className="p-1.5 rounded-full hover:bg-surface-200 hover:text-foreground transition-colors"
         title="复制回复"
       >
-        {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+        {copied ? <Check className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
       </button>
 
       {/* 好评 */}
       <button
         onClick={() => setFeedback(feedback === 'up' ? null : 'up')}
-        className={"p-1.5 rounded-full hover:bg-surface-200 transition-colors " + (feedback === 'up' ? 'text-emerald-500 bg-emerald-500/10' : 'hover:text-foreground')}
+        className={"p-1.5 rounded-full hover:bg-surface-200 transition-colors " + (feedback === 'up' ? 'text-emerald-600 dark:text-emerald-400 bg-emerald-500/10' : 'hover:text-foreground')}
         title="好的回答"
       >
         <ThumbsUp className="w-3.5 h-3.5" />
@@ -62,7 +62,7 @@ export function MessageActions({
       {/* 差评 */}
       <button
         onClick={() => setFeedback(feedback === 'down' ? null : 'down')}
-        className={"p-1.5 rounded-full hover:bg-white/10 transition-colors " + (feedback === 'down' ? 'text-rose-400 bg-rose-500/10' : 'hover:text-slate-200')}
+        className={"p-1.5 rounded-full hover:bg-surface-200 transition-colors " + (feedback === 'down' ? 'text-rose-600 dark:text-rose-400 bg-rose-500/10' : 'hover:text-foreground')}
         title="差的回答"
       >
         <ThumbsDown className="w-3.5 h-3.5" />
@@ -73,35 +73,35 @@ export function MessageActions({
         <div className="relative">
           <button
             onClick={() => setShowModifyMenu(!showModifyMenu)}
-            className="p-1.5 rounded-full hover:bg-white/10 hover:text-slate-200 transition-colors"
+            className="p-1.5 rounded-full hover:bg-surface-200 hover:text-foreground transition-colors"
             title="修改回复"
           >
             <SlidersHorizontal className="w-3.5 h-3.5" />
           </button>
 
           {showModifyMenu && (
-            <div className="absolute left-0 bottom-full mb-1 w-32 rounded-xl glass-modal p-1 shadow-2xl border border-white/10 z-30 animate-scale-in text-xs">
+            <div className="absolute left-0 bottom-full mb-1 w-32 rounded-xl glass-modal p-1 shadow-2xl border border-border z-30 animate-scale-in text-xs">
               <button
                 onClick={() => { onModifyTone('shorter'); setShowModifyMenu(false); }}
-                className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white transition-colors"
+                className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-surface-200 text-foreground transition-colors"
               >
                 更简短
               </button>
               <button
                 onClick={() => { onModifyTone('longer'); setShowModifyMenu(false); }}
-                className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white transition-colors"
+                className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-surface-200 text-foreground transition-colors"
               >
                 更详尽
               </button>
               <button
                 onClick={() => { onModifyTone('simpler'); setShowModifyMenu(false); }}
-                className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white transition-colors"
+                className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-surface-200 text-foreground transition-colors"
               >
                 更通俗
               </button>
               <button
                 onClick={() => { onModifyTone('professional'); setShowModifyMenu(false); }}
-                className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-white/10 text-slate-300 hover:text-white transition-colors"
+                className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-surface-200 text-foreground transition-colors"
               >
                 更专业
               </button>
@@ -114,7 +114,7 @@ export function MessageActions({
       {onRegenerate && (
         <button
           onClick={onRegenerate}
-          className="p-1.5 rounded-full hover:bg-white/10 hover:text-slate-200 transition-colors"
+          className="p-1.5 rounded-full hover:bg-surface-200 hover:text-foreground transition-colors"
           title="重新生成"
         >
           <RotateCcw className="w-3.5 h-3.5" />
@@ -124,7 +124,7 @@ export function MessageActions({
       {/* 导出 Markdown */}
       <button
         onClick={handleDownloadMarkdown}
-        className="p-1.5 rounded-full hover:bg-white/10 hover:text-slate-200 transition-colors"
+        className="p-1.5 rounded-full hover:bg-surface-200 hover:text-foreground transition-colors"
         title="下载为 Markdown 文件"
       >
         <Download className="w-3.5 h-3.5" />
@@ -134,7 +134,7 @@ export function MessageActions({
       {onBranchFromHere && (
         <button
           onClick={onBranchFromHere}
-          className="p-1.5 rounded-full hover:bg-emerald-500/15 hover:text-emerald-500 transition-colors"
+          className="p-1.5 rounded-full hover:bg-emerald-500/15 hover:text-emerald-600 dark:hover:text-emerald-400 transition-colors"
           title="从此处创建分支会话（保留截至当前轮次的上下文）"
         >
           <GitBranch className="w-3.5 h-3.5" />
@@ -145,17 +145,17 @@ export function MessageActions({
       <div className="relative">
         <button
           onClick={() => setShowMoreMenu(!showMoreMenu)}
-          className="p-1.5 rounded-full hover:bg-white/10 hover:text-slate-200 transition-colors"
+          className="p-1.5 rounded-full hover:bg-surface-200 hover:text-foreground transition-colors"
           title="查看更多"
         >
           <MoreHorizontal className="w-3.5 h-3.5" />
         </button>
 
         {showMoreMenu && (
-          <div className="absolute left-0 bottom-full mb-1 w-48 rounded-xl glass-modal p-2 shadow-2xl border border-white/10 z-30 animate-scale-in text-xs font-mono">
-            <div className="text-[10px] text-slate-500 uppercase tracking-wider mb-1">执行节点信息</div>
-            <div className="text-slate-300 truncate">算力: {executedByAccount || '本地调度池'}</div>
-            <div className="text-slate-500 text-[10px] mt-1">字数: {content.length} 字符</div>
+          <div className="absolute left-0 bottom-full mb-1 w-48 rounded-xl glass-modal p-2 shadow-2xl border border-border z-30 animate-scale-in text-xs font-mono">
+            <div className="text-[10px] text-muted-foreground uppercase tracking-wider mb-1">执行节点信息</div>
+            <div className="text-foreground truncate">算力: {executedByAccount || '本地调度池'}</div>
+            <div className="text-muted-foreground text-[10px] mt-1">字数: {content.length} 字符</div>
           </div>
         )}
       </div>

@@ -3259,9 +3259,9 @@ export default function WorkbenchPage() {
               <div className="flex items-center space-x-2 min-w-0 flex-1 pr-3">
                 <div className="inline-flex items-center space-x-1.5 px-2 py-0.5 rounded-lg bg-surface-200/70 border border-border/70 text-[11px] text-muted-foreground shrink-0">
                   {activeWs?.type === 'physical' ? (
-                    <FolderGit2 className="w-3 h-3 text-emerald-500" />
+                    <FolderGit2 className="w-3 h-3 text-emerald-600 dark:text-emerald-500" />
                   ) : (
-                    <Box className="w-3 h-3 text-sky-400" />
+                    <Box className="w-3 h-3 text-sky-600 dark:text-sky-400" />
                   )}
                   <span className="max-w-[140px] truncate font-medium text-foreground/90">
                     {activeWs?.name || '默认工作区'}
@@ -3578,7 +3578,7 @@ export default function WorkbenchPage() {
                       {/* 步数自适应扩展与深度自愈横幅 */}
                       {!isUser && msg.step_extend_info && (
                         <div className="flex items-start space-x-2.5 px-3.5 py-2 rounded-xl bg-indigo-500/10 border border-indigo-500/30 text-indigo-800 dark:text-indigo-200 text-xs animate-fade-in shadow-xs max-w-[88%] md:max-w-[82%]">
-                          <Sparkles className="w-4 h-4 text-indigo-400 shrink-0 mt-0.5 animate-pulse" />
+                          <Sparkles className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0 mt-0.5 animate-pulse" />
                           <div className="flex-1 leading-snug">
                             <span className="font-bold text-indigo-600 dark:text-indigo-300 mr-1.5">[自主推演与动态扩展]:</span>
                             <span>{msg.step_extend_info.message}</span>

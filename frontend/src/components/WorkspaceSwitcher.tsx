@@ -198,15 +198,15 @@ export function WorkspaceSwitcher({
     return (
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className="w-10 h-10 mx-auto rounded-xl flex items-center justify-center transition-all bg-surface-100 hover:bg-surface-200 border border-white/5 text-foreground relative group"
+        className="w-10 h-10 mx-auto rounded-xl flex items-center justify-center transition-all bg-surface-100 hover:bg-surface-200 border border-border text-foreground relative group"
         title={`当前工作区: ${activeWorkspace?.name || '默认工作区'}`}
       >
         {activeWorkspace?.type === 'physical' ? (
-          <FolderGit2 className="w-5 h-5 text-emerald-500" />
+          <FolderGit2 className="w-5 h-5 text-emerald-600 dark:text-emerald-500" />
         ) : (
-          <Box className="w-5 h-5 text-sky-400" />
+          <Box className="w-5 h-5 text-sky-600 dark:text-sky-400" />
         )}
-        <span className="absolute bottom-1 right-1 w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-black" />
+        <span className="absolute bottom-1 right-1 w-2 h-2 rounded-full bg-emerald-500 ring-2 ring-surface-sidebar" />
       </button>
     );
   }
@@ -216,17 +216,17 @@ export function WorkspaceSwitcher({
       {/* 触发卡片 */}
       <div
         onClick={() => setIsOpen(!isOpen)}
-        className="flex items-center justify-between p-2 rounded-xl bg-surface-100 hover:bg-surface-200/80 border border-white/5 cursor-pointer transition-all group"
+        className="flex items-center justify-between p-2 rounded-xl bg-surface-100 hover:bg-surface-200/80 border border-border cursor-pointer transition-all group"
       >
         <div className="flex items-center space-x-2.5 truncate flex-1 min-w-0 pr-1">
           <div className="relative shrink-0">
             {activeWorkspace?.type === 'physical' ? (
               <div className="w-7 h-7 rounded-lg bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center">
-                <FolderGit2 className="w-4 h-4 text-emerald-400" />
+                <FolderGit2 className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
               </div>
             ) : (
               <div className="w-7 h-7 rounded-lg bg-sky-500/10 border border-sky-500/20 flex items-center justify-center">
-                <Box className="w-4 h-4 text-sky-400" />
+                <Box className="w-4 h-4 text-sky-600 dark:text-sky-400" />
               </div>
             )}
             <span
@@ -266,7 +266,7 @@ export function WorkspaceSwitcher({
               placeholder="搜索工作区或路径..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-surface-200/70 border border-white/5 rounded-xl pl-8 pr-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-emerald-500/50"
+              className="w-full bg-surface-200/70 border border-border rounded-xl pl-8 pr-2.5 py-1.5 text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-emerald-500/50"
             />
           </div>
 
@@ -283,15 +283,15 @@ export function WorkspaceSwitcher({
                   }}
                   className={`group/item flex items-center justify-between p-2 rounded-xl cursor-pointer transition-all ${
                     isActive
-                      ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-400 font-semibold'
+                      ? 'bg-emerald-500/15 border border-emerald-500/30 text-emerald-700 dark:text-emerald-400 font-semibold'
                       : 'hover:bg-surface-200/60 text-foreground'
                   }`}
                 >
                   <div className="flex items-center space-x-2 truncate flex-1 min-w-0 pr-1">
                     {ws.type === 'physical' ? (
-                      <Folder className="w-4 h-4 text-emerald-400 shrink-0" />
+                      <Folder className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
                     ) : (
-                      <Box className="w-4 h-4 text-sky-400 shrink-0" />
+                      <Box className="w-4 h-4 text-sky-600 dark:text-sky-400 shrink-0" />
                     )}
                     <div className="truncate flex-1 min-w-0 text-left">
                       <div className="text-xs truncate flex items-center space-x-1">
@@ -309,11 +309,11 @@ export function WorkspaceSwitcher({
                   </div>
 
                   <div className="flex items-center space-x-1 shrink-0">
-                    {isActive && <Check className="w-4 h-4 text-emerald-400" />}
+                    {isActive && <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />}
                     {ws.id !== 'default' && (
                       <button
                         onClick={(e) => handleDeleteWorkspace(ws, e)}
-                        className="opacity-0 group-hover/item:opacity-100 p-1 rounded hover:bg-rose-500/20 text-muted-foreground hover:text-rose-400 transition-all"
+                        className="opacity-0 group-hover/item:opacity-100 p-1 rounded hover:bg-rose-500/20 text-muted-foreground hover:text-rose-600 dark:hover:text-rose-400 transition-all"
                         title="解除挂载（保留本地文件）"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
@@ -332,11 +332,11 @@ export function WorkspaceSwitcher({
           </div>
 
           {/* 分割线与底部快捷动作 */}
-          <div className="mt-2 pt-2 border-t border-white/5 space-y-1">
+          <div className="mt-2 pt-2 border-t border-border space-y-1">
             <button
               onClick={handlePickNativeFolder}
               disabled={isSelectingNative}
-              className="w-full flex items-center space-x-2 px-2.5 py-2 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 text-xs font-semibold transition-colors disabled:opacity-50"
+              className="w-full flex items-center space-x-2 px-2.5 py-2 rounded-xl bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-700 dark:text-emerald-400 text-xs font-semibold transition-colors disabled:opacity-50"
             >
               <FolderPlus className="w-4 h-4 shrink-0" />
               <span>{isSelectingNative ? '正在打开 Windows 选择器...' : '挂载本地已有工程目录...'}</span>
@@ -359,10 +359,10 @@ export function WorkspaceSwitcher({
       {/* 挂载本地工程目录确认弹窗 */}
       {isMountingModalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
-          <div className="bg-surface-modal border border-border w-full max-w-md rounded-2xl p-5 shadow-2xl space-y-4 animate-scale-in">
+          <div className="glass-modal border border-border w-full max-w-md rounded-2xl p-5 shadow-2xl space-y-4 animate-scale-in">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <FolderPlus className="w-5 h-5 text-emerald-400" />
+                <FolderPlus className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />
                 <h3 className="text-sm font-bold text-foreground">挂载本地已有工程工作区</h3>
               </div>
               <button
@@ -429,7 +429,7 @@ export function WorkspaceSwitcher({
               </div>
 
               {errorMessage && (
-                <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center space-x-2">
+                <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-400 text-xs flex items-center space-x-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
                   <span>{errorMessage}</span>
                 </div>
@@ -457,10 +457,10 @@ export function WorkspaceSwitcher({
       {/* 新建托管沙盒工作区弹窗 */}
       {isCreatingVirtual && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
-          <div className="bg-surface-modal border border-border w-full max-w-sm rounded-2xl p-5 shadow-2xl space-y-4 animate-scale-in">
+          <div className="glass-modal border border-border w-full max-w-sm rounded-2xl p-5 shadow-2xl space-y-4 animate-scale-in">
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <Box className="w-5 h-5 text-sky-400" />
+                <Box className="w-5 h-5 text-sky-600 dark:text-sky-400" />
                 <h3 className="text-sm font-bold text-foreground">新建沙盒托管工作区</h3>
               </div>
               <button
@@ -485,7 +485,7 @@ export function WorkspaceSwitcher({
               </div>
 
               {errorMessage && (
-                <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center space-x-2">
+                <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-600 dark:text-rose-400 text-xs flex items-center space-x-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
                   <span>{errorMessage}</span>
                 </div>

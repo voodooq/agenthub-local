@@ -11,13 +11,13 @@ interface ThemeContextType {
 }
 
 const ThemeContext = createContext<ThemeContextType>({
-  theme: 'dark',
+  theme: 'system',
   resolvedTheme: 'dark',
   setTheme: () => {},
 });
 
 export function ThemeProvider({ children }: { children: React.ReactNode }) {
-  const [theme, setThemeState] = useState<ThemeMode>('dark');
+  const [theme, setThemeState] = useState<ThemeMode>('system');
   const [resolvedTheme, setResolvedTheme] = useState<'light' | 'dark'>('dark');
   const [mounted, setMounted] = useState(false);
 
@@ -28,10 +28,10 @@ export function ThemeProvider({ children }: { children: React.ReactNode }) {
       if (saved && ['light', 'dark', 'system'].includes(saved)) {
         setThemeState(saved);
       } else {
-        setThemeState('dark');
+        setThemeState('system');
       }
     } catch {
-      setThemeState('dark');
+      setThemeState('system');
     }
     setMounted(true);
   }, []);

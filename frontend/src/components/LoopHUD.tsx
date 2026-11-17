@@ -106,25 +106,25 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
   const getStatusBadge = (status: LoopStatus) => {
     switch (status) {
       case 'planning':
-        return { text: t('规划子任务中'), color: 'bg-blue-500/10 text-blue-400 border-blue-500/20' };
+        return { text: t('规划子任务中'), color: 'bg-blue-500/10 text-blue-700 dark:text-blue-400 border-blue-500/20' };
       case 'executing':
-        return { text: t('具身执行中'), color: 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' };
+        return { text: t('具身执行中'), color: 'bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/20' };
       case 'verifying':
-        return { text: t('客观验收中 (DoD)'), color: 'bg-purple-500/10 text-purple-400 border-purple-500/20' };
+        return { text: t('客观验收中 (DoD)'), color: 'bg-purple-500/10 text-purple-700 dark:text-purple-400 border-purple-500/20' };
       case 'reflecting':
-        return { text: t('自愈反思中'), color: 'bg-amber-500/10 text-amber-400 border-amber-500/20' };
+        return { text: t('自愈反思中'), color: 'bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20' };
       case 'waiting_approval':
         return loop.pending_approval_call
-          ? { text: t('等待人工审批'), color: 'bg-rose-500/10 text-rose-400 border-rose-500/20 animate-pulse' }
-          : { text: t('等待确认决策'), color: 'bg-amber-500/10 text-amber-400 border-amber-500/20 animate-pulse' };
+          ? { text: t('等待人工审批'), color: 'bg-rose-500/10 text-rose-700 dark:text-rose-400 border-rose-500/20 animate-pulse' }
+          : { text: t('等待确认决策'), color: 'bg-amber-500/10 text-amber-700 dark:text-amber-400 border-amber-500/20 animate-pulse' };
       case 'completed':
-        return { text: t('任务已交付并验收'), color: 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30' };
+        return { text: t('任务已交付并验收'), color: 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 border-emerald-500/30' };
       case 'failed':
-        return { text: t('熔断或终止'), color: 'bg-red-500/10 text-red-400 border-red-500/20' };
+        return { text: t('熔断或终止'), color: 'bg-red-500/10 text-red-700 dark:text-red-400 border-red-500/20' };
       case 'paused':
-        return { text: t('已暂停'), color: 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20' };
+        return { text: t('已暂停'), color: 'bg-surface-200 text-muted-foreground border-border' };
       default:
-        return { text: status, color: 'bg-zinc-500/10 text-zinc-400 border-zinc-500/20' };
+        return { text: status, color: 'bg-surface-200 text-muted-foreground border-border' };
     }
   };
 
