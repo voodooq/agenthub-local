@@ -20,6 +20,12 @@ from typing import Any
 from ..core.logging_config import logger
 from ..core.runtime_paths import get_silent_subprocess_kwargs
 from ..service.audit_service import audit_service
+from .shell_background import (
+    DEFAULT_HEAVY_OBSERVE_SECONDS,
+    BackgroundCommandManager,
+    inject_package_manager_env,
+    is_heavy_command,
+)
 
 
 class LocalShellExecutor:
@@ -107,6 +113,11 @@ class LocalShellExecutor:
         self._approval_results: dict[str, bool] = {}
         # 正在运行的子进程 PID 映射: session_id -> list[int]
         self._running_pids: dict[str, set[int]] = {}
+        # 后台长耗时命令/下载管理器
+        self.background_manager = BackgroundCommandManager(
+            kill_tree_fn=self.kill_process_tree,
+            cwd_marker=self._CWD_MARKER,
+        )
 
     def check_security(self, command: str) -> str:
         """
@@ -200,13 +211,14 @@ class LocalShellExecutor:
 
     def cancel_session_processes(self, session_id: str) -> int:
         """
-        强制中断某会话正在运行的所有本地命令子进程。
+        强制中断某会话正在运行的所有本地命令子进程（含后台托管下载/构建任务）。
         """
         pids = list(self._running_pids.get(session_id, set()))
         for pid in pids:
             self.kill_process_tree(pid)
         self._running_pids.pop(session_id, None)
-        return len(pids)
+        bg_count = self.background_manager.cancel_session_jobs(session_id)
+        return len(pids) + bg_count
 
     @staticmethod
     def decode_output(raw_bytes: bytes) -> str:
@@ -306,22 +318,30 @@ class LocalShellExecutor:
         cwd: str | None = None,
         timeout: float = 60.0,
         session_id: str | None = None,
+        run_in_background: bool = False,
+        observe_seconds: float | None = None,
     ) -> dict[str, Any]:
         """
         在受控子进程中执行命令，自动维护 CWD 变更并执行编码容错与防卡死保护。
+        当显式指定 run_in_background=True 或命令命中重型下载/构建特征时，
+        自动注入防超时环境变量并托管至后台进程池，避免 60 秒强杀误伤大包下载。
 
         Args:
             command: 待执行的命令
             cwd: 当前会话工作目录
-            timeout: 最大执行超时时间（秒）
+            timeout: 同步命令最大执行超时时间（秒）
             session_id: 所属会话 ID（用于支持随时中断）
+            run_in_background: 是否强制立即转入后台异步执行
+            observe_seconds: 重型命令前台观察窗口秒数（超时未完成则无缝转后台）
 
         Returns:
             dict: {
                 "output": 组合后的标准输出与错误文本,
                 "exit_code": 退出码,
                 "new_cwd": 执行完毕后的最新工作目录路径,
-                "timed_out": 是否超时
+                "timed_out": 是否超时,
+                "background": 是否已转入后台运行（可选）,
+                "job_id": 后台任务 ID（可选）,
             }
         """
         if cwd and os.path.isdir(cwd):
@@ -342,10 +362,49 @@ class LocalShellExecutor:
         if not getattr(sys, "frozen", False):
             venv_scripts = os.path.dirname(sys.executable)
             child_env["PATH"] = venv_scripts + os.pathsep + child_env.get("PATH", "")
-        child_env["PYTHONIOENCODING"] = "utf-8"
-        child_env["PYTHONUNBUFFERED"] = "1"
+        inject_package_manager_env(child_env)
 
         allow_gui_window = self._is_gui_launch_command(command)
+
+        # 显式要求后台执行或命中重型下载/安装/构建特征：托管至后台管理器，不再 60 秒强杀
+        if run_in_background or is_heavy_command(command):
+            effective_observe = 0.0 if run_in_background else (
+                observe_seconds if observe_seconds is not None else DEFAULT_HEAVY_OBSERVE_SECONDS
+            )
+            try:
+                job = self.background_manager.start_job(
+                    command=command,
+                    exec_args=exec_args,
+                    cwd=effective_cwd,
+                    env=child_env,
+                    session_id=session_id,
+                    temp_script_path=temp_script_path,
+                    allow_gui_window=allow_gui_window,
+                )
+            except OSError as spawn_err:
+                if temp_script_path:
+                    try:
+                        os.unlink(temp_script_path)
+                    except OSError:
+                        pass
+                logger.warning(f"[ShellExecutor] 后台子进程拉起失败: {spawn_err}")
+                return {
+                    "output": (
+                        f"Error: 命令进程启动失败 ({spawn_err})。"
+                        "若因单条命令行参数过长或路径超限引发，请勿将超大源码内联进终端命令，请改用 `write_local_file` 直接写入目标文件后再运行短命令执行。"
+                    ),
+                    "exit_code": -2,
+                    "new_cwd": effective_cwd,
+                    "timed_out": False,
+                    "background": False,
+                }
+
+            bg_res = await self.background_manager.wait_initial_or_detach(
+                job, observe_seconds=effective_observe
+            )
+            if not bg_res.get("background"):
+                bg_res["output"] = self.sniff_and_extract_log(str(bg_res.get("output") or ""))
+            return bg_res
 
         def _sync_exec() -> tuple[bytes, bytes, int, bool, str | None]:
             try:

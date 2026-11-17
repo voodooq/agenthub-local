@@ -219,7 +219,8 @@ class ContextBuilder:
                 "   - **大文件与诊断**：长源码用 `write_local_file` 落盘，严禁塞入 `python -c`；数据探索须用单个紧凑 Python 脚本一次性打印全部元信息与样例；\n"
                 "   - **过程与交付分离**：调工具步骤仅附简短旁白，严禁提前撰写完整报告或编造 `[终端/工具输出]:` / `[Gemini]:` 标签。\n"
                 "5. **最新上传附件唯一基准**：本轮若上传新附件，强制以该最新附件为唯一起始基准，历史旧数据与 Working Memory 摘要一律作废；复用脚本前必须核验并更新输入路径指向最新附件；仅在未传新附件且用户特指继续旧数据时沿用旧数据。\n"
-                "6. **单层 `output/` 交付红线**：所有最终产出物必须直接保存于一级 `output/` 目录（如 `output/xxx.xlsx`），严禁 `output/output/` 多层嵌套或重复 `.xlsx` 等文件名后缀，交付链接（`file:///.../output/xxx`）须与磁盘单层路径 100% 一致。"
+                "6. **单层 `output/` 交付红线**：所有最终产出物必须直接保存于一级 `output/` 目录（如 `output/xxx.xlsx`），严禁 `output/output/` 多层嵌套或重复 `.xlsx` 等文件名后缀，交付链接（`file:///.../output/xxx`）须与磁盘单层路径 100% 一致。\n"
+                "7. **长耗时下载与后台托管**：重型下载/安装（`uv sync`/`pip install`/`npm install`/`git clone` 等）观察期未完将自动转入后台并返回 `job_id`；请调用 `check_background_command(job_id, wait_seconds=20)` 轮询，只要状态为 `running` 就继续等待，严禁强杀慢速下载；仅在 `stagnant`/`network_error`/`failed` 时用 `cancel_background_command` 终止并切镜像或修复参数。"
             )
             if tools:
                 protocol_prompt = ToolProtocolAdapter.build_xml_protocol_prompt(tools)

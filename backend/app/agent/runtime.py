@@ -2337,6 +2337,8 @@ class AgentRuntime:
                     rescue_addon = ""
                     tool_exit_code: int | None = None
                     s10_intercepted = False
+                    is_bg_detached = False
+                    bg_poll_running = False
                     args_hash = self._compute_tool_args_hash(args)
                     sig_key = (func_name, args_hash)
 
@@ -2403,8 +2405,12 @@ class AgentRuntime:
                         except Exception as ckpt_err:
                             logger.warning(f"[AgentRuntime] Pre-Tool 自动静默快照跳过: {ckpt_err}")
 
-                    # S10: 轮内无写操作穿插的重复工具签名拦截（连续第 2 次完全相同只读/失败调用直接拦截）
-                    if not args_parse_failed and sig_key in turn_tool_sig_cache:
+                    # S10: 轮内无写操作穿插的重复工具签名拦截（连续第 2 次完全相同只读/失败调用直接拦截；豁免后台轮询）
+                    if (
+                        not args_parse_failed
+                        and func_name != "check_background_command"
+                        and sig_key in turn_tool_sig_cache
+                    ):
                         s10_intercepted = True
                         seen_step = turn_tool_sig_cache[sig_key]
                         tool_output = (
@@ -2482,6 +2488,7 @@ class AgentRuntime:
                                     command=cmd_str,
                                     cwd=ctx.get("current_cwd"),
                                     session_id=conv_id,
+                                    run_in_background=bool(args.get("run_in_background", False)),
                                 )
                             except OSError as shell_os_err:
                                 logger.warning(f"[AgentRuntime] 本地命令子进程启动异常: {shell_os_err}")
@@ -2494,7 +2501,8 @@ class AgentRuntime:
                                     "new_cwd": ctx.get("current_cwd"),
                                 }
                             tool_output = str(exec_res.get("output") or "")
-                            tool_exit_code = int(exec_res.get("exit_code", 0) or 0)
+                            is_bg_detached = bool(exec_res.get("background"))
+                            tool_exit_code = 0 if is_bg_detached else int(exec_res.get("exit_code", 0) or 0)
                             raw_new_cwd = exec_res.get("new_cwd")
                             new_cwd: str | None = raw_new_cwd if isinstance(raw_new_cwd, str) and raw_new_cwd else None
                             if new_cwd and new_cwd != ctx.get("current_cwd"):
@@ -2503,7 +2511,8 @@ class AgentRuntime:
 
                             # 若执行了环境安装/桌面应用或 CDP 调试启动命令，尝试唤醒此前冷却中的 MCP 服务并刷新工具清单
                             if (
-                                tool_exit_code == 0
+                                not is_bg_detached
+                                and tool_exit_code == 0
                                 and not is_planning_phase
                                 and mcp_manager.has_cooling_servers()
                                 and re.search(
@@ -2522,21 +2531,109 @@ class AgentRuntime:
                                 except Exception as mcp_refresh_err:
                                     logger.debug(f"命令后刷新 MCP 工具跳过: {mcp_refresh_err}")
 
-                            compressed = shell_executor.compress_output(
-                                cmd_str, tool_output, tool_exit_code
-                            )
+                            if is_bg_detached:
+                                bg_job_id = str(exec_res.get("job_id") or "")
+                                compressed = f"[命令已转入后台运行 job_id={bg_job_id}: `{cmd_str[:45]}`]"
+                            else:
+                                compressed = shell_executor.compress_output(
+                                    cmd_str, tool_output, tool_exit_code
+                                )
                             yield {
                                 "type": "tool_end",
                                 "call_id": call_id,
                                 "name": func_name,
                                 "command": cmd_str,
                                 "reason": reason_str,
-                                "status": "completed" if tool_exit_code == 0 else "error",
+                                "status": "running" if is_bg_detached else ("completed" if tool_exit_code == 0 else "error"),
                                 "exit_code": tool_exit_code,
                                 "output": tool_output,
                                 "compressed": compressed,
                                 "cwd": new_cwd,
+                                **({"job_id": str(exec_res.get("job_id") or "")} if is_bg_detached else {}),
                             }
+
+                    # ── 工具 1.1: 后台长耗时命令状态查询与安全等待 (check_background_command) ──
+                    elif func_name == "check_background_command":
+                        bg_job_id = str(args.get("job_id", "")).strip()
+                        wait_secs = float(args.get("wait_seconds", 20) if args.get("wait_seconds") is not None else 20)
+                        tail_lines = int(args.get("tail_lines", 40) or 40)
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"check_background_command('{bg_job_id}', wait={int(wait_secs)}s)",
+                            "reason": f"跟踪后台任务 {bg_job_id} 最新进度与增量日志",
+                            "security": "SAFE",
+                        }
+                        bg_res = await shell_executor.background_manager.check_job(
+                            bg_job_id,
+                            wait_seconds=wait_secs,
+                            tail_lines=tail_lines,
+                        )
+                        bg_status = str(bg_res.get("status") or "unknown")
+                        tool_output = str(bg_res.get("output") or "")
+                        bg_poll_running = bg_status == "running"
+                        if bg_status == "completed":
+                            tool_exit_code = 0
+                            bg_new_cwd = bg_res.get("new_cwd")
+                            if isinstance(bg_new_cwd, str) and bg_new_cwd and bg_new_cwd != ctx.get("current_cwd"):
+                                ctx["current_cwd"] = bg_new_cwd
+                                await ConversationRepository.update_agent_state(conv_id, current_cwd=bg_new_cwd)
+                        elif bg_status in ("failed", "not_found"):
+                            raw_rc = bg_res.get("exit_code")
+                            tool_exit_code = int(raw_rc) if raw_rc is not None else -1
+                        else:
+                            tool_exit_code = 0
+
+                        compressed = (
+                            f"[后台任务 `{bg_job_id}` 状态: {bg_status}, "
+                            f"日志={bg_res.get('log_bytes', 0)}B, 缓存={bg_res.get('active_dir_bytes', 0)}B]"
+                        )
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"check_background_command('{bg_job_id}')",
+                            "reason": f"查询后台任务 {bg_job_id} 状态",
+                            "status": (
+                                "running"
+                                if bg_status == "running"
+                                else ("completed" if bg_status in ("completed", "cancelled") else "error")
+                            ),
+                            "exit_code": tool_exit_code,
+                            "output": tool_output,
+                            "compressed": compressed,
+                            "job_id": bg_job_id,
+                        }
+
+                    # ── 工具 1.2: 终止后台运行命令 (cancel_background_command) ──
+                    elif func_name == "cancel_background_command":
+                        bg_job_id = str(args.get("job_id", "")).strip()
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"cancel_background_command('{bg_job_id}')",
+                            "reason": f"终止后台任务 {bg_job_id}",
+                            "security": "AUTO_CONFIRMED",
+                        }
+                        cancel_res = await shell_executor.background_manager.cancel_job(bg_job_id)
+                        cancel_status = str(cancel_res.get("status") or "cancelled")
+                        tool_output = str(cancel_res.get("output") or "")
+                        tool_exit_code = 0 if cancel_status == "cancelled" else -1
+                        compressed = f"[已终止后台任务 `{bg_job_id}`: {cancel_status}]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"cancel_background_command('{bg_job_id}')",
+                            "reason": f"终止后台任务 {bg_job_id}",
+                            "status": "completed" if cancel_status == "cancelled" else "error",
+                            "exit_code": tool_exit_code,
+                            "output": tool_output,
+                            "compressed": compressed,
+                            "job_id": bg_job_id,
+                        }
 
                     # ── 工具 1.5: 按需 FTS5 记忆与工作区历史检索 (search_memory_history) ──
                     elif func_name == "search_memory_history":
@@ -3688,19 +3785,24 @@ class AgentRuntime:
                         has_workspace_mutations = True
                     prev_step_error = last_step_error_info
                     out_lower = tool_output_str.lower()
-                    is_step_abnormal = (
-                        (tool_exit_code is not None and tool_exit_code != 0)
-                        or tool_output_str.startswith(("Error:", "Denied:"))
-                        or any(
-                            err_kw in out_lower
-                            for err_kw in (
-                                "npm error", "enoent", "error:", "traceback", "syntaxerror",
-                                "command not found", "cannot find module", "failed", "denied",
-                                "commandnotfoundexception", "fullyqualifiederrorid",
-                                "无法将", "不是内部或外部命令",
+                    # 后台命令刚转入后台或正在活跃轮询(running)时，豁免异常探测与 LoopBreaker 熔断
+                    if is_bg_detached or bg_poll_running:
+                        is_step_abnormal = False
+                    else:
+                        is_step_abnormal = (
+                            (tool_exit_code is not None and tool_exit_code != 0)
+                            or tool_output_str.startswith(("Error:", "Denied:"))
+                            or any(
+                                err_kw in out_lower
+                                for err_kw in (
+                                    "npm error", "enoent", "error:", "traceback", "syntaxerror",
+                                    "command not found", "cannot find module", "failed", "denied",
+                                    "commandnotfoundexception", "fullyqualifiederrorid",
+                                    "无法将", "不是内部或外部命令",
+                                    "[停滞告警]", "[网络异常警告]",
+                                )
                             )
                         )
-                    )
                     attempt_key = (
                         re.sub(r"\s+", " ", str(args.get("command", "")).strip())
                         if func_name == "execute_local_command"
@@ -3805,7 +3907,7 @@ class AgentRuntime:
                                     if dl_path:
                                         ws_dl_root = Path(ctx.get("current_cwd") or os.getcwd()).resolve()
                                         self._invalidate_file_read_cache(conv_id, (ws_dl_root / dl_path).resolve())
-                            elif not args_parse_failed:
+                            elif not args_parse_failed and func_name != "check_background_command":
                                 turn_tool_sig_cache[sig_key] = step_idx + 1
                         last_step_error_info = None
                         if not str(tool_output or "").startswith(("Error:", "Denied:")):

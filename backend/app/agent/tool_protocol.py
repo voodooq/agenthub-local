@@ -257,8 +257,48 @@ class ToolProtocolAdapter:
                             "type": "string",
                             "description": "简短说明执行该命令的目的",
                         },
+                        "run_in_background": {
+                            "type": "boolean",
+                            "description": "是否立即转入后台异步执行（重型下载超时未完会自动转后台）",
+                        },
                     },
                     "required": ["command"],
+                },
+            },
+            {
+                "name": "check_background_command",
+                "description": "等待并查询后台命令状态、活跃度与增量日志。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {
+                            "type": "string",
+                            "description": "后台任务 ID（如 bg_1234abcd）",
+                        },
+                        "wait_seconds": {
+                            "type": "integer",
+                            "description": "最多等待秒数（默认 20，最大 60）",
+                        },
+                        "tail_lines": {
+                            "type": "integer",
+                            "description": "返回的尾部日志行数（默认 40）",
+                        },
+                    },
+                    "required": ["job_id"],
+                },
+            },
+            {
+                "name": "cancel_background_command",
+                "description": "终止指定后台命令及进程树。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {
+                            "type": "string",
+                            "description": "待终止的后台任务 ID",
+                        },
+                    },
+                    "required": ["job_id"],
                 },
             },
             {
