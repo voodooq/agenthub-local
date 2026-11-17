@@ -536,6 +536,31 @@ class AgentRuntime:
             return "正在调用本地工具执行并核验结果...", True
         return pre_clean, True
 
+    @classmethod
+    def _detect_unverified_action_claims(
+        cls,
+        text: str,
+        executed_tools: list[dict[str, Any]],
+    ) -> bool:
+        """当开启 verify_tool_call 时，检测模型是否在没有任何成功工具调用的情况下宣称已完成查询或处理"""
+        if not text or len(text.strip()) < 10:
+            return False
+        # 只要存在成功的真实工具调用，就不算纯文本虚假声明
+        if any(t.get("status") == "success" for t in executed_tools):
+            return False
+
+        # 匹配虚假查询/完成声明模式
+        claim_patterns = (
+            r"(?:已经?为(?:您|你)|已成功|已完成)(?:查询|收集|读取|汇总|检索|整理|提取|抓取|扫描|分析|统计|生成|记录)",
+            r"(?:查询|收集|整理|汇总|扫描|检索)已?完成",
+            r"今日(?:所有的?|全部)?交互(?:内容|记录)?已(?:收集|整理|汇总|记录|归档)",
+            r"以上是?从(?:数据库|本地日志|工作区|会话记录)中?(?:查询|收集|提取|检索)到的",
+        )
+        for pat in claim_patterns:
+            if re.search(pat, text):
+                return True
+        return False
+
     EXECUTION_APPROVAL_MARKERS = (
         "实施方案已通过用户审批",
         "批准执行以下步骤清单",
@@ -889,6 +914,8 @@ class AgentRuntime:
         swarm_member_name: str | None = None,
         swarm_role: str | None = None,
         swarm_brief: str | None = None,
+        agent_id: str | None = None,
+        grounding_config: dict[str, Any] | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行双层循环流式推理与工具编排，向外输出标准化 SSE 字典事件流。
@@ -954,6 +981,34 @@ class AgentRuntime:
         active_scene = (conv_obj.scene_mode if conv_obj else (scene_mode or "agent")) or "agent"
         active_incognito = bool(conv_obj.incognito) if conv_obj else bool(incognito)
         ws_id = (getattr(conv_obj, "workspace_id", None) if conv_obj else None) or ws_id
+
+        # ── 解析专家绑定配置与防幻觉参数 ──
+        effective_grounding = grounding_config
+        if not effective_grounding and agent_id:
+            try:
+                from ..repository.agent_repository import AgentProfileRepository
+                ag_profile = await AgentProfileRepository.get_agent(agent_id)
+                if ag_profile:
+                    effective_grounding = ag_profile.get("grounding_config")
+                    if not allowed_tools and ag_profile.get("allowed_tools"):
+                        allowed_tools = ag_profile.get("allowed_tools")
+                    if not allowed_write_dirs and ag_profile.get("allowed_write_dirs"):
+                        allowed_write_dirs = ag_profile.get("allowed_write_dirs")
+            except Exception as ag_err:
+                logger.debug(f"[AgentRuntime] 加载专家 {agent_id} 防幻觉配置跳过: {ag_err}")
+
+        # ── 模型温度能力嗅探与自适应压制 ──
+        effective_temperature = temperature
+        if effective_grounding and effective_grounding.get("strict_mode"):
+            if abs(temperature - 0.7) < 1e-4:
+                effective_temperature = float(effective_grounding.get("temperature", 0.1))
+
+        lower_model = (model_name or "").lower()
+        is_fixed_temp_model = any(
+            k in lower_model for k in ("o1-", "o1-mini", "o1-preview", "o3-", "o3-mini", "deepseek-r1", "-r1", "r1-")
+        )
+        if is_fixed_temp_model:
+            logger.debug(f"[AgentRuntime] 识别到固定温度推理模型 {model_name}，自动忽略自定义 temperature 参数")
 
         # ── Pre-Turn 0-Token 斜杠管理指令即时拦截 (/ckpt /rollback /remember /distill) ──
         trimmed_cmd_text = (user_message or "").strip()
@@ -1833,6 +1888,7 @@ class AgentRuntime:
         try:
             step_idx = 0
             force_final_text_only_step = False
+            executed_tools_record: list[dict[str, Any]] = []
             while step_idx < current_max_steps:
                 if await _check_cancelled():
                     was_cancelled = True
@@ -1873,6 +1929,7 @@ class AgentRuntime:
                     swarm_role=swarm_role,
                     swarm_member_name=swarm_member_name,
                     swarm_brief=swarm_brief,
+                    grounding_config=effective_grounding,
                 )
 
                 if await _check_cancelled():
@@ -1953,6 +2010,14 @@ class AgentRuntime:
                                 "2. 你必须立即在正文中输出标准 `<tool_call name=\"write_local_file\">` 标签将完整源码直接写入目标文件（切勿将上万字符内联塞入 `execute_local_command`）；\n"
                                 "3. 仅当工具返回真实成功回执后，方可向用户汇报完成。"
                             )
+                        elif last_step_error_info.get("tool") == "hallucinated_action":
+                            step_prompt = (
+                                "[🚨 系统防幻觉硬拦截警告 —— 严禁虚假行动与查询声明]:\n"
+                                "系统核验发现你在尚未成功调用任何数据查询/读取工具的情况下，在纯文本中声称「已为您查询/已收集完成/已为您记录」。\n"
+                                "1. 严禁在无真实证据时凭空捏造数据或谎称已完成操作！\n"
+                                "2. 你必须立即输出标准 `<tool_call>`（如 `search_memory_history`、`read_local_file` 等）获取真实数据；\n"
+                                "3. 若经工具检索确认当前无任何真实记录（或文件缺失），请直接如实告知用户「未检索到相关记录」，绝不允许为了交差编造假数据！"
+                            )
                         elif last_step_error_info.get("circuit_breaker"):
                             failed_c = last_step_error_info.get("failed_cmd", "")
                             step_prompt = (
@@ -2032,7 +2097,7 @@ class AgentRuntime:
                     model_name=model_name,
                     thinking_level=step_thinking_level,
                     system_override=ctx.get("system_instruction"),
-                    temperature=temperature,
+                    temperature=effective_temperature,
                     work_dir=ctx.get("current_cwd"),
                     context_rounds=context_rounds,
                     attachments=step_attachments,
@@ -2272,6 +2337,27 @@ class AgentRuntime:
                             "tool": "hallucinated_write",
                             "unverified_files": unverified_write_claims,
                             "summary": "模型未调用写盘工具却在纯文本中宣称文件已落盘，强制要求通过 write_local_file 真实写入",
+                        }
+                        step_idx += 1
+                        continue
+
+                    # 🛡️ 拦截开启 verify_tool_call 时无工具调用的虚假行动/查询声明幻觉
+                    if (
+                        effective_grounding
+                        and effective_grounding.get("verify_tool_call")
+                        and not is_planning_phase
+                        and not is_forced_final_step
+                        and self._detect_unverified_action_claims(stripped_without_empty, executed_tools_record)
+                        and consecutive_stalls < 2
+                        and step_idx < current_max_steps - 1
+                    ):
+                        consecutive_stalls += 1
+                        logger.warning(f"[AgentRuntime] 拦截无工具调用虚假行动声明幻觉，激活纠偏 (第{consecutive_stalls}次)")
+                        replace_prev_empty_step_pending = True
+                        yield {"type": "stream_reset"}
+                        last_step_error_info = {
+                            "tool": "hallucinated_action",
+                            "summary": "尚未成功调用任何数据查询或操作工具，严禁在纯文本中声称已完成查询或汇总。请先调用对应工具获取真实数据！",
                         }
                         step_idx += 1
                         continue
@@ -4458,6 +4544,30 @@ class AgentRuntime:
                         final_tool_output,
                         args_parse_failed=args_parse_failed,
                     )
+
+                    # 🛡️ 记录单轮工具调用状态与结果
+                    is_err = "Denied:" in tool_output or "Error" in tool_output or "Traceback" in tool_output
+                    is_empty_res = bool(
+                        tool_output.strip() in ("[]", "{}", '{"results": []}', "None")
+                        or re.search(r"(?:未检索到|未找到|未查到|无相关记录|FileNotFoundError|ENOENT|0 条匹配|0 items)", tool_output, re.IGNORECASE)
+                    )
+                    executed_tools_record.append({
+                        "name": func_name,
+                        "status": "error" if is_err else "success",
+                        "is_empty": is_empty_res,
+                    })
+
+                    # 🛡️ 空数据 Fail-Fast 熔断机制：针对数据/日志查询类工具，若结果为空硬性注入防脑补提醒
+                    if (
+                        effective_grounding
+                        and effective_grounding.get("fail_fast_on_missing")
+                        and is_empty_res
+                        and func_name in ("search_memory_history", "read_local_file", "search_skill_knowledge", "web_fetch", "run_skill_tool")
+                    ):
+                        tool_output += (
+                            "\n[防幻觉熔断提示]: 数据源查询结果为空或目标文件不存在。根据当前专家防幻觉与严谨度契约，"
+                            "严禁自行编造任何模拟/测试假数据，请立即如实向用户说明“未检索到相关真实记录/文件不存在”，并终止后续虚构操作。"
+                        )
 
                     # 将工具输出与单行折叠摘要同时落盘
                     await MessageRepository.save_message(

@@ -187,6 +187,8 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                         inquiry_confirmed=req.inquiry_confirmed,
                         inquiry_action=req.inquiry_action,
                         is_disconnected=request.is_disconnected,
+                        agent_id=req.agent_id,
+                        grounding_config=req.grounding_config,
                     ):
                         await queue.put(("event", event))
                     await queue.put(("done", None))

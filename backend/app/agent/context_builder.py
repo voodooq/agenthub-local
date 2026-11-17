@@ -124,6 +124,7 @@ class ContextBuilder:
         swarm_role: str | None = None,
         swarm_member_name: str | None = None,
         swarm_brief: str | None = None,
+        grounding_config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
         为当前推理步骤构建严格物理分区的三层上下文载荷 (Zone 1 + Zone 2 + Zone 3)。
@@ -234,6 +235,20 @@ class ContextBuilder:
                 zone1_static_parts.append(
                     "### 🔌 可用 MCP 扩展能力目录（默认仅挂载目录摘要；如需使用某服务，请先调用 `discover_mcp_tools(server_names=[...])` 按需加载其完整参数 Schema）：\n"
                     + mcp_catalog_prompt.strip()
+                )
+
+        if grounding_config and grounding_config.get("strict_mode"):
+            zone1_static_parts.append(
+                "### 🛡️ 专家严谨工作与事实基准铁律（强制执行）：\n"
+                "1. 【事实唯一基准】：所有数据、指标与结论必须 100% 源于真实工具调用回包或本地文件读取，严禁无依据推演。\n"
+                "2. 【缺失如实拒答 (Fail-Fast)】：工具未查到数据或文件缺失时，必须如实回答“无相关记录”，严禁编造任何模拟假数据。\n"
+                "3. 【禁止虚假声明】：严禁在未成功调用工具并获得有效返回前宣称“已查询/已完成/已保存”。\n"
+                "4. 【证据溯源】：输出核心结论时尽量附带真实引用的文件或工具事实依据。"
+            )
+            custom_rules = str(grounding_config.get("custom_rules") or "").strip()
+            if custom_rules:
+                zone1_static_parts.append(
+                    f"### 📋 专家专属业务防虚构红线：\n<custom_guardrails>\n{custom_rules[:500]}\n</custom_guardrails>"
                 )
 
         zone1_base_prompt = "\n\n".join(zone1_static_parts)

@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     skill_ids_json TEXT NOT NULL DEFAULT '[]',
     allowed_tools_json TEXT NOT NULL DEFAULT '[]',
     allowed_write_dirs_json TEXT NOT NULL DEFAULT '[]',
+    grounding_config_json TEXT NOT NULL DEFAULT '{}',
     tools_count INTEGER NOT NULL DEFAULT 0,
     ownership TEXT NOT NULL DEFAULT 'custom' CHECK (ownership IN ('official', 'custom')),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'draft')),
@@ -31,7 +32,7 @@ CREATE INDEX IF NOT EXISTS idx_agent_profiles_ownership ON agent_profiles(owners
 CREATE INDEX IF NOT EXISTS idx_agent_profiles_status ON agent_profiles(status);
 """
 
-# 系统预置官方专家清单（含原有 4 个核心专家 + 3 个办公协同专家）
+# 系统预置官方专家清单（含原有 4 个核心专家 + 3 个办公协同专家，全面注入防幻觉与严谨度配置）
 OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
     {
         "id": "agent_code_architect",
@@ -57,6 +58,14 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "tools_count": 8,
         "ownership": "official",
         "status": "active",
+        "grounding_config": {
+            "strict_mode": True,
+            "temperature": 0.1,
+            "fail_fast_on_missing": True,
+            "verify_tool_call": True,
+            "require_evidence": True,
+            "custom_rules": "重构与修改代码前必须通过 read_local_file 或 get_repo_skeleton 充分调研现有代码，严禁凭空盲写；改动后必须运行单测验证。",
+        },
     },
     {
         "id": "agent_deep_researcher",
@@ -80,6 +89,14 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "tools_count": 6,
         "ownership": "official",
         "status": "active",
+        "grounding_config": {
+            "strict_mode": True,
+            "temperature": 0.2,
+            "fail_fast_on_missing": True,
+            "verify_tool_call": True,
+            "require_evidence": True,
+            "custom_rules": "所有论断必须有一手官方文档或 web_fetch 抓取结果为事实依据，禁止无证据猜测推论。",
+        },
     },
     {
         "id": "agent_ui_ux_master",
@@ -102,6 +119,14 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "tools_count": 5,
         "ownership": "official",
         "status": "active",
+        "grounding_config": {
+            "strict_mode": False,
+            "temperature": 0.6,
+            "fail_fast_on_missing": False,
+            "verify_tool_call": False,
+            "require_evidence": False,
+            "custom_rules": "界面与样式设计必须严格遵循单色扁平化与暗黑模式适配原则，杜绝刺眼无规则色彩。",
+        },
     },
     {
         "id": "agent_plugin_builder",
@@ -126,6 +151,14 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "tools_count": 7,
         "ownership": "official",
         "status": "active",
+        "grounding_config": {
+            "strict_mode": True,
+            "temperature": 0.1,
+            "fail_fast_on_missing": True,
+            "verify_tool_call": True,
+            "require_evidence": True,
+            "custom_rules": "所有 MCP 工具定义与 Schema 必须通过 JSON Schema 严格校验，严禁输出非标准字段与格式偏差。",
+        },
     },
     {
         "id": "data-auditor",
@@ -150,6 +183,14 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "tools_count": 6,
         "ownership": "official",
         "status": "active",
+        "grounding_config": {
+            "strict_mode": True,
+            "temperature": 0.0,
+            "fail_fast_on_missing": True,
+            "verify_tool_call": True,
+            "require_evidence": True,
+            "custom_rules": "严格只读审计，严禁修改任何原始业务数据；若数据源不存在或内容为空，必须立即如实报告，严禁编造模拟假样本。",
+        },
     },
     {
         "id": "excel-builder",
@@ -174,6 +215,14 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "tools_count": 6,
         "ownership": "official",
         "status": "active",
+        "grounding_config": {
+            "strict_mode": True,
+            "temperature": 0.1,
+            "fail_fast_on_missing": True,
+            "verify_tool_call": True,
+            "require_evidence": True,
+            "custom_rules": "报表公式与数值必须严格对齐原始源表，最终交付必须输出至 output/sheets/ 目录，必须通过脚本真实执行生成。",
+        },
     },
     {
         "id": "ppt-architect",
@@ -197,6 +246,14 @@ OFFICIAL_AGENT_SEEDS: list[dict[str, Any]] = [
         "tools_count": 6,
         "ownership": "official",
         "status": "active",
+        "grounding_config": {
+            "strict_mode": True,
+            "temperature": 0.2,
+            "fail_fast_on_missing": True,
+            "verify_tool_call": True,
+            "require_evidence": True,
+            "custom_rules": "幻灯片核心结论与要点必须来自真实文档提炼，严禁凭空假造业务成果；交付产物输出至 output/slides/ 目录。",
+        },
     },
 ]
 
@@ -219,16 +276,46 @@ def _safe_json_loads_list(raw: str | None) -> list[str]:
     return []
 
 
+def _safe_json_loads_dict(raw: str | None) -> dict[str, Any]:
+    """安全反序列化字典 JSON，异常时回退空字典"""
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        if isinstance(parsed, dict):
+            return parsed
+    except (ValueError, TypeError):
+        pass
+    return {}
+
+
 def _row_to_agent_dict(row: Any) -> dict[str, Any]:
     """将数据库行映射为标准专家字典"""
     item = dict(row)
     skill_ids = _safe_json_loads_list(item.pop("skill_ids_json", "[]"))
     allowed_tools = _safe_json_loads_list(item.pop("allowed_tools_json", "[]"))
     allowed_write_dirs = _safe_json_loads_list(item.pop("allowed_write_dirs_json", "[]"))
+    raw_gc = _safe_json_loads_dict(item.pop("grounding_config_json", "{}"))
+
+    if not raw_gc:
+        # 回退默认值：官方专家从种子中对齐，自定义专家默认 strict_mode=False
+        if item.get("ownership") == "official":
+            seed = next((s for s in OFFICIAL_AGENT_SEEDS if s["id"] == item.get("id")), None)
+            raw_gc = (seed.get("grounding_config") or {}).copy() if seed else {}
+        else:
+            raw_gc = {
+                "strict_mode": False,
+                "temperature": 0.7,
+                "fail_fast_on_missing": False,
+                "verify_tool_call": False,
+                "require_evidence": False,
+                "custom_rules": "",
+            }
 
     item["skill_ids"] = skill_ids
     item["allowed_tools"] = allowed_tools
     item["allowed_write_dirs"] = allowed_write_dirs
+    item["grounding_config"] = raw_gc
     item["tools_count"] = int(item.get("tools_count") or len(allowed_tools))
     return item
 
@@ -247,20 +334,30 @@ class AgentProfileRepository:
 
         async with db_manager.get_connection() as conn:
             await conn.executescript(AGENT_PROFILES_SCHEMA_SQL)
+
+            # 动态平滑迁移：检查现有表中是否缺失 grounding_config_json 列
+            async with conn.execute("PRAGMA table_info(agent_profiles)") as cursor:
+                cols = [row[1] for row in await cursor.fetchall()]
+                if "grounding_config_json" not in cols:
+                    await conn.execute(
+                        "ALTER TABLE agent_profiles ADD COLUMN grounding_config_json TEXT NOT NULL DEFAULT '{}'"
+                    )
+
             now = _utc_now_iso()
             for seed in OFFICIAL_AGENT_SEEDS:
                 skill_ids_json = json.dumps(seed["skill_ids"], ensure_ascii=False)
                 allowed_tools_json = json.dumps(seed["allowed_tools"], ensure_ascii=False)
                 allowed_write_dirs_json = json.dumps(seed["allowed_write_dirs"], ensure_ascii=False)
+                grounding_config_json = json.dumps(seed.get("grounding_config") or {}, ensure_ascii=False)
                 tools_count = int(seed.get("tools_count") or len(seed["allowed_tools"]))
                 await conn.execute(
                     """
                     INSERT INTO agent_profiles (
                         id, name, description, base_model, context_prompt,
                         skill_ids_json, allowed_tools_json, allowed_write_dirs_json,
-                        tools_count, ownership, status, created_at, updated_at
+                        grounding_config_json, tools_count, ownership, status, created_at, updated_at
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'official', ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'official', ?, ?, ?)
                     ON CONFLICT(id) DO UPDATE SET
                         name = excluded.name,
                         description = excluded.description,
@@ -269,6 +366,7 @@ class AgentProfileRepository:
                         skill_ids_json = excluded.skill_ids_json,
                         allowed_tools_json = excluded.allowed_tools_json,
                         allowed_write_dirs_json = excluded.allowed_write_dirs_json,
+                        grounding_config_json = excluded.grounding_config_json,
                         tools_count = excluded.tools_count,
                         status = excluded.status,
                         updated_at = excluded.updated_at
@@ -283,6 +381,7 @@ class AgentProfileRepository:
                         skill_ids_json,
                         allowed_tools_json,
                         allowed_write_dirs_json,
+                        grounding_config_json,
                         tools_count,
                         seed.get("status", "active"),
                         now,
@@ -348,6 +447,19 @@ class AgentProfileRepository:
         allowed_write_dirs = [str(x) for x in (data.get("allowed_write_dirs") or []) if str(x).strip()]
         tools_count = int(data.get("tools_count") if data.get("tools_count") is not None else len(allowed_tools))
         status = data.get("status") if data.get("status") in ("active", "draft") else "active"
+
+        # 默认严谨工作模式优先
+        raw_gc = data.get("grounding_config")
+        if not isinstance(raw_gc, dict):
+            raw_gc = {
+                "strict_mode": True,
+                "temperature": 0.1,
+                "fail_fast_on_missing": True,
+                "verify_tool_call": True,
+                "require_evidence": True,
+                "custom_rules": "",
+            }
+        grounding_config_json = json.dumps(raw_gc, ensure_ascii=False)
         now = _utc_now_iso()
 
         async with db_manager.get_connection() as conn:
@@ -356,9 +468,9 @@ class AgentProfileRepository:
                 INSERT INTO agent_profiles (
                     id, name, description, base_model, context_prompt,
                     skill_ids_json, allowed_tools_json, allowed_write_dirs_json,
-                    tools_count, ownership, status, created_at, updated_at
+                    grounding_config_json, tools_count, ownership, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'custom', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'custom', ?, ?, ?)
                 """,
                 (
                     agent_id,
@@ -369,6 +481,7 @@ class AgentProfileRepository:
                     json.dumps(skill_ids, ensure_ascii=False),
                     json.dumps(allowed_tools, ensure_ascii=False),
                     json.dumps(allowed_write_dirs, ensure_ascii=False),
+                    grounding_config_json,
                     tools_count,
                     status,
                     now,
@@ -436,6 +549,13 @@ class AgentProfileRepository:
             if "status" in data and data["status"] in ("active", "draft")
             else existing["status"]
         )
+
+        grounding_config = (
+            data["grounding_config"]
+            if "grounding_config" in data and isinstance(data["grounding_config"], dict)
+            else (existing.get("grounding_config") or {})
+        )
+        grounding_config_json = json.dumps(grounding_config, ensure_ascii=False)
         now = _utc_now_iso()
 
         async with db_manager.get_connection() as conn:
@@ -444,7 +564,7 @@ class AgentProfileRepository:
                 UPDATE agent_profiles
                 SET name = ?, description = ?, base_model = ?, context_prompt = ?,
                     skill_ids_json = ?, allowed_tools_json = ?, allowed_write_dirs_json = ?,
-                    tools_count = ?, status = ?, updated_at = ?
+                    grounding_config_json = ?, tools_count = ?, status = ?, updated_at = ?
                 WHERE id = ? AND ownership = 'custom'
                 """,
                 (
@@ -455,6 +575,7 @@ class AgentProfileRepository:
                     json.dumps(skill_ids, ensure_ascii=False),
                     json.dumps(allowed_tools, ensure_ascii=False),
                     json.dumps(allowed_write_dirs, ensure_ascii=False),
+                    grounding_config_json,
                     tools_count,
                     status,
                     now,

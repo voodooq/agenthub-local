@@ -629,6 +629,16 @@ export interface UpdateStatusData {
   checked_at: number;
 }
 
+/** 专家防幻觉与严谨度配置 */
+export interface GroundingConfig {
+  strict_mode?: boolean;            // 是否开启严谨工作模式
+  temperature?: number;             // 推荐模型采样温度（0.0 ~ 1.0）
+  fail_fast_on_missing?: boolean;   // 未找到真实数据时如实拒答，禁止脑补
+  verify_tool_call?: boolean;       // 禁止未调用工具先宣称已完成
+  require_evidence?: boolean;       // 输出结论时必须附带事实来源依据
+  custom_rules?: string;            // 自定义防虚构业务红线（上限 500 字符）
+}
+
 /** 持久化专家智能体配置 */
 export interface AgentItem {
   id: string;
@@ -642,6 +652,7 @@ export interface AgentItem {
   status: 'active' | 'draft';
   allowed_tools?: string[];
   allowed_write_dirs?: string[];
+  grounding_config?: GroundingConfig;
   created_at: string;
   updated_at: string;
 }

@@ -43,6 +43,8 @@ class ChatStreamRequest(BaseModel):
     inquiry_action: str | None = Field(default=None, description="交互确认卡片触发动作: execute_now(确认后统一执行) | clarify_only(仅细化方案)")
     swarm_mode: bool = Field(default=False, description="是否开启 /swarm 蜂群协作模式")
     target_agent_ids: list[str] | None = Field(default=None, description="@专家名轻量点名唤起的目标专家 ID 列表")
+    agent_id: str | None = Field(default=None, description="本次绑定的专家 ID")
+    grounding_config: dict[str, Any] | None = Field(default=None, description="绑定的专家防幻觉与严谨度配置")
     swarm_id: str | None = Field(default=None, description="可选关联的已有 Swarm ID")
 
 

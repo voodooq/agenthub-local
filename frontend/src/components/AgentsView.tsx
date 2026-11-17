@@ -24,8 +24,12 @@ import {
   FolderLock,
   Clock,
   Loader2,
+  Sliders,
+  ChevronDown,
+  ChevronUp,
+  FileCheck,
 } from 'lucide-react';
-import { Workspace, SkillItem, AgentItem } from '@/types';
+import { Workspace, SkillItem, AgentItem, GroundingConfig } from '@/types';
 import { SkillCategoryTabs, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
 import { ModelOption } from '@/components/ModelSelector';
 import { apiFetch } from '@/utils/apiClient';
@@ -35,7 +39,7 @@ import {
   subscribeSkillsUpdated,
 } from '@/utils/skillCache';
 
-export type { AgentItem } from '@/types';
+export type { AgentItem, GroundingConfig } from '@/types';
 
 interface AgentsViewProps {
   workspace: Workspace | undefined;
@@ -44,7 +48,7 @@ interface AgentsViewProps {
   onLaunchSandboxChat?: (agent: AgentItem, selectedSkills: SkillItem[]) => void;
 }
 
-// 预设默认官方专家（挂载真实核心系统技能）
+// 预设默认官方专家（挂载真实核心系统技能与防幻觉配置）
 const DEFAULT_OFFICIAL_AGENTS: AgentItem[] = [
   {
     id: 'agent_code_architect',
@@ -56,8 +60,16 @@ const DEFAULT_OFFICIAL_AGENTS: AgentItem[] = [
     tools_count: 8,
     ownership: 'official',
     status: 'active',
+    grounding_config: {
+      strict_mode: true,
+      temperature: 0.1,
+      fail_fast_on_missing: true,
+      verify_tool_call: true,
+      require_evidence: true,
+      custom_rules: '重构与修改代码前必须通过调研现有代码，严禁凭空盲写；改动后必须运行单测验证。',
+    },
     created_at: '2026-10-28',
-    updated_at: '2026-11-16',
+    updated_at: '2026-11-17',
   },
   {
     id: 'agent_deep_researcher',
@@ -69,8 +81,16 @@ const DEFAULT_OFFICIAL_AGENTS: AgentItem[] = [
     tools_count: 6,
     ownership: 'official',
     status: 'active',
+    grounding_config: {
+      strict_mode: true,
+      temperature: 0.2,
+      fail_fast_on_missing: true,
+      verify_tool_call: true,
+      require_evidence: true,
+      custom_rules: '所有论断必须有一手官方文档或抓取结果为事实依据，禁止无证据猜测推论。',
+    },
     created_at: '2026-09-20',
-    updated_at: '2026-11-16',
+    updated_at: '2026-11-17',
   },
   {
     id: 'agent_ui_ux_master',
@@ -82,8 +102,16 @@ const DEFAULT_OFFICIAL_AGENTS: AgentItem[] = [
     tools_count: 5,
     ownership: 'official',
     status: 'active',
+    grounding_config: {
+      strict_mode: false,
+      temperature: 0.6,
+      fail_fast_on_missing: false,
+      verify_tool_call: false,
+      require_evidence: false,
+      custom_rules: '界面与样式设计必须遵循单色扁平化与暗黑模式适配原则，杜绝刺眼无规则色彩。',
+    },
     created_at: '2026-11-01',
-    updated_at: '2026-11-16',
+    updated_at: '2026-11-17',
   },
   {
     id: 'agent_plugin_builder',
@@ -95,8 +123,16 @@ const DEFAULT_OFFICIAL_AGENTS: AgentItem[] = [
     tools_count: 7,
     ownership: 'official',
     status: 'active',
+    grounding_config: {
+      strict_mode: true,
+      temperature: 0.1,
+      fail_fast_on_missing: true,
+      verify_tool_call: true,
+      require_evidence: true,
+      custom_rules: '所有 MCP 工具定义与 Schema 必须通过 JSON Schema 严格校验，严禁输出非标准字段。',
+    },
     created_at: '2026-10-14',
-    updated_at: '2026-11-16',
+    updated_at: '2026-11-17',
   },
 ];
 
@@ -139,6 +175,15 @@ export function AgentsView({
   const [scheduleName, setScheduleName] = useState('');
   const [schedulePrompt, setSchedulePrompt] = useState('');
   const [bannerNotice, setBannerNotice] = useState<string | null>(null);
+
+  // 防幻觉与严谨度配置表单状态
+  const [formStrictMode, setFormStrictMode] = useState(true);
+  const [formTemperature, setFormTemperature] = useState(0.1);
+  const [formFailFast, setFormFailFast] = useState(true);
+  const [formVerifyToolCall, setFormVerifyToolCall] = useState(true);
+  const [formRequireEvidence, setFormRequireEvidence] = useState(true);
+  const [formCustomRules, setFormCustomRules] = useState('');
+  const [isGroundingPanelOpen, setIsGroundingPanelOpen] = useState(true);
 
   // 初始化拉取系统真实技能
   useEffect(() => {
@@ -244,7 +289,37 @@ export function AgentsView({
     setScheduleHuman('');
     setScheduleName('');
     setSchedulePrompt('');
+    setFormStrictMode(true);
+    setFormTemperature(0.1);
+    setFormFailFast(true);
+    setFormVerifyToolCall(true);
+    setFormRequireEvidence(true);
+    setFormCustomRules('');
+    setIsGroundingPanelOpen(true);
     setIsModalOpen(true);
+  };
+
+  // 幂等注入防幻觉与事实基准规范模版
+  const handleInjectAntiHallucinationTemplate = () => {
+    const current = formDesc.trim();
+    if (
+      current.includes('【事实唯一基准】') ||
+      current.includes('【缺失如实拒答') ||
+      current.includes('防幻觉与事实基准')
+    ) {
+      setBannerNotice('当前提示词已包含防幻觉与事实基准规约，无需重复注入。');
+      setTimeout(() => setBannerNotice(null), 3000);
+      return;
+    }
+    const template = `\n\n### 核心执行规约（防幻觉与事实基准）：\n1. 【事实唯一基准】：所有数据、指标与分析结论必须 100% 依托工具读取到的本地文件或真实记录，严禁无事实依据凭空推演。\n2. 【缺失如实拒答 (Fail-Fast)】：未检索到真实记录或文件缺失时，必须如实回答“无相关记录”，严禁为了交差编造模拟/测试假数据！\n3. 【真实调用验证】：严禁在未真正收到工具成功回包前宣称已完成。`;
+    setFormDesc(current ? `${current}${template}` : template.trim());
+    setFormStrictMode(true);
+    setFormTemperature(0.1);
+    setFormFailFast(true);
+    setFormVerifyToolCall(true);
+    setFormRequireEvidence(true);
+    setBannerNotice('已成功注入防幻觉与事实基准规约模版，并已将模式设为严谨工作 (T=0.1)。');
+    setTimeout(() => setBannerNotice(null), 3000);
   };
 
   // 一句话自然语言智能装配专家配置与联动定时计划
@@ -276,6 +351,16 @@ export function AgentsView({
       if (Array.isArray(draft.skill_ids)) setSelectedSkillIds(draft.skill_ids);
       if (Array.isArray(draft.allowed_tools)) setFormAllowedTools(draft.allowed_tools.join(', '));
       if (Array.isArray(draft.allowed_write_dirs)) setFormAllowedWriteDirs(draft.allowed_write_dirs.join(', '));
+
+      if (draft.grounding_config) {
+        const gc = draft.grounding_config;
+        setFormStrictMode(gc.strict_mode ?? true);
+        setFormTemperature(typeof gc.temperature === 'number' ? gc.temperature : 0.1);
+        setFormFailFast(gc.fail_fast_on_missing ?? true);
+        setFormVerifyToolCall(gc.verify_tool_call ?? true);
+        setFormRequireEvidence(gc.require_evidence ?? true);
+        setFormCustomRules(gc.custom_rules || '');
+      }
 
       if (draft.schedule && draft.schedule.enabled) {
         setScheduleEnabled(true);
@@ -315,6 +400,16 @@ export function AgentsView({
     setScheduleHuman('');
     setScheduleName('');
     setSchedulePrompt('');
+
+    const gc = agent.grounding_config || {};
+    setFormStrictMode(gc.strict_mode ?? true);
+    setFormTemperature(typeof gc.temperature === 'number' ? gc.temperature : (gc.strict_mode === false ? 0.7 : 0.1));
+    setFormFailFast(gc.fail_fast_on_missing ?? true);
+    setFormVerifyToolCall(gc.verify_tool_call ?? true);
+    setFormRequireEvidence(gc.require_evidence ?? true);
+    setFormCustomRules(gc.custom_rules || '');
+    setIsGroundingPanelOpen(true);
+
     setIsModalOpen(true);
   };
 
@@ -342,6 +437,15 @@ export function AgentsView({
     const allowedWriteDirs = parseCommaList(formAllowedWriteDirs);
     const descText = targetPrompt || '自定义专业智能体，搭载专属技能集与独立沙盒运行环境。';
 
+    const targetGroundingConfig: GroundingConfig = {
+      strict_mode: formStrictMode,
+      temperature: formTemperature,
+      fail_fast_on_missing: formFailFast,
+      verify_tool_call: formVerifyToolCall,
+      require_evidence: formRequireEvidence,
+      custom_rules: formCustomRules.trim().slice(0, 500),
+    };
+
     setSavingAgent(true);
     setApiError(null);
 
@@ -363,6 +467,7 @@ export function AgentsView({
               skill_ids: selectedSkillIds,
               allowed_tools: allowedTools,
               allowed_write_dirs: allowedWriteDirs,
+              grounding_config: targetGroundingConfig,
             }),
           });
           if (res.ok) {
@@ -390,6 +495,7 @@ export function AgentsView({
             tools_count: Math.max(2, selectedSkillIds.length * 2),
             allowed_tools: allowedTools,
             allowed_write_dirs: allowedWriteDirs,
+            grounding_config: targetGroundingConfig,
             updated_at: todayStr,
           };
         });
@@ -411,6 +517,7 @@ export function AgentsView({
               skill_ids: selectedSkillIds,
               allowed_tools: allowedTools,
               allowed_write_dirs: allowedWriteDirs,
+              grounding_config: targetGroundingConfig,
               status: 'active',
             }),
           });
@@ -438,6 +545,7 @@ export function AgentsView({
           status: 'active',
           allowed_tools: allowedTools,
           allowed_write_dirs: allowedWriteDirs,
+          grounding_config: targetGroundingConfig,
           created_at: todayStr,
           updated_at: todayStr,
         };
@@ -652,6 +760,23 @@ export function AgentsView({
                           >
                             {agent.ownership === 'official' ? '官方' : '个人'}
                           </span>
+                          {agent.grounding_config?.strict_mode ? (
+                            <span
+                              className="text-[10px] px-1.5 py-0.5 rounded font-mono inline-flex items-center gap-1 bg-zinc-800/80 text-zinc-300 border border-zinc-700"
+                              title={`严谨工作模式 (温度 T=${agent.grounding_config?.temperature ?? 0.1}) · 强制事实锚定`}
+                            >
+                              <Shield className="w-2.5 h-2.5 text-zinc-400" />
+                              <span>严谨 · T={agent.grounding_config?.temperature ?? 0.1}</span>
+                            </span>
+                          ) : (
+                            <span
+                              className="text-[10px] px-1.5 py-0.5 rounded font-mono inline-flex items-center gap-1 bg-zinc-900/50 text-zinc-400 border border-zinc-800"
+                              title={`自由构想模式 (温度 T=${agent.grounding_config?.temperature ?? 0.7})`}
+                            >
+                              <Sliders className="w-2.5 h-2.5 text-zinc-500" />
+                              <span>构想 · T={agent.grounding_config?.temperature ?? 0.7}</span>
+                            </span>
+                          )}
                         </div>
                         <span className="text-[11px] font-mono text-muted-foreground">{agent.id}</span>
                       </div>
@@ -828,6 +953,12 @@ export function AgentsView({
             </div>
 
             <form onSubmit={handleSaveAgent} className="flex-1 overflow-y-auto py-4 space-y-4 pr-1">
+              {bannerNotice && (
+                <div className="p-2.5 rounded-lg border border-zinc-700 bg-zinc-800/90 text-zinc-200 text-xs flex items-center space-x-2 animate-fadeIn">
+                  <Check className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                  <span>{bannerNotice}</span>
+                </div>
+              )}
               {!editingAgent && (
                 <div className="p-3.5 rounded-xl bg-emerald-500/8 border border-emerald-500/25 space-y-2">
                   <div className="flex items-center justify-between">
@@ -882,16 +1013,191 @@ export function AgentsView({
               </div>
 
               <div>
-                <label className="block text-xs font-semibold text-foreground mb-1">
-                  职能描述 & SOP 指导原则
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs font-semibold text-foreground">
+                    职能描述 & SOP 指导原则
+                  </label>
+                  <button
+                    type="button"
+                    onClick={handleInjectAntiHallucinationTemplate}
+                    className="text-[11px] text-zinc-400 hover:text-zinc-200 flex items-center space-x-1 transition-colors px-2 py-0.5 rounded border border-zinc-700 bg-zinc-800/60"
+                    title="一键注入事实唯一基准、缺失拒答与工具执行验证规约"
+                  >
+                    <FileCheck className="w-3 h-3 text-zinc-400" />
+                    <span>规范化 / 注入防幻觉模版</span>
+                  </button>
+                </div>
                 <textarea
                   rows={2}
                   placeholder="清晰描述专家的主要职责、擅长领域、行为准则与交付标准..."
                   value={formDesc}
                   onChange={(e) => setFormDesc(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500 resize-none"
+                  className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-zinc-500 resize-none font-mono"
                 />
+              </div>
+
+              {/* 防幻觉与严谨度配置面板 (Grounding & Anti-Hallucination) */}
+              <div className="p-3.5 rounded-xl border border-zinc-700/80 bg-zinc-900/60 space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center space-x-2">
+                    <Shield className="w-4 h-4 text-zinc-400" />
+                    <span className="text-xs font-bold text-zinc-200">
+                      防幻觉与严谨度配置 (Grounding Guardrails)
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setIsGroundingPanelOpen((prev) => !prev)}
+                    className="text-[11px] text-zinc-400 hover:text-zinc-200 flex items-center space-x-1"
+                  >
+                    <span>{isGroundingPanelOpen ? '收起配置' : '展开微调'}</span>
+                    {isGroundingPanelOpen ? (
+                      <ChevronUp className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                </div>
+
+                {/* 模式快速切换单选块 */}
+                <div className="grid grid-cols-2 gap-2 text-xs">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormStrictMode(true);
+                      setFormTemperature(0.1);
+                      setFormFailFast(true);
+                      setFormVerifyToolCall(true);
+                      setFormRequireEvidence(true);
+                    }}
+                    className={`p-2.5 rounded-lg border text-left transition-all ${
+                      formStrictMode
+                        ? 'border-zinc-500 bg-zinc-800 text-zinc-100 shadow-sm'
+                        : 'border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:border-zinc-700'
+                    }`}
+                  >
+                    <div className="font-semibold flex items-center justify-between">
+                      <span>🎯 严谨工作模式</span>
+                      {formStrictMode && <Check className="w-3.5 h-3.5 text-zinc-300" />}
+                    </div>
+                    <p className="text-[10px] text-zinc-400 mt-1 leading-relaxed">
+                      推荐工作场景：低温 (T=0.1)、事实锚定、数据缺失如实拒答、防虚假完成声明。
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFormStrictMode(false);
+                      setFormTemperature(0.7);
+                      setFormFailFast(false);
+                      setFormVerifyToolCall(false);
+                    }}
+                    className={`p-2.5 rounded-lg border text-left transition-all ${
+                      !formStrictMode
+                        ? 'border-zinc-500 bg-zinc-800 text-zinc-100 shadow-sm'
+                        : 'border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:border-zinc-700'
+                    }`}
+                  >
+                    <div className="font-semibold flex items-center justify-between">
+                      <span>💡 自由构想模式</span>
+                      {!formStrictMode && <Check className="w-3.5 h-3.5 text-zinc-300" />}
+                    </div>
+                    <p className="text-[10px] text-zinc-400 mt-1 leading-relaxed">
+                      适合头脑风暴与创意探索：温度 (T=0.7)，允许发散思维与灵感构想。
+                    </p>
+                  </button>
+                </div>
+
+                {/* 展开的微调选项 */}
+                {isGroundingPanelOpen && (
+                  <div className="space-y-3 pt-2 border-t border-zinc-800/80 text-xs text-zinc-300">
+                    {/* 温度滑块 */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <span className="text-[11px] text-zinc-400 flex items-center gap-1">
+                          <Sliders className="w-3 h-3 text-zinc-400" />
+                          <span>模型采样温度 (Temperature):</span>
+                        </span>
+                        <span className="font-mono text-[11px] text-zinc-200 font-bold">
+                          {formTemperature.toFixed(2)} {formTemperature <= 0.2 ? '(严谨精确)' : formTemperature >= 0.7 ? '(发散创意)' : '(平衡)'}
+                        </span>
+                      </div>
+                      <input
+                        type="range"
+                        min="0"
+                        max="1"
+                        step="0.05"
+                        value={formTemperature}
+                        onChange={(e) => setFormTemperature(parseFloat(e.target.value))}
+                        className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-zinc-400"
+                      />
+                    </div>
+
+                    {/* 三重防线复选框 */}
+                    <div className="space-y-2 pt-1 text-[11px]">
+                      <label className="flex items-start space-x-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={formFailFast}
+                          onChange={(e) => setFormFailFast(e.target.checked)}
+                          className="mt-0.5 rounded border-zinc-700 bg-zinc-800 text-zinc-200 accent-zinc-500"
+                        />
+                        <div>
+                          <span className="font-medium text-zinc-200">未检索到数据如实拒答 (Fail-Fast)</span>
+                          <p className="text-[10px] text-zinc-400">
+                            当本地日志为空或目标文件不存在时，系统硬性规定直接说明无记录，禁止编造假样本。
+                          </p>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start space-x-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={formVerifyToolCall}
+                          onChange={(e) => setFormVerifyToolCall(e.target.checked)}
+                          className="mt-0.5 rounded border-zinc-700 bg-zinc-800 text-zinc-200 accent-zinc-500"
+                        />
+                        <div>
+                          <span className="font-medium text-zinc-200">工具调用真实性审计</span>
+                          <p className="text-[10px] text-zinc-400">
+                            严禁模型在未成功调用工具并获得返回前宣称“已为您查询/已为您整理/已成功保存”。
+                          </p>
+                        </div>
+                      </label>
+
+                      <label className="flex items-start space-x-2 cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={formRequireEvidence}
+                          onChange={(e) => setFormRequireEvidence(e.target.checked)}
+                          className="mt-0.5 rounded border-zinc-700 bg-zinc-800 text-zinc-200 accent-zinc-500"
+                        />
+                        <div>
+                          <span className="font-medium text-zinc-200">输出结论必须附带事实来源</span>
+                          <p className="text-[10px] text-zinc-400">
+                            强制要求分析报告与结论关联具体读取到的文件路径或工具数据片段。
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+
+                    {/* 自定义防虚构业务红线 */}
+                    <div className="pt-1">
+                      <label className="block text-[11px] text-zinc-400 mb-1">
+                        自定义业务防虚构红线（可选，最多 500 字符）:
+                      </label>
+                      <input
+                        type="text"
+                        maxLength={500}
+                        placeholder="例如：涉及财务金额必须精确对账；未找到今日工作记录直接输出无记录..."
+                        value={formCustomRules}
+                        onChange={(e) => setFormCustomRules(e.target.value)}
+                        className="w-full px-3 py-1.5 rounded-lg bg-zinc-800/80 border border-zinc-700 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-zinc-500"
+                      />
+                    </div>
+                  </div>
+                )}
               </div>
 
               {/* 真实基座模型选择器 */}

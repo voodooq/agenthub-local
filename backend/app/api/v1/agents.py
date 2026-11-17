@@ -14,6 +14,17 @@ from ...scheduler.intent_parser import ScheduleIntentParser
 router = APIRouter(prefix="/agents", tags=["agents"])
 
 
+class GroundingConfigSchema(BaseModel):
+    """专家防幻觉与严谨度配置 Schema"""
+
+    strict_mode: bool = Field(True, description="是否开启严谨工作模式（推荐工作场景使用）")
+    temperature: float = Field(0.1, ge=0.0, le=1.0, description="推荐采样温度（严谨模式建议 0.0~0.2）")
+    fail_fast_on_missing: bool = Field(True, description="未检索到真实数据时立即如实拒答，禁止脑补")
+    verify_tool_call: bool = Field(True, description="禁止在未成功执行工具并收到回包前宣称已完成")
+    require_evidence: bool = Field(True, description="输出结论时必须附带真实引用来源与数据出处")
+    custom_rules: str = Field("", max_length=500, description="自定义防虚构业务红线（上限 500 字符）")
+
+
 class AgentNaturalGenerateRequest(BaseModel):
     """自然语言一键生成专家与联动定时任务请求体"""
 
@@ -32,6 +43,9 @@ class AgentCreateRequest(BaseModel):
     skill_ids: list[str] = Field(default_factory=list, description="挂载的技能 ID 列表")
     allowed_tools: list[str] = Field(default_factory=list, description="允许调用的工具白名单")
     allowed_write_dirs: list[str] = Field(default_factory=list, description="允许写入的相对目录白名单")
+    grounding_config: GroundingConfigSchema | None = Field(
+        default_factory=GroundingConfigSchema, description="防幻觉与严谨度配置"
+    )
     tools_count: int | None = Field(None, ge=0, description="可用工具数量展示值")
     status: Literal["active", "draft"] = Field("active", description="专家状态")
 
@@ -46,6 +60,7 @@ class AgentUpdateRequest(BaseModel):
     skill_ids: list[str] | None = Field(None, description="挂载的技能 ID 列表")
     allowed_tools: list[str] | None = Field(None, description="允许调用的工具白名单")
     allowed_write_dirs: list[str] | None = Field(None, description="允许写入的相对目录白名单")
+    grounding_config: GroundingConfigSchema | None = Field(None, description="防幻觉与严谨度配置")
     tools_count: int | None = Field(None, ge=0, description="可用工具数量展示值")
     status: Literal["active", "draft"] | None = Field(None, description="专家状态")
 
@@ -105,23 +120,28 @@ async def generate_agent_from_prompt(req: AgentNaturalGenerateRequest) -> dict[s
     except Exception:
         pass
 
-    # 4. 推导工具白名单、写入目录与专业 SOP
+    # 4. 推导工具白名单、写入目录与专业防幻觉 SOP
     allowed_tools: list[str] = ["read_local_file", "write_local_file", "load_skill_detail"]
     allowed_write_dirs: list[str] = []
     sop_lines: list[str] = [f"你是【{agent_name}】。用户原始需求：{raw}"]
 
     is_daily_report = any(k in raw for k in ("日报", "周报", "总结", "交互", "复盘", "记录"))
+    is_work_related = is_daily_report or any(
+        k in raw for k in ("报表", "excel", "ppt", "表格", "审计", "核查", "代码", "重构", "工作", "分析", "数据")
+    )
+
     if is_daily_report:
         for t in ("search_memory_history", "save_long_term_memory", "search_skill_knowledge"):
             if t not in allowed_tools:
                 allowed_tools.append(t)
         allowed_write_dirs = ["output/reports"]
         sop_lines.extend([
-            "执行规范：",
-            "1. 优先调用 `search_memory_history(query='today', scope='messages', limit=50)` 收集当日全部会话与沙盒交互内容。",
-            "2. 按项目/主题分类提炼已完成工作、核心结论、遇到的问题与后续待办。",
-            "3. 使用 `write_local_file` 将完整 Markdown 日报归档至 `output/reports/daily_report_<日期>.md`。",
-            "4. 若包含重要长期决策或关键进展，调用 `save_long_term_memory` 沉淀核心摘要。",
+            "",
+            "### 核心执行规约（防幻觉与事实基准）：",
+            "1. 【事实唯一基准】：优先调用 `search_memory_history(query='today', scope='messages', limit=50)` 收集当日全部会话与沙盒交互真实内容。所有日报内容必须 100% 源于读取到的记录。",
+            "2. 【缺失如实拒答 (Fail-Fast)】：若检索结果为空（今日无新增对话或操作记录），必须立即如实回复“今日工作区暂无新增交互记录，无需生成虚构日报”，严禁为了交差而编造假任务与指标！",
+            "3. 【分类提炼】：有真实数据时，按项目与主题结构化提炼完成事项、核心结论与待办。",
+            "4. 【真实落盘】：使用 `write_local_file` 将 Markdown 日报保存至 `output/reports/daily_report_<日期>.md`，必须收到真实成功回包后再向用户交付。",
         ])
     else:
         if any(k in lower_raw for k in ("网页", "新闻", "搜索", "抓取", "行情", "调研", "官网")):
@@ -130,11 +150,28 @@ async def generate_agent_from_prompt(req: AgentNaturalGenerateRequest) -> dict[s
             allowed_tools.extend(["execute_local_command", "run_skill_tool"])
         if any(k in raw for k in ("记忆", "历史", "回顾", "总结")):
             allowed_tools.extend(["search_memory_history", "save_long_term_memory"])
-        if any(k in raw for k in ("报告", "文档", "归档", "记录")):
+        if any(k in raw for k in ("报告", "文档", "归档", "记录", "表格", "审计")):
             allowed_write_dirs = ["output/reports"]
-        sop_lines.append("请严格依托已授权工具与挂载技能高质量完成任务，并将最终成果输出至指定交付目录。")
+        sop_lines.extend([
+            "",
+            "### 核心执行规约（防幻觉与事实基准）：",
+            "1. 严格依托已授权工具与真实数据完成任务，严禁无事实依据凭空推演。",
+            "2. 数据缺失或文件不存在时必须如实说明情况（Fail-Fast），严禁自行生成 Mock/虚构数据欺骗用户。",
+            "3. 任何最终成果必须真实执行工具输出至指定交付目录。",
+        ])
 
     context_prompt = "\n".join(sop_lines)
+
+    # 推荐防幻觉配置
+    grounding_config = {
+        "strict_mode": is_work_related,
+        "temperature": 0.1 if is_work_related else 0.7,
+        "fail_fast_on_missing": True,
+        "verify_tool_call": True,
+        "require_evidence": is_work_related,
+        "custom_rules": "未检索到本地真实数据或文件时直接报告无记录，严禁编造任何模拟/测试假数据。" if is_work_related else "",
+    }
+
     schedule_info: dict[str, Any] | None = None
     if has_schedule:
         parsed_sched = ScheduleIntentParser.parse(raw)
@@ -159,6 +196,7 @@ async def generate_agent_from_prompt(req: AgentNaturalGenerateRequest) -> dict[s
             "skill_ids": matched_skills,
             "allowed_tools": allowed_tools,
             "allowed_write_dirs": allowed_write_dirs,
+            "grounding_config": grounding_config,
             "schedule": schedule_info,
         },
     }
