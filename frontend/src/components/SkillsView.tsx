@@ -23,6 +23,7 @@ import {
   subscribeSkillsUpdated,
 } from '@/utils/skillCache';
 import { SopDrawer } from './SopDrawer';
+import { McpServerManager } from './McpServerManager';
 
 interface SkillsViewProps {
   workspace: Workspace | undefined;
@@ -394,36 +395,14 @@ export function SkillsView({ workspace }: SkillsViewProps) {
           </div>
         )}
 
-        {/* MCP 关联应用 */}
+        {/* MCP 关联应用与服务中枢 */}
         {activeTab === 'mcp' && (
-          <div className="space-y-4">
-            <h2 className="text-xl font-bold text-foreground">{t('已关联应用与 MCP 服务')}</h2>
-            <p className="text-xs text-muted-foreground">
-              {t('连接外部开发工具与数据协议，为 AI 具身操作赋能')}
-            </p>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-              <div className="p-4 rounded-xl border border-border bg-surface-card flex items-center justify-between shadow-sm">
-                <div className="flex items-center space-x-3">
-                  <Terminal className="w-5 h-5 text-emerald-500" />
-                  <div>
-                    <h4 className="text-sm font-semibold text-foreground">Local Shell / Terminal</h4>
-                    <p className="text-xs text-muted-foreground">{t('受控本地终端执行能力')}</p>
-                  </div>
-                </div>
-                <span className="text-xs text-emerald-600 dark:text-emerald-400 font-mono">● {t('已启用')}</span>
-              </div>
-              <div className="p-4 rounded-xl border border-border bg-surface-card flex items-center justify-between shadow-sm">
-                <div className="flex items-center space-x-3">
-                  <Database className="w-5 h-5 text-blue-500" />
-                  <div>
-                    <h4 className="text-sm font-semibold text-foreground">SQLite FTS5 Local Memory</h4>
-                    <p className="text-xs text-muted-foreground">{t('工作区零拷贝全文索引')}</p>
-                  </div>
-                </div>
-                <span className="text-xs text-emerald-600 dark:text-emerald-400 font-mono">● {t('已就绪')}</span>
-              </div>
-            </div>
-          </div>
+          <McpServerManager
+            workspaceId={workspace?.id}
+            onServersUpdated={() => {
+              invalidateWorkspaceSkills(workspace?.id);
+            }}
+          />
         )}
 
         {/* 探索市场 */}

@@ -45,8 +45,9 @@ import {
   setExtensionSkillsCache,
 } from '@/utils/skillCache';
 import { PersonaPreset, SkillItem } from './SettingsModal';
+import { McpServerManager } from './McpServerManager';
 
-export type MemoryHubTab = 'memories' | 'facts' | 'ledger' | 'personality';
+export type MemoryHubTab = 'memories' | 'facts' | 'ledger' | 'personality' | 'mcp';
 
 export interface MemoryHubModalProps {
   isOpen?: boolean;
@@ -1336,8 +1337,20 @@ export function MemoryHubModal({
                 : 'border-transparent text-muted-foreground hover:text-foreground'
             }`}
           >
-            <Brain className="w-3.5 h-3.5 text-purple-500" />
+            <Brain className="w-3.5 h-3.5 text-foreground" />
             <span>回复性格与人设</span>
+          </button>
+
+          <button
+            onClick={() => setActiveTab('mcp')}
+            className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
+              activeTab === 'mcp'
+                ? 'border-foreground text-foreground'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Globe className="w-3.5 h-3.5 text-foreground" />
+            <span>关联应用与 MCP</span>
           </button>
         </div>
 
@@ -2233,6 +2246,16 @@ export function MemoryHubModal({
               </div>
             </div>
           )}
+
+          {/* ────────── TAB 5: MCP 关联应用与服务中枢 ────────── */}
+          {activeTab === 'mcp' && (
+            <div className="py-2">
+              <McpServerManager
+                workspaceId={workspaceId}
+                onServersUpdated={onSkillsUpdated}
+              />
+            </div>
+          )}
         </div>
       </div>
   );
@@ -2243,7 +2266,7 @@ export function MemoryHubModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-fade-in"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 animate-fade-in"
       onClick={onClose}
     >
       {innerContent}
