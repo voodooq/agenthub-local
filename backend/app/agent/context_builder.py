@@ -220,7 +220,7 @@ class ContextBuilder:
                 "   - **过程与交付分离**：调工具步骤仅附简短旁白，严禁提前撰写完整报告或编造 `[终端/工具输出]:` / `[Gemini]:` 标签。\n"
                 "5. **最新上传附件唯一基准**：本轮若上传新附件，强制以该最新附件为唯一起始基准，历史旧数据与 Working Memory 摘要一律作废；复用脚本前必须核验并更新输入路径指向最新附件；仅在未传新附件且用户特指继续旧数据时沿用旧数据。\n"
                 "6. **单层 `output/` 交付红线**：所有最终产出物必须直接保存于一级 `output/` 目录（如 `output/xxx.xlsx`），严禁 `output/output/` 多层嵌套或重复 `.xlsx` 等文件名后缀，交付链接（`file:///.../output/xxx`）须与磁盘单层路径 100% 一致。\n"
-                "7. **长耗时下载与后台托管**：重型下载/安装（`uv sync`/`pip install`/`npm install`/`git clone` 等）观察期未完将自动转入后台并返回 `job_id`；请调用 `check_background_command(job_id, wait_seconds=20)` 轮询，只要状态为 `running` 就继续等待，严禁强杀慢速下载；仅在 `stagnant`/`network_error`/`failed` 时用 `cancel_background_command` 终止并切镜像或修复参数。"
+                "7. **长耗时下载与断点续传**：下载大文件/大模型或易断流包时优先使用 `resumable_download`（自带 Range 断点续传、异常退避重试、直连/代理/备用源切换及确认不可达安全断开保留断点）；重型命令（`uv sync`/`pip install`/`npm install`/`git clone`）观察期未完也会自动转后台返回 `job_id`。请调用 `check_background_command(job_id, wait_seconds=20)` 持续跟进，状态为 `running` 时切勿强杀；若最终确认断网断开，请如实报告保留的 `.part` 断点路径。"
             )
             if tools:
                 protocol_prompt = ToolProtocolAdapter.build_xml_protocol_prompt(tools)

@@ -245,7 +245,7 @@ class ToolProtocolAdapter:
         return [
             {
                 "name": "execute_local_command",
-                "description": "在用户本机终端（Windows PowerShell / Linux Bash）受控执行命令。只读命令自动直通，修改命令将触发前端弹窗审批。",
+                "description": "在本地终端执行单行命令。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -302,23 +302,50 @@ class ToolProtocolAdapter:
                 },
             },
             {
+                "name": "resumable_download",
+                "description": "后台断点续传下载大文件，支持异常退避重试、直连/代理/备用源切换及断网安全断开。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "主下载链接",
+                        },
+                        "save_path": {
+                            "type": "string",
+                            "description": "本地保存文件路径",
+                        },
+                        "fallback_urls": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": "可选备用镜像链接列表",
+                        },
+                        "sha256": {
+                            "type": "string",
+                            "description": "可选 SHA256 校验值",
+                        },
+                    },
+                    "required": ["url", "save_path"],
+                },
+            },
+            {
                 "name": "search_memory_history",
-                "description": "按需基于本地 SQLite FTS5 BM25 毫秒级追溯历史对话、双时间轴结构化事实变更记录（含已覆盖旧版本）以及当前工作区源码/文档片段。仅在需要回溯窗口之外的历史报错、决策原因或跨文件线索时按需调用。",
+                "description": "基于本地 FTS5 追溯历史对话、事实变更记录与工作区源码片段，用于回溯窗口外历史线索。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "检索关键词或关键短语（支持中英文子串与代码符号）",
+                            "description": "检索关键词或短语",
                         },
                         "scope": {
                             "type": "string",
                             "enum": ["messages", "facts_history", "workspace", "all"],
-                            "description": "检索范围：messages(历史消息)、facts_history(含历史版本的精确事实与长期画像)、workspace(工作区代码文档 FTS5)、all(全部联合召回，默认)",
+                            "description": "检索范围（默认 all）",
                         },
                         "limit": {
                             "type": "integer",
-                            "description": "每类来源最多返回的匹配条目数（默认 5）",
+                            "description": "每类最大条数（默认 5）",
                         },
                     },
                     "required": ["query"],
@@ -326,21 +353,21 @@ class ToolProtocolAdapter:
             },
             {
                 "name": "update_working_memory",
-                "description": "更新当前多步任务的工作记忆草稿纸（Scratchpad），记录已查明的 PID、文件路径、子步骤状态，防止后续步骤遗忘。任务彻底完成时传 task_completed=true 清空草稿。",
+                "description": "更新多步任务草稿纸（PID、路径、子步骤状态）；完成时传 task_completed=true 清空。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "goal": {
                             "type": "string",
-                            "description": "当前多步任务的总目标简述",
+                            "description": "任务总目标简述",
                         },
                         "notes": {
                             "type": "object",
-                            "description": "要合并写入草稿纸的键值对状态（如 {'target_pid': 14520, 'port': 8080, 'step': '已定位进程'}）",
+                            "description": "待合并的键值对状态",
                         },
                         "task_completed": {
                             "type": "boolean",
-                            "description": "当前多步任务是否已彻底交付完成（若为 true 则归档并清空草稿纸）",
+                            "description": "任务是否彻底完成",
                         },
                     },
                     "required": [],
@@ -348,22 +375,22 @@ class ToolProtocolAdapter:
             },
             {
                 "name": "save_long_term_memory",
-                "description": "当用户明确要求“记住某偏好/植入长期记忆/保存个人画像或交互规则”时，直接将记忆条目持久化写入 SQLite 长期记忆库 (long_term_memories)，跨会话永久生效。",
+                "description": "将用户要求记住的环境信息、偏好或规则持久化写入长期记忆库，跨会话生效。",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "category": {
                             "type": "string",
                             "enum": ["env_info", "preference", "rule"],
-                            "description": "记忆分类：env_info(本机软硬件环境/技术栈/身份背景)、preference(个人习惯/兴趣偏好)、rule(交互与回复规则)",
+                            "description": "记忆分类",
                         },
                         "content": {
                             "type": "string",
-                            "description": "精炼、高信息密度的单条长期记忆文本",
+                            "description": "单条记忆文本",
                         },
                         "is_pinned": {
                             "type": "boolean",
-                            "description": "是否设为全局核心置顶记忆（默认 true，置顶后每次对话固定优先注入且永不衰减）",
+                            "description": "是否全局置顶（默认 true）",
                         },
                     },
                     "required": ["category", "content"],

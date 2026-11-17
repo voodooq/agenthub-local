@@ -218,18 +218,21 @@ def measure_watch_dirs_footprint(watch_dirs: list[Path], since_ts: float) -> tup
 
 @dataclass
 class BackgroundJob:
-    """后台运行命令任务实体。"""
+    """后台运行命令或断点下载任务实体。"""
 
     job_id: str
     session_id: str | None
     command: str
     cwd: str
-    process: subprocess.Popen[bytes]
     log_path: Path
     temp_script_path: str | None
     watch_dirs: list[Path]
     started_at: float
     last_activity_at: float
+    process: subprocess.Popen[bytes] | None = None
+    async_task: asyncio.Task[Any] | None = field(default=None, repr=False)
+    cancel_event: asyncio.Event | None = field(default=None, repr=False)
+    job_kind: str = "command"  # command | download
     stagnant_threshold: float = DEFAULT_STAGNANT_THRESHOLD_SECONDS
     last_log_size: int = 0
     last_dir_footprint: tuple[int, int] = (0, 0)
@@ -433,6 +436,19 @@ class BackgroundCommandManager:
                 "network_error": None,
             }
 
+        # 内置断点下载器自行管理退避重连与线路切换，确认不可达时会主动退出并置 exit_code=1
+        if job.job_kind == "download":
+            return {
+                "status": "running",
+                "exit_code": None,
+                "elapsed_seconds": round(elapsed, 1),
+                "idle_seconds": round(idle_seconds, 1),
+                "log_bytes": log_size,
+                "active_dir_bytes": dir_footprint[0],
+                "is_active": log_grown or dir_grown or idle_seconds < 10.0,
+                "network_error": None,
+            }
+
         # 进程仍在运行：读取日志尾部做致命网络指纹辅助探测
         tail_snippet = ""
         try:
@@ -494,10 +510,11 @@ class BackgroundCommandManager:
         delta_text, tail_text = self._read_incremental_and_tail(job, tail_lines=30)
         preview = delta_text or tail_text or "(已启动，暂未产生控制台输出，正在后台运行/下载中)"
         state = self.evaluate_status(job)
+        pid_display = str(job.process.pid) if job.process is not None else "async-downloader"
         output = (
             f"[已自动转入后台运行] 命令在 {observe_seconds:.1f}s 观察窗口内尚未结束，已托管至后台继续执行（未强杀进程）。\n"
             f"- job_id: `{job.job_id}`\n"
-            f"- pid: {job.process.pid}\n"
+            f"- pid: {pid_display}\n"
             f"- 状态: `{state['status']}` | 日志字节: {state['log_bytes']} | 缓存目录活跃字节: {state['active_dir_bytes']}\n"
             f"- 初始输出:\n{preview}\n\n"
             f"请调用 `check_background_command(job_id=\"{job.job_id}\", wait_seconds=20)` 持续跟踪进度；"
@@ -512,6 +529,89 @@ class BackgroundCommandManager:
             "job_id": job.job_id,
             "status": state["status"],
         }
+
+    def start_download_job(
+        self,
+        *,
+        url: str,
+        save_path: str | Path,
+        cwd: str,
+        session_id: str | None = None,
+        fallback_urls: list[str] | None = None,
+        expected_sha256: str | None = None,
+        config: Any = None,
+    ) -> BackgroundJob:
+        """在后台异步事件循环中启动内置断点续传下载任务，并接入统一日志与监控池。"""
+        from .resumable_downloader import download_with_resume
+
+        job_id = f"bg_{uuid.uuid4().hex[:8]}"
+        fd, log_name = tempfile.mkstemp(prefix=f"agenthub_{job_id}_", suffix=".log")
+        os.close(fd)
+        log_path = Path(log_name)
+        target_path = Path(save_path).expanduser().resolve()
+        now = time.monotonic()
+        cancel_event = asyncio.Event()
+
+        job = BackgroundJob(
+            job_id=job_id,
+            session_id=session_id,
+            command=f"resumable_download {url} -> {target_path}",
+            cwd=cwd,
+            log_path=log_path,
+            temp_script_path=None,
+            watch_dirs=[target_path.parent] if target_path.parent.is_dir() else [],
+            started_at=now,
+            last_activity_at=now,
+            process=None,
+            cancel_event=cancel_event,
+            job_kind="download",
+        )
+
+        def _append_log(line: str) -> None:
+            ts = time.strftime("%H:%M:%S")
+            encoded = f"[{ts}] {line}\n".encode("utf-8", errors="replace")
+            with job._lock:
+                try:
+                    with open(log_path, "ab") as fp:
+                        fp.write(encoded)
+                        fp.flush()
+                    job.last_activity_at = time.monotonic()
+                except OSError:
+                    pass
+
+        async def _runner() -> None:
+            try:
+                res = await download_with_resume(
+                    url=url,
+                    save_path=target_path,
+                    fallback_urls=fallback_urls,
+                    expected_sha256=expected_sha256,
+                    config=config,
+                    cancel_event=cancel_event,
+                    on_log=_append_log,
+                )
+                with job._lock:
+                    if res.cancelled:
+                        job.cancelled = True
+                        job.exit_code = -1
+                    else:
+                        job.exit_code = 0 if res.success else 1
+                    job.finished_at = time.monotonic()
+            except asyncio.CancelledError:
+                with job._lock:
+                    job.cancelled = True
+                    job.exit_code = -1
+                    job.finished_at = time.monotonic()
+            except Exception as err:
+                _append_log(f"[disconnect] 下载任务意外异常: {err}")
+                with job._lock:
+                    job.exit_code = 1
+                    job.finished_at = time.monotonic()
+
+        with self._jobs_lock:
+            self._jobs[job_id] = job
+        job.async_task = asyncio.create_task(_runner(), name=f"bg-dl-{job_id}")
+        return job
 
     async def check_job(
         self,
@@ -614,22 +714,30 @@ class BackgroundCommandManager:
 
         with job._lock:
             job.cancelled = True
-            pid = job.process.pid
+            pid = job.process.pid if job.process is not None else None
+            cancel_ev = job.cancel_event
+            async_task = job.async_task
 
         if not job.is_finished():
-            await asyncio.to_thread(self._kill_tree_fn, pid)
-            # 等待日志线程收割退出状态
-            for _ in range(10):
+            if cancel_ev is not None:
+                cancel_ev.set()
+            if pid is not None:
+                await asyncio.to_thread(self._kill_tree_fn, pid)
+            elif async_task is not None and not async_task.done():
+                async_task.cancel()
+            # 等待日志线程或异步协程收割退出状态
+            for _ in range(15):
                 if job.is_finished():
                     break
                 await asyncio.sleep(0.05)
 
         _, tail_text = self._read_incremental_and_tail(job, tail_lines=20)
         self._cleanup_finished_job(job_id)
+        pid_desc = f"PID={pid}" if pid is not None else "async-downloader"
         return {
             "job_id": job_id,
             "status": "cancelled",
-            "output": f"已终止后台任务 `{job_id}` (PID={pid})。\n--- 终止前日志尾部 ---\n{tail_text or '(无输出)'}",
+            "output": f"已终止后台任务 `{job_id}` ({pid_desc})。\n--- 终止前日志尾部 ---\n{tail_text or '(无输出)'}",
         }
 
     def cancel_session_jobs(self, session_id: str) -> int:
@@ -641,9 +749,16 @@ class BackgroundCommandManager:
         for job in targets:
             with job._lock:
                 job.cancelled = True
-                pid = job.process.pid
+                pid = job.process.pid if job.process is not None else None
+                cancel_ev = job.cancel_event
+                async_task = job.async_task
             if not job.is_finished():
-                self._kill_tree_fn(pid)
+                if cancel_ev is not None:
+                    cancel_ev.set()
+                if pid is not None:
+                    self._kill_tree_fn(pid)
+                elif async_task is not None and not async_task.done():
+                    async_task.cancel()
                 cancelled_count += 1
             self._cleanup_finished_job(job.job_id)
         return cancelled_count

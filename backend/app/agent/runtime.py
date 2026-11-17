@@ -2635,6 +2635,80 @@ class AgentRuntime:
                             "job_id": bg_job_id,
                         }
 
+                    # ── 工具 1.3: 内置断点续传下载器 (resumable_download) ──
+                    elif func_name == "resumable_download":
+                        dl_url = str(args.get("url", "")).strip()
+                        raw_save_path = str(args.get("save_path", "")).strip()
+                        raw_fallbacks = args.get("fallback_urls")
+                        fallback_list: list[str] = []
+                        if isinstance(raw_fallbacks, list):
+                            fallback_list = [str(u).strip() for u in raw_fallbacks if str(u).strip()]
+                        elif isinstance(raw_fallbacks, str) and raw_fallbacks.strip():
+                            fallback_list = [raw_fallbacks.strip()]
+                        expected_sha = str(args.get("sha256", "")).strip() or None
+
+                        cwd_base = str(ctx.get("current_cwd") or os.getcwd())
+                        resolved_save = (
+                            str((Path(cwd_base) / raw_save_path).resolve())
+                            if raw_save_path and not Path(raw_save_path).is_absolute()
+                            else raw_save_path
+                        )
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"resumable_download('{dl_url}')",
+                            "reason": f"断点续传下载至 {resolved_save}",
+                            "security": "AUTO_CONFIRMED",
+                        }
+
+                        if not dl_url or not resolved_save:
+                            tool_output = "Error: resumable_download 必须提供有效的 `url` 与 `save_path` 参数。"
+                            tool_exit_code = -1
+                            compressed = "[Error: resumable_download 缺少参数]"
+                            dl_status = "error"
+                            dl_job_id = ""
+                        else:
+                            dl_job = shell_executor.background_manager.start_download_job(
+                                url=dl_url,
+                                save_path=resolved_save,
+                                cwd=cwd_base,
+                                session_id=conv_id,
+                                fallback_urls=fallback_list or None,
+                                expected_sha256=expected_sha,
+                            )
+                            dl_res = await shell_executor.background_manager.wait_initial_or_detach(
+                                dl_job,
+                                observe_seconds=10.0,
+                            )
+                            tool_output = str(dl_res.get("output") or "")
+                            is_dl_bg = bool(dl_res.get("background"))
+                            dl_job_id = str(dl_res.get("job_id") or "")
+                            tool_exit_code = 0 if is_dl_bg else int(dl_res.get("exit_code", 0) or 0)
+                            if is_dl_bg:
+                                dl_status = "running"
+                                compressed = f"[断点下载已转入后台 job_id={dl_job_id}: `{Path(resolved_save).name}`]"
+                            elif tool_exit_code == 0:
+                                dl_status = "completed"
+                                compressed = f"[断点下载已完成: `{Path(resolved_save).name}`]"
+                            else:
+                                dl_status = "error"
+                                compressed = f"[断点下载失败: `{Path(resolved_save).name}`]"
+
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"resumable_download('{dl_url}')",
+                            "reason": f"断点续传下载至 {resolved_save}",
+                            "status": dl_status,
+                            "exit_code": tool_exit_code,
+                            "output": tool_output,
+                            "compressed": compressed,
+                            "job_id": dl_job_id or None,
+                        }
+
                     # ── 工具 1.5: 按需 FTS5 记忆与工作区历史检索 (search_memory_history) ──
                     elif func_name == "search_memory_history":
                         mem_query = str(args.get("query", "")).strip()
