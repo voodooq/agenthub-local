@@ -3976,6 +3976,7 @@ class AgentRuntime:
                                 default_model=model_name,
                             )
                             eff_swarm_id = sw_obj["id"]
+                            swarm_id = eff_swarm_id
 
                         if swarm_role == "worker":
                             tool_output = "Denied: Worker 成员无权调用 `swarm_control` 管理蜂群拓扑。"
@@ -4043,6 +4044,7 @@ class AgentRuntime:
                                 default_model=model_name,
                             )
                             eff_swarm_id = sw_obj["id"]
+                            swarm_id = eff_swarm_id
 
                         post_text = str(args.get("text") or "").strip()
                         post_kind = str(args.get("kind") or "message").strip() or "message"
@@ -4083,6 +4085,7 @@ class AgentRuntime:
                                 default_model=model_name,
                             )
                             eff_swarm_id = sw_obj["id"]
+                            swarm_id = eff_swarm_id
 
                         if bool(args.get("status", False)):
                             members = await SwarmRepository.list_members(eff_swarm_id)
@@ -4119,6 +4122,7 @@ class AgentRuntime:
                                 default_model=model_name,
                             )
                             eff_swarm_id = sw_obj["id"]
+                            swarm_id = eff_swarm_id
 
                         since_seq = int(args.get("since") or 0)
                         mentions_only = bool(args.get("mentions_only", True))

@@ -100,7 +100,7 @@ class SwarmManager:
         title: str = "Swarm 协作",
         workspace_id: str = "default",
         cwd: str | None = None,
-        default_model: str = "4 Argon",
+        default_model: str = "",
     ) -> dict[str, Any]:
         """获取或创建关联主会话的 Swarm 实例。"""
         swarm = None
@@ -117,7 +117,7 @@ class SwarmManager:
         state = self._get_state(swarm["id"])
         state.workspace_id = workspace_id or "default"
         state.cwd = cwd
-        state.default_model = default_model or "4 Argon"
+        state.default_model = default_model or ""
         return swarm
 
     async def add_member(

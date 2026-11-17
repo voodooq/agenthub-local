@@ -278,13 +278,42 @@ class ContextBuilder:
                         "</swarm_worker>"
                     )
                 else:
+                    # 动态读取系统已注册的全部活跃专家名录（官方 + 个人），供 Coordinator 根据意图自动拆解并行派发
+                    roster_lines: list[str] = []
+                    try:
+                        from ..repository.agent_repository import AgentProfileRepository
+                        active_agents = await AgentProfileRepository.list_agents(status="active")
+                        for ag in active_agents:
+                            ag_id = ag.get("id") or ""
+                            ag_name = ag.get("name") or ag_id
+                            ag_desc = (ag.get("description") or "").strip()
+                            if len(ag_desc) > 55:
+                                ag_desc = ag_desc[:55] + "..."
+                            dirs = ag.get("allowed_write_dirs") or []
+                            dir_note = f" | 产出目录: {','.join(dirs)}" if dirs else ""
+                            roster_lines.append(f"  - `agent_id=\"{ag_id}\"` ({ag_name}): {ag_desc}{dir_note}")
+                    except Exception as roster_err:
+                        logger.debug(f"[ContextBuilder] 加载 Swarm 专家名录跳过: {roster_err}")
+
+                    roster_block = (
+                        "\n可用专家名录（调用 `swarm_control(action=\"add\", agent_id=...)` 可直接继承其技能、工具白名单与写入边界）：\n"
+                        + "\n".join(roster_lines)
+                        if roster_lines
+                        else ""
+                    )
+
                     zone3_parts.append(
                         "<swarm_coordinator>\n"
                         "当前处于【蜂群协作协调者 (Swarm Coordinator)】模式。\n"
-                        "协作铁律：\n"
-                        "1. 复杂跨领域任务可通过 `swarm_control(action=\"add\", name=..., brief=..., agent_id=...)` 派发专家 Worker 并行执行。\n"
-                        "2. 通过 `swarm_wait(since=...)` 零轮询挂起等待成员汇报 `[done]`，或通过 `swarm_read` 查看增量消息。\n"
-                        "3. 所有成员交付验收完毕后，汇总完整结论与交付物链接回复用户。\n"
+                        "协作与自动并行拆解铁律：\n"
+                        "1. **自动拆解与严禁单干**：收到用户请求后，立即分析任务涉及的专业领域，拆解为互不冲突的独立子任务（或有向接力流水线）。\n"
+                        "2. **同轮并行派发多专家**：优先从下方「可用专家名录」中匹配对应 `agent_id`（无匹配专家时可不传 `agent_id` 定制通用 Worker），"
+                        "在**同一轮回复中连续调用多个 `swarm_control(action=\"add\", name=..., agent_id=..., brief=...)`**，"
+                        "让多个 Worker 协程**多线程并行启动**。`brief` 必须写明输入路径、负责范围、禁止修改的目录及 `[done]` 汇报要求。\n"
+                        "3. **零轮询等待与接力**：派发完成后调用 `swarm_wait(since=...)` 挂起等待汇报；"
+                        "若有上下游依赖（如报表依赖审计结论），收到前置 `[done]` 后调用 `swarm_post(text=\"@下游专家 ...\")` 唤醒接力。\n"
+                        "4. **验收与汇总**：所有节点均回报 `[done]` 后，核查产物文件并向用户汇总最终结果与交付链接。"
+                        f"{roster_block}\n"
                         "</swarm_coordinator>"
                     )
 
