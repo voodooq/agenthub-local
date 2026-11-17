@@ -65,7 +65,8 @@ def _display_width(value: Any) -> int:
 def _build_sheet(wb: Workbook, spec: dict[str, Any], is_first: bool) -> dict[str, Any]:
     """构建单个工作表：标题横幅、多级表头、数据行、动态公式与 SUMIFS 汇总"""
     sheet_name = str(spec.get("name") or "Sheet1")[:31]
-    ws = wb.active if is_first else wb.create_sheet(title=sheet_name)
+    ws = wb.active if (is_first and wb.active is not None) else wb.create_sheet(title=sheet_name)
+    assert ws is not None
     ws.title = sheet_name
 
     columns = spec.get("columns") or []

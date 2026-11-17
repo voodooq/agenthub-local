@@ -52,7 +52,7 @@ def _read_dataframe(input_path: Path, sheet_name: str | int = 0) -> pd.DataFrame
                 return pd.read_csv(input_path, encoding=enc)
             except UnicodeDecodeError:
                 continue
-        return pd.read_csv(input_path, encoding="utf-8", errors="replace")
+        return pd.read_csv(input_path, encoding="utf-8", encoding_errors="replace")
     if suffix in (".xlsx", ".xlsm", ".xls"):
         return pd.read_excel(input_path, sheet_name=sheet_name)
     raise ValueError(f"不支持的文件格式: {suffix}（仅支持 .csv/.xlsx/.xlsm/.xls）")
@@ -130,8 +130,9 @@ def run_audit(params: dict[str, Any]) -> dict[str, Any]:
         if not expr:
             continue
         try:
-            passed_mask = df.eval(expr, engine="python")
-            violated_idx = df.index[~passed_mask.fillna(False)].tolist()
+            passed_raw = df.eval(expr, engine="python")
+            passed_mask = passed_raw if isinstance(passed_raw, pd.Series) else pd.Series(passed_raw, index=df.index)
+            violated_idx = df.index[~passed_mask.fillna(False).astype(bool)].tolist()
             rule_results.append({
                 "name": rule_name,
                 "expr": expr,

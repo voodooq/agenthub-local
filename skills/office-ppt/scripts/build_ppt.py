@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from pptx import Presentation
+from pptx.presentation import Presentation as PresentationType
 from pptx.chart.data import CategoryChartData
 from pptx.dml.color import RGBColor
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
@@ -132,7 +133,7 @@ def _render_bullets(
         p.font.color.rgb = theme["text"]
 
 
-def _add_cover_slide(prs: Presentation, spec: dict[str, Any], theme: dict[str, RGBColor]) -> None:
+def _add_cover_slide(prs: PresentationType, spec: dict[str, Any], theme: dict[str, RGBColor]) -> None:
     """构建封面页或结束页"""
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _set_bg_color(slide, theme["primary"])
@@ -173,7 +174,7 @@ def _add_cover_slide(prs: Presentation, spec: dict[str, Any], theme: dict[str, R
         mp.font.color.rgb = RGBColor(148, 163, 184)
 
 
-def _add_chart_slide(prs: Presentation, spec: dict[str, Any], theme: dict[str, RGBColor], page_num: int) -> None:
+def _add_chart_slide(prs: PresentationType, spec: dict[str, Any], theme: dict[str, RGBColor], page_num: int) -> None:
     """构建原生数据图表页（柱状图/折线图/饼图）"""
     slide = prs.slides.add_slide(prs.slide_layouts[6])
     _add_header_bar(slide, str(spec.get("title") or "数据分析"), theme, page_num)
