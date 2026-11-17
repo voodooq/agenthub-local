@@ -1021,7 +1021,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-md animate-fadeIn"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 animate-fadeIn"
       onClick={onClose}
     >
       <div
@@ -1029,7 +1029,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
         onClick={(e) => e.stopPropagation()}
       >
         {/* 顶部标题栏 */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-surface-200/60">
+        <div className="flex items-center justify-between px-6 py-4 border-b border-border bg-surface-200">
           <div className="flex items-center space-x-3">
             <div className="w-9 h-9 rounded-xl bg-gradient-to-tr from-emerald-600 to-indigo-600 flex items-center justify-center shadow-lg shadow-emerald-500/20">
               <Shield className="w-5 h-5 text-white" />

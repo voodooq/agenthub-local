@@ -28,6 +28,8 @@ import {
   ChevronDown,
   ChevronUp,
   FileCheck,
+  Target,
+  Compass,
 } from 'lucide-react';
 import { Workspace, SkillItem, AgentItem, GroundingConfig } from '@/types';
 import { SkillCategoryTabs, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
@@ -923,11 +925,20 @@ export function AgentsView({
 
       {/* 创建 / 修改专家模态抽屉 */}
       {isModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
-          <div className="bg-surface-modal border border-border w-full max-w-xl max-h-[90vh] rounded-2xl p-6 shadow-2xl flex flex-col animate-scale-in text-foreground">
+        <div 
+          onClick={() => {
+            setIsModalOpen(false);
+            setEditingAgent(null);
+          }}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 animate-fade-in"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="bg-surface-card border border-border w-full max-w-xl max-h-[90vh] rounded-2xl p-6 shadow-2xl flex flex-col animate-scale-in text-foreground"
+          >
             <div className="flex items-center justify-between pb-3 border-b border-border shrink-0">
               <div className="flex items-center space-x-2.5">
-                <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-500">
+                <div className="p-2 rounded-xl bg-surface-100 text-foreground border border-border">
                   <Bot className="w-5 h-5" />
                 </div>
                 <div>
@@ -946,7 +957,7 @@ export function AgentsView({
                   setIsModalOpen(false);
                   setEditingAgent(null);
                 }}
-                className="p-1.5 rounded-lg hover:bg-surface-100 text-muted-foreground hover:text-foreground"
+                className="p-1.5 rounded-lg hover:bg-surface-100 text-muted-foreground hover:text-foreground transition-colors"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -954,16 +965,16 @@ export function AgentsView({
 
             <form onSubmit={handleSaveAgent} className="flex-1 overflow-y-auto py-4 space-y-4 pr-1">
               {bannerNotice && (
-                <div className="p-2.5 rounded-lg border border-zinc-700 bg-zinc-800/90 text-zinc-200 text-xs flex items-center space-x-2 animate-fadeIn">
-                  <Check className="w-3.5 h-3.5 text-zinc-400 shrink-0" />
+                <div className="p-2.5 rounded-lg border border-border bg-surface-100 text-foreground text-xs flex items-center space-x-2 animate-fadeIn">
+                  <Check className="w-3.5 h-3.5 text-foreground shrink-0" />
                   <span>{bannerNotice}</span>
                 </div>
               )}
               {!editingAgent && (
-                <div className="p-3.5 rounded-xl bg-emerald-500/8 border border-emerald-500/25 space-y-2">
+                <div className="p-3.5 rounded-xl bg-surface-100 border border-border space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="text-xs font-semibold text-emerald-600 dark:text-emerald-400 flex items-center space-x-1.5">
-                      <Sparkles className="w-3.5 h-3.5" />
+                    <span className="text-xs font-semibold text-foreground flex items-center space-x-1.5">
+                      <Sparkles className="w-3.5 h-3.5 text-foreground" />
                       <span>一句话自然语言创建（自动装配技能 + 定时调度）</span>
                     </span>
                   </div>
@@ -979,13 +990,13 @@ export function AgentsView({
                           handleGenerateFromNaturalLanguage();
                         }
                       }}
-                      className="flex-1 px-3 py-1.5 rounded-lg bg-surface-100 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500"
+                      className="flex-1 px-3 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground/40"
                     />
                     <button
                       type="button"
                       onClick={handleGenerateFromNaturalLanguage}
                       disabled={nlGenerating || !nlPrompt.trim()}
-                      className="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white text-xs font-semibold flex items-center space-x-1 shrink-0 transition-colors"
+                      className="px-3 py-1.5 rounded-lg bg-foreground hover:opacity-90 disabled:opacity-40 text-background text-xs font-semibold flex items-center space-x-1 shrink-0 transition-opacity"
                     >
                       {nlGenerating ? (
                         <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -1008,7 +1019,7 @@ export function AgentsView({
                   placeholder="例如：财报研报专家、代码审查管家、自动测试大师..."
                   value={formName}
                   onChange={(e) => setFormName(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500"
+                  className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground/40"
                 />
               </div>
 
@@ -1020,10 +1031,10 @@ export function AgentsView({
                   <button
                     type="button"
                     onClick={handleInjectAntiHallucinationTemplate}
-                    className="text-[11px] text-zinc-400 hover:text-zinc-200 flex items-center space-x-1 transition-colors px-2 py-0.5 rounded border border-zinc-700 bg-zinc-800/60"
+                    className="text-[11px] text-muted-foreground hover:text-foreground flex items-center space-x-1 transition-colors px-2 py-0.5 rounded border border-border bg-surface-100"
                     title="一键注入事实唯一基准、缺失拒答与工具执行验证规约"
                   >
-                    <FileCheck className="w-3 h-3 text-zinc-400" />
+                    <FileCheck className="w-3 h-3 text-muted-foreground" />
                     <span>规范化 / 注入防幻觉模版</span>
                   </button>
                 </div>
@@ -1032,23 +1043,23 @@ export function AgentsView({
                   placeholder="清晰描述专家的主要职责、擅长领域、行为准则与交付标准..."
                   value={formDesc}
                   onChange={(e) => setFormDesc(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-zinc-500 resize-none font-mono"
+                  className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground/40 resize-none font-mono"
                 />
               </div>
 
               {/* 防幻觉与严谨度配置面板 (Grounding & Anti-Hallucination) */}
-              <div className="p-3.5 rounded-xl border border-zinc-700/80 bg-zinc-900/60 space-y-3">
+              <div className="p-3.5 rounded-xl border border-border bg-surface-100 space-y-3">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center space-x-2">
-                    <Shield className="w-4 h-4 text-zinc-400" />
-                    <span className="text-xs font-bold text-zinc-200">
+                    <Shield className="w-4 h-4 text-foreground" />
+                    <span className="text-xs font-bold text-foreground">
                       防幻觉与严谨度配置 (Grounding Guardrails)
                     </span>
                   </div>
                   <button
                     type="button"
                     onClick={() => setIsGroundingPanelOpen((prev) => !prev)}
-                    className="text-[11px] text-zinc-400 hover:text-zinc-200 flex items-center space-x-1"
+                    className="text-[11px] text-muted-foreground hover:text-foreground flex items-center space-x-1 transition-colors"
                   >
                     <span>{isGroundingPanelOpen ? '收起配置' : '展开微调'}</span>
                     {isGroundingPanelOpen ? (
@@ -1072,15 +1083,18 @@ export function AgentsView({
                     }}
                     className={`p-2.5 rounded-lg border text-left transition-all ${
                       formStrictMode
-                        ? 'border-zinc-500 bg-zinc-800 text-zinc-100 shadow-sm'
-                        : 'border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:border-zinc-700'
+                        ? 'border-foreground/40 bg-surface-200 text-foreground shadow-sm'
+                        : 'border-border bg-surface-50 text-muted-foreground hover:border-border-hover hover:text-foreground'
                     }`}
                   >
                     <div className="font-semibold flex items-center justify-between">
-                      <span>🎯 严谨工作模式</span>
-                      {formStrictMode && <Check className="w-3.5 h-3.5 text-zinc-300" />}
+                      <span className="flex items-center space-x-1.5">
+                        <Target className="w-3.5 h-3.5 text-foreground" />
+                        <span>严谨工作模式</span>
+                      </span>
+                      {formStrictMode && <Check className="w-3.5 h-3.5 text-foreground" />}
                     </div>
-                    <p className="text-[10px] text-zinc-400 mt-1 leading-relaxed">
+                    <p className="text-[10px] text-muted-foreground mt-1 leading-relaxed">
                       推荐工作场景：低温 (T=0.1)、事实锚定、数据缺失如实拒答、防虚假完成声明。
                     </p>
                   </button>
@@ -1095,15 +1109,18 @@ export function AgentsView({
                     }}
                     className={`p-2.5 rounded-lg border text-left transition-all ${
                       !formStrictMode
-                        ? 'border-zinc-500 bg-zinc-800 text-zinc-100 shadow-sm'
-                        : 'border-zinc-800 bg-zinc-900/40 text-zinc-400 hover:border-zinc-700'
+                        ? 'border-foreground/40 bg-surface-200 text-foreground shadow-sm'
+                        : 'border-border bg-surface-50 text-muted-foreground hover:border-border-hover hover:text-foreground'
                     }`}
                   >
                     <div className="font-semibold flex items-center justify-between">
-                      <span>💡 自由构想模式</span>
-                      {!formStrictMode && <Check className="w-3.5 h-3.5 text-zinc-300" />}
+                      <span className="flex items-center space-x-1.5">
+                        <Compass className="w-3.5 h-3.5 text-foreground" />
+                        <span>自由构想模式</span>
+                      </span>
+                      {!formStrictMode && <Check className="w-3.5 h-3.5 text-foreground" />}
                     </div>
-                    <p className="text-[10px] text-zinc-400 mt-1 leading-relaxed">
+                    <p className="text-[10px] text-muted-foreground mt-1 leading-relaxed">
                       适合头脑风暴与创意探索：温度 (T=0.7)，允许发散思维与灵感构想。
                     </p>
                   </button>
@@ -1111,15 +1128,15 @@ export function AgentsView({
 
                 {/* 展开的微调选项 */}
                 {isGroundingPanelOpen && (
-                  <div className="space-y-3 pt-2 border-t border-zinc-800/80 text-xs text-zinc-300">
+                  <div className="space-y-3 pt-2 border-t border-border text-xs text-foreground">
                     {/* 温度滑块 */}
                     <div>
                       <div className="flex items-center justify-between mb-1">
-                        <span className="text-[11px] text-zinc-400 flex items-center gap-1">
-                          <Sliders className="w-3 h-3 text-zinc-400" />
+                        <span className="text-[11px] text-muted-foreground flex items-center gap-1">
+                          <Sliders className="w-3 h-3 text-muted-foreground" />
                           <span>模型采样温度 (Temperature):</span>
                         </span>
-                        <span className="font-mono text-[11px] text-zinc-200 font-bold">
+                        <span className="font-mono text-[11px] text-foreground font-bold">
                           {formTemperature.toFixed(2)} {formTemperature <= 0.2 ? '(严谨精确)' : formTemperature >= 0.7 ? '(发散创意)' : '(平衡)'}
                         </span>
                       </div>
@@ -1130,7 +1147,7 @@ export function AgentsView({
                         step="0.05"
                         value={formTemperature}
                         onChange={(e) => setFormTemperature(parseFloat(e.target.value))}
-                        className="w-full h-1.5 bg-zinc-800 rounded-lg appearance-none cursor-pointer accent-zinc-400"
+                        className="w-full h-1.5 bg-surface-200 rounded-lg appearance-none cursor-pointer accent-foreground"
                       />
                     </div>
 
@@ -1141,11 +1158,11 @@ export function AgentsView({
                           type="checkbox"
                           checked={formFailFast}
                           onChange={(e) => setFormFailFast(e.target.checked)}
-                          className="mt-0.5 rounded border-zinc-700 bg-zinc-800 text-zinc-200 accent-zinc-500"
+                          className="mt-0.5 rounded border-border bg-surface-200 text-foreground accent-foreground"
                         />
                         <div>
-                          <span className="font-medium text-zinc-200">未检索到数据如实拒答 (Fail-Fast)</span>
-                          <p className="text-[10px] text-zinc-400">
+                          <span className="font-medium text-foreground">未检索到数据如实拒答 (Fail-Fast)</span>
+                          <p className="text-[10px] text-muted-foreground">
                             当本地日志为空或目标文件不存在时，系统硬性规定直接说明无记录，禁止编造假样本。
                           </p>
                         </div>
@@ -1156,11 +1173,11 @@ export function AgentsView({
                           type="checkbox"
                           checked={formVerifyToolCall}
                           onChange={(e) => setFormVerifyToolCall(e.target.checked)}
-                          className="mt-0.5 rounded border-zinc-700 bg-zinc-800 text-zinc-200 accent-zinc-500"
+                          className="mt-0.5 rounded border-border bg-surface-200 text-foreground accent-foreground"
                         />
                         <div>
-                          <span className="font-medium text-zinc-200">工具调用真实性审计</span>
-                          <p className="text-[10px] text-zinc-400">
+                          <span className="font-medium text-foreground">工具调用真实性审计</span>
+                          <p className="text-[10px] text-muted-foreground">
                             严禁模型在未成功调用工具并获得返回前宣称“已为您查询/已为您整理/已成功保存”。
                           </p>
                         </div>
@@ -1171,11 +1188,11 @@ export function AgentsView({
                           type="checkbox"
                           checked={formRequireEvidence}
                           onChange={(e) => setFormRequireEvidence(e.target.checked)}
-                          className="mt-0.5 rounded border-zinc-700 bg-zinc-800 text-zinc-200 accent-zinc-500"
+                          className="mt-0.5 rounded border-border bg-surface-200 text-foreground accent-foreground"
                         />
                         <div>
-                          <span className="font-medium text-zinc-200">输出结论必须附带事实来源</span>
-                          <p className="text-[10px] text-zinc-400">
+                          <span className="font-medium text-foreground">输出结论必须附带事实来源</span>
+                          <p className="text-[10px] text-muted-foreground">
                             强制要求分析报告与结论关联具体读取到的文件路径或工具数据片段。
                           </p>
                         </div>
@@ -1184,7 +1201,7 @@ export function AgentsView({
 
                     {/* 自定义防虚构业务红线 */}
                     <div className="pt-1">
-                      <label className="block text-[11px] text-zinc-400 mb-1">
+                      <label className="block text-[11px] text-muted-foreground mb-1">
                         自定义业务防虚构红线（可选，最多 500 字符）:
                       </label>
                       <input
@@ -1193,7 +1210,7 @@ export function AgentsView({
                         placeholder="例如：涉及财务金额必须精确对账；未找到今日工作记录直接输出无记录..."
                         value={formCustomRules}
                         onChange={(e) => setFormCustomRules(e.target.value)}
-                        className="w-full px-3 py-1.5 rounded-lg bg-zinc-800/80 border border-zinc-700 text-xs text-zinc-200 placeholder:text-zinc-500 focus:outline-none focus:border-zinc-500"
+                        className="w-full px-3 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground/40"
                       />
                     </div>
                   </div>
@@ -1211,7 +1228,7 @@ export function AgentsView({
                 <select
                   value={formModel}
                   onChange={(e) => setFormModel(e.target.value)}
-                  className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border text-xs text-foreground focus:outline-none focus:border-emerald-500 font-mono"
+                  className="w-full px-3 py-2 rounded-xl bg-surface-100 border border-border text-xs text-foreground focus:outline-none focus:border-foreground/40 font-mono"
                 >
                   <option value="">
                     跟随当前会话模型 (自动继承{currentModel ? ` · ${currentModel}` : ''})
@@ -1228,30 +1245,30 @@ export function AgentsView({
               <div className="space-y-2 pt-1">
                 <div className="flex items-center justify-between">
                   <label className="text-xs font-semibold text-foreground flex items-center space-x-1.5">
-                    <Layers className="w-3.5 h-3.5 text-sky-400" />
+                    <Layers className="w-3.5 h-3.5 text-foreground" />
                     <span>装配技能集 (Skills · 多选)</span>
-                    <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-sky-500/15 text-sky-400 font-mono font-medium">
+                    <span className="text-[10px] px-1.5 py-0.2 rounded bg-surface-200 border border-border text-foreground font-mono font-medium">
                       已选 {selectedSkillIds.length} 项
                     </span>
                   </label>
                   <button
                     type="button"
                     onClick={() => setIsSkillPickerOpen((prev) => !prev)}
-                    className="text-xs font-semibold text-emerald-500 hover:text-emerald-400 flex items-center space-x-1"
+                    className="text-xs font-semibold text-foreground hover:opacity-80 flex items-center space-x-1 transition-opacity"
                   >
                     <span>{isSkillPickerOpen ? '收起技能库' : '+ 添加/调整技能'}</span>
                   </button>
                 </div>
 
                 {/* 已选技能标签横条 */}
-                <div className="p-2.5 rounded-xl bg-surface-100/80 border border-border min-h-[46px] flex flex-wrap gap-1.5 items-center">
+                <div className="p-2.5 rounded-xl bg-surface-100 border border-border min-h-[46px] flex flex-wrap gap-1.5 items-center">
                   {selectedSkillIds.length > 0 ? (
                     selectedSkillIds.map((id) => {
                       const sk = skillMap.get(id);
                       return (
                         <span
                           key={id}
-                          className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-sky-500/15 border border-sky-500/30 text-sky-400 text-xs font-mono group"
+                          className="inline-flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-surface-200 border border-border text-foreground text-xs font-mono group"
                         >
                           <span>{sk?.name || id}</span>
                           <button
@@ -1274,7 +1291,7 @@ export function AgentsView({
 
                 {/* 技能勾选选择器抽屉 */}
                 {isSkillPickerOpen && (
-                  <div className="p-3 rounded-xl bg-surface-100 border border-border/80 space-y-2.5 animate-fadeIn">
+                  <div className="p-3 rounded-xl bg-surface-100 border border-border space-y-2.5 animate-fadeIn">
                     <div className="relative">
                       <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
                       <input
@@ -1282,7 +1299,7 @@ export function AgentsView({
                         placeholder="搜索技能名称或职能..."
                         value={skillSearchQuery}
                         onChange={(e) => setSkillSearchQuery(e.target.value)}
-                        className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500"
+                        className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground/40"
                       />
                     </div>
 
@@ -1307,13 +1324,13 @@ export function AgentsView({
                               onClick={() => handleToggleSkill(sk.id)}
                               className={`p-2.5 rounded-lg border cursor-pointer transition-all flex items-center justify-between text-xs ${
                                 isSelected
-                                  ? 'bg-sky-500/15 border-sky-500/40 text-foreground font-medium'
-                                  : 'bg-surface-200/50 hover:bg-surface-200 border-border/60 text-muted-foreground hover:text-foreground'
+                                  ? 'bg-surface-200 border-foreground/40 text-foreground font-medium shadow-sm'
+                                  : 'bg-surface-50 hover:bg-surface-200 border-border text-muted-foreground hover:text-foreground'
                               }`}
                             >
                               <div className="flex items-center space-x-2.5 min-w-0 flex-1 pr-2">
                                 {isSelected ? (
-                                  <CheckSquare className="w-4 h-4 text-sky-400 shrink-0" />
+                                  <CheckSquare className="w-4 h-4 text-foreground shrink-0" />
                                 ) : (
                                   <Square className="w-4 h-4 text-muted-foreground shrink-0" />
                                 )}
@@ -1321,7 +1338,7 @@ export function AgentsView({
                                   <div className="flex items-center space-x-1.5">
                                     <span className="font-semibold text-foreground truncate">{sk.name || sk.id}</span>
                                     {sk.command && (
-                                      <span className="text-[10px] font-mono px-1 rounded bg-surface-100 text-sky-400">
+                                      <span className="text-[10px] font-mono px-1 rounded bg-surface-200 border border-border text-foreground">
                                         {sk.command}
                                       </span>
                                     )}
@@ -1333,8 +1350,8 @@ export function AgentsView({
                               </div>
 
                               <span
-                                className={`text-[10px] px-1.5 py-0.5 rounded font-mono shrink-0 ${
-                                  sk.scope === 'workspace' ? 'bg-amber-500/10 text-amber-400' : 'bg-surface-100 text-muted-foreground'
+                                className={`text-[10px] px-1.5 py-0.5 rounded font-mono shrink-0 border border-border ${
+                                  sk.scope === 'workspace' ? 'bg-surface-200 text-foreground' : 'bg-surface-100 text-muted-foreground'
                                 }`}
                               >
                                 {sk.scope === 'workspace' ? '工作区' : '系统'}
@@ -1355,7 +1372,7 @@ export function AgentsView({
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
                 <div>
                   <label className="block text-xs font-semibold text-foreground mb-1 flex items-center space-x-1">
-                    <Wrench className="w-3 h-3 text-violet-400" />
+                    <Wrench className="w-3 h-3 text-muted-foreground" />
                     <span>工具白名单 (可选，逗号分隔)</span>
                   </label>
                   <input
@@ -1363,12 +1380,12 @@ export function AgentsView({
                     placeholder="如: read_file, write_file, run_command"
                     value={formAllowedTools}
                     onChange={(e) => setFormAllowedTools(e.target.value)}
-                    className="w-full px-3 py-1.5 rounded-xl bg-surface-100 border border-border text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500"
+                    className="w-full px-3 py-1.5 rounded-xl bg-surface-100 border border-border text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground/40"
                   />
                 </div>
                 <div>
                   <label className="block text-xs font-semibold text-foreground mb-1 flex items-center space-x-1">
-                    <FolderLock className="w-3 h-3 text-amber-400" />
+                    <FolderLock className="w-3 h-3 text-muted-foreground" />
                     <span>允许写入目录 (可选，逗号分隔)</span>
                   </label>
                   <input
@@ -1376,23 +1393,23 @@ export function AgentsView({
                     placeholder="如: frontend/, docs/"
                     value={formAllowedWriteDirs}
                     onChange={(e) => setFormAllowedWriteDirs(e.target.value)}
-                    className="w-full px-3 py-1.5 rounded-xl bg-surface-100 border border-border text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500"
+                    className="w-full px-3 py-1.5 rounded-xl bg-surface-100 border border-border text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground/40"
                   />
                 </div>
               </div>
 
               {!editingAgent && (
-                <div className="p-3 rounded-xl bg-surface-100/80 border border-border space-y-2">
+                <div className="p-3 rounded-xl bg-surface-100 border border-border space-y-2">
                   <label className="flex items-center justify-between cursor-pointer">
                     <span className="text-xs font-semibold text-foreground flex items-center space-x-1.5">
-                      <Clock className="w-3.5 h-3.5 text-emerald-500" />
+                      <Clock className="w-3.5 h-3.5 text-foreground" />
                       <span>联动定时任务调度（支持按计划自动唤醒该专家执行）</span>
                     </span>
                     <input
                       type="checkbox"
                       checked={scheduleEnabled}
                       onChange={(e) => setScheduleEnabled(e.target.checked)}
-                      className="rounded border-border text-emerald-500 focus:ring-emerald-500"
+                      className="rounded border-border text-foreground accent-foreground"
                     />
                   </label>
                   {scheduleEnabled && (
@@ -1406,7 +1423,7 @@ export function AgentsView({
                           value={scheduleCron}
                           onChange={(e) => setScheduleCron(e.target.value)}
                           placeholder="0 18 * * *"
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-surface-200 border border-border text-xs font-mono text-foreground focus:outline-none focus:border-emerald-500"
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-surface-200 border border-border text-xs font-mono text-foreground focus:outline-none focus:border-foreground/40"
                         />
                       </div>
                       <div>
@@ -1416,7 +1433,7 @@ export function AgentsView({
                           value={scheduleName}
                           onChange={(e) => setScheduleName(e.target.value)}
                           placeholder={`${formName || '专家'} · 定时执行`}
-                          className="w-full px-2.5 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground focus:outline-none focus:border-emerald-500"
+                          className="w-full px-2.5 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground focus:outline-none focus:border-foreground/40"
                         />
                       </div>
                     </div>
@@ -1425,14 +1442,14 @@ export function AgentsView({
               )}
 
               {apiError && (
-                <div className="px-3 py-2 rounded-xl bg-rose-500/10 border border-rose-500/30 text-xs text-rose-500">
+                <div className="px-3 py-2 rounded-xl bg-surface-100 border border-border text-xs text-rose-500">
                   {apiError}
                 </div>
               )}
 
-              <div className="p-3 rounded-xl bg-emerald-500/10 border border-emerald-500/20 text-[11px] text-muted-foreground space-y-1">
-                <div className="font-semibold text-emerald-600 dark:text-emerald-400 flex items-center space-x-1">
-                  <Shield className="w-3.5 h-3.5" />
+              <div className="p-3 rounded-xl bg-surface-100 border border-border text-[11px] text-muted-foreground space-y-1">
+                <div className="font-semibold text-foreground flex items-center space-x-1">
+                  <Shield className="w-3.5 h-3.5 text-foreground" />
                   <span>自动创建隔离沙盒说明</span>
                 </div>
                 <p>保存后，该专家将自动建立专属工作区路径；所勾选的技能 SOP 与真实模型将在启动沙盒时一次性注入会话。</p>
@@ -1445,13 +1462,13 @@ export function AgentsView({
                     setIsModalOpen(false);
                     setEditingAgent(null);
                   }}
-                  className="px-4 py-2 rounded-xl border border-border hover:bg-surface-100 text-xs text-muted-foreground"
+                  className="px-4 py-2 rounded-xl border border-border hover:bg-surface-100 text-xs text-muted-foreground hover:text-foreground transition-colors"
                 >
                   取消
                 </button>
                 <button
                   type="submit"
-                  className="px-5 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold shadow-md active:scale-95 transition-all"
+                  className="px-5 py-2 rounded-xl bg-foreground text-background hover:opacity-90 text-xs font-semibold shadow-sm transition-opacity"
                 >
                   {editingAgent ? '保存修改' : '确认创建'}
                 </button>

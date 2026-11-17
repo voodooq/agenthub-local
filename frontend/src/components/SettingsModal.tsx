@@ -501,7 +501,7 @@ export function SettingsModal({
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fadeIn"
+      className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 animate-fadeIn"
       onClick={onClose}
     >
       <div
@@ -509,7 +509,7 @@ export function SettingsModal({
         onClick={(e) => e.stopPropagation()}
       >
         {/* 左侧 Strata 风格分类导航栏 */}
-        <div className="w-56 bg-surface-100/70 border-r border-border p-5 flex flex-col justify-between shrink-0 select-none">
+        <div className="w-56 bg-surface-100 border-r border-border p-5 flex flex-col justify-between shrink-0 select-none">
           <div className="space-y-6">
             <div className="px-2">
               <h2 className="text-base font-bold text-foreground tracking-tight">设置</h2>

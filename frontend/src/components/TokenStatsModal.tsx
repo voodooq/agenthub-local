@@ -164,10 +164,10 @@ export function TokenStatsModal({
   const summary = stats?.summary;
 
   return (
-    <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4 animate-fadeIn">
-      <div className="w-full max-w-4xl max-h-[88vh] rounded-2xl bg-surface-100 border border-border/80 shadow-2xl flex flex-col overflow-hidden">
+    <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 animate-fadeIn">
+      <div className="w-full max-w-4xl max-h-[88vh] rounded-2xl bg-surface-100 border border-border shadow-2xl flex flex-col overflow-hidden">
         {/* 顶栏 */}
-        <div className="px-6 py-4 border-b border-border/70 flex items-center justify-between bg-surface-200/40">
+        <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-surface-200">
           <div className="flex items-center space-x-3">
             <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center">
               <BarChart3 className="w-5 h-5 text-emerald-600 dark:text-emerald-400" />

@@ -314,7 +314,7 @@ export function UpdateModal({
 
   return (
     <div
-      className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in"
+      className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-black/70 animate-fade-in"
       onClick={() => {
         if (!isRestarting) onClose();
       }}
@@ -324,7 +324,7 @@ export function UpdateModal({
         onClick={(e) => e.stopPropagation()}
       >
         {/* 顶部标题栏 */}
-        <div className="px-6 py-4 border-b border-border/70 bg-surface-100/80 flex items-center justify-between shrink-0">
+        <div className="px-6 py-4 border-b border-border bg-surface-100 flex items-center justify-between shrink-0">
           <div className="flex items-center space-x-2.5">
             <div className="w-8 h-8 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center">
               <Sparkles className="w-4 h-4 text-emerald-500" />

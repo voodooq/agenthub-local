@@ -264,7 +264,7 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-fade-in"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 animate-fade-in"
       onClick={onClose}
     >
       <div
@@ -272,7 +272,7 @@ export function ImportWizardModal({ isOpen, onClose, onSuccess }: ImportWizardMo
         onClick={(e) => e.stopPropagation()}
       >
         {/* 顶部标题与 4 步进度指示条 */}
-        <div className="px-6 py-4 border-b border-border bg-surface-100/60 flex items-center justify-between">
+        <div className="px-6 py-4 border-b border-border bg-surface-100 flex items-center justify-between">
           <div>
             <h2 className="text-[15px] font-bold text-foreground">
               跨平台历史会话与长期记忆「四步导入向导」

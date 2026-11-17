@@ -1092,11 +1092,17 @@ export function Sidebar({
 
       {/* 挂载本地工程目录弹窗 */}
       {isMountingModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
-          <div className="bg-surface-modal border border-border w-full max-w-md rounded-2xl p-5 shadow-2xl space-y-4 animate-scale-in">
+        <div 
+          onClick={() => setIsMountingModalOpen(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 animate-fade-in"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="bg-surface-card border border-border w-full max-w-md rounded-2xl p-5 shadow-2xl space-y-4 animate-scale-in"
+          >
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <FolderPlus className="w-5 h-5 text-emerald-400" />
+                <FolderPlus className="w-5 h-5 text-foreground" />
                 <h3 className="text-sm font-bold text-foreground">挂载本地已有工程项目</h3>
               </div>
               <button
@@ -1114,7 +1120,7 @@ export function Sidebar({
                   type="text"
                   value={mountPath}
                   onChange={(e) => setMountPath(e.target.value)}
-                  className="w-full bg-surface-200/80 border border-border rounded-xl px-3 py-2 text-xs font-mono text-foreground outline-none"
+                  className="w-full bg-surface-200 border border-border rounded-xl px-3 py-2 text-xs font-mono text-foreground outline-none focus:border-foreground/40"
                 />
               </div>
 
@@ -1141,7 +1147,7 @@ export function Sidebar({
                   value={mountName}
                   onChange={(e) => setMountName(e.target.value)}
                   placeholder="例如: 病例研究 / 全栈开发"
-                  className="w-full bg-surface-200/80 border border-border rounded-xl px-3 py-2 text-xs text-foreground outline-none focus:border-emerald-500"
+                  className="w-full bg-surface-200 border border-border rounded-xl px-3 py-2 text-xs text-foreground outline-none focus:border-foreground/40"
                 />
               </div>
 
@@ -1154,12 +1160,12 @@ export function Sidebar({
                   onChange={(e) => setMountContext(e.target.value)}
                   placeholder="可在此输入该项目的专属规范或指令。"
                   rows={3}
-                  className="w-full bg-surface-200/80 border border-border rounded-xl p-2.5 text-xs text-foreground outline-none focus:border-emerald-500 resize-none"
+                  className="w-full bg-surface-200 border border-border rounded-xl p-2.5 text-xs text-foreground outline-none focus:border-foreground/40 resize-none"
                 />
               </div>
 
               {wsErrorMsg && (
-                <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center space-x-2">
+                <div className="p-2.5 rounded-xl bg-surface-100 border border-border text-rose-400 text-xs flex items-center space-x-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
                   <span>{wsErrorMsg}</span>
                 </div>
@@ -1175,7 +1181,7 @@ export function Sidebar({
               </button>
               <button
                 onClick={handleConfirmMount}
-                className="px-4 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold transition-all shadow-md"
+                className="px-4 py-2 rounded-xl bg-foreground text-background hover:opacity-90 text-xs font-semibold transition-opacity shadow-sm"
               >
                 立即挂载
               </button>
@@ -1186,11 +1192,17 @@ export function Sidebar({
 
       {/* 新建托管沙盒工作区弹窗 */}
       {isCreatingVirtual && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
-          <div className="bg-surface-modal border border-border w-full max-w-sm rounded-2xl p-5 shadow-2xl space-y-4 animate-scale-in">
+        <div 
+          onClick={() => setIsCreatingVirtual(false)}
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 animate-fade-in"
+        >
+          <div 
+            onClick={(e) => e.stopPropagation()}
+            className="bg-surface-card border border-border w-full max-w-sm rounded-2xl p-5 shadow-2xl space-y-4 animate-scale-in"
+          >
             <div className="flex items-center justify-between">
               <div className="flex items-center space-x-2">
-                <Box className="w-5 h-5 text-sky-400" />
+                <Box className="w-5 h-5 text-foreground" />
                 <h3 className="text-sm font-bold text-foreground">新建沙盒托管项目</h3>
               </div>
               <button
@@ -1209,13 +1221,13 @@ export function Sidebar({
                   value={virtualName}
                   onChange={(e) => setVirtualName(e.target.value)}
                   placeholder="例如: 文献整理 / 临时沙盒"
-                  className="w-full bg-surface-200/80 border border-border rounded-xl px-3 py-2 text-xs text-foreground outline-none focus:border-sky-500"
+                  className="w-full bg-surface-200 border border-border rounded-xl px-3 py-2 text-xs text-foreground outline-none focus:border-foreground/40"
                   autoFocus
                 />
               </div>
 
               {wsErrorMsg && (
-                <div className="p-2.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-center space-x-2">
+                <div className="p-2.5 rounded-xl bg-surface-100 border border-border text-rose-400 text-xs flex items-center space-x-2">
                   <AlertCircle className="w-4 h-4 shrink-0" />
                   <span>{wsErrorMsg}</span>
                 </div>
@@ -1231,7 +1243,7 @@ export function Sidebar({
               </button>
               <button
                 onClick={handleConfirmVirtual}
-                className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold transition-all shadow-md"
+                className="px-4 py-2 rounded-xl bg-foreground text-background hover:opacity-90 text-xs font-semibold transition-opacity shadow-sm"
               >
                 确认创建
               </button>

@@ -23,8 +23,8 @@
   --color-primary-hover: #059669;
   --color-primary-subtle: rgba(16, 185, 129, 0.12);
 
-  --glass-panel: rgba(17, 22, 20, 0.88);
-  --glass-modal: rgba(15, 20, 18, 0.96);
+  --glass-panel: var(--bg-surface-100);
+  --glass-modal: var(--bg-card);
   --chat-assistant-bg: #151b18;
   --chat-user-bg: #064e3b;
   --chat-user-text: #ecfdf5;
@@ -73,8 +73,8 @@ html.light {
   --color-primary-hover: #047857;
   --color-primary-subtle: #e8f5f0;
 
-  --glass-panel: rgba(255, 255, 255, 0.92);
-  --glass-modal: rgba(255, 255, 255, 0.98);
+  --glass-panel: var(--bg-surface-100);
+  --glass-modal: var(--bg-card);
   --chat-assistant-bg: #ffffff;
   --chat-user-bg: #e6f4ea;
   --chat-user-text: #064e3b;
@@ -127,20 +127,16 @@ body {
   background: var(--color-foreground-muted);
 }
 
-/* Glassmorphism 与浮层面板 */
+/* 纯色高对比度面板与模态弹窗 (取消半透明与毛玻璃透光) */
 .glass-panel {
   background: var(--glass-panel);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   border: 1px solid var(--color-border);
 }
 
 .glass-modal {
   background: var(--glass-modal);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
   border: 1px solid var(--color-border);
-  box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 20px 50px -10px rgba(0, 0, 0, 0.45);
 }
 
 html.light .glass-modal {
