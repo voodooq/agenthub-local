@@ -28,6 +28,28 @@
   --chat-assistant-bg: #151b18;
   --chat-user-bg: #064e3b;
   --chat-user-text: #ecfdf5;
+
+  /* 间距阶梯 Token (4px / 8px / 12px) */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+
+  /* Sidebar 组件级 Token (深色 Obsidian Emerald) */
+  --sidebar-bg: var(--bg-sidebar);
+  --sidebar-border: var(--color-border);
+  --sidebar-fg: var(--color-foreground);
+  --sidebar-section-fg: var(--color-foreground-muted);
+  --sidebar-item-hover: rgba(255, 255, 255, 0.05);
+  --sidebar-item-active: var(--color-primary-subtle);
+  --sidebar-item-active-fg: #34d399;
+  --sidebar-item-active-border: rgba(16, 185, 129, 0.35);
+  --sidebar-indicator: var(--color-primary);
+  --sidebar-pill-bg: var(--bg-surface-50);
+  --sidebar-pill-border: var(--color-border);
+  --sidebar-card-bg: var(--bg-surface-100);
+  --sidebar-card-hover: var(--bg-surface-50);
+  --sidebar-tag-bg: rgba(255, 255, 255, 0.06);
+  --sidebar-tag-fg: var(--color-foreground-muted);
 }
 
 html.light {
@@ -56,6 +78,23 @@ html.light {
   --chat-assistant-bg: #ffffff;
   --chat-user-bg: #e6f4ea;
   --chat-user-text: #064e3b;
+
+  /* Sidebar 组件级 Token (浅色 Sage Minimal) */
+  --sidebar-bg: var(--bg-sidebar);
+  --sidebar-border: var(--color-border);
+  --sidebar-fg: var(--color-foreground);
+  --sidebar-section-fg: var(--color-foreground-muted);
+  --sidebar-item-hover: rgba(0, 0, 0, 0.04);
+  --sidebar-item-active: var(--color-primary-subtle);
+  --sidebar-item-active-fg: var(--color-primary-hover);
+  --sidebar-item-active-border: rgba(5, 150, 105, 0.3);
+  --sidebar-indicator: var(--color-primary);
+  --sidebar-pill-bg: var(--bg-surface-50);
+  --sidebar-pill-border: var(--color-border);
+  --sidebar-card-bg: var(--bg-surface-200);
+  --sidebar-card-hover: var(--bg-surface-50);
+  --sidebar-tag-bg: rgba(0, 0, 0, 0.05);
+  --sidebar-tag-fg: var(--color-foreground-muted);
 }
 
 body {

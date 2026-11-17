@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import {
   Menu,
   Plus,
@@ -146,6 +146,10 @@ export function Sidebar({
   const [isCreatingVirtual, setIsCreatingVirtual] = useState(false);
   const [virtualName, setVirtualName] = useState('');
   const [wsErrorMsg, setWsErrorMsg] = useState('');
+  // 沙盒与项目快捷过滤状态
+  const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const [filterQuery, setFilterQuery] = useState('');
+  const filterInputRef = useRef<HTMLInputElement>(null);
   const sidebarRef = useRef<HTMLElement>(null);
 
   // 当前激活工作区默认自动展开
@@ -183,11 +187,41 @@ export function Sidebar({
     return () => document.removeEventListener('mousedown', handleOutside);
   }, [menuOpenId]);
 
-  // 划分项目工作区（非 default）与独立对话（default）
-  const projectWorkspaces = workspaces.filter((w) => w.id !== 'default');
-  const standaloneConvs = conversations.filter((c) => !c.workspace_id || c.workspace_id === 'default');
-  const pinnedStandalone = standaloneConvs.filter((c) => c.is_pinned);
-  const regularStandalone = standaloneConvs.filter((c) => !c.is_pinned);
+  // 划分项目工作区（非 default）与独立对话（default），并支持快捷过滤与置顶优先排序
+  const normalizedFilter = filterQuery.trim().toLowerCase();
+
+  const { projectWorkspaces, filteredProjectWorkspaces, pinnedStandalone, regularStandalone, standaloneConvs } =
+    useMemo(() => {
+      const allProjects = workspaces.filter((w) => w.id !== 'default');
+
+      // 优先置顶当前激活工作区、以及包含置顶对话的工作区
+      const pinnedWsIds = new Set(
+        conversations.filter((c) => c.is_pinned && c.workspace_id && c.workspace_id !== 'default').map((c) => c.workspace_id)
+      );
+
+      const sortedProjects = [...allProjects].sort((a, b) => {
+        const aScore = (a.id === activeWorkspaceId ? 2 : 0) + (pinnedWsIds.has(a.id) ? 1 : 0);
+        const bScore = (b.id === activeWorkspaceId ? 2 : 0) + (pinnedWsIds.has(b.id) ? 1 : 0);
+        return bScore - aScore;
+      });
+
+      const filteredProjects = normalizedFilter
+        ? sortedProjects.filter((w) => (w.name || '').toLowerCase().includes(normalizedFilter))
+        : sortedProjects;
+
+      const allStandalone = conversations.filter((c) => !c.workspace_id || c.workspace_id === 'default');
+      const filteredStandalone = normalizedFilter
+        ? allStandalone.filter((c) => (c.title || '').toLowerCase().includes(normalizedFilter))
+        : allStandalone;
+
+      return {
+        projectWorkspaces: allProjects,
+        filteredProjectWorkspaces: filteredProjects,
+        standaloneConvs: filteredStandalone,
+        pinnedStandalone: filteredStandalone.filter((c) => c.is_pinned),
+        regularStandalone: filteredStandalone.filter((c) => !c.is_pinned),
+      };
+    }, [workspaces, conversations, activeWorkspaceId, normalizedFilter]);
 
   const handleStartRename = (conv: Conversation) => {
     setEditingId(conv.id);
@@ -332,44 +366,91 @@ export function Sidebar({
         ? 'bg-amber-500'
         : 'bg-emerald-500';
 
+  // 快捷导航网格配置（统一克制语义色调）
+  const secondaryHubs: {
+    id: MainNavHub;
+    label: string;
+    title: string;
+    icon: React.ReactNode;
+    hasIndicator?: boolean;
+    spanFull?: boolean;
+  }[] = [
+    {
+      id: 'agents',
+      label: '智能体专家',
+      title: '智能体 (专家装配与沙盒启动)',
+      icon: <Bot className="w-3.5 h-3.5 shrink-0" />,
+    },
+    {
+      id: 'skills',
+      label: '技能与应用',
+      title: '技能与应用 (Skills & MCP)',
+      icon: <Puzzle className="w-3.5 h-3.5 shrink-0" />,
+    },
+    {
+      id: 'memory',
+      label: '记忆中枢',
+      title: '记忆中枢 (长期记忆 · 事实双时间轴 · 行为账本 · 人设)',
+      icon: <Brain className="w-3.5 h-3.5 shrink-0" />,
+    },
+    {
+      id: 'library',
+      label: '资产与库',
+      title: '资产与库 (Library · 沉淀文档与媒体资产)',
+      icon: <Library className="w-3.5 h-3.5 shrink-0" />,
+    },
+    {
+      id: 'scheduled',
+      label: '已安排调度',
+      title: '已安排调度 (Triggers · 计划任务)',
+      icon: <Clock className="w-3.5 h-3.5 shrink-0" />,
+      hasIndicator: true,
+      spanFull: true,
+    },
+  ];
+
   return (
     <aside
       ref={sidebarRef}
-      className={`bg-surface-sidebar border-r border-border flex flex-col h-full select-none transition-all duration-300 z-30 ${
+      className={`bg-[var(--sidebar-bg)] border-r border-[var(--sidebar-border)] text-[var(--sidebar-fg)] flex flex-col h-full select-none transition-all duration-300 z-30 ${
         isCollapsed ? 'w-16' : 'w-[264px]'
       }`}
     >
-      {/* ① 顶部 Brand 与动作区 */}
-      <div className="p-2.5 border-b border-border space-y-2">
+      {/* ① 顶部 Brand 与紧凑单行操作条 */}
+      <div className="px-3 pt-2.5 pb-2 border-b border-[var(--sidebar-border)] space-y-2">
         <div className="flex items-center justify-between">
           {!isCollapsed && (
-            <div className="flex items-center space-x-1.5 pl-1 min-w-0">
+            <div className="flex items-center space-x-1.5 pl-0.5 min-w-0">
               <img
                 src="/icon.png"
                 alt="AgentHub Logo"
                 className="w-5 h-5 rounded-md object-contain shrink-0"
               />
-              <span className="text-xs font-bold tracking-wider text-muted-foreground font-mono">AGENT-HUB</span>
+              <span className="text-xs font-bold tracking-wider text-[var(--sidebar-section-fg)] font-mono">
+                AGENT-HUB
+              </span>
               {onOpenUpdateModal ? (
                 <button
                   type="button"
                   onClick={onOpenUpdateModal}
-                  className="text-[10px] text-muted-foreground/80 hover:text-emerald-500 font-mono transition-colors"
+                  className="text-[10px] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-item-active-fg)] font-mono transition-colors"
                   title="点击检查客户端版本更新"
                 >
                   {appVersionTag}
                 </button>
               ) : (
-                <span className="text-[10px] text-muted-foreground/70 font-normal font-mono">{appVersionTag}</span>
+                <span className="text-[10px] text-[var(--sidebar-section-fg)] font-normal font-mono">
+                  {appVersionTag}
+                </span>
               )}
               {hasUpdate && onOpenUpdateModal && (
                 <button
                   type="button"
                   onClick={onOpenUpdateModal}
-                  className="px-1.5 py-0.5 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/35 text-[9px] font-semibold text-emerald-600 dark:text-emerald-300 flex items-center space-x-1 shrink-0 transition-colors"
+                  className="px-1.5 py-0.5 rounded-full bg-[var(--sidebar-item-active)] border border-[var(--sidebar-item-active-border)] text-[9px] font-semibold text-[var(--sidebar-item-active-fg)] flex items-center space-x-1 shrink-0 transition-colors"
                   title={latestVersion ? `发现新版本 v${latestVersion}，点击查看更新日志并升级` : '发现新版本'}
                 >
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-[var(--sidebar-indicator)] animate-pulse" />
                   <span>新版本</span>
                 </button>
               )}
@@ -377,186 +458,161 @@ export function Sidebar({
           )}
           <button
             onClick={() => setIsCollapsed(!isCollapsed)}
-            className="p-1.5 rounded-lg hover:bg-surface-100 text-muted-foreground hover:text-foreground transition-colors ml-auto"
+            className="p-1.5 rounded-lg hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors ml-auto"
             title={isCollapsed ? '展开侧边栏 ([)' : '收起侧边栏 ([)'}
           >
             <Menu className="w-4 h-4" />
           </button>
         </div>
 
-        {/* 发起新对话 / 任务 */}
-        <button
-          onClick={() => onNewChat()}
-          className={`flex items-center rounded-xl bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-600 dark:text-emerald-400 text-xs font-semibold transition-all border border-emerald-500/30 shadow-sm ${
-            isCollapsed ? 'justify-center p-2.5 w-10 h-10 mx-auto' : 'space-x-2 w-full px-3 py-2'
-          }`}
-          title="在当前工作区发起新对话 / 新任务 (Ctrl+N)"
-        >
-          <Plus className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
-          {!isCollapsed && <span>新对话 / 任务</span>}
-        </button>
-
-        {/* 全文检索 Ctrl + K */}
+        {/* 单行双列紧凑操作条：+ 新对话 | 全局检索 Ctrl K */}
         {!isCollapsed ? (
-          <button
-            onClick={onOpenSearch}
-            className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-xl bg-surface-200/50 hover:bg-surface-200 border border-border/50 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <div className="flex items-center space-x-2 min-w-0">
-              <Search className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
-              <span className="truncate">全文检索历史...</span>
-            </div>
-            <kbd className="px-1.5 py-0.5 rounded bg-surface-100 border border-border text-[10px] font-mono text-muted-foreground shrink-0">
-              Ctrl K
-            </kbd>
-          </button>
+          <div className="flex items-center gap-1.5">
+            <button
+              onClick={() => onNewChat()}
+              className="flex-1 flex items-center justify-center gap-1.5 h-8 px-2.5 rounded-xl bg-[var(--sidebar-item-active)] hover:brightness-110 text-[var(--sidebar-item-active-fg)] border border-[var(--sidebar-item-active-border)] text-xs font-semibold transition-all"
+              title="在当前工作区发起新对话 / 新任务 (Ctrl+N)"
+            >
+              <Plus className="w-3.5 h-3.5 shrink-0" />
+              <span>新对话</span>
+            </button>
+            <button
+              onClick={onOpenSearch}
+              className="flex items-center gap-1.5 h-8 px-2.5 rounded-xl bg-[var(--sidebar-pill-bg)] hover:bg-[var(--sidebar-item-hover)] border border-[var(--sidebar-pill-border)] text-xs text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors shrink-0"
+              title="全局检索历史对话与记忆 (Ctrl+K)"
+            >
+              <Search className="w-3.5 h-3.5 shrink-0" />
+              <kbd className="text-[10px] font-mono opacity-80">Ctrl K</kbd>
+            </button>
+          </div>
         ) : (
-          <button
-            onClick={onOpenSearch}
-            className="w-10 h-10 mx-auto rounded-xl flex items-center justify-center hover:bg-surface-100 text-muted-foreground hover:text-foreground transition-colors"
-            title="全文检索历史 (Ctrl+K)"
-          >
-            <Search className="w-4 h-4" />
-          </button>
+          <div className="flex flex-col items-center gap-1.5">
+            <button
+              onClick={() => onNewChat()}
+              className="w-9 h-9 rounded-xl flex items-center justify-center bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)] border border-[var(--sidebar-item-active-border)] transition-all"
+              title="在当前工作区发起新对话 / 新任务 (Ctrl+N)"
+            >
+              <Plus className="w-4 h-4" />
+            </button>
+            <button
+              onClick={onOpenSearch}
+              className="w-9 h-9 rounded-xl flex items-center justify-center hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
+              title="全文检索历史 (Ctrl+K)"
+            >
+              <Search className="w-4 h-4" />
+            </button>
+          </div>
         )}
       </div>
 
-      {/* ② 核心导航枢纽区：工作台 + 专家与能力 */}
-      <div className="p-2 border-b border-border space-y-3">
-        {/* 子板块 A: 工作台 (WORKSPACE) */}
-        <div className="space-y-0.5">
-          {!isCollapsed && (
-            <div className="px-2 py-0.5 text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
-              工作台
-            </div>
-          )}
-          <button
-            onClick={() => onSelectNavHub?.('chat')}
-            className={`w-full flex items-center rounded-lg text-xs transition-colors ${
-              activeNavHub === 'chat'
-                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
-                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
-            } ${isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-1.5'}`}
-            title="对话与任务"
-          >
-            <MessageSquare className="w-4 h-4 shrink-0" />
-            {!isCollapsed && <span>对话与任务</span>}
-          </button>
+      {/* ② 核心导航枢纽区：主入口置顶 + 2列紧凑快捷网格 */}
+      <div className="px-2.5 py-2 border-b border-[var(--sidebar-border)] space-y-1.5">
+        {/* 主入口：对话与任务 */}
+        <button
+          onClick={() => onSelectNavHub?.('chat')}
+          className={`w-full flex items-center rounded-lg text-xs transition-colors ${
+            activeNavHub === 'chat'
+              ? 'bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)] font-semibold border-l-2 border-[var(--sidebar-indicator)] rounded-l-none'
+              : 'hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)]'
+          } ${isCollapsed ? 'justify-center p-2' : 'gap-2 px-2.5 py-1.5'}`}
+          title="对话与任务"
+        >
+          <MessageSquare className="w-4 h-4 shrink-0" />
+          {!isCollapsed && <span>对话与任务</span>}
+        </button>
 
-          <button
-            onClick={() => onSelectNavHub?.('library')}
-            className={`w-full flex items-center justify-between rounded-lg text-xs transition-colors ${
-              activeNavHub === 'library'
-                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
-                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
-            } ${isCollapsed ? 'justify-center p-2' : 'px-3 py-1.5'}`}
-            title="资产与库 (Library · 沉淀文档与媒体资产)"
-          >
-            <div className="flex items-center space-x-2.5">
-              <Library className="w-4 h-4 shrink-0 text-sky-400" />
-              {!isCollapsed && <span>资产与库</span>}
-            </div>
-            {!isCollapsed && (
-              <span className="text-[10px] px-1.5 py-0.2 rounded-full bg-surface-200 text-muted-foreground font-mono">
-                资产
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => onSelectNavHub?.('scheduled')}
-            className={`w-full flex items-center justify-between rounded-lg text-xs transition-colors ${
-              activeNavHub === 'scheduled'
-                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
-                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
-            } ${isCollapsed ? 'justify-center p-2' : 'px-3 py-1.5'}`}
-            title="已安排调度 (Triggers · 计划任务)"
-          >
-            <div className="flex items-center space-x-2.5">
-              <Clock className="w-4 h-4 shrink-0 text-amber-400" />
-              {!isCollapsed && <span>已安排调度</span>}
-            </div>
-            {!isCollapsed && (
-              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" title="后台调度守护就绪" />
-            )}
-          </button>
-        </div>
-
-        {/* 子板块 B: 专家与扩展能力 (EXPERTS & CAPABILITIES) */}
-        <div className="space-y-0.5 pt-1.5 border-t border-border/40">
-          {!isCollapsed && (
-            <div className="px-2 py-0.5 text-[10px] font-semibold text-muted-foreground/70 uppercase tracking-wider">
-              专家与能力
-            </div>
-          )}
-
-          {/* 智能体 (专家中心) */}
-          <button
-            onClick={() => onSelectNavHub?.('agents')}
-            className={`w-full flex items-center justify-between rounded-lg text-xs transition-colors ${
-              activeNavHub === 'agents'
-                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
-                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
-            } ${isCollapsed ? 'justify-center p-2' : 'px-3 py-1.5'}`}
-            title="智能体 (专家装配与沙盒启动)"
-          >
-            <div className="flex items-center space-x-2.5">
-              <Bot className="w-4 h-4 shrink-0 text-emerald-500" />
-              {!isCollapsed && <span>智能体 (专家)</span>}
-            </div>
-            {!isCollapsed && (
-              <span className="text-[9px] px-1.5 py-0.2 rounded-full bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 font-medium">
-                专家
-              </span>
-            )}
-          </button>
-
-          <button
-            onClick={() => onSelectNavHub?.('skills')}
-            className={`w-full flex items-center rounded-lg text-xs transition-colors ${
-              activeNavHub === 'skills'
-                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
-                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
-            } ${isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-1.5'}`}
-            title="技能与应用 (Skills & MCP)"
-          >
-            <Puzzle className="w-4 h-4 shrink-0 text-indigo-400" />
-            {!isCollapsed && <span>技能与应用</span>}
-          </button>
-
-          <button
-            onClick={() => onSelectNavHub?.('memory')}
-            className={`w-full flex items-center justify-between rounded-lg text-xs transition-colors ${
-              activeNavHub === 'memory'
-                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-semibold border-l-2 border-emerald-500 rounded-l-none'
-                : 'hover:bg-surface-100 text-muted-foreground hover:text-foreground'
-            } ${isCollapsed ? 'justify-center p-2' : 'space-x-2.5 px-3 py-1.5'}`}
-            title="记忆中枢 (长期记忆 · 事实双时间轴 · 行为账本 · 人设)"
-          >
-            <div className="flex items-center space-x-2.5">
-              <Brain className="w-4 h-4 shrink-0 text-emerald-500" />
-              {!isCollapsed && <span>记忆中枢</span>}
-            </div>
-          </button>
-        </div>
+        {/* 其余高频枢纽：2 列紧凑网格（折叠态为垂直图标栏） */}
+        {isCollapsed ? (
+          <div className="flex flex-col items-center gap-1 pt-1 border-t border-[var(--sidebar-border)]">
+            {secondaryHubs.map((hub) => {
+              const isActive = activeNavHub === hub.id;
+              return (
+                <button
+                  key={hub.id}
+                  onClick={() => onSelectNavHub?.(hub.id)}
+                  className={`relative w-9 h-9 rounded-xl flex items-center justify-center transition-colors ${
+                    isActive
+                      ? 'bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)]'
+                      : 'hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)]'
+                  }`}
+                  title={hub.title}
+                >
+                  {hub.icon}
+                  {hub.hasIndicator && (
+                    <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-[var(--sidebar-indicator)]" />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 gap-1">
+            {secondaryHubs.map((hub) => {
+              const isActive = activeNavHub === hub.id;
+              return (
+                <button
+                  key={hub.id}
+                  onClick={() => onSelectNavHub?.(hub.id)}
+                  className={`flex items-center justify-between px-2 py-1.5 rounded-lg text-[11px] transition-colors ${
+                    hub.spanFull ? 'col-span-2' : ''
+                  } ${
+                    isActive
+                      ? 'bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)] font-semibold'
+                      : 'hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)]'
+                  }`}
+                  title={hub.title}
+                >
+                  <span className="flex items-center gap-1.5 min-w-0">
+                    {hub.icon}
+                    <span className="truncate">{hub.label}</span>
+                  </span>
+                  {hub.hasIndicator && (
+                    <span
+                      className="w-1.5 h-1.5 rounded-full bg-[var(--sidebar-indicator)] shrink-0"
+                      title="后台调度守护就绪"
+                    />
+                  )}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* ③ 中部滚动区：「沙盒与项目」折叠树 + 「对话」独立列表 */}
-      <div className="flex-1 overflow-y-auto p-2 space-y-3">
+      <div className="flex-1 overflow-y-auto px-2.5 py-2 space-y-3">
         {/* 分组一：沙盒与项目 (对应非 default 工作区) */}
         <div className="space-y-1">
           {!isCollapsed && (
-            <div className="px-1.5 py-0.5 flex items-center justify-between text-[11px] font-bold text-muted-foreground">
-              <span className="flex items-center space-x-1.5">
-                <Box className="w-3.5 h-3.5 text-sky-400" />
+            <div className="px-1 py-0.5 flex items-center justify-between text-[11px] font-semibold text-[var(--sidebar-section-fg)]">
+              <span className="flex items-center gap-1.5">
                 <span>沙盒与项目 ({projectWorkspaces.length})</span>
               </span>
-              <div className="flex items-center space-x-1">
+              <div className="flex items-center gap-0.5">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsFilterOpen((prev) => {
+                      const next = !prev;
+                      if (!next) setFilterQuery('');
+                      else setTimeout(() => filterInputRef.current?.focus(), 0);
+                      return next;
+                    });
+                  }}
+                  className={`p-1 rounded transition-colors ${
+                    isFilterOpen || filterQuery
+                      ? 'bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)]'
+                      : 'hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)]'
+                  }`}
+                  title="快捷过滤沙盒、项目与对话"
+                >
+                  <Search className="w-3.5 h-3.5" />
+                </button>
                 <button
                   type="button"
                   onClick={handlePickNativeFolder}
                   disabled={isSelectingNative}
-                  className="p-1 rounded hover:bg-surface-200 text-muted-foreground hover:text-emerald-500 transition-colors"
+                  className="p-1 rounded hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-item-active-fg)] transition-colors"
                   title="挂载本地已有工程目录"
                 >
                   <FolderPlus className="w-3.5 h-3.5" />
@@ -564,7 +620,7 @@ export function Sidebar({
                 <button
                   type="button"
                   onClick={() => setIsCreatingVirtual(true)}
-                  className="p-1 rounded hover:bg-surface-200 text-muted-foreground hover:text-sky-400 transition-colors"
+                  className="p-1 rounded hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
                   title="新建托管隔离沙盒"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -573,12 +629,46 @@ export function Sidebar({
             </div>
           )}
 
-          {projectWorkspaces.length > 0 ? (
+          {/* 一键展开快捷过滤搜索框 */}
+          {!isCollapsed && isFilterOpen && (
+            <div className="relative px-0.5 pb-1">
+              <Search className="w-3 h-3 text-[var(--sidebar-section-fg)] absolute left-2.5 top-2 pointer-events-none" />
+              <input
+                ref={filterInputRef}
+                type="text"
+                value={filterQuery}
+                onChange={(e) => setFilterQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Escape') {
+                    setFilterQuery('');
+                    setIsFilterOpen(false);
+                  }
+                }}
+                placeholder="按名称过滤沙盒、项目或对话..."
+                className="w-full h-7 pl-7 pr-6 rounded-lg bg-[var(--sidebar-pill-bg)] border border-[var(--sidebar-pill-border)] focus:border-[var(--sidebar-item-active-border)] text-[11px] text-[var(--sidebar-fg)] placeholder:text-[var(--sidebar-section-fg)] outline-none transition-colors"
+              />
+              {filterQuery && (
+                <button
+                  type="button"
+                  onClick={() => setFilterQuery('')}
+                  className="absolute right-2 top-1.5 p-0.5 rounded hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)]"
+                  title="清空过滤"
+                >
+                  <X className="w-3 h-3" />
+                </button>
+              )}
+            </div>
+          )}
+
+          {filteredProjectWorkspaces.length > 0 ? (
             <div className="space-y-0.5">
-              {projectWorkspaces.map((ws) => {
+              {filteredProjectWorkspaces.map((ws) => {
                 const wsConvs = conversations.filter((c) => c.workspace_id === ws.id);
                 const isWsActive = activeWorkspaceId === ws.id;
                 const isExpanded = Boolean(expandedWorkspaceIds[ws.id]);
+                const isSandbox = ws.type !== 'physical' || (ws.name || '').startsWith('[沙盒]');
+                const displayName = (ws.name || '').replace(/^\[沙盒\]\s*/, '');
+                const hasPinnedConv = wsConvs.some((c) => c.is_pinned);
 
                 if (isCollapsed) {
                   return (
@@ -588,10 +678,10 @@ export function Sidebar({
                         onSelectWorkspace(ws.id);
                         onSelectNavHub?.('chat');
                       }}
-                      className={`w-10 h-10 mx-auto rounded-xl flex items-center justify-center transition-colors relative ${
+                      className={`w-9 h-9 mx-auto rounded-xl flex items-center justify-center transition-colors relative ${
                         isWsActive
-                          ? 'bg-emerald-500/20 text-emerald-500 border border-emerald-500/30'
-                          : 'hover:bg-surface-100 text-muted-foreground'
+                          ? 'bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)] border border-[var(--sidebar-item-active-border)]'
+                          : 'hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)]'
                       }`}
                       title={`项目: ${ws.name} (${wsConvs.length} 个会话)`}
                     >
@@ -613,12 +703,12 @@ export function Sidebar({
                       }}
                       className={`group/ws flex items-center justify-between px-2 py-1.5 rounded-lg cursor-pointer text-xs transition-colors ${
                         isWsActive
-                          ? 'bg-surface-200/80 text-foreground font-semibold'
-                          : 'hover:bg-surface-100 text-foreground/90'
+                          ? 'bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)] font-semibold'
+                          : 'hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-fg)]/90'
                       }`}
                     >
-                      <div className="flex items-center space-x-1.5 min-w-0 flex-1 pr-1">
-                        <span className="text-muted-foreground shrink-0">
+                      <div className="flex items-center gap-1.5 min-w-0 flex-1 pr-1">
+                        <span className="text-[var(--sidebar-section-fg)] shrink-0">
                           {isExpanded ? (
                             <ChevronDown className="w-3.5 h-3.5" />
                           ) : (
@@ -627,20 +717,38 @@ export function Sidebar({
                         </span>
                         <div className="relative shrink-0">
                           {ws.type === 'physical' ? (
-                            <Folder className="w-3.5 h-3.5 text-emerald-500" />
+                            <Folder
+                              className={`w-3.5 h-3.5 ${
+                                isWsActive ? 'text-[var(--sidebar-item-active-fg)]' : 'text-[var(--sidebar-section-fg)]'
+                              }`}
+                            />
                           ) : (
-                            <Box className="w-3.5 h-3.5 text-sky-400" />
+                            <Box
+                              className={`w-3.5 h-3.5 ${
+                                isWsActive ? 'text-[var(--sidebar-item-active-fg)]' : 'text-[var(--sidebar-section-fg)]'
+                              }`}
+                            />
                           )}
-                          <span
-                            className={`absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full ${
-                              ws.is_path_accessible === false ? 'bg-rose-500' : 'bg-emerald-500'
-                            }`}
-                          />
+                          {/* 仅在路径不可访问时展示异常警告点，移除泛滥的绿色圆点 */}
+                          {ws.is_path_accessible === false && (
+                            <span
+                              className="absolute -bottom-0.5 -right-0.5 w-1.5 h-1.5 rounded-full bg-rose-500"
+                              title="工作区路径不可访问"
+                            />
+                          )}
                         </div>
-                        <span className="truncate">{ws.name}</span>
+                        <span className="truncate">{displayName}</span>
+                        {isSandbox && (
+                          <span className="px-1 py-0.2 rounded text-[9px] bg-[var(--sidebar-tag-bg)] text-[var(--sidebar-tag-fg)] shrink-0 font-normal">
+                            沙盒
+                          </span>
+                        )}
+                        {hasPinnedConv && !isWsActive && (
+                          <Pin className="w-2.5 h-2.5 text-amber-500/80 shrink-0 rotate-45" />
+                        )}
                       </div>
 
-                      <div className="flex items-center space-x-0.5 opacity-0 group-hover/ws:opacity-100 transition-opacity shrink-0">
+                      <div className="flex items-center gap-0.5 opacity-0 group-hover/ws:opacity-100 transition-opacity shrink-0">
                         <button
                           type="button"
                           onClick={(e) => {
@@ -648,7 +756,7 @@ export function Sidebar({
                             setExpandedWorkspaceIds((prev) => ({ ...prev, [ws.id]: true }));
                             onNewChat(ws.id);
                           }}
-                          className="p-1 rounded hover:bg-surface-200 text-muted-foreground hover:text-emerald-500"
+                          className="p-1 rounded hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-item-active-fg)]"
                           title="在此项目下新建对话"
                         >
                           <Plus className="w-3 h-3" />
@@ -660,7 +768,7 @@ export function Sidebar({
                               e.stopPropagation();
                               onOpenWorkspaceContract(ws);
                             }}
-                            className="p-1 rounded hover:bg-surface-200 text-muted-foreground hover:text-sky-400"
+                            className="p-1 rounded hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)]"
                             title="编辑项目背景契约 WORKSPACE.md"
                           >
                             <FileCode2 className="w-3 h-3" />
@@ -669,7 +777,7 @@ export function Sidebar({
                         <button
                           type="button"
                           onClick={(e) => handleDeleteWorkspace(ws, e)}
-                          className="p-1 rounded hover:bg-rose-500/20 text-muted-foreground hover:text-rose-400"
+                          className="p-1 rounded hover:bg-rose-500/15 text-[var(--sidebar-section-fg)] hover:text-rose-400"
                           title="解除挂载（保留本地文件）"
                         >
                           <Trash2 className="w-3 h-3" />
@@ -678,7 +786,7 @@ export function Sidebar({
                     </div>
 
                     {isExpanded && (
-                      <div className="pl-4 border-l border-border/60 ml-3.5 space-y-0.5">
+                      <div className="pl-3.5 border-l border-[var(--sidebar-border)] ml-3 space-y-0.5">
                         {wsConvs.length > 0 ? (
                           wsConvs.map((conv) => (
                             <ConversationRow
@@ -708,7 +816,7 @@ export function Sidebar({
                             />
                           ))
                         ) : (
-                          <div className="px-2 py-1 text-[11px] text-muted-foreground/70">
+                          <div className="px-2 py-1 text-[11px] text-[var(--sidebar-section-fg)] opacity-70">
                             暂无对话
                           </div>
                         )}
@@ -720,15 +828,25 @@ export function Sidebar({
             </div>
           ) : (
             !isCollapsed && (
-              <div className="px-2 py-2 rounded-lg border border-dashed border-border/60 text-[11px] text-muted-foreground flex items-center justify-between">
-                <span>尚未挂载项目</span>
-                <button
-                  type="button"
-                  onClick={handlePickNativeFolder}
-                  className="text-emerald-500 hover:underline"
-                >
-                  挂载目录
-                </button>
+              <div className="px-2.5 py-2 rounded-lg border border-dashed border-[var(--sidebar-border)] text-[11px] text-[var(--sidebar-section-fg)] flex items-center justify-between">
+                <span>{normalizedFilter ? '无匹配沙盒或项目' : '尚未挂载项目'}</span>
+                {normalizedFilter ? (
+                  <button
+                    type="button"
+                    onClick={() => setFilterQuery('')}
+                    className="text-[var(--sidebar-item-active-fg)] hover:underline"
+                  >
+                    清空
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handlePickNativeFolder}
+                    className="text-[var(--sidebar-item-active-fg)] hover:underline"
+                  >
+                    挂载目录
+                  </button>
+                )}
               </div>
             )
           )}
@@ -737,14 +855,14 @@ export function Sidebar({
         {/* 分组二：独立对话（default 默认工作区） */}
         <div className="space-y-1">
           {!isCollapsed && (
-            <div className="px-1.5 py-0.5 flex items-center justify-between text-[11px] font-bold text-muted-foreground">
+            <div className="px-1 py-0.5 flex items-center justify-between text-[11px] font-semibold text-[var(--sidebar-section-fg)]">
               <span>对话 ({standaloneConvs.length})</span>
-              <div className="flex items-center space-x-1">
+              <div className="flex items-center gap-0.5">
                 {onCleanupDuplicates && standaloneConvs.length > 3 && (
                   <button
                     type="button"
                     onClick={onCleanupDuplicates}
-                    className="text-[10px] font-normal px-1.5 py-0.5 rounded hover:bg-surface-200 text-muted-foreground hover:text-emerald-500 transition-colors"
+                    className="text-[10px] font-normal px-1.5 py-0.5 rounded hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-item-active-fg)] transition-colors"
                     title="智能去重并清理空白会话"
                   >
                     去重
@@ -753,7 +871,7 @@ export function Sidebar({
                 <button
                   type="button"
                   onClick={onOpenSync}
-                  className="p-1 rounded hover:bg-surface-200 text-muted-foreground hover:text-foreground transition-colors"
+                  className="p-1 rounded hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
                   title="数据导入与导出"
                 >
                   <UploadCloud className="w-3.5 h-3.5" />
@@ -766,7 +884,7 @@ export function Sidebar({
                     }
                     onNewChat('default');
                   }}
-                  className="p-1 rounded hover:bg-surface-200 text-muted-foreground hover:text-emerald-500 transition-colors"
+                  className="p-1 rounded hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-item-active-fg)] transition-colors"
                   title="新建独立对话"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -778,7 +896,7 @@ export function Sidebar({
           {pinnedStandalone.length > 0 && (
             <div className="space-y-0.5">
               {!isCollapsed && (
-                <div className="px-2 py-0.5 text-[10px] font-semibold text-amber-500/90 flex items-center space-x-1">
+                <div className="px-2 py-0.5 text-[10px] font-semibold text-amber-500/90 flex items-center gap-1">
                   <Pin className="w-2.5 h-2.5 rotate-45" />
                   <span>置顶</span>
                 </div>
@@ -843,44 +961,46 @@ export function Sidebar({
             ))}
 
             {standaloneConvs.length === 0 && !isCollapsed && (
-              <div className="px-3 py-4 text-center text-xs text-muted-foreground border border-dashed border-border/60 rounded-xl space-y-1">
-                <p>暂无独立对话</p>
-                <button
-                  onClick={() => onNewChat('default')}
-                  className="text-emerald-500 hover:underline text-xs"
-                >
-                  点击新建对话
-                </button>
+              <div className="px-3 py-3 text-center text-xs text-[var(--sidebar-section-fg)] border border-dashed border-[var(--sidebar-border)] rounded-xl space-y-1">
+                <p>{normalizedFilter ? '无匹配对话' : '暂无独立对话'}</p>
+                {!normalizedFilter && (
+                  <button
+                    onClick={() => onNewChat('default')}
+                    className="text-[var(--sidebar-item-active-fg)] hover:underline text-xs"
+                  >
+                    点击新建对话
+                  </button>
+                )}
               </div>
             )}
           </div>
         </div>
       </div>
 
-      {/* ④ 底部账号与算力卡片 + 运维三联栏 */}
-      <div className="p-2 border-t border-border space-y-1.5">
-        {/* 账号算力状态卡片 */}
+      {/* ④ 底部轻量 surface 账号卡片 + 均匀三联工具条 */}
+      <div className="px-3 pt-2 pb-3 border-t border-[var(--sidebar-border)] space-y-2">
+        {/* 账号算力状态卡片（轻量 surface 风格，无生硬粗边框） */}
         <button
           type="button"
           onClick={onOpenAccounts}
-          className={`w-full flex items-center justify-between rounded-xl border border-border/80 bg-surface-100/70 hover:bg-surface-200/80 transition-colors ${
+          className={`w-full flex items-center justify-between rounded-xl bg-[var(--sidebar-card-bg)] hover:bg-[var(--sidebar-card-hover)] transition-colors ${
             isCollapsed ? 'p-2 justify-center' : 'px-2.5 py-2'
           }`}
           title="统一管理算力账号、OAuth 与配额池"
         >
-          <div className="flex items-center space-x-2 min-w-0">
+          <div className="flex items-center gap-2 min-w-0">
             <span className={`w-2 h-2 rounded-full shrink-0 ${accountDotClass}`} />
             {!isCollapsed && (
               <div className="text-left min-w-0">
-                <div className="text-xs font-semibold text-foreground truncate flex items-center space-x-1.5">
+                <div className="text-xs font-semibold text-[var(--sidebar-fg)] truncate flex items-center gap-1.5">
                   <span className="truncate">{statusPill?.active_account_name || '算力账号池'}</span>
                   {statusPill?.auth_type === 'oauth_google_one' && (
-                    <span className="text-[9px] px-1 py-0.2 rounded bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 font-mono">
+                    <span className="text-[9px] px-1 py-0.2 rounded bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)] font-mono">
                       PRO
                     </span>
                   )}
                 </div>
-                <div className="text-[10px] text-muted-foreground truncate">
+                <div className="text-[10px] text-[var(--sidebar-section-fg)] truncate">
                   {statusPill
                     ? `今日 ${statusPill.today_used} 次${statusPill.is_relayed ? ' · 热接力中' : ''}`
                     : '点击配置账号 / 本地引擎'}
@@ -888,66 +1008,66 @@ export function Sidebar({
               </div>
             )}
           </div>
-          {!isCollapsed && <ChevronRight className="w-3.5 h-3.5 text-muted-foreground shrink-0" />}
+          {!isCollapsed && <ChevronRight className="w-3.5 h-3.5 text-[var(--sidebar-section-fg)] shrink-0" />}
         </button>
 
         {/* 三联轻工具条：用量分析 · 系统监控 · 设置 */}
         {isCollapsed ? (
-          <div className="flex flex-col items-center space-y-1.5 pt-1 border-t border-border/40">
+          <div className="flex flex-col items-center gap-1 pt-1">
             {onOpenTokenStats && (
               <button
                 type="button"
                 onClick={onOpenTokenStats}
-                className="p-2 rounded-xl hover:bg-surface-200 text-muted-foreground hover:text-foreground transition-colors"
+                className="p-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
                 title="用量分析 (Token 消耗统计)"
               >
-                <BarChart3 className="w-4 h-4 text-emerald-500" />
+                <BarChart3 className="w-4 h-4" />
               </button>
             )}
             {onOpenSystemMonitor && (
               <button
                 type="button"
                 onClick={onOpenSystemMonitor}
-                className="relative p-2 rounded-xl hover:bg-surface-200 text-muted-foreground hover:text-foreground transition-colors"
+                className="relative p-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
                 title="系统监控与性能"
               >
-                <Activity className="w-4 h-4 text-sky-400" />
+                <Activity className="w-4 h-4" />
                 {pendingProposalCount > 0 && (
-                  <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-amber-500" />
+                  <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-amber-500" />
                 )}
               </button>
             )}
             <button
               type="button"
               onClick={onOpenSettings}
-              className="relative p-2 rounded-xl hover:bg-surface-200 text-muted-foreground hover:text-foreground transition-colors"
+              className="relative p-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
               title="偏好设置"
             >
-              <Sliders className="w-4 h-4 text-amber-400" />
+              <Sliders className="w-4 h-4" />
               {hasUpdate && (
-                <span className="absolute top-1 right-1 w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-[var(--sidebar-indicator)] animate-pulse" />
               )}
             </button>
           </div>
         ) : (
-          <div className="grid grid-cols-3 gap-1 pt-1 border-t border-border/40">
+          <div className="grid grid-cols-3 gap-1">
             <button
               type="button"
               onClick={() => onOpenTokenStats?.()}
-              className="flex items-center justify-center space-x-1 px-1.5 py-1.5 rounded-lg hover:bg-surface-200 text-[11px] text-muted-foreground hover:text-foreground transition-colors border border-transparent hover:border-border/50"
+              className="flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-lg hover:bg-[var(--sidebar-item-hover)] text-[11px] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
               title="查看 Token 消耗与脱水节省统计"
             >
-              <BarChart3 className="w-3.5 h-3.5 shrink-0 text-emerald-500" />
+              <BarChart3 className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate font-medium">用量分析</span>
             </button>
 
             <button
               type="button"
               onClick={() => onOpenSystemMonitor?.()}
-              className="relative flex items-center justify-center space-x-1 px-1.5 py-1.5 rounded-lg hover:bg-surface-200 text-[11px] text-muted-foreground hover:text-foreground transition-colors border border-transparent hover:border-border/50"
+              className="relative flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-lg hover:bg-[var(--sidebar-item-hover)] text-[11px] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
               title="系统监控与优化提案"
             >
-              <Activity className="w-3.5 h-3.5 shrink-0 text-sky-400" />
+              <Activity className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate font-medium">系统监控</span>
               {pendingProposalCount > 0 && (
                 <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
@@ -957,13 +1077,13 @@ export function Sidebar({
             <button
               type="button"
               onClick={onOpenSettings}
-              className="relative flex items-center justify-center space-x-1 px-1.5 py-1.5 rounded-lg hover:bg-surface-200 text-[11px] text-muted-foreground hover:text-foreground transition-colors border border-transparent hover:border-border/50"
+              className="relative flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-lg hover:bg-[var(--sidebar-item-hover)] text-[11px] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
               title="系统偏好、外观与模型路由设置"
             >
-              <Sliders className="w-3.5 h-3.5 shrink-0 text-amber-400" />
+              <Sliders className="w-3.5 h-3.5 shrink-0" />
               <span className="truncate font-medium">设置</span>
               {hasUpdate && (
-                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse shrink-0" />
+                <span className="w-1.5 h-1.5 rounded-full bg-[var(--sidebar-indicator)] animate-pulse shrink-0" />
               )}
             </button>
           </div>
@@ -1169,10 +1289,10 @@ function ConversationRow({
     return (
       <button
         onClick={onSelect}
-        className={`w-10 h-10 mx-auto rounded-xl flex items-center justify-center transition-colors ${
+        className={`w-9 h-9 mx-auto rounded-xl flex items-center justify-center transition-colors ${
           isActive
-            ? 'bg-emerald-600 text-white'
-            : 'hover:bg-surface-100 text-muted-foreground'
+            ? 'bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)] border border-[var(--sidebar-item-active-border)]'
+            : 'hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)]'
         }`}
         title={conv.title}
       >
@@ -1186,8 +1306,8 @@ function ConversationRow({
       onClick={onSelect}
       className={`group relative flex items-center justify-between px-2.5 py-1.5 rounded-xl cursor-pointer text-xs transition-all ${
         isActive
-          ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold border border-emerald-500/35 shadow-xs'
-          : 'hover:bg-surface-100 text-foreground border border-transparent'
+          ? 'bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)] font-semibold border border-[var(--sidebar-item-active-border)]'
+          : 'hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-fg)] border border-transparent'
       }`}
     >
       <div className="flex items-center space-x-1.5 truncate flex-1 pr-1 min-w-0">
