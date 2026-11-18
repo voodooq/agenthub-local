@@ -447,8 +447,8 @@ class HybridSearchEngine:
 
         # 阶段二点五：微经验 (L5 Experience) 双路召回融合 (v1.5.5)
         try:
-            from ..memory.experience_store import experience_store
-            exp_cases = await experience_store.search_for_context(
+            from ..memory.experience_store import episodic_experience_store
+            exp_cases = await episodic_experience_store.search_for_context(
                 clean_query,
                 workspace_id=pod_id if pod_id != "global" else "GLOBAL",
                 limit=2,

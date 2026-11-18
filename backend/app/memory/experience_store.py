@@ -780,4 +780,5 @@ class EpisodicExperienceStore:
 
 # 全局唯一微经验库单例，供 ContextBuilder / Runtime / Distiller 共享调用
 episodic_experience_store = EpisodicExperienceStore()
+experience_store = episodic_experience_store
 
