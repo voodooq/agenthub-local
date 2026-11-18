@@ -267,6 +267,43 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     }
   };
 
+  // 彻底物理删除单个独立知识库
+  const handleDeleteKb = async (kbId: string, kbName: string) => {
+    if (!confirm(`确定要彻底删除独立知识库【${kbName}】吗？\n该操作将物理销毁其在磁盘上的所有版本快照与向量数据库，不可恢复。`)) return;
+    try {
+      const resp = await apiFetch(`/api/v1/kb/bases/${kbId}`, { method: 'DELETE' });
+      if (resp.ok) {
+        if (selectedKbId === kbId) {
+          const remaining = kbsList.filter((k) => k.kb_id !== kbId);
+          setSelectedKbId(remaining[0]?.kb_id || '');
+          setPlaygroundHits(null);
+        }
+        await loadKBs();
+      } else {
+        const data = await resp.json().catch(() => ({}));
+        alert('删除失败: ' + (data?.message || '网络异常'));
+      }
+    } catch (e: any) {
+      alert('删除异常: ' + e.message);
+    }
+  };
+
+  // 一键清空物理销毁全部独立知识库资产
+  const handlePurgeAllKbs = async () => {
+    if (kbsList.length === 0) return;
+    if (!confirm(`确定要清空并物理销毁当前系统所有独立知识库资产吗？（共 ${kbsList.length} 个）\n该操作将删除磁盘所有 index.db 并清空元数据，不可恢复！`)) return;
+    try {
+      const resp = await apiFetch('/api/v1/kb/bases/purge-all', { method: 'POST' });
+      const data = await resp.json();
+      alert(data.message || '已清空所有独立知识库资产');
+      setSelectedKbId('');
+      setPlaygroundHits(null);
+      await loadKBs();
+    } catch (e: any) {
+      alert('清空异常: ' + e.message);
+    }
+  };
+
   return (
     <div className="flex-1 flex flex-col h-full bg-background overflow-hidden">
       {/* 第一层：图标，功能名称，功能描述，全局的功能按钮 放在页面顶部右侧 */}
@@ -890,17 +927,30 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                       独立知识库资产清单 ({kbsList.length})
                     </h3>
                     <p className="text-xs text-muted-foreground mt-0.5">
-                      v1.5.8 独立自包含 SQLite index.db，支持快照复制、版本回滚与磁盘瘦身
+                      v1.5.8 独立自包含 SQLite index.db，支持快照复制、版本回滚、磁盘瘦身与物理清理
                     </p>
                   </div>
-                  <button
-                    onClick={loadKBs}
-                    disabled={loadingKbs}
-                    className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
-                    title="刷新知识库资产"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${loadingKbs ? 'animate-spin' : ''}`} />
-                  </button>
+                  <div className="flex items-center gap-2">
+                    {kbsList.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handlePurgeAllKbs}
+                        className="flex items-center gap-1 px-2.5 py-1 text-xs text-rose-500 hover:text-rose-600 hover:bg-rose-500/10 rounded-lg border border-rose-500/20 transition-colors"
+                        title="清空并彻底物理销毁所有独立知识库资产"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                        <span>清空全部</span>
+                      </button>
+                    )}
+                    <button
+                      onClick={loadKBs}
+                      disabled={loadingKbs}
+                      className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
+                      title="刷新知识库资产"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${loadingKbs ? 'animate-spin' : ''}`} />
+                    </button>
+                  </div>
                 </div>
 
                 <div className="space-y-3">
@@ -948,7 +998,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                               </span>
                             </div>
 
-                            <div className="flex items-center gap-2">
+                            <div className="flex items-center gap-1.5">
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -959,7 +1009,20 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                 title="清理旧历史版本快照，执行 VACUUM 释放磁盘"
                               >
                                 <Scissors className="w-3 h-3" />
-                                <span>磁盘瘦身</span>
+                                <span>瘦身</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleDeleteKb(kb.kb_id, kb.name);
+                                }}
+                                className="flex items-center gap-1 px-2 py-1 text-xs text-rose-500 hover:text-rose-600 hover:bg-rose-500/10 rounded-lg border border-rose-500/20 transition-colors"
+                                title="彻底物理销毁此知识库及历史快照"
+                              >
+                                <Trash2 className="w-3 h-3" />
+                                <span>清理</span>
                               </button>
                             </div>
                           </div>

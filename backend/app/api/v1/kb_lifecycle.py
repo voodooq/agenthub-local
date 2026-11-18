@@ -160,6 +160,23 @@ async def delete_base(kb_id: str) -> dict[str, Any]:
     return {"success": True, "message": f"知识库 {kb_id} 及其所有版本已彻底物理删除"}
 
 
+@router.post("/bases/purge-all")
+async def purge_all_bases() -> dict[str, Any]:
+    """一键物理销毁当前系统所有独立知识库资产及所有历史版本。"""
+    from ...repository.db import db_manager
+    async with db_manager.get_connection() as conn:
+        cursor = await conn.execute("SELECT kb_id FROM knowledge_bases")
+        rows = await cursor.fetchall()
+        for row in rows:
+            kb_id = str(row["kb_id"])
+            KBStorageManager.physically_destroy_kb(kb_id)
+        await conn.execute("DELETE FROM kb_versions")
+        await conn.execute("DELETE FROM expert_kb_bindings")
+        await conn.execute("DELETE FROM knowledge_bases")
+        await conn.commit()
+    return {"success": True, "message": f"已彻底清理销毁全部 {len(rows)} 个独立知识库资产"}
+
+
 @router.get("/bases/{kb_id}/versions")
 async def list_versions(kb_id: str) -> dict[str, Any]:
     """获取知识库版本快照列表与 Changelog。"""

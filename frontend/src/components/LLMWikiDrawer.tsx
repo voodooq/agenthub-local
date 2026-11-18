@@ -260,6 +260,24 @@ export function LLMWikiDrawer({ isOpen, onClose, workspaceRoot = '.' }: LLMWikiD
     }
   };
 
+  // 彻底删除知识库
+  const handleDeleteKb = async (kbId: string, kbName: string) => {
+    if (!confirm(`确定要彻底删除独立知识库【${kbName}】吗？\n该操作将物理销毁其所有历史版本与向量数据库。`)) return;
+    try {
+      const resp = await apiFetch(`/api/v1/kb/bases/${kbId}`, { method: 'DELETE' });
+      if (resp.ok) {
+        if (selectedKbId === kbId) {
+          const remaining = kbsList.filter((k) => k.kb_id !== kbId);
+          setSelectedKbId(remaining[0]?.kb_id || '');
+          setPlaygroundHits(null);
+        }
+        await loadKBs();
+      }
+    } catch (e: any) {
+      alert('删除失败: ' + e.message);
+    }
+  };
+
   return (
     <aside className="fixed inset-y-0 right-0 w-full md:w-[500px] lg:w-[560px] bg-surface-card border-l border-border shadow-2xl z-40 flex flex-col animate-fade-in text-foreground">
       {/* 顶部 Header */}
@@ -714,6 +732,17 @@ export function LLMWikiDrawer({ isOpen, onClose, workspaceRoot = '.' }: LLMWikiD
                             title="清理历史旧版本快照 (Prune 瘦身)"
                           >
                             <Scissors className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteKb(kb.kb_id, kb.name);
+                            }}
+                            className="p-1 text-muted-foreground hover:text-rose-500 hover:bg-rose-500/10 rounded transition-colors"
+                            title="彻底删除此知识库"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
                         </div>
                       </div>
