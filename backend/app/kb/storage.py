@@ -38,6 +38,72 @@ class KBStorageManager:
         return p
 
     @classmethod
+    def upsert_chunks_to_version_db(
+        cls,
+        kb_id: str,
+        version: str,
+        chunks: list[dict[str, Any]],
+        embedding_model: str = "null_offline_lexical",
+        embedding_dim: int = 768,
+    ) -> tuple[int, int]:
+        """将切片批量写入/更新至指定版本的独立 index.db 中，并同步更新 manifest.json。
+
+        Returns:
+            tuple[int, int]: (total_chunk_count, disk_size_bytes)
+        """
+        db_path = cls.get_version_db_path(kb_id, version)
+        cls.init_version_db_schema(db_path)
+
+        now = time.time()
+        conn = sqlite3.connect(str(db_path))
+        try:
+            with conn:
+                for c in chunks:
+                    chunk_id = str(
+                        c.get("chunk_id")
+                        or c.get("id")
+                        or hashlib.md5(
+                            f"{c['remote_uri']}:{c.get('section_path', '')}:{c.get('content_text', '')[:64]}".encode("utf-8")
+                        ).hexdigest()
+                    )
+                    content = c.get("content_text") or c.get("content") or ""
+                    title = c.get("title") or Path(c["remote_uri"]).name
+                    tier = c.get("authority_tier", 2)
+                    mtime = c.get("mtime", now)
+                    etag = c.get("etag", "")
+                    blob = c.get("embedding_blob")
+
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO hybrid_chunks (
+                            id, remote_uri, title, content, authority_tier, mtime, etag, embedding_blob, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (chunk_id, c["remote_uri"], title, content, tier, mtime, etag, blob, now),
+                    )
+
+                cursor = conn.cursor()
+                cursor.execute("SELECT count(*) FROM hybrid_chunks")
+                total_chunks = cursor.fetchone()[0]
+                cursor.execute("SELECT count(*) FROM knowledge_triples")
+                total_triples = cursor.fetchone()[0]
+        finally:
+            conn.close()
+
+        manifest = cls.write_manifest(
+            kb_id=kb_id,
+            version=version,
+            embedding_model=embedding_model,
+            embedding_dim=embedding_dim,
+            chunk_count=total_chunks,
+            triple_count=total_triples,
+            changelog=f"写入/更新 {len(chunks)} 个切片",
+        )
+
+        disk_size = manifest.get("disk_size_bytes", 0)
+        return total_chunks, disk_size
+
+    @classmethod
     def get_version_db_path(cls, kb_id: str, version: str) -> Path:
         """获取指定版本独立 index.db 路径。"""
         return cls.get_version_dir(kb_id, version) / "index.db"

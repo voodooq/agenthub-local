@@ -263,19 +263,39 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
                 elif m["provider_type"] == "oss":
                     sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请检查存储桶与前缀配置。")
             modified = sync_mgr.filter_modified_files(m["mount_id"], files)
+            mount_new_chunks: list[dict[str, Any]] = []
             for f in modified:
                 try:
                     stream = await provider.download_stream(f.remote_uri)
                     chunks = DocumentStreamExtractor.extract_chunks(stream, f.title, f.remote_uri, authority_tier=f.authority_tier)
                     if chunks:
                         await engine.upsert_chunks(chunks)
+                        mount_new_chunks.extend(chunks)
                         total_new_chunks += len(chunks)
                     sync_mgr.update_sync_state(m["mount_id"], f)
                 except Exception as file_err:
                     logger.warning(f"同步单个文件失败 ({f.title}): {file_err}")
+
+            if mount_new_chunks:
+                # 同步更新独立知识库资产存储
+                from ...kb.manager import KBLifecycleManager
+                from ...kb.storage import KBStorageManager
+                kb_id = f"kb_{m['mount_id']}"
+                KBStorageManager.upsert_chunks_to_version_db(
+                    kb_id=kb_id,
+                    version="v1.0.0",
+                    chunks=mount_new_chunks,
+                )
         except Exception as prov_err:
             logger.warning(f"挂载源 {m['mount_name']} 增量拉取失败: {prov_err}")
             sync_warnings.append(f"【{m['mount_name']}】拉取异常: {prov_err}")
+
+    # 触发自动纳管与元数据同步
+    try:
+        from ...kb.manager import KBLifecycleManager
+        await KBLifecycleManager.auto_adopt_mounted_kbs()
+    except Exception as e:
+        logger.debug(f"同步后自动纳管: {e}")
 
     if total_new_chunks == 0 and sync_warnings:
         return {

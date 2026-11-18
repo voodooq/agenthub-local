@@ -60,13 +60,14 @@ class WebDAVProvider(CloudVFSProvider):
         except Exception:
             return False
 
-    def _get_http_client(self, timeout: float = 30.0) -> httpx.AsyncClient:
+    def _get_http_client(self, timeout: float = 15.0) -> httpx.AsyncClient:
         """获取具备代理隔离与重定向跟踪的 AsyncClient。"""
         # 若为本地或私有网络，强制关闭环境代理 (trust_env=False)，避免本地请求被外部翻墙代理拦截
         trust_env = not self._is_local
+        client_timeout = httpx.Timeout(connect=5.0, read=timeout, write=10.0, pool=5.0)
         return httpx.AsyncClient(
             auth=self._auth,
-            timeout=timeout,
+            timeout=client_timeout,
             trust_env=trust_env,
             follow_redirects=True,
         )
@@ -166,10 +167,17 @@ class WebDAVProvider(CloudVFSProvider):
                         "Content-Type": "application/xml; charset=utf-8",
                     }
 
-                    resp = await client.request("PROPFIND", target_url, headers=headers, content=propfind_body)
-                    if resp.status_code not in (200, 207):
-                        # 若带 body 被拒绝，尝试不带 body 发送纯 PROPFIND (RFC 4918 allprop 缺省模式)
-                        resp = await client.request("PROPFIND", target_url, headers={"Depth": "1"})
+                    try:
+                        resp = await client.request("PROPFIND", target_url, headers=headers, content=propfind_body)
+                        if resp.status_code not in (200, 207):
+                            # 若带 body 被拒绝，尝试不带 body 发送纯 PROPFIND (RFC 4918 allprop 缺省模式)
+                            resp = await client.request("PROPFIND", target_url, headers={"Depth": "1"})
+                    except httpx.TimeoutException as te:
+                        logger.warning(f"WebDAV 目录 [{norm_path}] PROPFIND 超时，跳过该子目录继续处理其余目录: {te}")
+                        continue
+                    except Exception as req_err:
+                        logger.warning(f"WebDAV 目录 [{norm_path}] 请求失败: {req_err}")
+                        continue
 
                     if resp.status_code not in (200, 207):
                         logger.warning(f"WebDAV 目录 [{norm_path}] PROPFIND 失败: HTTP {resp.status_code}")

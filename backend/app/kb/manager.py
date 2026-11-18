@@ -7,6 +7,7 @@ AgentHub Local v1.5.8 知识库生命周期管理核心 (KB Lifecycle Manager)
 4. 检索命中率测试台 (Retrieval Playground) 执行。
 """
 import json
+from pathlib import Path
 import time
 from typing import Any
 import aiosqlite
@@ -199,8 +200,117 @@ class KBLifecycleManager:
         }
 
     @classmethod
+    async def auto_adopt_mounted_kbs(cls) -> None:
+        """自动扫描云端挂载源并纳管已在工作区中训练切片的独立知识库资产。"""
+        try:
+            from ..api.v1.knowledge import _load_mounts
+            mounts = _load_mounts()
+            if not mounts:
+                return
+
+            candidate_dbs: list[Path] = []
+            default_index = Path(".agenthub") / "index.db"
+            if default_index.exists():
+                candidate_dbs.append(default_index)
+
+            workspaces_dir = Path("data") / "workspaces"
+            if workspaces_dir.exists():
+                for ws in workspaces_dir.iterdir():
+                    idx = ws / ".agenthub" / "index.db"
+                    if idx.exists():
+                        candidate_dbs.append(idx)
+
+            for m in mounts:
+                m_id = m["mount_id"]
+                kb_id = f"kb_{m_id}"
+                m_name = m["mount_name"]
+                p_type = m["provider_type"]
+
+                # 1. 确保 kb_data_sources 中有记录
+                async with db_manager.get_connection() as conn:
+                    await conn.execute(
+                        """
+                        INSERT OR IGNORE INTO kb_data_sources (
+                            source_id, name, source_type, config_json, ignore_patterns,
+                            sync_mode, default_tier, status, created_at
+                        ) VALUES (?, ?, ?, ?, '~$*,*.tmp,.git/*', 'auto_live', ?, 'active', ?)
+                        """,
+                        (m_id, m_name, p_type, json.dumps(m.get("config", {}), ensure_ascii=False), m.get("authority_tier", 2), time.time()),
+                    )
+                    cursor = await conn.execute("SELECT kb_id, chunk_count FROM knowledge_bases WHERE kb_id = ?", (kb_id,))
+                    row = await cursor.fetchone()
+                    existing_count = row["chunk_count"] if row else 0
+                    is_created = bool(row)
+
+                prefix = f"{p_type}://"
+                collected_chunks: list[dict[str, Any]] = []
+
+                for db_p in candidate_dbs:
+                    try:
+                        import sqlite3 as s3
+                        with s3.connect(str(db_p)) as c_conn:
+                            c_conn.row_factory = s3.Row
+                            cur = c_conn.cursor()
+                            cur.execute("SELECT * FROM hybrid_chunks WHERE remote_uri LIKE ?", (f"{prefix}%",))
+                            rows = cur.fetchall()
+                            for r in rows:
+                                collected_chunks.append(dict(r))
+                    except Exception:
+                        pass
+
+                # 去重
+                unique_chunks_map = {
+                    str(c.get("chunk_id") or c.get("id") or f"{c.get('remote_uri')}_{i}"): c
+                    for i, c in enumerate(collected_chunks)
+                }
+                chunks_list = list(unique_chunks_map.values())
+
+                if chunks_list and (not is_created or existing_count < len(chunks_list)):
+                    # 2. 若未创建则新建独立知识库（此时不持有任何外层 DB 锁）
+                    if not is_created:
+                        await cls.create_knowledge_base(
+                            kb_id=kb_id,
+                            name=m_name,
+                            description=f"由云端挂载源 [{m_name}] ({p_type}) 自动构建的独立规程知识库",
+                            source_id=m_id,
+                            initial_version="v1.0.0",
+                        )
+
+                    # 3. 将切片写入专属版本的独立 index.db
+                    total_chunks, disk_size = KBStorageManager.upsert_chunks_to_version_db(
+                        kb_id=kb_id,
+                        version="v1.0.0",
+                        chunks=chunks_list,
+                    )
+
+                    # 4. 更新数据库元数据
+                    now = time.time()
+                    async with db_manager.get_connection() as conn:
+                        await conn.execute(
+                            """
+                            UPDATE knowledge_bases
+                            SET chunk_count = ?, disk_size_bytes = ?, updated_at = ?
+                            WHERE kb_id = ?
+                            """,
+                            (total_chunks, disk_size, now, kb_id),
+                        )
+                        await conn.execute(
+                            """
+                            UPDATE kb_versions
+                            SET chunk_count = ?, disk_size_bytes = ?
+                            WHERE kb_id = ? AND version = 'v1.0.0'
+                            """,
+                            (total_chunks, disk_size, kb_id),
+                        )
+                        await conn.commit()
+                    logger.info(f"成功自动纳管挂载源 [{m_name}] 为独立知识库 ({kb_id})：共纳入 {total_chunks} 个切片")
+        except Exception as e:
+            logger.warning(f"自动纳管知识库资产异常: {e}")
+
+    @classmethod
     async def list_knowledge_bases(cls) -> list[dict[str, Any]]:
         """获取所有知识库资产列表（包含物理磁盘占用与切片统计）。"""
+        await cls.auto_adopt_mounted_kbs()
         async with db_manager.get_connection() as conn:
             async with conn.execute("""
                 SELECT kb.*, ds.name as source_name, ds.source_type
