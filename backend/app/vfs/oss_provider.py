@@ -41,7 +41,15 @@ class OSSProvider(CloudVFSProvider):
         self.bucket = bucket.strip()
         self.access_key = access_key.strip()
         self.secret_key = secret_key.strip()
-        self.prefix = prefix.strip("/")
+        
+        # 智能提取前缀：若用户在 endpoint 路径中填写了目录（如 http://.../competitionRules/）而 prefix 为空，自动提取
+        raw = self.raw_endpoint if "://" in self.raw_endpoint else f"https://{self.raw_endpoint}"
+        parsed = urlparse(raw)
+        ep_path = parsed.path.strip("/")
+        eff_prefix = prefix.strip().strip("/")
+        if not eff_prefix and ep_path:
+            eff_prefix = ep_path
+        self.prefix = eff_prefix
         self.is_aliyun = "aliyuncs.com" in self.raw_endpoint.lower()
 
     def _normalize_request_target(self, object_key: str = "", query: str = "") -> tuple[str, str, str]:
@@ -177,12 +185,33 @@ class OSSProvider(CloudVFSProvider):
                     if key_node is None or not key_node.text:
                         continue
                     key = key_node.text
+                    # 边界约束：若配置了目录前缀，严格仅收录该前缀范围内的文件，防止扫描外部目录
+                    if self.prefix:
+                        p_norm = self.prefix.rstrip("/")
+                        if not (key == p_norm or key.startswith(p_norm + "/")):
+                            continue
 
                     size_node = content.find("{http://s3.amazonaws.com/doc/2006-03-01/}Size") or content.find("Size")
                     size = int(size_node.text) if size_node is not None and size_node.text else 0
 
                     etag_node = content.find("{http://s3.amazonaws.com/doc/2006-03-01/}ETag") or content.find("ETag")
                     etag = etag_node.text.strip('"') if etag_node is not None and etag_node.text else ""
+
+                    # 解析真实修改时间戳 LastModified (ISO-8601 格式)，严禁使用 time.time() 导致每次增量判定失真
+                    mtime_node = content.find("{http://s3.amazonaws.com/doc/2006-03-01/}LastModified") or content.find("LastModified")
+                    mtime_val = 0.0
+                    if mtime_node is not None and mtime_node.text:
+                        raw_date = mtime_node.text.strip()
+                        try:
+                            clean_date = raw_date.replace("Z", "+00:00")
+                            dt = datetime.fromisoformat(clean_date)
+                            mtime_val = dt.timestamp()
+                        except Exception:
+                            try:
+                                dt = email.utils.parsedate_to_datetime(raw_date)
+                                mtime_val = dt.timestamp()
+                            except Exception:
+                                mtime_val = 0.0
 
                     remote_uri = f"oss://{self.bucket}/{key}"
                     title = key.split("/")[-1]
@@ -193,7 +222,7 @@ class OSSProvider(CloudVFSProvider):
                             title=title,
                             size=size,
                             etag=etag,
-                            mtime=time.time(),
+                            mtime=mtime_val,
                             is_dir=key.endswith("/"),
                             authority_tier=self.authority_tier,
                         )

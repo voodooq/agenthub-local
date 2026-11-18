@@ -37,7 +37,8 @@ class WebDAVProvider(CloudVFSProvider):
         self.base_url = base_url.strip().rstrip("/")
         self.username = username.strip()
         self.password = password.strip()
-        clean_root = "/" + root_path.strip().strip("/")
+        # 统一规范化 root_path（自动解除 %20 等 URL 转义，保留真实目录字符串）
+        clean_root = "/" + unquote(root_path.strip()).strip("/")
         self.root_path = clean_root if clean_root != "/" else "/"
         self._auth = (self.username, self.password) if self.username else None
         self._is_local = self._check_is_local(self.base_url)
@@ -143,6 +144,7 @@ class WebDAVProvider(CloudVFSProvider):
         """通过 BFS 广度优先递归遍历 WebDAV 目录树 (Depth: 1 逐层展开，完美兼容 Alist/NAS)。"""
         files: list[CloudFileMeta] = []
         visited_dirs: set[str] = set()
+        norm_root = "/" + unquote(self.root_path).strip("/")
         queue: deque[str] = deque([self.root_path])
         max_dirs = 200  # 防止死循环保护阈值
 
@@ -245,10 +247,19 @@ class WebDAVProvider(CloudVFSProvider):
 
                         if is_dir:
                             if recursive:
-                                # 将子目录加入遍历队列
+                                # 将子目录加入遍历队列，严格限制在用户指定的根目录范围内
                                 sub_dir_path = clean_href_sub if clean_href_sub else clean_href_path
-                                if sub_dir_path not in visited_dirs and sub_dir_path not in queue:
-                                    queue.append(sub_dir_path)
+                                clean_sub = "/" + sub_dir_path.strip("/")
+                                if norm_root != "/" and clean_sub != norm_root and not clean_sub.startswith(norm_root + "/"):
+                                    continue
+                                if clean_sub not in visited_dirs and clean_sub not in queue:
+                                    queue.append(clean_sub)
+                            continue
+
+                        # 过滤非本根目录范围内的文件
+                        file_full_path = clean_href_sub if clean_href_sub else clean_href_path
+                        clean_file = "/" + file_full_path.strip("/")
+                        if norm_root != "/" and not clean_file.startswith(norm_root + "/"):
                             continue
 
                         # 长度与修改时间
@@ -293,7 +304,15 @@ class WebDAVProvider(CloudVFSProvider):
             err_msg = str(e) or repr(e) or type(e).__name__
             logger.warning(f"WebDAV 遍历异常: {err_msg}", exc_info=True)
 
-        return files
+        # 严格按 remote_uri 去重，防止重定向或父子遍历导致同一个文件出现多次
+        seen_uris: set[str] = set()
+        unique_files: list[CloudFileMeta] = []
+        for f in files:
+            if f.remote_uri not in seen_uris:
+                seen_uris.add(f.remote_uri)
+                unique_files.append(f)
+
+        return unique_files
 
     async def download_stream(self, remote_uri: str) -> bytes:
         """流式拉取 WebDAV 文件内容（支持 302 外部重定向与中文/空格编码）。"""

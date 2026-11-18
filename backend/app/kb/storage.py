@@ -58,16 +58,28 @@ class KBStorageManager:
         conn = sqlite3.connect(str(db_path))
         try:
             from ..search.light_graph_rag import LightGraphRAGEngine
+            actual_written = 0
             with conn:
+                # 预读已有切片 ID 与内容哈希，严格比对已有内容，避免盲目重写与 FTS5 索引无脑膨胀
+                cur = conn.cursor()
+                cur.execute("SELECT id, content FROM hybrid_chunks")
+                existing_map = {r[0]: hashlib.md5(r[1].encode("utf-8")).hexdigest() for r in cur.fetchall()}
+
                 for c in chunks:
+                    content = c.get("content_text") or c.get("content") or ""
                     chunk_id = str(
                         c.get("chunk_id")
                         or c.get("id")
                         or hashlib.md5(
-                            f"{c['remote_uri']}:{c.get('section_path', '')}:{c.get('content_text', '')[:64]}".encode("utf-8")
+                            f"{c['remote_uri']}:{c.get('section_path', '')}:{content[:64]}".encode("utf-8")
                         ).hexdigest()
                     )
-                    content = c.get("content_text") or c.get("content") or ""
+                    content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+
+                    # 核心对比防无脑叠加：内容未变且 ID 存在时跳过
+                    if chunk_id in existing_map and existing_map[chunk_id] == content_hash:
+                        continue
+
                     title = c.get("title") or Path(c["remote_uri"]).name
                     tier = c.get("authority_tier", 2)
                     mtime = c.get("mtime", now)
@@ -82,6 +94,7 @@ class KBStorageManager:
                         """,
                         (chunk_id, c["remote_uri"], title, content, tier, mtime, etag, blob, now),
                     )
+                    actual_written += 1
 
                     # 提取并写入启发式知识三元组
                     triples = LightGraphRAGEngine.extract_triples_from_text(
@@ -102,6 +115,9 @@ class KBStorageManager:
                 total_chunks = cursor.fetchone()[0]
                 cursor.execute("SELECT count(*) FROM knowledge_triples")
                 total_triples = cursor.fetchone()[0]
+
+            if actual_written > 0:
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
         finally:
             conn.close()
 
@@ -171,9 +187,104 @@ class KBStorageManager:
                 triple_count=total_triples,
                 changelog=f"全量图谱三元组抽取构建完成，共生成 {total_triples} 条关系边",
             )
+            try:
+                from ..repository.db import db_manager
+                import asyncio
+                async def _sync_counts():
+                    async with db_manager.get_connection() as mconn:
+                        await mconn.execute(
+                            "UPDATE knowledge_bases SET triple_count = ?, chunk_count = ?, updated_at = ? WHERE kb_id = ?",
+                            (total_triples, total_chunks, now, kb_id),
+                        )
+                        await mconn.execute(
+                            "UPDATE kb_versions SET triple_count = ?, chunk_count = ? WHERE kb_id = ? AND version = ?",
+                            (total_triples, total_chunks, kb_id, version),
+                        )
+                        await mconn.commit()
+                # 若已处于事件循环中则安排任务，否则创建一次性运行
+                try:
+                    loop = asyncio.get_running_loop()
+                    loop.create_task(_sync_counts())
+                except RuntimeError:
+                    asyncio.run(_sync_counts())
+            except Exception as e:
+                logger.debug(f"同步三元组统计至元数据表: {e}")
+
             return total_triples
         finally:
             conn.close()
+
+    @classmethod
+    def clean_invalid_chunks_for_kb(
+        cls,
+        kb_id: str,
+        version: str,
+        valid_prefix: str,
+        valid_subpath: str | None = None,
+    ) -> tuple[int, int, int]:
+        """清理独立知识库中不符合当前有效前缀或目录的切片，并重新校准切片数与磁盘大小。
+
+        Returns:
+            (deleted_count, remaining_chunks, disk_size)
+        """
+        db_path = cls.get_version_db_path(kb_id, version)
+        if not db_path.exists():
+            return 0, 0, 0
+
+        conn = sqlite3.connect(str(db_path))
+        deleted_count = 0
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id, remote_uri FROM hybrid_chunks")
+            rows = cur.fetchall()
+            bad_ids = []
+            for cid, uri in rows:
+                is_ok = uri.startswith(valid_prefix)
+                if is_ok and valid_subpath and valid_subpath != "/":
+                    sub = uri[len(valid_prefix):]
+                    from urllib.parse import unquote
+                    clean_norm = "/" + unquote(sub).strip("/")
+                    if not clean_norm.startswith(valid_subpath):
+                        is_ok = False
+                if not is_ok:
+                    bad_ids.append(cid)
+
+            if bad_ids:
+                deleted_count = len(bad_ids)
+                placeholders = ",".join("?" for _ in bad_ids)
+                cur.execute(f"DELETE FROM hybrid_chunks WHERE id IN ({placeholders})", bad_ids)
+                try:
+                    cur.execute(f"DELETE FROM knowledge_triples WHERE chunk_id IN ({placeholders})", bad_ids)
+                except Exception:
+                    pass
+                conn.commit()
+                # 触发 FTS5 彻底重构与 SQLite 物理瘦身，彻底阻断空间虚高膨胀
+                try:
+                    conn.execute("INSERT INTO hybrid_chunks_fts(hybrid_chunks_fts) VALUES('rebuild');")
+                    conn.commit()
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                    conn.execute("VACUUM;")
+                except Exception:
+                    pass
+
+            cur.execute("SELECT count(*) FROM hybrid_chunks")
+            remaining_chunks = cur.fetchone()[0]
+            cur.execute("SELECT count(*) FROM knowledge_triples")
+            remaining_triples = cur.fetchone()[0]
+        finally:
+            conn.close()
+
+        manifest = cls.write_manifest(
+            kb_id=kb_id,
+            version=version,
+            embedding_model="null_offline_lexical",
+            embedding_dim=768,
+            chunk_count=remaining_chunks,
+            triple_count=remaining_triples,
+            changelog=f"隔离清理完成：移除非当前挂载目录/前缀的 {deleted_count} 个切片" if deleted_count > 0 else "切片完整性校验完成",
+        )
+        disk_size = manifest.get("disk_size_bytes", 0)
+        return deleted_count, remaining_chunks, disk_size
 
     @classmethod
     def get_version_db_path(cls, kb_id: str, version: str) -> Path:
@@ -381,12 +492,18 @@ class KBStorageManager:
                 except Exception as e:
                     logger.warning(f"清理旧版本目录 [{child}] 失败: {e}")
 
-        # 对保留活跃的各版本执行 VACUUM
+        # 对保留活跃的各版本执行 FTS5 重建与 VACUUM 深度瘦身
         for ver in keep_set:
             db_p = cls.get_version_db_path(kb_id, ver)
             if db_p.exists():
                 try:
                     conn = sqlite3.connect(str(db_p))
+                    try:
+                        conn.execute("INSERT INTO hybrid_chunks_fts(hybrid_chunks_fts) VALUES('rebuild');")
+                        conn.commit()
+                    except Exception:
+                        pass
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
                     conn.execute("VACUUM;")
                     conn.close()
                 except Exception:

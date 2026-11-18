@@ -225,6 +225,37 @@ class KBLifecycleManager:
                 kb_id = f"kb_{m_id}"
                 m_name = m["mount_name"]
                 p_type = m["provider_type"]
+                cfg = m.get("config", {})
+
+                # 严格计算属于本挂载源的 valid_prefix 与 valid_subpath（防止跨挂载源或越界目录匹配）
+                valid_prefix = ""
+                valid_subpath = None
+                if p_type == "webdav":
+                    # WebDAV remote_uri 格式: webdav://{m_id}{rel_path}
+                    valid_prefix = f"webdav://{m_id}"
+                    root_p = cfg.get("root_path", "").strip()
+                    if root_p and root_p != "/":
+                        from urllib.parse import unquote
+                        valid_subpath = "/" + unquote(root_p).strip("/")
+                elif p_type == "oss":
+                    bucket = cfg.get("bucket", "").strip()
+                    prefix = cfg.get("prefix", "").strip()
+                    ep = cfg.get("endpoint", "").strip()
+                    if not prefix and ep:
+                        from urllib.parse import urlparse
+                        ep_p = urlparse(ep if "://" in ep else f"http://{ep}").path.strip("/")
+                        if ep_p:
+                            prefix = ep_p
+                    clean_prefix = prefix.strip("/")
+                    if clean_prefix:
+                        valid_prefix = f"oss://{bucket}/{clean_prefix}"
+                    else:
+                        valid_prefix = f"oss://{bucket}/"
+                elif p_type == "wecom":
+                    space_id = cfg.get("space_id", "").strip()
+                    valid_prefix = f"wecom://{space_id}/"
+                else:
+                    valid_prefix = f"{p_type}://{m_id}"
 
                 # 1. 确保 kb_data_sources 中有记录
                 async with db_manager.get_connection() as conn:
@@ -235,26 +266,56 @@ class KBLifecycleManager:
                             sync_mode, default_tier, status, created_at
                         ) VALUES (?, ?, ?, ?, '~$*,*.tmp,.git/*', 'auto_live', ?, 'active', ?)
                         """,
-                        (m_id, m_name, p_type, json.dumps(m.get("config", {}), ensure_ascii=False), m.get("authority_tier", 2), time.time()),
+                        (m_id, m_name, p_type, json.dumps(cfg, ensure_ascii=False), m.get("authority_tier", 2), time.time()),
                     )
                     cursor = await conn.execute("SELECT kb_id, chunk_count FROM knowledge_bases WHERE kb_id = ?", (kb_id,))
                     row = await cursor.fetchone()
                     existing_count = row["chunk_count"] if row else 0
                     is_created = bool(row)
 
-                prefix = f"{p_type}://"
-                collected_chunks: list[dict[str, Any]] = []
+                # 2. 清理独立库中不属于该挂载源的切片（防止把历史测试或其他目录的切片串入）
+                del_count, remaining, disk_sz = KBStorageManager.clean_invalid_chunks_for_kb(
+                    kb_id=kb_id,
+                    version="v1.0.0",
+                    valid_prefix=valid_prefix,
+                    valid_subpath=valid_subpath,
+                )
+                if del_count > 0:
+                    logger.info(f"知识库 {m_name} ({kb_id}) 已隔离清洗 {del_count} 个越界/混淆切片，剩余 {remaining} 个有效切片")
+                    now = time.time()
+                    async with db_manager.get_connection() as conn:
+                        await conn.execute(
+                            "UPDATE knowledge_bases SET chunk_count = ?, disk_size_bytes = ?, updated_at = ? WHERE kb_id = ?",
+                            (remaining, disk_sz, now, kb_id),
+                        )
+                        await conn.execute(
+                            "UPDATE kb_versions SET chunk_count = ?, disk_size_bytes = ? WHERE kb_id = ? AND version = 'v1.0.0'",
+                            (remaining, disk_sz, kb_id),
+                        )
+                        await conn.commit()
+                    existing_count = remaining
 
+                # 3. 从工作区 candidate_dbs 中严格收集属于该挂载源且符合目录的切片
+                collected_chunks: list[dict[str, Any]] = []
                 for db_p in candidate_dbs:
                     try:
                         import sqlite3 as s3
                         with s3.connect(str(db_p)) as c_conn:
                             c_conn.row_factory = s3.Row
                             cur = c_conn.cursor()
-                            cur.execute("SELECT * FROM hybrid_chunks WHERE remote_uri LIKE ?", (f"{prefix}%",))
+                            cur.execute("SELECT * FROM hybrid_chunks WHERE remote_uri LIKE ?", (f"{valid_prefix}%",))
                             rows = cur.fetchall()
                             for r in rows:
-                                collected_chunks.append(dict(r))
+                                uri = r["remote_uri"]
+                                is_ok = True
+                                if valid_subpath and valid_subpath != "/":
+                                    sub = uri[len(valid_prefix):]
+                                    from urllib.parse import unquote
+                                    clean_norm = "/" + unquote(sub).strip("/")
+                                    if not clean_norm.startswith(valid_subpath):
+                                        is_ok = False
+                                if is_ok:
+                                    collected_chunks.append(dict(r))
                     except Exception:
                         pass
 
@@ -266,7 +327,7 @@ class KBLifecycleManager:
                 chunks_list = list(unique_chunks_map.values())
 
                 if chunks_list and (not is_created or existing_count < len(chunks_list)):
-                    # 2. 若未创建则新建独立知识库（此时不持有任何外层 DB 锁）
+                    # 4. 若未创建则新建独立知识库（此时不持有任何外层 DB 锁）
                     if not is_created:
                         await cls.create_knowledge_base(
                             kb_id=kb_id,
@@ -276,14 +337,14 @@ class KBLifecycleManager:
                             initial_version="v1.0.0",
                         )
 
-                    # 3. 将切片写入专属版本的独立 index.db
+                    # 5. 将切片写入专属版本的独立 index.db
                     total_chunks, disk_size = KBStorageManager.upsert_chunks_to_version_db(
                         kb_id=kb_id,
                         version="v1.0.0",
                         chunks=chunks_list,
                     )
 
-                    # 4. 更新数据库元数据
+                    # 6. 更新数据库元数据
                     now = time.time()
                     async with db_manager.get_connection() as conn:
                         await conn.execute(
