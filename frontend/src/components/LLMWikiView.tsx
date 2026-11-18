@@ -28,9 +28,14 @@ import {
   X,
   Zap,
   Network,
+  Upload,
+  Download,
+  History,
 } from 'lucide-react';
 import { Workspace } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
+import { KBImportConflictModal } from './KBImportConflictModal';
+import { KBVersionDrawer } from './KBVersionDrawer';
 
 interface LLMWikiViewProps {
   workspace?: Workspace;
@@ -114,6 +119,84 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [triplesPage, setTriplesPage] = useState<number>(1);
   const [triplesSearchQuery, setTriplesSearchQuery] = useState<string>('');
   const [extractingGraphKbId, setExtractingGraphKbId] = useState<string | null>(null);
+
+  // ── v1.5.9 导入导出与版本抽屉状态 ──
+  const [versionDrawerKb, setVersionDrawerKb] = useState<KnowledgeBaseItem | null>(null);
+  const [conflictModalOpen, setConflictModalOpen] = useState(false);
+  const [pendingConflictData, setPendingConflictData] = useState<any | null>(null);
+  const [currentImportFile, setCurrentImportFile] = useState<File | null>(null);
+  const [isImporting, setIsImporting] = useState(false);
+  const [exportingKbId, setExportingKbId] = useState<string | null>(null);
+
+  const handleExportBundle = async (kb: KnowledgeBaseItem) => {
+    setExportingKbId(kb.kb_id);
+    try {
+      const response = await fetch(`/api/v1/kb/${kb.kb_id}/export`);
+      if (!response.ok) {
+        throw new Error(`导出失败: ${response.statusText}`);
+      }
+      const blob = await response.blob();
+      const url = window.URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const safeName = kb.name.replace(/[\\/*?:"<>|]/g, '_');
+      a.download = `${safeName}_${kb.active_version}.ahkb`;
+      document.body.appendChild(a);
+      a.click();
+      window.URL.revokeObjectURL(url);
+      document.body.removeChild(a);
+    } catch (err: any) {
+      alert(`导出知识包失败: ${err.message || err}`);
+    } finally {
+      setExportingKbId(null);
+    }
+  };
+
+  const handleImportFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setCurrentImportFile(file);
+    await doImportBundle(file, 'ask');
+    e.target.value = '';
+  };
+
+  const doImportBundle = async (file: File, strategy: string) => {
+    setIsImporting(true);
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('conflict_strategy', strategy);
+
+    try {
+      const res = await fetch('/api/v1/kb/import', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await res.json();
+      if (!res.ok || !data.success) {
+        throw new Error(data.detail || data.message || '导入异常');
+      }
+
+      const resData = data.data;
+      if (resData.status === 'identical_skipped') {
+        alert(resData.message || '内容一致，已自动跳过重复导入。');
+      } else if (resData.status === 'conflict_confirm_required') {
+        setPendingConflictData(resData);
+        setConflictModalOpen(true);
+      } else if (resData.status === 'backed_up_and_overwritten') {
+        alert(`已备份原版本并成功覆盖导入！新版本: ${resData.new_version}`);
+        setConflictModalOpen(false);
+        loadKBs();
+      } else if (resData.status === 'imported_new') {
+        alert('知识包已成功导入为新知识库！');
+        setConflictModalOpen(false);
+        loadKBs();
+      }
+    } catch (err: any) {
+      alert(`导入知识包失败: ${err.message || err}`);
+    } finally {
+      setIsImporting(false);
+    }
+  };
 
   useEffect(() => {
     loadMounts();
@@ -1102,6 +1185,21 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                         <span>清空全部</span>
                       </button>
                     )}
+                    <label
+                      className={`flex items-center gap-1 px-2.5 py-1 text-xs text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg border border-blue-200 dark:border-blue-900/60 transition-colors cursor-pointer ${
+                        isImporting ? 'opacity-50 pointer-events-none' : ''
+                      }`}
+                      title="导入免重新训练的 .ahkb 离线知识包"
+                    >
+                      <Upload className="w-3.5 h-3.5" />
+                      <span>{isImporting ? '导入中...' : '导入知识包 (.ahkb)'}</span>
+                      <input
+                        type="file"
+                        accept=".ahkb,.zip"
+                        onChange={handleImportFileSelect}
+                        className="hidden"
+                      />
+                    </label>
                     <button
                       onClick={loadKBs}
                       disabled={loadingKbs}
@@ -1119,7 +1217,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                       <Database className="w-8 h-8 text-muted-foreground/40 mx-auto" />
                       <div>暂无已训练的知识库资产</div>
                       <p className="text-[11px] text-muted-foreground/80 max-w-[240px] mx-auto">
-                        请在上方点击“一键启动知识库增量训练与切片”生成第一个知识库
+                        请在上方点击“一键启动知识库增量训练与切片”生成第一个知识库，或直接导入 .ahkb 知识包
                       </p>
                     </div>
                   ) : (
@@ -1138,9 +1236,18 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                           <div className="flex items-center justify-between gap-3">
                             <div className="flex items-center gap-2 min-w-0 flex-1">
                               <span className="font-semibold text-sm text-foreground truncate" title={kb.name}>{kb.name}</span>
-                              <span className="px-2 py-0.5 rounded font-mono text-[10px] bg-surface-200 text-foreground border border-border shrink-0">
-                                {kb.active_version}
-                              </span>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setVersionDrawerKb(kb);
+                                }}
+                                className="px-2 py-0.5 rounded font-mono text-[10px] bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 shrink-0 hover:bg-blue-500/20 transition flex items-center gap-1"
+                                title="点击打开版本管理与回滚抽屉"
+                              >
+                                <History className="w-3 h-3" />
+                                <span>{kb.active_version}</span>
+                              </button>
                               <span
                                 className={`px-2 py-0.5 rounded text-[10px] font-medium shrink-0 ${
                                   kb.ownership_type === 'subscribed_ro'
@@ -1159,6 +1266,20 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                             </div>
 
                             <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                disabled={exportingKbId === kb.kb_id}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleExportBundle(kb);
+                                }}
+                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 bg-blue-500/10 hover:bg-blue-500/15 rounded-lg border border-blue-500/20 transition-all font-medium whitespace-nowrap"
+                                title="导出为免重新训练的 .ahkb 离线归档包"
+                              >
+                                <Download className="w-3.5 h-3.5 text-blue-500" />
+                                <span>{exportingKbId === kb.kb_id ? '导出中...' : '导出包'}</span>
+                              </button>
+
                               <button
                                 type="button"
                                 onClick={(e) => {
@@ -2303,6 +2424,43 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
             </div>
           </div>
         </div>
+      )}
+
+      {/* v1.5.9 版本冲突仲裁弹窗 */}
+      <KBImportConflictModal
+        isOpen={conflictModalOpen}
+        onClose={() => setConflictModalOpen(false)}
+        kbName={pendingConflictData?.manifest?.kb_name || '知识库'}
+        localVersion={pendingConflictData?.local_version || 'v1.0.0'}
+        localMd5={pendingConflictData?.local_md5 || ''}
+        incomingVersion={pendingConflictData?.incoming_version || 'v1.0.0'}
+        incomingMd5={pendingConflictData?.incoming_md5 || ''}
+        diff={pendingConflictData?.diff || null}
+        isProcessing={isImporting}
+        onConfirmOverwrite={() => {
+          if (currentImportFile) {
+            doImportBundle(currentImportFile, 'backup_and_overwrite');
+          }
+        }}
+        onImportAsNew={() => {
+          if (currentImportFile) {
+            doImportBundle(currentImportFile, 'import_as_new');
+          }
+        }}
+      />
+
+      {/* v1.5.9 版本演进与回滚抽屉 */}
+      {versionDrawerKb && (
+        <KBVersionDrawer
+          isOpen={!!versionDrawerKb}
+          onClose={() => setVersionDrawerKb(null)}
+          kbId={versionDrawerKb.kb_id}
+          kbName={versionDrawerKb.name}
+          currentVersion={versionDrawerKb.active_version}
+          onRollbackSuccess={() => {
+            loadKBs();
+          }}
+        />
       )}
     </div>
   );

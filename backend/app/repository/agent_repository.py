@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS agent_profiles (
     allowed_tools_json TEXT NOT NULL DEFAULT '[]',
     allowed_write_dirs_json TEXT NOT NULL DEFAULT '[]',
     grounding_config_json TEXT NOT NULL DEFAULT '{}',
+    kb_isolation_mode TEXT NOT NULL DEFAULT 'strict_bound_only',
+    strict_grounding INTEGER NOT NULL DEFAULT 1,
+    min_relevance_score REAL NOT NULL DEFAULT 0.42,
+    api_service_enabled INTEGER NOT NULL DEFAULT 0,
+    api_model_slug TEXT NOT NULL DEFAULT '',
     tools_count INTEGER NOT NULL DEFAULT 0,
     ownership TEXT NOT NULL DEFAULT 'custom' CHECK (ownership IN ('official', 'custom')),
     status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'draft')),
@@ -317,6 +322,11 @@ def _row_to_agent_dict(row: Any) -> dict[str, Any]:
     item["allowed_write_dirs"] = allowed_write_dirs
     item["grounding_config"] = raw_gc
     item["tools_count"] = int(item.get("tools_count") or len(allowed_tools))
+    item["kb_isolation_mode"] = item.get("kb_isolation_mode") or "strict_bound_only"
+    item["strict_grounding"] = int(item.get("strict_grounding") if item.get("strict_grounding") is not None else 1)
+    item["min_relevance_score"] = float(item.get("min_relevance_score") or 0.42)
+    item["api_service_enabled"] = int(item.get("api_service_enabled") or 0)
+    item["api_model_slug"] = item.get("api_model_slug") or ""
     return item
 
 
@@ -335,13 +345,25 @@ class AgentProfileRepository:
         async with db_manager.get_connection() as conn:
             await conn.executescript(AGENT_PROFILES_SCHEMA_SQL)
 
-            # 动态平滑迁移：检查现有表中是否缺失 grounding_config_json 列
+            # 动态平滑迁移：检查现有表中是否缺失列
             async with conn.execute("PRAGMA table_info(agent_profiles)") as cursor:
                 cols = [row[1] for row in await cursor.fetchall()]
                 if "grounding_config_json" not in cols:
                     await conn.execute(
                         "ALTER TABLE agent_profiles ADD COLUMN grounding_config_json TEXT NOT NULL DEFAULT '{}'"
                     )
+                for new_col, col_def in [
+                    ("kb_isolation_mode", "TEXT NOT NULL DEFAULT 'strict_bound_only'"),
+                    ("strict_grounding", "INTEGER NOT NULL DEFAULT 1"),
+                    ("min_relevance_score", "REAL NOT NULL DEFAULT 0.42"),
+                    ("api_service_enabled", "INTEGER NOT NULL DEFAULT 0"),
+                    ("api_model_slug", "TEXT NOT NULL DEFAULT ''"),
+                ]:
+                    if new_col not in cols:
+                        try:
+                            await conn.execute(f"ALTER TABLE agent_profiles ADD COLUMN {new_col} {col_def}")
+                        except Exception:
+                            pass
 
             now = _utc_now_iso()
             for seed in OFFICIAL_AGENT_SEEDS:
@@ -462,15 +484,23 @@ class AgentProfileRepository:
         grounding_config_json = json.dumps(raw_gc, ensure_ascii=False)
         now = _utc_now_iso()
 
+        kb_isolation_mode = str(data.get("kb_isolation_mode") or "strict_bound_only").strip()
+        strict_grounding = int(data.get("strict_grounding") if data.get("strict_grounding") is not None else 1)
+        min_relevance_score = float(data.get("min_relevance_score") if data.get("min_relevance_score") is not None else 0.42)
+        api_service_enabled = int(data.get("api_service_enabled") or 0)
+        api_model_slug = str(data.get("api_model_slug") or "").strip()
+
         async with db_manager.get_connection() as conn:
             await conn.execute(
                 """
                 INSERT INTO agent_profiles (
                     id, name, description, base_model, context_prompt,
                     skill_ids_json, allowed_tools_json, allowed_write_dirs_json,
-                    grounding_config_json, tools_count, ownership, status, created_at, updated_at
+                    grounding_config_json, kb_isolation_mode, strict_grounding,
+                    min_relevance_score, api_service_enabled, api_model_slug,
+                    tools_count, ownership, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'custom', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'custom', ?, ?, ?)
                 """,
                 (
                     agent_id,
@@ -482,6 +512,11 @@ class AgentProfileRepository:
                     json.dumps(allowed_tools, ensure_ascii=False),
                     json.dumps(allowed_write_dirs, ensure_ascii=False),
                     grounding_config_json,
+                    kb_isolation_mode,
+                    strict_grounding,
+                    min_relevance_score,
+                    api_service_enabled,
+                    api_model_slug,
                     tools_count,
                     status,
                     now,
@@ -556,6 +591,32 @@ class AgentProfileRepository:
             else (existing.get("grounding_config") or {})
         )
         grounding_config_json = json.dumps(grounding_config, ensure_ascii=False)
+
+        kb_isolation_mode = (
+            str(data["kb_isolation_mode"]).strip()
+            if "kb_isolation_mode" in data and data["kb_isolation_mode"] is not None
+            else existing["kb_isolation_mode"]
+        )
+        strict_grounding = (
+            int(data["strict_grounding"])
+            if "strict_grounding" in data and data["strict_grounding"] is not None
+            else existing["strict_grounding"]
+        )
+        min_relevance_score = (
+            float(data["min_relevance_score"])
+            if "min_relevance_score" in data and data["min_relevance_score"] is not None
+            else existing["min_relevance_score"]
+        )
+        api_service_enabled = (
+            int(data["api_service_enabled"])
+            if "api_service_enabled" in data and data["api_service_enabled"] is not None
+            else existing["api_service_enabled"]
+        )
+        api_model_slug = (
+            str(data["api_model_slug"]).strip()
+            if "api_model_slug" in data and data["api_model_slug"] is not None
+            else existing["api_model_slug"]
+        )
         now = _utc_now_iso()
 
         async with db_manager.get_connection() as conn:
@@ -564,7 +625,9 @@ class AgentProfileRepository:
                 UPDATE agent_profiles
                 SET name = ?, description = ?, base_model = ?, context_prompt = ?,
                     skill_ids_json = ?, allowed_tools_json = ?, allowed_write_dirs_json = ?,
-                    grounding_config_json = ?, tools_count = ?, status = ?, updated_at = ?
+                    grounding_config_json = ?, kb_isolation_mode = ?, strict_grounding = ?,
+                    min_relevance_score = ?, api_service_enabled = ?, api_model_slug = ?,
+                    tools_count = ?, status = ?, updated_at = ?
                 WHERE id = ? AND ownership = 'custom'
                 """,
                 (
@@ -576,6 +639,11 @@ class AgentProfileRepository:
                     json.dumps(allowed_tools, ensure_ascii=False),
                     json.dumps(allowed_write_dirs, ensure_ascii=False),
                     grounding_config_json,
+                    kb_isolation_mode,
+                    strict_grounding,
+                    min_relevance_score,
+                    api_service_enabled,
+                    api_model_slug,
                     tools_count,
                     status,
                     now,

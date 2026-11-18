@@ -348,3 +348,247 @@ class AstChunker:
                 break
             start += max_chars - overlap
         return results
+
+
+@dataclass
+class HierarchicalChunk:
+    """父子分层切片模型 (v1.5.9+)"""
+    id: str
+    chunk_role: str  # 'parent' | 'child' | 'hype_question'
+    parent_chunk_id: str | None
+    section_path: str
+    content_text: str
+    title: str
+    remote_uri: str
+    authority_tier: int = 2
+    doc_year: int = 0
+    effective_date: str = ""
+    effective_ts: int = 0
+    doc_priority_type: str = "normal"
+    topic_cluster_id: str = ""
+    is_latest_in_cluster: int = 1
+    mtime: float = 0.0
+
+
+class ParentChildASTChunker:
+    """父子分层结构化切分器 (ParentChildASTChunker)。
+    
+    1. 父切片 (Parent Chunk): 目标 1000~1500 字，按公文标题层级或 Markdown 章节聚合；
+       对连续 '|' 开头的 Markdown 表格执行原子保护，整表不跨切片截断；
+    2. 子切片 (Child Chunk): 目标 200~280 字 (40 字重叠)，注入来源与章节元数据前缀，
+       绑定所属 parent_chunk_id，用于向量化与全文召回；
+    """
+
+    PARENT_MAX_CHARS = 1400
+    CHILD_MAX_CHARS = 260
+    CHILD_OVERLAP_CHARS = 40
+
+    # 中文公文与 Markdown 标题正则匹配器
+    SECTION_HEADER_RE = re.compile(
+        r"^(?:"
+        r"#{1,4}\s+.+|"  # Markdown 标题 # ## ### ####
+        r"[第][一二三四五六七八九十百]+[条章节部篇卷]\s*.+|"  # 第一条 / 第一章
+        r"[一二三四五六七八九十]+[、.]\s*.+|"  # 一、 竞赛办法
+        r"[(（][一二三四五六七八九十]+[)）]\s*.+|"  # (一) 器材装备
+        r"\d{1,2}[、.]\s*.+"  # 1. 2.
+        r")$",
+        re.MULTILINE,
+    )
+
+    @classmethod
+    def chunk_document(
+        cls,
+        text: str,
+        filename: str,
+        remote_uri: str,
+        authority_tier: int = 2,
+        doc_year: int = 0,
+        effective_date: str = "",
+        effective_ts: int = 0,
+        doc_priority_type: str = "normal",
+        topic_cluster_id: str = "",
+        is_latest_in_cluster: int = 1,
+        mtime: float = 0.0,
+    ) -> list[HierarchicalChunk]:
+        """将规程或文档切分为父子两级切片。"""
+        if not text.strip():
+            return []
+
+        import hashlib
+
+        # 1. 提取并保护 Markdown 表格块 (将连续 table 行整块保护)
+        cleaned_text = cls._preserve_markdown_tables(text)
+
+        # 2. 按标题和段落分段聚合父切片
+        parent_blocks = cls._aggregate_parent_blocks(cleaned_text, filename)
+
+        all_chunks: list[HierarchicalChunk] = []
+
+        for p_idx, (sec_path, p_content) in enumerate(parent_blocks, 1):
+            p_content_hash = hashlib.md5(p_content.encode("utf-8")).hexdigest()
+            parent_id = hashlib.md5(f"parent:{remote_uri}:{sec_path}:{p_content_hash}".encode("utf-8")).hexdigest()
+
+            # 写入父切片
+            parent_chunk = HierarchicalChunk(
+                id=parent_id,
+                chunk_role="parent",
+                parent_chunk_id=None,
+                section_path=sec_path,
+                content_text=p_content,
+                title=filename,
+                remote_uri=remote_uri,
+                authority_tier=authority_tier,
+                doc_year=doc_year,
+                effective_date=effective_date,
+                effective_ts=effective_ts,
+                doc_priority_type=doc_priority_type,
+                topic_cluster_id=topic_cluster_id,
+                is_latest_in_cluster=is_latest_in_cluster,
+                mtime=mtime,
+            )
+            all_chunks.append(parent_chunk)
+
+            # 3. 在父切片内部切割子切片 (Child Chunks)
+            child_texts = cls._split_into_children(p_content, cls.CHILD_MAX_CHARS, cls.CHILD_OVERLAP_CHARS)
+            for c_idx, c_raw in enumerate(child_texts, 1):
+                # 拼接时空上下文强元数据前缀
+                date_str = effective_date or (str(doc_year) if doc_year else "通用")
+                header_prefix = f"【来源】{filename} (生效日期: {date_str}) | 【章节】{sec_path}\n"
+                child_content = header_prefix + c_raw
+
+                c_hash = hashlib.md5(child_content.encode("utf-8")).hexdigest()
+                child_id = hashlib.md5(f"child:{parent_id}:{c_idx}:{c_hash}".encode("utf-8")).hexdigest()
+
+                child_chunk = HierarchicalChunk(
+                    id=child_id,
+                    chunk_role="child",
+                    parent_chunk_id=parent_id,
+                    section_path=f"{sec_path}#c{c_idx}",
+                    content_text=child_content,
+                    title=filename,
+                    remote_uri=remote_uri,
+                    authority_tier=authority_tier,
+                    doc_year=doc_year,
+                    effective_date=effective_date,
+                    effective_ts=effective_ts,
+                    doc_priority_type=doc_priority_type,
+                    topic_cluster_id=topic_cluster_id,
+                    is_latest_in_cluster=is_latest_in_cluster,
+                    mtime=mtime,
+                )
+                all_chunks.append(child_chunk)
+
+        return all_chunks
+
+    @classmethod
+    def _preserve_markdown_tables(cls, text: str) -> str:
+        """保护 Markdown 表格：确保整表行之间无空行打断，便于作为原子块识别。"""
+        lines = text.splitlines()
+        result_lines: list[str] = []
+        in_table = False
+        for line in lines:
+            stripped = line.strip()
+            if stripped.startswith("|") and stripped.endswith("|"):
+                in_table = True
+                result_lines.append(line)
+            else:
+                if in_table and not stripped:
+                    # 表格内空行，跳过以防断表
+                    continue
+                in_table = False
+                result_lines.append(line)
+        return "\n".join(result_lines)
+
+    @classmethod
+    def _aggregate_parent_blocks(cls, text: str, filename: str) -> list[tuple[str, str]]:
+        """按标题与段落边界聚合 1000~1500 字符的父切片。"""
+        lines = text.splitlines()
+        sections: list[tuple[str, list[str]]] = []
+        current_title = "正文"
+        current_lines: list[str] = []
+
+        for line in lines:
+            stripped = line.strip()
+            if cls.SECTION_HEADER_RE.match(stripped):
+                if current_lines:
+                    sections.append((current_title, current_lines))
+                    current_lines = []
+                current_title = stripped.lstrip("#").strip()
+            current_lines.append(line)
+
+        if current_lines:
+            sections.append((current_title, current_lines))
+
+        # 将过长的单个小节再按段落聚合成 PARENT_MAX_CHARS 大小的块，整表不切断
+        parents: list[tuple[str, str]] = []
+        for sec_title, sec_lines in sections:
+            accum_lines: list[str] = []
+            accum_len = 0
+            sub_idx = 1
+            for line in sec_lines:
+                line_len = len(line) + 1
+                # 如果当前是一张 Markdown 表格的行，优先保持完整
+                if accum_len + line_len > cls.PARENT_MAX_CHARS and accum_lines and not (line.strip().startswith("|") and line.strip().endswith("|")):
+                    p_text = "\n".join(accum_lines).strip()
+                    if p_text:
+                        s_name = f"{sec_title} (分段{sub_idx})" if sub_idx > 1 else sec_title
+                        parents.append((s_name, p_text))
+                        sub_idx += 1
+                    accum_lines = []
+                    accum_len = 0
+                accum_lines.append(line)
+                accum_len += line_len
+
+            if accum_lines:
+                p_text = "\n".join(accum_lines).strip()
+                if p_text:
+                    s_name = f"{sec_title} (分段{sub_idx})" if sub_idx > 1 else sec_title
+                    parents.append((s_name, p_text))
+
+        return parents if parents else [("正文", text)]
+
+    @classmethod
+    def _split_into_children(cls, text: str, max_chars: int, overlap: int) -> list[str]:
+        """将父切片文本滑动切分为子切片。"""
+        if len(text) <= max_chars:
+            return [text.strip()]
+
+        # 优先按段落切分
+        paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
+        chunks: list[str] = []
+        cur_chunk: list[str] = []
+        cur_len = 0
+
+        for p in paragraphs:
+            p_len = len(p)
+            if cur_len + p_len > max_chars and cur_chunk:
+                joined = "\n\n".join(cur_chunk).strip()
+                if joined:
+                    chunks.append(joined)
+                cur_chunk = []
+                cur_len = 0
+            cur_chunk.append(p)
+            cur_len += p_len + 2
+
+        if cur_chunk:
+            joined = "\n\n".join(cur_chunk).strip()
+            if joined:
+                chunks.append(joined)
+
+        # 若段落聚合后仍有超过 max_chars 的（如大表格），按字符滑动窗口兜底
+        final_children: list[str] = []
+        for c in chunks:
+            if len(c) > max_chars:
+                start = 0
+                while start < len(c):
+                    end = min(start + max_chars, len(c))
+                    sub = c[start:end].strip()
+                    if sub:
+                        final_children.append(sub)
+                    if end >= len(c):
+                        break
+                    start += max_chars - overlap
+            else:
+                final_children.append(c)
+
+        return final_children if final_children else [text]

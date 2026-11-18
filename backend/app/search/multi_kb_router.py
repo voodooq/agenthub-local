@@ -6,6 +6,7 @@ AgentHub Local v1.5.8 多知识库隔离检索路由与门控中心 (Multi-KB Re
 3. 库级优先级加权重排: W_priority = 1.15 - 0.05 * (rank - 1)。
 """
 import asyncio
+from datetime import datetime
 from pathlib import Path
 import re
 import sqlite3
@@ -15,6 +16,8 @@ from typing import Any
 from ..core.logging_config import logger
 from ..kb.manager import KBLifecycleManager
 from ..kb.storage import KBStorageManager
+from .embedding_provider import embedding_router, HAS_NUMPY, np
+from .temporal_reranker import TemporalReranker
 from .hybrid_engine import HybridSearchEngine
 
 
@@ -120,16 +123,69 @@ class MultiKBRetrievalRouter:
             kb_names = "、".join([t["name"] for t in targets])
             return True, f"在已挂载知识库【{kb_names}】中未检索到与「{query}」直接相关的规程切片。", []
 
-        # 按综合加权分降序排序并截取 Top-K
-        all_candidates.sort(key=lambda x: x["final_score"], reverse=True)
-        final_top = all_candidates[:top_k]
+        # 阶段一：时效重排 (TemporalReranker) 仲裁最新生效版
+        reranked_candidates = TemporalReranker.rerank_chunks(
+            chunks=all_candidates,
+            current_query=query,
+            now_dt=datetime.now(),
+        )
 
-        # 格式化输出供 LLM 证据链参考
-        lines = [f"### 已挂载知识库证据检索结果 (关键词: {query}, 命中文档数: {len(final_top)}):"]
+        # 阶段二：Small-to-Big 上下文还原与去重
+        # 如果命中的子切片或口语提问关联了 parent_chunk_id，回溯提取完整的父切片
+        final_top: list[dict[str, Any]] = []
+        seen_parents: set[str] = set()
+
+        for c in reranked_candidates:
+            pid = c.get("parent_chunk_id")
+            kb_id = c.get("kb_id")
+            ver = c.get("version")
+            db_path = KBStorageManager.get_version_db_path(kb_id, ver)
+
+            # 若有关联的父切片且未展示过，尝试提取完整父切片
+            if pid and pid not in seen_parents and db_path.exists():
+                try:
+                    conn = sqlite3.connect(str(db_path))
+                    conn.row_factory = sqlite3.Row
+                    cur = conn.cursor()
+                    cur.execute(
+                        "SELECT id, title, content, section_path, doc_year, effective_date FROM hybrid_chunks WHERE id = ?",
+                        (pid,)
+                    )
+                    parent_row = cur.fetchone()
+                    conn.close()
+                    if parent_row:
+                        c_copy = dict(c)
+                        c_copy["content"] = parent_row["content"]
+                        c_copy["title"] = parent_row["title"]
+                        c_copy["is_expanded_parent"] = True
+                        seen_parents.add(pid)
+                        final_top.append(c_copy)
+                        if len(final_top) >= top_k:
+                            break
+                        continue
+                except Exception as p_err:
+                    logger.debug(f"[Small-to-Big] 读取父切片失败，保留原切片: {p_err}")
+
+            # 无父切片或未开启 Small-to-Big
+            chunk_hash = c.get("id") or c.get("title")
+            if chunk_hash not in seen_parents:
+                seen_parents.add(chunk_hash)
+                final_top.append(c)
+                if len(final_top) >= top_k:
+                    break
+
+        # 格式化输出供 LLM 证据链参考（动态注入当前系统真实时间）
+        current_date_str = datetime.now().strftime("%Y年%m月%d日")
+        lines = [
+            f"> 💡 **[系统时效环境声明]**：当前系统运行时间为 **{current_date_str}**。如命中文档存在历史年份版本更迭，系统已根据最新生效日期完成优先级仲裁，请严格以最新规程为准。\n",
+            f"### 已挂载知识库证据检索结果 (关键词: {query}, 命中文档数: {len(final_top)}):",
+        ]
         for idx, c in enumerate(final_top, start=1):
-            tier_label = "正式规程(Tier 1)" if c["authority_tier"] == 1 else "常规资料(Tier 2)"
+            tier_label = "正式规程(Tier 1)" if c.get("authority_tier") == 1 else "常规资料(Tier 2)"
+            eff_str = f", 生效日期: {c.get('effective_date')}" if c.get('effective_date') else ""
+            latest_badge = " [最新版]" if c.get("is_latest_in_cluster") == 1 else ""
             lines.append(
-                f"\n[{idx}] 来源: 【{c['kb_name']} {c['version']}】 - {c['title']} ({tier_label}, 优先级权重: {c['priority_weight']:.2f})"
+                f"\n[{idx}] 来源: 【{c['kb_name']} {c['version']}】 - {c['title']}{latest_badge} ({tier_label}{eff_str}, 优先级权重: {c['priority_weight']:.2f})"
             )
             lines.append(f"内容:\n{c['content']}")
 
@@ -147,7 +203,7 @@ class MultiKBRetrievalRouter:
         priority_weight: float,
         include_archived: bool,
     ) -> list[dict[str, Any]]:
-        """在单个独立 index.db 中执行自然语言分词、FTS5 与智能多关键词加权检索。"""
+        """在单个独立 index.db 中执行向量相似度、FTS5 全文与时效元数据联合召回。"""
         results: list[dict[str, Any]] = []
 
         # 中文问句常见停用词/疑问助词表
@@ -156,6 +212,15 @@ class MultiKBRetrievalRouter:
             "谁可以", "怎样", "想知道", "能不能", "可以吗", "请介绍", "讲讲", "帮我查",
             "关于", "以及", "并且", "的话", "吗", "呢", "吧", "呀", "有啥", "怎么弄",
         }
+
+        # 尝试提前计算 query embedding
+        provider = await embedding_router.get_provider()
+        q_vec = None
+        if provider.is_available and provider.dimension > 0:
+            try:
+                q_vec = await provider.encode_query(query.strip())
+            except Exception as e:
+                logger.debug(f"[MultiKB] 检索 Query 向量编码跳过: {e}")
 
         def _do_query():
             conn = sqlite3.connect(str(db_path))
@@ -174,7 +239,6 @@ class MultiKBRetrievalRouter:
                         s_str = s.strip()
                         if len(s_str) >= 2 and s_str not in keywords:
                             keywords.append(s_str)
-                    # 2-gram 兜底
                     if len(t) >= 2:
                         for i in range(len(t) - 1):
                             bg = t[i : i + 2]
@@ -184,34 +248,44 @@ class MultiKBRetrievalRouter:
                 if not keywords:
                     keywords = [clean_q] if clean_q else [query]
 
-                rows = []
+                rows: list[sqlite3.Row] = []
+                matched_ids: set[str] = set()
 
-                # 2. 优先尝试 FTS5 全文索引匹配 (使用 OR 链接关键词)
+                # 2. 优先尝试 FTS5 全文索引匹配 (排除 chunk_role='parent' 直接召回)
                 fts_candidates = [k for k in keywords if len(k) >= 2]
                 if fts_candidates:
                     fts_query_str = " OR ".join([f'"{k}"' for k in fts_candidates[:8]])
                     try:
                         fts_sql = """
                         SELECT c.id, c.remote_uri, c.title, c.content, c.authority_tier, c.mtime,
-                               rank as fts_rank
+                               c.doc_year, c.effective_date, c.effective_ts, c.doc_priority_type,
+                               c.topic_cluster_id, c.is_latest_in_cluster, c.chunk_role, c.parent_chunk_id,
+                               c.embedding_blob, rank as fts_rank
                         FROM hybrid_chunks_fts f
                         JOIN hybrid_chunks c ON f.rowid = c.rowid
                         WHERE hybrid_chunks_fts MATCH ?
+                          AND (c.chunk_role != 'parent' OR c.chunk_role IS NULL)
                         ORDER BY rank
                         LIMIT ?
                         """
-                        cursor = conn.execute(fts_sql, (fts_query_str, top_k * 2))
+                        cursor = conn.execute(fts_sql, (fts_query_str, top_k * 3))
                         rows = cursor.fetchall()
+                        for r in rows:
+                            matched_ids.add(r["id"])
                     except Exception:
                         rows = []
 
-                # 3. 若 FTS5 未命中，执行多关键词 LIKE 模糊匹配
-                if not rows and keywords:
+                # 3. 若 FTS5 召回量少，补充多关键词 LIKE 模糊匹配
+                if len(rows) < top_k * 2 and keywords:
                     where_clauses = ["(content LIKE ? OR title LIKE ?)" for _ in keywords[:6]]
                     like_sql = f"""
-                    SELECT id, remote_uri, title, content, authority_tier, mtime
+                    SELECT id, remote_uri, title, content, authority_tier, mtime,
+                           doc_year, effective_date, effective_ts, doc_priority_type,
+                           topic_cluster_id, is_latest_in_cluster, chunk_role, c.parent_chunk_id,
+                           embedding_blob, NULL as fts_rank
                     FROM hybrid_chunks
-                    WHERE {" OR ".join(where_clauses)}
+                    WHERE ({" OR ".join(where_clauses)})
+                      AND (chunk_role != 'parent' OR chunk_role IS NULL)
                     LIMIT ?
                     """
                     params: list[Any] = []
@@ -219,30 +293,57 @@ class MultiKBRetrievalRouter:
                         params.extend([f"%{k}%", f"%{k}%"])
                     params.append(top_k * 3)
                     cursor = conn.execute(like_sql, params)
-                    rows = cursor.fetchall()
+                    more_rows = cursor.fetchall()
+                    for mr in more_rows:
+                        if mr["id"] not in matched_ids:
+                            matched_ids.add(mr["id"])
+                            rows.append(mr)
 
-                # 4. 结果打分与排序
+                # 4. 向量余弦相似度计算与加权打分
                 scored_list = []
+                import array
+                q_list = [float(x) for x in q_vec] if q_vec is not None else None
+                q_len = len(q_list) if q_list is not None else 0
+
                 for r in rows:
-                    if not include_archived and r["authority_tier"] >= 3:
+                    if not include_archived and (r["authority_tier"] or 2) >= 3:
                         continue
-                    tier = r["authority_tier"]
+                    tier = r["authority_tier"] or 2
                     tier_bonus = 1.25 if tier == 1 else 1.0
 
-                    content_str = r["content"]
-                    title_str = r["title"]
+                    content_str = r["content"] or ""
+                    title_str = r["title"] or ""
 
                     hit_cnt = sum(1 for kw in keywords if kw in content_str or kw in title_str)
                     base_score = min(1.0, 0.4 + 0.2 * hit_cnt)
 
-                    if "fts_rank" in r.keys():
+                    if r["fts_rank"] is not None:
                         try:
                             fts_bonus = 1.0 / (abs(float(r["fts_rank"])) + 1.0)
                             base_score = max(base_score, fts_bonus)
                         except Exception:
                             pass
 
-                    final_score = base_score * tier_bonus * priority_weight
+                    # 向量打分
+                    cosine_sim = 0.0
+                    blob = r["embedding_blob"]
+                    if blob and q_list and q_len > 0:
+                        try:
+                            arr = array.array("f")
+                            arr.frombytes(blob)
+                            if len(arr) == q_len:
+                                dot = sum(a * b for a, b in zip(arr, q_list))
+                                cosine_sim = max(0.0, float(dot))
+                                # 融合向量得分
+                                base_score = 0.5 * base_score + 0.5 * cosine_sim
+                        except Exception:
+                            pass
+
+                    # 如果是口语提问命中的切片，提升相关度激励
+                    role = r["chunk_role"] or "child"
+                    role_boost = 1.15 if role == "hype_question" else 1.0
+
+                    final_score = base_score * tier_bonus * priority_weight * role_boost
                     scored_list.append((final_score, {
                         "id": r["id"],
                         "kb_id": kb_id,
@@ -253,12 +354,21 @@ class MultiKBRetrievalRouter:
                         "content": r["content"],
                         "authority_tier": tier,
                         "mtime": r["mtime"],
+                        "doc_year": r["doc_year"],
+                        "effective_date": r["effective_date"],
+                        "effective_ts": r["effective_ts"],
+                        "doc_priority_type": r["doc_priority_type"],
+                        "topic_cluster_id": r["topic_cluster_id"],
+                        "is_latest_in_cluster": r["is_latest_in_cluster"],
+                        "chunk_role": role,
+                        "parent_chunk_id": r["parent_chunk_id"],
                         "priority_weight": priority_weight,
                         "final_score": round(final_score, 4),
+                        "cosine_similarity": round(cosine_sim, 4),
                     }))
 
                 scored_list.sort(key=lambda x: x[0], reverse=True)
-                results = [item[1] for item in scored_list[:top_k]]
+                results = [item[1] for item in scored_list[: top_k * 2]]
             finally:
                 conn.close()
             return results

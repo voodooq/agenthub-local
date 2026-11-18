@@ -8,15 +8,19 @@ AgentHub Local v1.5.8 知识库生命周期治理、版本发布与专家沙盒�
 5. 检索命中率测试台 (Retrieval Playground) 实时验货。
 """
 from pathlib import Path
+import shutil
+import tempfile
 import time
 from typing import Any
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from ...core.logging_config import logger
 from ...kb.manager import KBLifecycleManager
 from ...kb.package import KBPackageEngine
 from ...kb.storage import KBStorageManager
+from ...kb.exchange import KBExchangeEngine
 from ...search.multi_kb_router import MultiKBRetrievalRouter
 
 router = APIRouter(prefix="/kb", tags=["kb-lifecycle"])
@@ -625,4 +629,111 @@ async def list_kb_triples(
         }
     finally:
         conn.close()
+
+
+# ==========================================
+# 6. v1.5.9 资产交换与版本快照治理 API
+# ==========================================
+
+@router.get("/{kb_id}/export")
+async def export_kb_bundle(
+    kb_id: str,
+    version: str | None = Query(default=None, description="版本号，缺省为当前激活版本"),
+    author: str = Query(default="AgentHub User", description="导出人"),
+    change_summary: str = Query(default="", description="版本变更说明"),
+):
+    """将指定版本的知识库打包导出为标准 .ahkb 归档文件。"""
+    kbs = await KBLifecycleManager.list_knowledge_bases()
+    target_kb = next((k for k in kbs if k["kb_id"] == kb_id), None)
+    if not target_kb:
+        raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+
+    target_ver = version or target_kb.get("active_version") or "v1.0.0"
+    try:
+        pkg_path, md5_val, manifest = KBExchangeEngine.export_bundle(
+            kb_id=kb_id,
+            version=target_ver,
+            author=author,
+            change_summary=change_summary,
+        )
+        return FileResponse(
+            path=str(pkg_path),
+            filename=pkg_path.name,
+            media_type="application/zip",
+            headers={
+                "X-Content-MD5": md5_val,
+                "X-KB-Version": target_ver,
+                "Access-Control-Expose-Headers": "X-Content-MD5, X-KB-Version",
+            },
+        )
+    except Exception as e:
+        logger.error(f"导出 .ahkb 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"导出知识库包失败: {str(e)}")
+
+
+@router.post("/import")
+async def import_kb_bundle(
+    file: UploadFile = File(..., description=".ahkb 资产包文件"),
+    conflict_strategy: str = Form(default="ask", description="ask | backup_and_overwrite | import_as_new"),
+    target_kb_name: str = Form(default="", description="导入后的知识库名称覆盖"),
+) -> dict[str, Any]:
+    """导入 .ahkb 知识库包，支持 MD5 幂等跳过、冲突询问与自动快照备份覆盖。"""
+    if not file.filename or not (file.filename.endswith(".ahkb") or file.filename.endswith(".zip")):
+        raise HTTPException(status_code=400, detail="仅支持上传 .ahkb 知识库资产包")
+
+    # 写入临时文件
+    suffix = Path(file.filename).suffix
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp_path = Path(tmp.name)
+        shutil.copyfileobj(file.file, tmp)
+
+    try:
+        result = await KBExchangeEngine.import_bundle(
+            bundle_path=tmp_path,
+            conflict_strategy=conflict_strategy,
+            target_kb_name=target_kb_name,
+        )
+        return {"success": True, "data": result}
+    except Exception as e:
+        logger.error(f"导入 .ahkb 失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"导入知识库资产包失败: {str(e)}")
+    finally:
+        if tmp_path.exists():
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+
+
+@router.get("/{kb_id}/versions")
+async def list_kb_versions(kb_id: str) -> dict[str, Any]:
+    """获取指定知识库的所有历史快照记录与自动备份列表。"""
+    snapshots = await KBExchangeEngine.list_snapshots(kb_id)
+    return {"success": True, "data": snapshots}
+
+
+@router.get("/{kb_id}/versions/diff")
+async def diff_kb_versions(
+    kb_id: str,
+    base_snapshot: str = Query(..., description="基准快照 ID"),
+    target_snapshot: str = Query(..., description="目标快照 ID"),
+) -> dict[str, Any]:
+    """比对两个快照版本之间的文档增删改差异。"""
+    try:
+        diff_res = await KBExchangeEngine.compute_snapshot_diff(base_snapshot, target_snapshot)
+        return {"success": True, "data": diff_res}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/{kb_id}/versions/{snapshot_id}/rollback")
+async def rollback_kb_snapshot(kb_id: str, snapshot_id: str) -> dict[str, Any]:
+    """将知识库安全回滚至指定快照（回滚前自动生成 auto_backup）。"""
+    try:
+        res = await KBExchangeEngine.rollback_to_snapshot(kb_id, snapshot_id)
+        return {"success": True, "data": res}
+    except Exception as e:
+        logger.error(f"知识库回滚失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"回滚失败: {str(e)}")
+
 

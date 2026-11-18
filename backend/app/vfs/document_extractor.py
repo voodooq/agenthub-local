@@ -67,19 +67,15 @@ class DocumentStreamExtractor:
     @staticmethod
     def extract_doc_year(file_name: str, head_text: str = "") -> int:
         """从文件名或首页落款提取生效年份（2020~2039）。"""
-        m_file = re.search(r"(20[2-3]\d)", file_name)
-        if m_file:
-            return int(m_file.group(1))
-        m_head = re.search(r"(20[2-3]\d)\s*年", head_text[:600])
-        return int(m_head.group(1)) if m_head else 0
+        from ..search.temporal_reranker import TemporalMetadataExtractor
+        tmeta = TemporalMetadataExtractor.extract_metadata(file_name, head_text)
+        return tmeta.doc_year
 
     @staticmethod
     def extract_topic_cluster_id(file_name: str) -> str:
         """剥离年份、副本序号、版本标识与扩展名，生成同主题族归一化 ID。"""
-        name = re.sub(r"\.[^.]+$", "", file_name)
-        name = re.sub(r"20[2-3]\d年?", "", name)
-        name = re.sub(r"[\(（]\s*\d+\s*[\)）]|v\d+(\.\d+)*|试行|修订版|正式版|定稿", "", name, flags=re.I)
-        return re.sub(r"[\s_\-]+", "", name).strip()
+        from ..search.temporal_reranker import TemporalMetadataExtractor
+        return TemporalMetadataExtractor.extract_topic_cluster_id(file_name)
 
     @staticmethod
     def detect_authority_tier(file_name: str, fallback_tier: int = 2) -> int:
@@ -155,8 +151,13 @@ class DocumentStreamExtractor:
     ) -> list[dict[str, Any]]:
         """四级递进式 PDF 鲁棒解析器：原生表格解析 -> 文本层 -> 乱码/稀疏检测 -> RapidOCR 离线兜底。"""
         chunks: list[dict[str, Any]] = []
-        doc_year = cls.extract_doc_year(filename)
-        topic_cluster_id = cls.extract_topic_cluster_id(filename)
+        from ..search.temporal_reranker import TemporalMetadataExtractor
+        tmeta = TemporalMetadataExtractor.extract_metadata(filename)
+        doc_year = tmeta.doc_year
+        topic_cluster_id = tmeta.topic_cluster_id
+        effective_date = tmeta.effective_date
+        effective_ts = tmeta.effective_ts
+        doc_priority_type = tmeta.doc_priority_type
         effective_tier = cls.detect_authority_tier(filename, authority_tier)
 
         # 1. 优先使用 PyMuPDF (fitz)
@@ -223,6 +224,9 @@ class DocumentStreamExtractor:
                         "authority_tier": effective_tier,
                         "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
                         "doc_year": doc_year,
+                        "effective_date": effective_date,
+                        "effective_ts": effective_ts,
+                        "doc_priority_type": doc_priority_type,
                         "topic_cluster_id": topic_cluster_id,
                         "is_latest_in_cluster": 1,
                     })
@@ -263,6 +267,9 @@ class DocumentStreamExtractor:
                         "authority_tier": effective_tier,
                         "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
                         "doc_year": doc_year,
+                        "effective_date": effective_date,
+                        "effective_ts": effective_ts,
+                        "doc_priority_type": doc_priority_type,
                         "topic_cluster_id": topic_cluster_id,
                         "is_latest_in_cluster": 1,
                     })
@@ -277,8 +284,13 @@ class DocumentStreamExtractor:
     ) -> list[dict[str, Any]]:
         """通过标准库 zipfile 解析 DOCX word/document.xml。"""
         chunks: list[dict[str, Any]] = []
-        doc_year = cls.extract_doc_year(filename)
-        topic_cluster_id = cls.extract_topic_cluster_id(filename)
+        from ..search.temporal_reranker import TemporalMetadataExtractor
+        tmeta = TemporalMetadataExtractor.extract_metadata(filename)
+        doc_year = tmeta.doc_year
+        topic_cluster_id = tmeta.topic_cluster_id
+        effective_date = tmeta.effective_date
+        effective_ts = tmeta.effective_ts
+        doc_priority_type = tmeta.doc_priority_type
         effective_tier = cls.detect_authority_tier(filename, authority_tier)
 
         try:
@@ -366,8 +378,13 @@ class DocumentStreamExtractor:
     ) -> list[dict[str, Any]]:
         """流式解析旧版 Word 97-2003 (.doc)、RTF 或 HTML 导出的二进制复合文档。"""
         chunks: list[dict[str, Any]] = []
-        doc_year = cls.extract_doc_year(filename)
-        topic_cluster_id = cls.extract_topic_cluster_id(filename)
+        from ..search.temporal_reranker import TemporalMetadataExtractor
+        tmeta = TemporalMetadataExtractor.extract_metadata(filename)
+        doc_year = tmeta.doc_year
+        topic_cluster_id = tmeta.topic_cluster_id
+        effective_date = tmeta.effective_date
+        effective_ts = tmeta.effective_ts
+        doc_priority_type = tmeta.doc_priority_type
         effective_tier = cls.detect_authority_tier(filename, authority_tier)
 
         try:
@@ -420,6 +437,9 @@ class DocumentStreamExtractor:
                         "authority_tier": effective_tier,
                         "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
                         "doc_year": doc_year,
+                        "effective_date": effective_date,
+                        "effective_ts": effective_ts,
+                        "doc_priority_type": doc_priority_type,
                         "topic_cluster_id": topic_cluster_id,
                         "is_latest_in_cluster": 1,
                     })
@@ -671,8 +691,13 @@ class DocumentStreamExtractor:
     ) -> list[dict[str, Any]]:
         """通过 openpyxl 只读流式解析 Excel 工作表并转为 Markdown 表格。"""
         chunks: list[dict[str, Any]] = []
-        doc_year = cls.extract_doc_year(filename)
-        topic_cluster_id = cls.extract_topic_cluster_id(filename)
+        from ..search.temporal_reranker import TemporalMetadataExtractor
+        tmeta = TemporalMetadataExtractor.extract_metadata(filename)
+        doc_year = tmeta.doc_year
+        topic_cluster_id = tmeta.topic_cluster_id
+        effective_date = tmeta.effective_date
+        effective_ts = tmeta.effective_ts
+        doc_priority_type = tmeta.doc_priority_type
         effective_tier = cls.detect_authority_tier(filename, authority_tier)
 
         try:
@@ -723,13 +748,59 @@ class DocumentStreamExtractor:
     def _extract_plain_or_markdown(
         cls, raw_bytes: bytes, filename: str, remote_uri: str, authority_tier: int
     ) -> list[dict[str, Any]]:
-        """纯文本或 Markdown 切分。"""
+        """纯文本或 Markdown 切分，采用 ParentChildASTChunker 实施父子分层与表格原子保护。"""
         content = raw_bytes.decode("utf-8", errors="replace")
-        chunks: list[dict[str, Any]] = []
-        doc_year = cls.extract_doc_year(filename, content[:600])
-        topic_cluster_id = cls.extract_topic_cluster_id(filename)
+        from ..search.temporal_reranker import TemporalMetadataExtractor
+        tmeta = TemporalMetadataExtractor.extract_metadata(filename, content[:600])
         effective_tier = cls.detect_authority_tier(filename, authority_tier)
 
+        try:
+            from ..search.ast_chunker import ParentChildASTChunker
+            h_chunks = ParentChildASTChunker.chunk_document(
+                text=content,
+                filename=filename,
+                remote_uri=remote_uri,
+                authority_tier=effective_tier,
+                doc_year=tmeta.doc_year,
+                effective_date=tmeta.effective_date,
+                effective_ts=tmeta.effective_ts,
+                doc_priority_type=tmeta.doc_priority_type,
+                topic_cluster_id=tmeta.topic_cluster_id,
+                is_latest_in_cluster=1,
+            )
+            if h_chunks:
+                return [
+                    {
+                        "id": hc.id,
+                        "chunk_role": hc.chunk_role,
+                        "parent_chunk_id": hc.parent_chunk_id,
+                        "remote_uri": hc.remote_uri,
+                        "title": hc.title,
+                        "section_path": hc.section_path,
+                        "start_line": 1,
+                        "end_line": 1,
+                        "content_text": hc.content_text,
+                        "authority_tier": hc.authority_tier,
+                        "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
+                        "doc_year": hc.doc_year,
+                        "effective_date": hc.effective_date,
+                        "effective_ts": hc.effective_ts,
+                        "doc_priority_type": hc.doc_priority_type,
+                        "topic_cluster_id": hc.topic_cluster_id,
+                        "is_latest_in_cluster": hc.is_latest_in_cluster,
+                    }
+                    for hc in h_chunks
+                ]
+        except Exception as e:
+            logger.warning(f"ParentChildASTChunker 切分异常，回退至常规切分: {e}")
+
+        # 回退常规切分
+        chunks: list[dict[str, Any]] = []
+        doc_year = tmeta.doc_year
+        topic_cluster_id = tmeta.topic_cluster_id
+        effective_date = tmeta.effective_date
+        effective_ts = tmeta.effective_ts
+        doc_priority_type = tmeta.doc_priority_type
         lines = content.splitlines(keepends=True)
         start = 0
         text_len = len(content)
@@ -754,6 +825,9 @@ class DocumentStreamExtractor:
                     "authority_tier": effective_tier,
                     "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
                     "doc_year": doc_year,
+                    "effective_date": effective_date,
+                    "effective_ts": effective_ts,
+                    "doc_priority_type": doc_priority_type,
                     "topic_cluster_id": topic_cluster_id,
                     "is_latest_in_cluster": 1,
                 })

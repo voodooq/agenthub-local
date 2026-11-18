@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { Workspace, SkillItem, AgentItem, GroundingConfig } from '@/types';
 import { SkillCategoryTabs, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
+import { ExpertKnowledgeAndApiPanel, BoundKBItem } from './ExpertKnowledgeAndApiPanel';
 import { ModelOption } from '@/components/ModelSelector';
 import { apiFetch } from '@/utils/apiClient';
 import {
@@ -187,6 +188,14 @@ export function AgentsView({
   const [formCustomRules, setFormCustomRules] = useState('');
   const [isGroundingPanelOpen, setIsGroundingPanelOpen] = useState(true);
 
+  // v1.5.9 专家知识底座与对外 API 状态
+  const [formKbIsolationMode, setFormKbIsolationMode] = useState<string>('strict_bound_only');
+  const [formStrictGrounding, setFormStrictGrounding] = useState<boolean>(true);
+  const [formMinRelevanceScore, setFormMinRelevanceScore] = useState<number>(0.42);
+  const [formApiServiceEnabled, setFormApiServiceEnabled] = useState<boolean>(false);
+  const [formApiModelSlug, setFormApiModelSlug] = useState<string>('');
+  const [formBoundKbs, setFormBoundKbs] = useState<BoundKBItem[]>([]);
+
   // 初始化拉取系统真实技能
   useEffect(() => {
     let isMounted = true;
@@ -297,6 +306,12 @@ export function AgentsView({
     setFormVerifyToolCall(true);
     setFormRequireEvidence(true);
     setFormCustomRules('');
+    setFormKbIsolationMode('strict_bound_only');
+    setFormStrictGrounding(true);
+    setFormMinRelevanceScore(0.42);
+    setFormApiServiceEnabled(false);
+    setFormApiModelSlug('');
+    setFormBoundKbs([]);
     setIsGroundingPanelOpen(true);
     setIsModalOpen(true);
   };
@@ -410,6 +425,32 @@ export function AgentsView({
     setFormVerifyToolCall(gc.verify_tool_call ?? true);
     setFormRequireEvidence(gc.require_evidence ?? true);
     setFormCustomRules(gc.custom_rules || '');
+    setFormKbIsolationMode((agent as any).kb_isolation_mode || 'strict_bound_only');
+    setFormStrictGrounding((agent as any).strict_grounding !== undefined ? Boolean((agent as any).strict_grounding) : true);
+    setFormMinRelevanceScore(typeof (agent as any).min_relevance_score === 'number' ? (agent as any).min_relevance_score : 0.42);
+    setFormApiServiceEnabled(Boolean((agent as any).api_service_enabled));
+    setFormApiModelSlug((agent as any).api_model_slug || '');
+    setFormBoundKbs([]);
+
+    // 异步拉取已绑定的知识库
+    apiFetch(`/api/v1/agents/${encodeURIComponent(agent.id)}/knowledge-bases`)
+      .then(async (res) => {
+        if (res.ok) {
+          const json = await res.json();
+          if (json.bound_knowledge_bases) {
+            setFormBoundKbs(
+              json.bound_knowledge_bases.map((b: any) => ({
+                kb_id: b.kb_id,
+                name: b.name,
+                priority_weight: b.priority_weight ?? 1.0,
+                top_k_override: b.top_k_override ?? 5,
+              }))
+            );
+          }
+        }
+      })
+      .catch(() => {});
+
     setIsGroundingPanelOpen(true);
 
     setIsModalOpen(true);
@@ -450,9 +491,11 @@ export function AgentsView({
 
     setSavingAgent(true);
     setApiError(null);
+    let savedTargetId: string | null = null;
 
     try {
       if (editingAgent) {
+        savedTargetId = editingAgent.id;
         // 严格安全防卫：禁止修改官方智能体
         if (editingAgent.ownership === 'official') return;
 
@@ -470,6 +513,11 @@ export function AgentsView({
               allowed_tools: allowedTools,
               allowed_write_dirs: allowedWriteDirs,
               grounding_config: targetGroundingConfig,
+              kb_isolation_mode: formKbIsolationMode,
+              strict_grounding: formStrictGrounding ? 1 : 0,
+              min_relevance_score: formMinRelevanceScore,
+              api_service_enabled: formApiServiceEnabled ? 1 : 0,
+              api_model_slug: formApiModelSlug.trim() || undefined,
             }),
           });
           if (res.ok) {
@@ -521,6 +569,11 @@ export function AgentsView({
               allowed_write_dirs: allowedWriteDirs,
               grounding_config: targetGroundingConfig,
               status: 'active',
+              kb_isolation_mode: formKbIsolationMode,
+              strict_grounding: formStrictGrounding ? 1 : 0,
+              min_relevance_score: formMinRelevanceScore,
+              api_service_enabled: formApiServiceEnabled ? 1 : 0,
+              api_model_slug: formApiModelSlug.trim() || undefined,
             }),
           });
           if (res.ok) {
@@ -580,6 +633,31 @@ export function AgentsView({
           } catch {
             setBannerNotice(`已创建专家【${newAgent.name}】，定时任务注册遇到网络异常。`);
           }
+        }
+        savedTargetId = newAgent.id;
+      }
+
+      // 同步保存专家的知识底座与对外 API 策略
+      if (savedTargetId) {
+        try {
+          await apiFetch(`/api/v1/agents/${encodeURIComponent(savedTargetId)}/knowledge-bases`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              knowledge_bases: formBoundKbs.map((b) => ({
+                kb_id: b.kb_id,
+                priority_weight: b.priority_weight,
+                top_k_override: b.top_k_override,
+              })),
+              kb_isolation_mode: formKbIsolationMode,
+              strict_grounding: formStrictGrounding ? 1 : 0,
+              min_relevance_score: formMinRelevanceScore,
+              api_service_enabled: formApiServiceEnabled ? 1 : 0,
+              api_model_slug: formApiModelSlug.trim() || undefined,
+            }),
+          });
+        } catch (kbSyncErr) {
+          console.error('同步专家知识底座配置失败:', kbSyncErr);
         }
       }
 
@@ -1216,6 +1294,23 @@ export function AgentsView({
                   </div>
                 )}
               </div>
+
+              {/* v1.5.9 专属规程知识底座与对外 API 服务化面板 */}
+              <ExpertKnowledgeAndApiPanel
+                agentId={editingAgent?.id}
+                kbIsolationMode={formKbIsolationMode}
+                onChangeIsolationMode={setFormKbIsolationMode}
+                strictGrounding={formStrictGrounding}
+                onChangeStrictGrounding={setFormStrictGrounding}
+                minRelevanceScore={formMinRelevanceScore}
+                onChangeMinRelevanceScore={setFormMinRelevanceScore}
+                apiServiceEnabled={formApiServiceEnabled}
+                onChangeApiServiceEnabled={setFormApiServiceEnabled}
+                apiModelSlug={formApiModelSlug}
+                onChangeApiModelSlug={setFormApiModelSlug}
+                boundKbs={formBoundKbs}
+                onChangeBoundKbs={setFormBoundKbs}
+              />
 
               {/* 真实基座模型选择器 */}
               <div>

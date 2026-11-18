@@ -928,7 +928,67 @@ class DatabaseManager:
                 PRIMARY KEY (workspace_id, kb_id)
             );
             CREATE INDEX IF NOT EXISTS idx_wkb_ws ON workspace_knowledge_bases(workspace_id);
+
+            -- 6. 专家与知识库多对多绑定表 (v1.5.9+)
+            CREATE TABLE IF NOT EXISTS expert_knowledge_bases (
+                expert_id        TEXT NOT NULL,
+                kb_id            TEXT NOT NULL,
+                priority_weight  REAL DEFAULT 1.0,
+                top_k_override   INTEGER DEFAULT 5,
+                created_at       REAL NOT NULL,
+                PRIMARY KEY (expert_id, kb_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_expert_kb_expert ON expert_knowledge_bases(expert_id);
+
+            -- 7. 专家对外 API 密钥与限流表 (v1.5.9+)
+            CREATE TABLE IF NOT EXISTS expert_api_keys (
+                key_id           TEXT PRIMARY KEY,
+                expert_id        TEXT NOT NULL,
+                key_name         TEXT NOT NULL,
+                api_key_hash     TEXT NOT NULL,
+                key_prefix       TEXT NOT NULL,
+                rate_limit_rpm   INTEGER DEFAULT 60,
+                is_active        INTEGER DEFAULT 1,
+                total_calls      INTEGER DEFAULT 0,
+                last_used_at     REAL DEFAULT NULL,
+                created_at       REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_expert_api_keys_hash ON expert_api_keys(api_key_hash);
+            CREATE INDEX IF NOT EXISTS idx_expert_api_keys_expert ON expert_api_keys(expert_id);
+
+            -- 8. 知识库版本快照与自动备份归档表 (v1.5.9+)
+            CREATE TABLE IF NOT EXISTS kb_version_snapshots (
+                snapshot_id         TEXT PRIMARY KEY,
+                kb_id               TEXT NOT NULL,
+                kb_uuid             TEXT NOT NULL,
+                version_tag         TEXT NOT NULL,
+                parent_version_tag  TEXT DEFAULT '',
+                snapshot_type       TEXT NOT NULL,
+                content_md5         TEXT NOT NULL,
+                embedding_model     TEXT NOT NULL,
+                embedding_dim       INTEGER NOT NULL,
+                change_summary      TEXT DEFAULT '',
+                bundle_archive_path TEXT NOT NULL,
+                doc_manifest_json   TEXT NOT NULL,
+                created_at          REAL NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_kb_snapshots_kb_time ON kb_version_snapshots(kb_id, created_at DESC);
             """)
+
+            # 兼容性平滑升级：knowledge_bases 扩展跨端 UUID、当前版本与内容 MD5
+            for col, col_def in [
+                ("kb_uuid", "TEXT DEFAULT ''"),
+                ("current_version", "TEXT DEFAULT 'v1.0.0'"),
+                ("content_md5", "TEXT DEFAULT ''"),
+            ]:
+                try:
+                    await conn.execute(f"ALTER TABLE knowledge_bases ADD COLUMN {col} {col_def};")
+                except Exception:
+                    pass
+            try:
+                await conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_kb_uuid ON knowledge_bases(kb_uuid) WHERE kb_uuid != '';")
+            except Exception:
+                pass
 
             await conn.commit()
             try:

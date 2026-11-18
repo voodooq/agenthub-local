@@ -48,6 +48,11 @@ class AgentCreateRequest(BaseModel):
     )
     tools_count: int | None = Field(None, ge=0, description="可用工具数量展示值")
     status: Literal["active", "draft"] = Field("active", description="专家状态")
+    kb_isolation_mode: str | None = Field("strict_bound_only", description="strict_bound_only | bound_plus_at")
+    strict_grounding: int | None = Field(1, description="1=严格规程依据作答，0=允许自由生成")
+    min_relevance_score: float | None = Field(0.42, description="防幻觉熔断最低语义相似度阈值")
+    api_service_enabled: int | None = Field(0, description="是否开启对外 API 服务")
+    api_model_slug: str | None = Field("", description="对外暴露的模型标识别名")
 
 
 class AgentUpdateRequest(BaseModel):
@@ -63,6 +68,11 @@ class AgentUpdateRequest(BaseModel):
     grounding_config: GroundingConfigSchema | None = Field(None, description="防幻觉与严谨度配置")
     tools_count: int | None = Field(None, ge=0, description="可用工具数量展示值")
     status: Literal["active", "draft"] | None = Field(None, description="专家状态")
+    kb_isolation_mode: str | None = Field(None, description="strict_bound_only | bound_plus_at")
+    strict_grounding: int | None = Field(None, description="1=严格规程依据作答，0=允许自由生成")
+    min_relevance_score: float | None = Field(None, description="防幻觉熔断最低语义相似度阈值")
+    api_service_enabled: int | None = Field(None, description="是否开启对外 API 服务")
+    api_model_slug: str | None = Field(None, description="对外暴露的模型标识别名")
 
 
 @router.post("/generate-from-prompt")
@@ -248,6 +258,25 @@ async def update_agent(agent_id: str, req: AgentUpdateRequest) -> dict:
         return {"success": True, "agent": updated}
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
+
+
+# ==========================================
+# 专家知识库绑定与对外 API 密钥路由绑定 (v1.5.9)
+# ==========================================
+from .external_expert_gateway import (
+    get_agent_knowledge_bases,
+    update_agent_knowledge_bases,
+    list_agent_api_keys,
+    create_agent_api_key,
+    revoke_agent_api_key,
+)
+
+router.add_api_route("/{agent_id}/knowledge-bases", get_agent_knowledge_bases, methods=["GET"])
+router.add_api_route("/{agent_id}/knowledge-bases", update_agent_knowledge_bases, methods=["PUT"])
+router.add_api_route("/{agent_id}/api-keys", list_agent_api_keys, methods=["GET"])
+router.add_api_route("/{agent_id}/api-keys", create_agent_api_key, methods=["POST"])
+router.add_api_route("/{agent_id}/api-keys/{key_id}", revoke_agent_api_key, methods=["DELETE"])
+
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -262,3 +291,22 @@ async def delete_agent(agent_id: str) -> dict:
         return {"success": True, "deleted_id": agent_id}
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
+
+
+# ==========================================
+# 专家知识库绑定与对外 API 密钥路由绑定 (v1.5.9)
+# ==========================================
+from .external_expert_gateway import (
+    get_agent_knowledge_bases,
+    update_agent_knowledge_bases,
+    list_agent_api_keys,
+    create_agent_api_key,
+    revoke_agent_api_key,
+)
+
+router.add_api_route("/{agent_id}/knowledge-bases", get_agent_knowledge_bases, methods=["GET"])
+router.add_api_route("/{agent_id}/knowledge-bases", update_agent_knowledge_bases, methods=["PUT"])
+router.add_api_route("/{agent_id}/api-keys", list_agent_api_keys, methods=["GET"])
+router.add_api_route("/{agent_id}/api-keys", create_agent_api_key, methods=["POST"])
+router.add_api_route("/{agent_id}/api-keys/{key_id}", revoke_agent_api_key, methods=["DELETE"])
+

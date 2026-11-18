@@ -75,8 +75,8 @@ class KBStorageManager:
                     content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
                     section_p = str(c.get("section_path") or "")
 
-                    # 严格确定性唯一哈希 ID：杜绝重复切片
-                    chunk_id = hashlib.md5(
+                    # 严格确定性唯一哈希 ID：杜绝重复切片 (若上游已有确定性 ID 则优先采用)
+                    chunk_id = c.get("id") or hashlib.md5(
                         f"{c['remote_uri']}:{section_p}:{content_hash}".encode("utf-8")
                     ).hexdigest()
 
@@ -93,6 +93,12 @@ class KBStorageManager:
                     etag = c.get("etag", "")
                     blob = c.get("embedding_blob")
 
+                    chunk_role = c.get("chunk_role") or "child"
+                    parent_chunk_id = c.get("parent_chunk_id")
+                    doc_priority_type = c.get("doc_priority_type") or "normal"
+                    effective_date = c.get("effective_date") or ""
+                    effective_ts = int(c.get("effective_ts") or 0)
+
                     doc_year = c.get("doc_year")
                     if doc_year is None or doc_year == 0:
                         doc_year = DocumentStreamExtractor.extract_doc_year(title, content[:400])
@@ -107,8 +113,9 @@ class KBStorageManager:
                         """
                         INSERT OR REPLACE INTO hybrid_chunks (
                             id, remote_uri, title, content, authority_tier, mtime, etag, embedding_blob,
-                            doc_year, topic_cluster_id, is_latest_in_cluster, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            doc_year, effective_date, effective_ts, doc_priority_type, topic_cluster_id,
+                            is_latest_in_cluster, chunk_role, parent_chunk_id, section_path, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             chunk_id,
@@ -120,8 +127,14 @@ class KBStorageManager:
                             etag,
                             blob,
                             doc_year,
+                            effective_date,
+                            effective_ts,
+                            doc_priority_type,
                             topic_cluster_id,
                             is_latest,
+                            chunk_role,
+                            parent_chunk_id,
+                            section_p,
                             now,
                         ),
                     )
@@ -145,12 +158,12 @@ class KBStorageManager:
                             (t.subject.strip(), t.predicate.strip(), t.object.strip(), chunk_id, now, now),
                         )
 
-                # 族内最新版本定标（Cluster Head Refresh）：自动标记每个主题族最新年份为 is_latest_in_cluster=1
+                # 族内最新版本定标（Cluster Head Refresh）：自动标记每个主题族最新生效时间戳为 is_latest_in_cluster=1
                 conn.execute("""
                     UPDATE hybrid_chunks
                     SET is_latest_in_cluster = CASE
-                        WHEN doc_year = (
-                            SELECT MAX(c2.doc_year)
+                        WHEN COALESCE(effective_ts, 0) = (
+                            SELECT MAX(COALESCE(c2.effective_ts, 0))
                             FROM hybrid_chunks c2
                             WHERE c2.topic_cluster_id = hybrid_chunks.topic_cluster_id
                         ) THEN 1
@@ -181,6 +194,14 @@ class KBStorageManager:
         )
 
         disk_size = manifest.get("disk_size_bytes", 0)
+
+        # 触发后台异步 HyPE 提炼口语问答
+        try:
+            from ..search.hype_worker import HyPEQuestionWorker
+            HyPEQuestionWorker.schedule_background_hype(kb_id, version)
+        except Exception as hype_err:
+            logger.debug(f"[HyPE] 调度异常: {hype_err}")
+
         return total_chunks, disk_size
 
     @classmethod

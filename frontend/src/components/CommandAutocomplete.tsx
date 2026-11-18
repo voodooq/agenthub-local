@@ -18,6 +18,7 @@ import {
   Loader2,
   Bot,
   Users,
+  Database,
 } from 'lucide-react';
 import { ExtensionSkillItem, AgentItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
@@ -304,6 +305,60 @@ function mapAgentsToCommands(agents: AgentItem[]): CommandItem[] {
   return items;
 }
 
+const RECENT_KBS_KEY = 'agenthub_recent_kbs_v1';
+
+function getRecentKbIds(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_KBS_KEY);
+    if (!raw) return [];
+    const list = JSON.parse(raw);
+    return Array.isArray(list) ? list.slice(0, 5) : [];
+  } catch {
+    return [];
+  }
+}
+
+function recordRecentKb(kbId: string) {
+  try {
+    const existing = getRecentKbIds().filter((id) => id !== kbId);
+    existing.unshift(kbId);
+    localStorage.setItem(RECENT_KBS_KEY, JSON.stringify(existing.slice(0, 10)));
+  } catch {}
+}
+
+function mapKnowledgeBasesToCommands(kbs: any[]): CommandItem[] {
+  const recentIds = new Set(getRecentKbIds());
+  const items: CommandItem[] = [];
+
+  for (const kb of kbs) {
+    const name = String(kb.name || kb.kb_id || '').trim();
+    if (!name) continue;
+    const isRecent = recentIds.has(kb.kb_id);
+    const ver = kb.active_version || kb.current_version || 'v1.0.0';
+
+    items.push({
+      id: `kb_${kb.kb_id}`,
+      trigger: '@',
+      label: `@${name}`,
+      description: `【知识底座】版本: ${ver} · 切片: ${kb.chunk_count || 0}条`,
+      insertText: `@${name} `,
+      icon: Database,
+      badge: isRecent ? '常用知识库' : '规程知识库',
+      version: ver,
+      hasDoc: true,
+      docBody: `# @${name} 规程知识底座\n\n${kb.description || '专属规程知识底座'}\n\n- **生效版本**: \`${ver}\`\n- **切片规模**: ${kb.chunk_count || 0} 条\n- **图谱三元组**: ${kb.triple_count || 0} 条`,
+    });
+  }
+
+  items.sort((a, b) => {
+    if (a.badge === '常用知识库' && b.badge !== '常用知识库') return -1;
+    if (a.badge !== '常用知识库' && b.badge === '常用知识库') return 1;
+    return a.label.localeCompare(b.label);
+  });
+
+  return items;
+}
+
 interface CommandAutocompleteProps {
   input: string;
   cursorPosition?: number;
@@ -319,6 +374,7 @@ export function CommandAutocomplete({
 }: CommandAutocompleteProps) {
   const [dynamicItems, setDynamicItems] = useState<CommandItem[]>([]);
   const [agentItems, setAgentItems] = useState<CommandItem[]>([]);
+  const [kbItems, setKbItems] = useState<CommandItem[]>([]);
   const [previewItemId, setPreviewItemId] = useState<string | null>(null);
   const [activeCategory, setActiveCategory] = useState(ALL_CATEGORY);
   const [detailCache, setDetailCache] = useState<Record<string, string>>({});
@@ -429,6 +485,18 @@ export function CommandAutocomplete({
         fallbackFromLocal();
       });
 
+    // 同步拉取已训练规程知识库资产
+    apiFetch('/api/v1/kb/bases')
+      .then(async (res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        const kbs = Array.isArray(data?.data) ? data.data : [];
+        if (!cancelled) {
+          setKbItems(mapKnowledgeBasesToCommands(kbs));
+        }
+      })
+      .catch(() => {});
+
     return () => {
       cancelled = true;
     };
@@ -503,7 +571,7 @@ export function CommandAutocomplete({
   );
 
   const allCommands = useMemo(() => {
-    const merged: CommandItem[] = [...dynamicItems, ...agentItems];
+    const merged: CommandItem[] = [...dynamicItems, ...agentItems, ...kbItems];
     const existingLabels = new Set(merged.map((i) => i.label.toLowerCase()));
     for (const st of STATIC_COMMAND_LIST) {
       if (!existingLabels.has(st.label.toLowerCase())) {
@@ -511,7 +579,7 @@ export function CommandAutocomplete({
       }
     }
     return merged;
-  }, [dynamicItems, agentItems]);
+  }, [dynamicItems, agentItems, kbItems]);
 
   const skillItems = useMemo(
     () => allCommands.filter((i) => i.trigger === '/' && i.skillId),
@@ -599,7 +667,12 @@ export function CommandAutocomplete({
             return (
               <div
                 key={item.id}
-                onClick={() => onSelect(item.insertText, { start: tokenStart, end: tokenEnd })}
+                onClick={() => {
+                  onSelect(item.insertText, { start: tokenStart, end: tokenEnd });
+                  if (item.id.startsWith('kb_')) {
+                    recordRecentKb(item.id.replace('kb_', ''));
+                  }
+                }}
                 className={`flex items-center justify-between p-2 rounded-xl cursor-pointer transition-colors group ${
                   isPreviewing
                     ? 'bg-emerald-500/10 border border-emerald-500/30'
