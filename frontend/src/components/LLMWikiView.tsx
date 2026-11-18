@@ -592,16 +592,40 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                 {providerTab === 'webdav' && (
                   <div className="rounded-xl border border-border/80 bg-surface-100/40 p-4 space-y-3.5">
                     <div>
-                      <label className="text-xs font-semibold text-foreground block mb-1">
-                        WebDAV 端点 URL <span className="text-red-500">*</span>
-                      </label>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-xs font-semibold text-foreground">
+                          WebDAV 端点 URL <span className="text-red-500">*</span>
+                        </label>
+                        <span className="text-[10px] text-muted-foreground">
+                          Alist 路径为 <code className="text-emerald-500 font-bold">/dav</code>（字母 a，非 dev）
+                        </span>
+                      </div>
                       <input
                         type="text"
                         placeholder="http://127.0.0.1:5244/dav 或 https://nas.local:5006"
                         value={webdavForm.base_url}
                         onChange={(e) => setWebdavForm({ ...webdavForm, base_url: e.target.value })}
-                        className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-emerald-500"
+                        className={`w-full rounded-lg border bg-surface-card px-2.5 py-1.5 text-xs outline-none transition-colors ${
+                          webdavForm.base_url.includes('/dev')
+                            ? 'border-amber-500 focus:border-amber-500'
+                            : 'border-border focus:border-emerald-500'
+                        }`}
                       />
+                      {webdavForm.base_url.includes('/dev') && (
+                        <div className="mt-1.5 flex items-center justify-between p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-[11px] animate-fade-in">
+                          <span className="flex items-center gap-1">
+                            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                            检测到输入包含 <code>/dev</code>，Alist 等服务标准路径为 <code>/dav</code>（字母 a）
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setWebdavForm({ ...webdavForm, base_url: webdavForm.base_url.replace('/dev', '/dav') })}
+                            className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-600 text-white font-medium transition shrink-0 ml-2"
+                          >
+                            一键修正为 /dav
+                          </button>
+                        </div>
+                      )}
                     </div>
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">

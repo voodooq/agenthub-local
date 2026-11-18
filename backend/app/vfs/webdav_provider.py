@@ -107,6 +107,20 @@ class WebDAVProvider(CloudVFSProvider):
                     return False, "WebDAV 鉴权失败: 用户名或密码错误 (HTTP 401)"
                 if resp.status_code == 403:
                     return False, "WebDAV 访问被拒绝 (HTTP 403)"
+                if resp.status_code == 405:
+                    # 针对用户常见手误 (/dev 与 /dav 混淆、或漏填 /dav) 的智能诊断
+                    if "/dev" in self.base_url:
+                        candidate = self.base_url.replace("/dev", "/dav")
+                        cand_url = f"{candidate}{req_path}" if req_path != "/" else f"{candidate}/"
+                        try:
+                            cand_resp = await client.request("PROPFIND", cand_url, headers={"Depth": "0"})
+                            if cand_resp.status_code in (200, 207, 401):
+                                return False, f"WebDAV 端点路径拼写错误 (HTTP 405): 您输入的 URL 包含「/dev」，Alist 等服务的标准 WebDAV 路径为「/dav」（字母 a）。已探测到目标服务，请将 URL 修改为: {candidate}"
+                        except Exception:
+                            pass
+                        return False, "WebDAV 服务返回 HTTP 405 (方法不被允许)。请检查: Alist 的标准 WebDAV 路径为 /dav（字母 a），而非 /dev。"
+                    elif not self.base_url.endswith("/dav") and not self.base_url.endswith("/webdav"):
+                        return False, "WebDAV 服务返回 HTTP 405。若您使用的是 Alist，请在端口后加上 /dav 路径（例如: http://127.0.0.1:5244/dav）。"
                 return False, f"WebDAV 服务异常 (HTTP {resp.status_code})"
         except Exception as e:
             err_msg = str(e) or repr(e) or type(e).__name__
