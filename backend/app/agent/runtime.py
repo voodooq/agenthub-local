@@ -4590,27 +4590,49 @@ class AgentRuntime:
                             "compressed": f"[混合检索完成: 关键词 '{q_str}']",
                         }
 
-                    # ── 工具: 云端 LLM Wiki 规程检索 (search_cloud_wiki) ──
+                    # ── 工具: 云端 LLM Wiki 规程检索 (search_cloud_wiki / v1.5.8 显式挂载门控) ──
                     elif func_name == "search_cloud_wiki":
+                        from ..search.multi_kb_router import MultiKBRetrievalRouter
                         from ..tools.workspace_fts import search_cloud_wiki
                         q_str = str(args.get("query") or "").strip()
                         top_k_val = int(args.get("top_k") or 6)
                         pod_id_val = str(args.get("pod_id") or "global")
                         ws_root = target_cwd or "."
 
-                        res_text = await search_cloud_wiki(
-                            workspace_root=ws_root,
+                        # v1.5.8 优先通过多知识库隔离门控检索已挂载知识库
+                        is_gated, router_text, router_chunks = await MultiKBRetrievalRouter.search_mounted_kbs(
                             query=q_str,
+                            expert_id=expert_id if "expert_id" in locals() else None,
+                            session_mounted_kbs=getattr(self, "session_mounted_kbs", None),
                             top_k=top_k_val,
-                            pod_id=pod_id_val,
                         )
-                        if res_text and "未检索到" not in res_text:
-                            retrieved_evidence_chunks.append({
-                                "source_uri": f"cloud_wiki://{q_str}",
-                                "content_text": res_text[:1200],
-                                "authority_tier": 1,
-                                "score": 0.95,
-                            })
+
+                        if is_gated and router_chunks:
+                            res_text = router_text
+                            for rc in router_chunks:
+                                retrieved_evidence_chunks.append({
+                                    "source_uri": rc.get("remote_uri", f"kb://{q_str}"),
+                                    "content_text": rc.get("content", "")[:1200],
+                                    "authority_tier": rc.get("authority_tier", 1),
+                                    "score": round(rc.get("final_score", 0.9), 3),
+                                })
+                        elif is_gated and not router_chunks:
+                            res_text = router_text
+                        else:
+                            # 回退工作区旧式云端同步缓存或返回纯净提示
+                            res_text = await search_cloud_wiki(
+                                workspace_root=ws_root,
+                                query=q_str,
+                                top_k=top_k_val,
+                                pod_id=pod_id_val,
+                            )
+                            if res_text and "未检索到" not in res_text:
+                                retrieved_evidence_chunks.append({
+                                    "source_uri": f"cloud_wiki://{q_str}",
+                                    "content_text": res_text[:1200],
+                                    "authority_tier": 1,
+                                    "score": 0.95,
+                                })
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,

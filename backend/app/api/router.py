@@ -5,12 +5,14 @@ from fastapi import APIRouter
 from .v1 import (
     health, accounts, conversations, chat, search, quota, audit, oauth,
     models, settings, sync, system, memories, workspaces, loop, skills,
-    artifacts, scheduled, experiences, agents, swarms, processes, knowledge
+    artifacts, scheduled, experiences, agents, swarms, processes, knowledge,
+    kb_lifecycle
 )
 
 api_router = APIRouter(prefix="/api/v1")
 api_router.include_router(health.router)
 api_router.include_router(knowledge.router)
+api_router.include_router(kb_lifecycle.router)
 api_router.include_router(processes.router)
 api_router.include_router(agents.router)
 api_router.include_router(swarms.router)

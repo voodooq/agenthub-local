@@ -856,6 +856,69 @@ class DatabaseManager:
             );
             """)
 
+            # 15. v1.5.8 知识库全生命周期治理、版本快照与专家绑定核心表
+            await conn.executescript("""
+            -- 1. 数据源连接配置表（与知识库资产解耦）
+            CREATE TABLE IF NOT EXISTS kb_data_sources (
+                source_id        TEXT PRIMARY KEY,
+                name             TEXT NOT NULL,
+                source_type      TEXT NOT NULL,
+                config_json      TEXT NOT NULL,
+                ignore_patterns  TEXT DEFAULT '~$*,*.tmp,.git/*',
+                sync_mode        TEXT NOT NULL DEFAULT 'auto_live',
+                default_tier     INTEGER NOT NULL DEFAULT 2,
+                status           TEXT NOT NULL DEFAULT 'active',
+                last_sync_at     REAL,
+                last_error       TEXT DEFAULT '',
+                created_at       REAL NOT NULL
+            );
+
+            -- 2. 知识库资产主表（独立于数据源生命周期）
+            CREATE TABLE IF NOT EXISTS knowledge_bases (
+                kb_id            TEXT PRIMARY KEY,
+                name             TEXT NOT NULL,
+                description      TEXT DEFAULT '',
+                ownership_type   TEXT NOT NULL DEFAULT 'local',
+                source_id        TEXT,
+                active_version   TEXT NOT NULL DEFAULT 'v1.0.0',
+                staging_version  TEXT DEFAULT '',
+                embedding_model  TEXT NOT NULL,
+                embedding_dim    INTEGER NOT NULL,
+                chunk_count      INTEGER NOT NULL DEFAULT 0,
+                triple_count     INTEGER NOT NULL DEFAULT 0,
+                disk_size_bytes  INTEGER NOT NULL DEFAULT 0,
+                share_repo_uri   TEXT DEFAULT '',
+                created_at       REAL NOT NULL,
+                updated_at       REAL NOT NULL
+            );
+
+            -- 3. 知识库版本快照历史表
+            CREATE TABLE IF NOT EXISTS kb_versions (
+                kb_id            TEXT NOT NULL,
+                version          TEXT NOT NULL,
+                status           TEXT NOT NULL DEFAULT 'ready',
+                changelog        TEXT DEFAULT '',
+                chunk_count      INTEGER NOT NULL DEFAULT 0,
+                triple_count     INTEGER NOT NULL DEFAULT 0,
+                disk_size_bytes  INTEGER NOT NULL DEFAULT 0,
+                package_hash     TEXT DEFAULT '',
+                created_by       TEXT DEFAULT 'local',
+                created_at       REAL NOT NULL,
+                PRIMARY KEY (kb_id, version)
+            );
+
+            -- 4. 专家角色与知识库绑定关系表
+            CREATE TABLE IF NOT EXISTS expert_kb_bindings (
+                expert_id        TEXT NOT NULL,
+                kb_id            TEXT NOT NULL,
+                pinned_version   TEXT DEFAULT 'latest',
+                priority_rank    INTEGER NOT NULL DEFAULT 1,
+                created_at       REAL NOT NULL,
+                PRIMARY KEY (expert_id, kb_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_expert_kb_rank ON expert_kb_bindings(expert_id, priority_rank);
+            """)
+
             await conn.commit()
             try:
                 from .agent_repository import AgentProfileRepository
