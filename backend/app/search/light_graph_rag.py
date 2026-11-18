@@ -69,18 +69,31 @@ class LightGraphRAGEngine:
         """从文本段落中启发式抽取核心关系三元组。"""
         triples: list[KnowledgeTriple] = []
         eff = effective_time or time.time()
+        doc_name = source_uri.split("/")[-1].split(".")[0].strip()
 
-        # 1. 结构化键值抽取 (例如：报名费: 300元, 负责人：张三)
-        kv_pattern = re.compile(r"^[\s\-\*]*([A-Za-z0-9_\u4e00-\u9fa5]{2,20})[\s]*[:：][\s]*([^\r\n]{2,50})$", re.M)
+        # 1. 结构化键值抽取 (支持各类前置数字与汉字序号)
+        kv_pattern = re.compile(
+            r"^[\s\-\*\d一二三四五六七八九十（）\(\)\.、]*([A-Za-z0-9_\u4e00-\u9fa5]{2,15})[\s]*[:：][\s]*([^\r\n]{2,80})$",
+            re.M,
+        )
         for match in kv_pattern.finditer(text):
             k, v = match.group(1).strip(), match.group(2).strip()
-            # 过滤明显不是三元组的内容
-            if not k.startswith("http") and not v.startswith("http"):
+            if not k.startswith("http") and not v.startswith("http") and len(k) >= 2 and len(v) >= 2:
+                # 若键名为组别（如初中组、U12组），主体设为该组别
+                if any(group_kw in k for group_kw in ("组", "队", "年龄", "资格")):
+                    sub = f"{doc_name}·{k}"
+                    pred = "规则要求"
+                    obj = v
+                else:
+                    sub = doc_name
+                    pred = k
+                    obj = v
+
                 triples.append(
                     KnowledgeTriple(
-                        subject=source_uri.split("/")[-1].split(".")[0],
-                        predicate=k,
-                        object=v,
+                        subject=sub,
+                        predicate=pred,
+                        object=obj,
                         source_uri=source_uri,
                         authority_tier=authority_tier,
                         effective_time=eff,
@@ -90,8 +103,8 @@ class LightGraphRAGEngine:
         # 2. 中文常见谓词抽取：X的Y是Z / X负责Y / X包含Y / X隶属于Y / X兼项限制Y
         patterns = [
             (re.compile(r"([A-Za-z0-9_\u4e00-\u9fa5]{2,15})的([A-Za-z0-9_\u4e00-\u9fa5]{2,10})为?是?([A-Za-z0-9_\u4e00-\u9fa5]{2,30})"), 1, 2, 3),
-            (re.compile(r"([A-Za-z0-9_\u4e00-\u9fa5]{2,15})(负责|主管|对接|承办|协办|归属|隶属|兼项限制|规定)([A-Za-z0-9_\u4e00-\u9fa5]{2,30})"), 1, 2, 3),
-            (re.compile(r"([A-Za-z0-9_\u4e00-\u9fa5]{2,15})(费用|标准|金额|限额)为([A-Za-z0-9_\u4e00-\u9fa5]{2,20})"), 1, 2, 3),
+            (re.compile(r"([A-Za-z0-9_\u4e00-\u9fa5]{2,15})(负责|主管|对接|承办|协办|主办|归属|隶属|兼项限制|规定|设)([A-Za-z0-9_\u4e00-\u9fa5]{2,30})"), 1, 2, 3),
+            (re.compile(r"([A-Za-z0-9_\u4e00-\u9fa5]{2,15})(费用|标准|金额|限额|电话|地址|地点)为?[:：]?([A-Za-z0-9_\u4e00-\u9fa5\d]{2,30})"), 1, 2, 3),
         ]
 
         for pat, s_idx, p_idx, o_idx in patterns:

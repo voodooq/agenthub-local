@@ -26,6 +26,8 @@ import {
   FileSpreadsheet,
   FileCode,
   X,
+  Zap,
+  Network,
 } from 'lucide-react';
 import { Workspace } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
@@ -103,6 +105,15 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [chunksPage, setChunksPage] = useState<number>(1);
   const [chunksSearchQuery, setChunksSearchQuery] = useState<string>('');
   const [copiedChunkId, setCopiedChunkId] = useState<string | null>(null);
+
+  // ── 查看知识图谱三元组状态 ──
+  const [viewingTriplesKb, setViewingTriplesKb] = useState<KnowledgeBaseItem | null>(null);
+  const [kbTriples, setKbTriples] = useState<any[]>([]);
+  const [totalTriplesCount, setTotalTriplesCount] = useState<number>(0);
+  const [loadingTriples, setLoadingTriples] = useState(false);
+  const [triplesPage, setTriplesPage] = useState<number>(1);
+  const [triplesSearchQuery, setTriplesSearchQuery] = useState<string>('');
+  const [extractingGraphKbId, setExtractingGraphKbId] = useState<string | null>(null);
 
   useEffect(() => {
     loadMounts();
@@ -373,6 +384,46 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     navigator.clipboard.writeText(text);
     setCopiedChunkId(chunkId);
     setTimeout(() => setCopiedChunkId(null), 2000);
+  };
+
+  // 提取抽取知识图谱三元组
+  const handleExtractGraph = async (kbId: string) => {
+    setExtractingGraphKbId(kbId);
+    try {
+      const resp = await apiFetch(`/api/v1/kb/bases/${kbId}/extract-graph`, { method: 'POST' });
+      const data = await resp.json();
+      if (resp.ok) {
+        alert(data.message || '图谱三元组提取完成');
+        await loadKBs();
+      } else {
+        alert('提取失败: ' + (data.detail || data.message));
+      }
+    } catch (e: any) {
+      alert('网络请求异常: ' + e.message);
+    } finally {
+      setExtractingGraphKbId(null);
+    }
+  };
+
+  // 查看知识图谱三元组资产列表
+  const handleViewKbTriples = async (kb: KnowledgeBaseItem, page: number = 1, search: string = '') => {
+    setViewingTriplesKb(kb);
+    setTriplesPage(page);
+    setTriplesSearchQuery(search);
+    setLoadingTriples(true);
+    try {
+      const q = encodeURIComponent(search.trim());
+      const resp = await apiFetch(`/api/v1/kb/bases/${kb.kb_id}/triples?page=${page}&page_size=30&search=${q}`);
+      if (resp.ok) {
+        const json = await resp.json();
+        setKbTriples(json.triples || []);
+        setTotalTriplesCount(json.total_count || 0);
+      }
+    } catch (e) {
+      console.error('加载三元组失败:', e);
+    } finally {
+      setLoadingTriples(false);
+    }
   };
 
   return (
@@ -1121,6 +1172,20 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
 
                               <button
                                 type="button"
+                                disabled={extractingGraphKbId === kb.kb_id}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleExtractGraph(kb.kb_id);
+                                }}
+                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700 bg-amber-500/10 hover:bg-amber-500/15 rounded-lg border border-amber-500/20 transition-all font-medium disabled:opacity-50"
+                                title="对已有切片重新批量提取知识图谱三元组"
+                              >
+                                <Zap className={`w-3.5 h-3.5 text-amber-500 ${extractingGraphKbId === kb.kb_id ? 'animate-bounce' : ''}`} />
+                                <span>{extractingGraphKbId === kb.kb_id ? '提取中...' : '提取图谱'}</span>
+                              </button>
+
+                              <button
+                                type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   handlePruneKb(kb.kb_id);
@@ -1148,15 +1213,41 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                           </div>
 
                           <div className="grid grid-cols-3 gap-2 py-2 px-3 rounded-lg bg-surface-card border border-border/60 text-[11px]">
-                            <div>
-                              <span className="text-muted-foreground block">规程切片数</span>
-                              <strong className="text-foreground text-xs">{kb.chunk_count}</strong>
+                            <div
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleViewKbChunks(kb, 1, '');
+                              }}
+                              className="cursor-pointer hover:bg-surface-200/50 p-1 rounded-md transition-colors"
+                              title="点击查看所有规程切片明细"
+                            >
+                              <span className="text-muted-foreground flex items-center gap-1">
+                                <span>规程切片数</span>
+                                <FileText className="w-3 h-3 text-sky-500" />
+                              </span>
+                              <strong className="text-foreground text-xs hover:text-sky-500 underline underline-offset-2">
+                                {kb.chunk_count}
+                              </strong>
                             </div>
-                            <div>
-                              <span className="text-muted-foreground block">图谱三元组</span>
-                              <strong className="text-foreground text-xs">{kb.triple_count}</strong>
+
+                            <div
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleViewKbTriples(kb, 1, '');
+                              }}
+                              className="cursor-pointer hover:bg-surface-200/50 p-1 rounded-md transition-colors"
+                              title="点击查看知识图谱三元组资产明细"
+                            >
+                              <span className="text-muted-foreground flex items-center gap-1">
+                                <span>图谱三元组</span>
+                                <Network className="w-3 h-3 text-amber-500" />
+                              </span>
+                              <strong className="text-foreground text-xs hover:text-amber-500 underline underline-offset-2">
+                                {kb.triple_count}
+                              </strong>
                             </div>
-                            <div>
+
+                            <div className="p-1">
                               <span className="text-muted-foreground block">独立数据库大小</span>
                               <strong className="text-foreground text-xs font-mono">
                                 {(kb.disk_size_bytes / (1024 * 1024)).toFixed(2)} MB
@@ -1664,6 +1755,180 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                 <button
                   type="button"
                   onClick={() => setViewingChunksKb(null)}
+                  className="px-3 py-1.5 rounded-lg bg-surface-200 hover:bg-surface-300 text-xs text-foreground font-medium transition"
+                >
+                  关闭
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 知识图谱三元组资产浏览器模态框 */}
+      {viewingTriplesKb && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 animate-fade-in"
+          onClick={() => setViewingTriplesKb(null)}
+        >
+          <div
+            className="w-full max-w-4xl max-h-[85vh] rounded-2xl border border-border bg-surface-card shadow-2xl flex flex-col overflow-hidden text-foreground animate-scale-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* 模态框顶部 Header */}
+            <div className="px-6 py-4 border-b border-border flex items-center justify-between gap-4 bg-surface-100/60">
+              <div className="flex items-center space-x-3 min-w-0">
+                <div className="p-2 rounded-xl bg-amber-500/10 text-amber-500 border border-amber-500/20">
+                  <Network className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-base font-bold text-foreground truncate">
+                      {viewingTriplesKb.name} · 知识图谱三元组资产清单
+                    </h3>
+                    <span className="px-2 py-0.5 rounded font-mono text-[10px] bg-surface-200 text-foreground border border-border">
+                      {viewingTriplesKb.active_version}
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-2 text-xs text-muted-foreground mt-0.5">
+                    <span>总计关系边：<strong className="text-foreground">{totalTriplesCount}</strong> 条</span>
+                    <span>·</span>
+                    <span>LightGraphRAG 实体语义网络</span>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setViewingTriplesKb(null)}
+                className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* 搜索与工具栏 */}
+            <div className="p-4 border-b border-border bg-surface-100/40 flex items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="搜索图谱主体、关系谓词或客体（如: 主办单位、初中组、U12）..."
+                  value={triplesSearchQuery}
+                  onChange={(e) => setTriplesSearchQuery(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      handleViewKbTriples(viewingTriplesKb, 1, triplesSearchQuery);
+                    }
+                  }}
+                  className="w-full pl-9 pr-3 py-1.5 rounded-xl border border-border bg-surface-card text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-amber-500 transition"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleViewKbTriples(viewingTriplesKb, triplesPage, triplesSearchQuery)}
+                  disabled={loadingTriples}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-border bg-surface-card text-xs text-foreground hover:bg-surface-200 transition"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingTriples ? 'animate-spin' : ''}`} />
+                  <span>刷新</span>
+                </button>
+              </div>
+            </div>
+
+            {/* 三元组卡片列表 Body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-3">
+              {loadingTriples ? (
+                <div className="py-16 text-center text-xs text-muted-foreground space-y-2">
+                  <RefreshCw className="w-6 h-6 animate-spin mx-auto text-amber-500" />
+                  <div>正在加载图谱三元组资产...</div>
+                </div>
+              ) : kbTriples.length === 0 ? (
+                <div className="py-16 text-center text-xs text-muted-foreground space-y-2">
+                  <Network className="w-8 h-8 mx-auto text-muted-foreground/40" />
+                  <div>暂未匹配到图谱三元组关系</div>
+                  <p className="text-[11px] text-muted-foreground/80">
+                    请尝试更换搜索关键字，或在卡片上点击“提取图谱”进行实体关系构建
+                  </p>
+                </div>
+              ) : (
+                kbTriples.map((t, idx) => (
+                  <div
+                    key={t.id || idx}
+                    className="rounded-xl border border-border bg-surface-100/50 p-3.5 flex items-center justify-between gap-3 text-xs hover:border-border/80 transition-all shadow-xs"
+                  >
+                    <div className="flex items-center gap-2 flex-wrap min-w-0">
+                      <span className="font-mono text-[10px] text-muted-foreground px-1.5 py-0.5 rounded bg-surface-200 shrink-0">
+                        #{(triplesPage - 1) * 30 + idx + 1}
+                      </span>
+
+                      {/* 主体 */}
+                      <span className="font-semibold px-2.5 py-1 rounded-lg bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20 max-w-xs truncate" title={t.subject}>
+                        {t.subject}
+                      </span>
+
+                      {/* 谓词/关系 */}
+                      <span className="flex items-center gap-1 font-mono text-[11px] px-2 py-0.5 rounded bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 font-medium">
+                        <span>--[ {t.predicate} ]--&gt;</span>
+                      </span>
+
+                      {/* 客体 */}
+                      <span className="px-2.5 py-1 rounded-lg bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 max-w-md truncate" title={t.object}>
+                        {t.object}
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={() => handleCopyChunkText(`trip_${t.id}`, `(${t.subject}) --[${t.predicate}]--> (${t.object})`)}
+                      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-muted-foreground hover:text-foreground hover:bg-surface-200 border border-border shrink-0 transition"
+                      title="复制三元组"
+                    >
+                      {copiedChunkId === `trip_${t.id}` ? (
+                        <>
+                          <Check className="w-3 h-3 text-emerald-500" />
+                          <span className="text-emerald-500 text-[10px]">已复制</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy className="w-3 h-3" />
+                          <span className="text-[10px]">复制</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* 模态框底部 Footer 与分页 */}
+            <div className="px-6 py-3 border-t border-border bg-surface-100/60 flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">
+                共 {totalTriplesCount} 条关系三元组 · 当前第 {triplesPage} / {Math.ceil(totalTriplesCount / 30) || 1} 页
+              </span>
+
+              <div className="flex items-center space-x-2">
+                <button
+                  type="button"
+                  disabled={triplesPage <= 1 || loadingTriples}
+                  onClick={() => handleViewKbTriples(viewingTriplesKb, triplesPage - 1, triplesSearchQuery)}
+                  className="px-3 py-1.5 rounded-lg border border-border text-xs text-foreground hover:bg-surface-200 transition disabled:opacity-40"
+                >
+                  上一页
+                </button>
+                <button
+                  type="button"
+                  disabled={triplesPage * 30 >= totalTriplesCount || loadingTriples}
+                  onClick={() => handleViewKbTriples(viewingTriplesKb, triplesPage + 1, triplesSearchQuery)}
+                  className="px-3 py-1.5 rounded-lg border border-border text-xs text-foreground hover:bg-surface-200 transition disabled:opacity-40"
+                >
+                  下一页
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewingTriplesKb(null)}
                   className="px-3 py-1.5 rounded-lg bg-surface-200 hover:bg-surface-300 text-xs text-foreground font-medium transition"
                 >
                   关闭

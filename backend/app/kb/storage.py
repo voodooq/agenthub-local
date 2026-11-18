@@ -57,6 +57,7 @@ class KBStorageManager:
         now = time.time()
         conn = sqlite3.connect(str(db_path))
         try:
+            from ..search.light_graph_rag import LightGraphRAGEngine
             with conn:
                 for c in chunks:
                     chunk_id = str(
@@ -82,6 +83,20 @@ class KBStorageManager:
                         (chunk_id, c["remote_uri"], title, content, tier, mtime, etag, blob, now),
                     )
 
+                    # 提取并写入启发式知识三元组
+                    triples = LightGraphRAGEngine.extract_triples_from_text(
+                        content, c["remote_uri"], authority_tier=tier, effective_time=mtime
+                    )
+                    for t in triples:
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO knowledge_triples (
+                                subject, predicate, object, chunk_id, created_at
+                            ) VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (t.subject, t.predicate, t.object, chunk_id, now),
+                        )
+
                 cursor = conn.cursor()
                 cursor.execute("SELECT count(*) FROM hybrid_chunks")
                 total_chunks = cursor.fetchone()[0]
@@ -102,6 +117,63 @@ class KBStorageManager:
 
         disk_size = manifest.get("disk_size_bytes", 0)
         return total_chunks, disk_size
+
+    @classmethod
+    def extract_and_save_triples_for_kb(cls, kb_id: str, version: str) -> int:
+        """对指定版本独立库中已有的所有切片批量重新抽取并写入知识图谱三元组。"""
+        db_path = cls.get_version_db_path(kb_id, version)
+        if not db_path.exists():
+            return 0
+
+        cls.init_version_db_schema(db_path)
+        from ..search.light_graph_rag import LightGraphRAGEngine
+
+        now = time.time()
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            cur = conn.cursor()
+            cur.execute("SELECT id, remote_uri, title, content, authority_tier, mtime FROM hybrid_chunks")
+            chunks = cur.fetchall()
+
+            with conn:
+                for r in chunks:
+                    chunk_id = str(r["id"])
+                    content = r["content"] or ""
+                    uri = r["remote_uri"]
+                    tier = r["authority_tier"]
+                    mtime = r["mtime"] or now
+
+                    triples = LightGraphRAGEngine.extract_triples_from_text(
+                        content, uri, authority_tier=tier, effective_time=mtime
+                    )
+                    for t in triples:
+                        conn.execute(
+                            """
+                            INSERT OR IGNORE INTO knowledge_triples (
+                                subject, predicate, object, chunk_id, created_at
+                            ) VALUES (?, ?, ?, ?, ?)
+                            """,
+                            (t.subject, t.predicate, t.object, chunk_id, now),
+                        )
+
+                cur.execute("SELECT count(*) FROM hybrid_chunks")
+                total_chunks = cur.fetchone()[0]
+                cur.execute("SELECT count(*) FROM knowledge_triples")
+                total_triples = cur.fetchone()[0]
+
+            cls.write_manifest(
+                kb_id=kb_id,
+                version=version,
+                embedding_model="null_offline_lexical",
+                embedding_dim=768,
+                chunk_count=total_chunks,
+                triple_count=total_triples,
+                changelog=f"全量图谱三元组抽取构建完成，共生成 {total_triples} 条关系边",
+            )
+            return total_triples
+        finally:
+            conn.close()
 
     @classmethod
     def get_version_db_path(cls, kb_id: str, version: str) -> Path:

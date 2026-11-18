@@ -402,3 +402,119 @@ async def list_kb_chunks(
     finally:
         conn.close()
 
+
+@router.post("/bases/{kb_id}/extract-graph")
+async def extract_kb_graph(
+    kb_id: str,
+    version: str | None = Query(default=None, description="版本号，缺省为当前激活版本"),
+) -> dict[str, Any]:
+    """触发对指定知识库中所有切片批量重新抽取知识图谱三元组。"""
+    kbs = await KBLifecycleManager.list_knowledge_bases()
+    target_kb = next((k for k in kbs if k["kb_id"] == kb_id), None)
+    if not target_kb:
+        raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+
+    target_ver = version or target_kb["active_version"]
+    total = KBStorageManager.extract_and_save_triples_for_kb(kb_id, target_ver)
+
+    from ...repository.db import db_manager
+    async with db_manager.get_connection() as conn:
+        await conn.execute(
+            "UPDATE knowledge_bases SET triple_count = ?, updated_at = ? WHERE kb_id = ?",
+            (total, time.time(), kb_id),
+        )
+        await conn.execute(
+            "UPDATE kb_versions SET triple_count = ? WHERE kb_id = ? AND version = ?",
+            (total, kb_id, target_ver),
+        )
+        await conn.commit()
+
+    return {
+        "success": True,
+        "kb_id": kb_id,
+        "name": target_kb["name"],
+        "version": target_ver,
+        "triple_count": total,
+        "message": f"成功为【{target_kb['name']}】提取抽取 {total} 条实体关系三元组",
+    }
+
+
+@router.get("/bases/{kb_id}/triples")
+async def list_kb_triples(
+    kb_id: str,
+    version: str | None = Query(default=None, description="版本号，缺省为当前激活版本"),
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=30, ge=1, le=100, description="每页三元组数"),
+    search: str | None = Query(default=None, description="可选搜索关键词过滤（主体/谓词/客体）"),
+) -> dict[str, Any]:
+    """分页查看指定独立知识库中的知识图谱三元组资产清单。"""
+    kbs = await KBLifecycleManager.list_knowledge_bases()
+    target_kb = next((k for k in kbs if k["kb_id"] == kb_id), None)
+    if not target_kb:
+        raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+
+    target_ver = version or target_kb["active_version"]
+    db_p = KBStorageManager.get_version_db_path(kb_id, target_ver)
+    if not db_p.exists():
+        return {
+            "success": True,
+            "kb_id": kb_id,
+            "name": target_kb["name"],
+            "version": target_ver,
+            "total_count": 0,
+            "page": page,
+            "page_size": page_size,
+            "triples": [],
+        }
+
+    import sqlite3
+    conn = sqlite3.connect(str(db_p))
+    conn.row_factory = sqlite3.Row
+    try:
+        where_clause = ""
+        params: list[Any] = []
+        if search and search.strip():
+            kw = f"%{search.strip()}%"
+            where_clause = "WHERE subject LIKE ? OR predicate LIKE ? OR object LIKE ?"
+            params.extend([kw, kw, kw])
+
+        count_sql = f"SELECT count(*) FROM knowledge_triples {where_clause}"
+        cursor = conn.execute(count_sql, params)
+        total_count = cursor.fetchone()[0]
+
+        offset = (page - 1) * page_size
+        query_sql = f"""
+        SELECT id, subject, predicate, object, chunk_id, created_at
+        FROM knowledge_triples
+        {where_clause}
+        ORDER BY id ASC
+        LIMIT ? OFFSET ?
+        """
+        cursor = conn.execute(query_sql, params + [page_size, offset])
+        rows = cursor.fetchall()
+
+        triples_data = [
+            {
+                "id": r["id"],
+                "subject": r["subject"],
+                "predicate": r["predicate"],
+                "object": r["object"],
+                "chunk_id": r["chunk_id"],
+                "created_at": r["created_at"],
+            }
+            for r in rows
+        ]
+
+        return {
+            "success": True,
+            "kb_id": kb_id,
+            "name": target_kb["name"],
+            "version": target_ver,
+            "total_count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "triples": triples_data,
+        }
+    finally:
+        conn.close()
+
