@@ -8,6 +8,8 @@ SQLite 混合检索引擎 (Hybrid Search Engine)
 5. Pod 隔离标识 (pod_id / org_entity_id) 支持；
 6. 低优先级后台异步增量向量化队列。
 """
+from __future__ import annotations
+
 from contextlib import closing
 import hashlib
 import json
@@ -16,7 +18,13 @@ import re
 import sqlite3
 import time
 from typing import Any
-import numpy as np
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+    np = None  # type: ignore
 
 from ..core.logging_config import logger
 from .embedding_provider import (
@@ -179,9 +187,9 @@ class HybridSearchEngine:
             provider = await embedding_router.get_provider()
 
         texts_to_embed = [c["content_text"] for c in chunks]
-        embeddings: np.ndarray | None = None
+        embeddings: Any | None = None
 
-        if provider.is_available and provider.dimension > 0:
+        if HAS_NUMPY and np is not None and provider.is_available and provider.dimension > 0:
             try:
                 embeddings = await provider.encode_batch(texts_to_embed)
                 if embeddings is None:
@@ -212,7 +220,7 @@ class HybridSearchEngine:
                     is_sup = c.get("is_superseded", 0)
 
                     blob_data = None
-                    if embeddings is not None and idx < len(embeddings):
+                    if HAS_NUMPY and np is not None and embeddings is not None and idx < len(embeddings):
                         blob_data = embeddings[idx].astype(np.float32).tobytes()
 
                     conn.execute("""
@@ -298,7 +306,7 @@ class HybridSearchEngine:
         provider = await embedding_router.get_provider()
         w_fts, w_vec = self.route_query_intent(clean_query)
 
-        if not provider.is_available or provider.dimension == 0:
+        if not HAS_NUMPY or not provider.is_available or provider.dimension == 0:
             w_fts = 1.0
             w_vec = 0.0
 
@@ -308,7 +316,7 @@ class HybridSearchEngine:
         chunk_cache: dict[int, dict[str, Any]] = {}
 
         # 1. 向量相似度召回 (在线实时查询走常驻低延迟通道)
-        if w_vec > 0.0:
+        if HAS_NUMPY and np is not None and w_vec > 0.0:
             try:
                 q_vec = await provider.encode_query(clean_query)
                 if q_vec is not None and q_vec.shape[0] > 0:
@@ -330,7 +338,7 @@ class HybridSearchEngine:
 
                     if rows:
                         chunk_ids: list[int] = []
-                        valid_blobs: list[np.ndarray] = []
+                        valid_blobs: list[Any] = []
 
                         for r in rows:
                             cid = r["chunk_id"]

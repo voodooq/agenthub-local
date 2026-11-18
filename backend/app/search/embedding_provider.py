@@ -29,32 +29,42 @@ from pathlib import Path
 from typing import Any, Literal
 
 import httpx
-import numpy as np
+
+try:
+    import numpy as np
+    HAS_NUMPY = True
+except ImportError:
+    HAS_NUMPY = False
+    np = None  # type: ignore
 
 from ..core.logging_config import logger
 
 DevicePolicy = Literal["auto", "cpu", "gpu", "directml"]
 
 
-def normalize_l2(vectors: np.ndarray) -> np.ndarray:
+def normalize_l2(vectors: Any) -> Any:
     """对嵌入向量进行 L2 归一化，确保点积等价于余弦相似度。
 
     Args:
-        vectors: 形状为 (N, D) 或 (D,) 的二维/一维 float 矩阵。
+        vectors: 形状为 (N, D) 或 (D,) 的二维/一维 float 矩阵或列表。
 
     Returns:
-        np.ndarray: L2 归一化后的 float32 矩阵。
+        L2 归一化后的数据（如果 numpy 可用则返回 float32 np.ndarray，否则返回原对象）。
     """
-    if vectors.size == 0:
+    if not HAS_NUMPY or np is None or vectors is None:
+        return vectors
+    if hasattr(vectors, "size") and vectors.size == 0:
         return vectors.astype(np.float32)
-    if vectors.ndim == 1:
+    if hasattr(vectors, "ndim") and vectors.ndim == 1:
         norm = float(np.linalg.norm(vectors))
         if norm < 1e-9:
             return vectors.astype(np.float32)
         return (vectors / norm).astype(np.float32)
-    norms = np.linalg.norm(vectors, axis=-1, keepdims=True)
-    norms = np.maximum(norms, 1e-9)
-    return (vectors / norms).astype(np.float32)
+    if hasattr(vectors, "ndim"):
+        norms = np.linalg.norm(vectors, axis=-1, keepdims=True)
+        norms = np.maximum(norms, 1e-9)
+        return (vectors / norms).astype(np.float32)
+    return vectors
 
 
 @dataclass(frozen=True)
@@ -135,10 +145,14 @@ class NullEmbeddingProvider(BaseEmbeddingProvider):
     def is_available(self) -> bool:
         return False
 
-    async def encode_query(self, text: str) -> np.ndarray | None:
+    async def encode_query(self, text: str) -> Any | None:
+        if not HAS_NUMPY or np is None:
+            return None
         return np.zeros(0, dtype=np.float32)
 
-    async def encode_batch(self, texts: list[str], batch_size: int = 32) -> np.ndarray | None:
+    async def encode_batch(self, texts: list[str], batch_size: int = 32) -> Any | None:
+        if not HAS_NUMPY or np is None:
+            return None
         return np.zeros((len(texts), 0), dtype=np.float32)
 
     def get_status(self) -> EmbeddingRuntimeStatus:
@@ -183,7 +197,7 @@ class LocalServerEmbeddingProvider(BaseEmbeddingProvider):
 
     @property
     def is_available(self) -> bool:
-        return self._available
+        return HAS_NUMPY and self._available
 
     async def probe_and_activate(self) -> bool:
         """探活本地推理端点并校验 Embedding 能力。"""
@@ -445,7 +459,7 @@ class VramAwareOnnxProvider(BaseEmbeddingProvider):
 
     @property
     def is_available(self) -> bool:
-        return (self._model_dir / "model_quantized.onnx").exists()
+        return HAS_NUMPY and (self._model_dir / "model_quantized.onnx").exists()
 
     def set_device_policy(self, policy: DevicePolicy) -> None:
         """动态调整设备策略。"""

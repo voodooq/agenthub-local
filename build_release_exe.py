@@ -40,10 +40,9 @@ DIST_DIR = BASE_DIR / "dist"
 BUILD_DIR = BASE_DIR / "build"
 APP_NAME = "AgentHub"
 
-# 严禁进入独立桌面发行包的重型/测试无关依赖（切断 openpyxl -> pandas -> numpy 约 19 MB 体积膨胀链）
+# 严禁进入独立桌面发行包的重型/测试无关依赖（排除 pandas / scipy / matplotlib 等，保留 numpy 用于混合检索）
 EXCLUDED_MODULES: tuple[str, ...] = (
     "pandas",
-    "numpy",
     "scipy",
     "matplotlib",
     "pytest",
@@ -163,7 +162,7 @@ def _assert_toc_and_stage_clean() -> None:
     """精确校验 PyInstaller PYZ/PKG/COLLECT 清单及暂存切片，确保 0 隐私泄漏并剔除无关重型包。"""
     import ast
 
-    forbidden_top_pkgs = {"pandas", "numpy", "scipy", "matplotlib", "pytest", "_pytest"}
+    forbidden_top_pkgs = {"pandas", "scipy", "matplotlib", "pytest", "_pytest"}
     pyz_toc = BUILD_DIR / APP_NAME / "PYZ-00.toc"
     if pyz_toc.is_file():
         try:
@@ -364,7 +363,7 @@ def build_executable(mode: str, release_version: str) -> Path:
         print(f"🎉 AgentHub Local {release_version} 独立单文件客户端构建完成！")
         print(f"🚀 单文件独立可执行程序: {final_exe} ({size_mb:.2f} MB)")
         print("   ✓ 已内置静态前端/后端微内核/默认技能/MCP 配置，支持单文件双击运行")
-        print("   ✓ 已裁剪 pandas / numpy / 测试代码等冗余体积，并保证 0 隐私数据泄漏")
+        print("   ✓ 已裁剪 pandas / scipy / 测试代码等冗余体积，并保证 0 隐私数据泄漏")
         print("=================================================================\n")
         return final_exe
 
