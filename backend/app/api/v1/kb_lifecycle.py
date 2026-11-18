@@ -407,15 +407,16 @@ async def list_kb_chunks(
 async def extract_kb_graph(
     kb_id: str,
     version: str | None = Query(default=None, description="版本号，缺省为当前激活版本"),
+    force_rebuild: bool = Query(default=False, description="是否强制全量重构图谱（缺省 False 为增量水位线模式）"),
 ) -> dict[str, Any]:
-    """触发对指定知识库中所有切片批量重新抽取知识图谱三元组。"""
+    """触发对指定知识库中未抽取的切片进行增量抽取，或全量重构知识图谱三元组。"""
     kbs = await KBLifecycleManager.list_knowledge_bases()
     target_kb = next((k for k in kbs if k["kb_id"] == kb_id), None)
     if not target_kb:
         raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
 
     target_ver = version or target_kb["active_version"]
-    total = KBStorageManager.extract_and_save_triples_for_kb(kb_id, target_ver)
+    new_extracted, total = KBStorageManager.extract_and_save_triples_for_kb(kb_id, target_ver, force_rebuild=force_rebuild)
 
     from ...repository.db import db_manager
     async with db_manager.get_connection() as conn:
@@ -429,13 +430,19 @@ async def extract_kb_graph(
         )
         await conn.commit()
 
+    if new_extracted == 0 and not force_rebuild:
+        msg = f"【{target_kb['name']}】所有切片均已完成图谱构建（共 {total} 条关系边），未重复消耗算力。"
+    else:
+        msg = f"成功为【{target_kb['name']}】增量抽取/强化印证 {new_extracted} 条关系边，当前总计 {total} 条"
+
     return {
         "success": True,
         "kb_id": kb_id,
         "name": target_kb["name"],
         "version": target_ver,
+        "new_extracted": new_extracted,
         "triple_count": total,
-        "message": f"成功为【{target_kb['name']}】提取抽取 {total} 条实体关系三元组",
+        "message": msg,
     }
 
 
@@ -447,7 +454,7 @@ async def list_kb_triples(
     page_size: int = Query(default=30, ge=1, le=100, description="每页三元组数"),
     search: str | None = Query(default=None, description="可选搜索关键词过滤（主体/谓词/客体）"),
 ) -> dict[str, Any]:
-    """分页查看指定独立知识库中的知识图谱三元组资产清单。"""
+    """分页查看指定独立知识库中的知识图谱三元组资产清单（优先按置信度/验证频次降序）。"""
     kbs = await KBLifecycleManager.list_knowledge_bases()
     target_kb = next((k for k in kbs if k["kb_id"] == kb_id), None)
     if not target_kb:
@@ -484,10 +491,10 @@ async def list_kb_triples(
 
         offset = (page - 1) * page_size
         query_sql = f"""
-        SELECT id, subject, predicate, object, chunk_id, created_at
+        SELECT id, subject, predicate, object, chunk_id, confidence, created_at
         FROM knowledge_triples
         {where_clause}
-        ORDER BY id ASC
+        ORDER BY confidence DESC, id ASC
         LIMIT ? OFFSET ?
         """
         cursor = conn.execute(query_sql, params + [page_size, offset])
@@ -500,6 +507,7 @@ async def list_kb_triples(
                 "predicate": r["predicate"],
                 "object": r["object"],
                 "chunk_id": r["chunk_id"],
+                "confidence": r["confidence"] if "confidence" in r.keys() else 1.0,
                 "created_at": r["created_at"],
             }
             for r in rows
@@ -508,6 +516,15 @@ async def list_kb_triples(
         return {
             "success": True,
             "kb_id": kb_id,
+            "name": target_kb["name"],
+            "version": target_ver,
+            "total_count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "triples": triples_data,
+        }
+    finally:
+        conn.close()
             "name": target_kb["name"],
             "version": target_ver,
             "total_count": total_count,

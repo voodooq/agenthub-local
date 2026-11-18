@@ -62,8 +62,49 @@ class LightGraphRAGEngine:
         self._init_db(conn)
         return conn
 
-    @staticmethod
+    PREDICATE_SYNONYM_MAP: dict[str, str] = {
+        # 主办与组织架构
+        "主办方": "主办单位",
+        "承办方": "承办单位",
+        "协办方": "协办单位",
+        "支持单位": "指导单位",
+        "指导机构": "指导单位",
+        # 费用标准
+        "报名费": "收费标准",
+        "报名费用": "收费标准",
+        "参赛费": "收费标准",
+        "收费标准": "收费标准",
+        "押金": "收费标准",
+        "押金标准": "收费标准",
+        # 比赛时间
+        "开票日期": "开票日期",
+        "开票时间": "开票日期",
+        "比赛时间": "比赛时间",
+        "比赛日期": "比赛时间",
+        "竞赛时间": "比赛时间",
+        "报名截止时间": "报名截止时间",
+        "报名截止日期": "报名截止时间",
+        # 项目与组别
+        "比赛项目": "竞赛项目",
+        "参赛项目": "竞赛项目",
+        "组别设置": "竞赛组别",
+        "比赛组别": "竞赛组别",
+        "参赛组别": "竞赛组别",
+        # 资格与要求
+        "报名条件": "参赛资格",
+        "报名资格": "参赛资格",
+        "参赛要求": "参赛资格",
+    }
+
+    @classmethod
+    def normalize_predicate(cls, pred: str) -> str:
+        """谓词同义词与核心语义标准化。"""
+        clean_p = pred.strip()
+        return cls.PREDICATE_SYNONYM_MAP.get(clean_p, clean_p)
+
+    @classmethod
     def extract_triples_from_text(
+        cls,
         text: str, source_uri: str, authority_tier: int = 2, effective_time: float = 0.0
     ) -> list[KnowledgeTriple]:
         """从文本段落中启发式抽取核心关系三元组。"""
@@ -86,7 +127,7 @@ class LightGraphRAGEngine:
                     obj = v
                 else:
                     sub = doc_name
-                    pred = k
+                    pred = cls.normalize_predicate(k)
                     obj = v
 
                 triples.append(
@@ -110,7 +151,7 @@ class LightGraphRAGEngine:
         for pat, s_idx, p_idx, o_idx in patterns:
             for match in pat.finditer(text):
                 sub = match.group(s_idx).strip()
-                pred = match.group(p_idx).strip()
+                pred = cls.normalize_predicate(match.group(p_idx).strip())
                 obj = match.group(o_idx).strip()
                 if sub and pred and obj and sub != obj:
                     triples.append(

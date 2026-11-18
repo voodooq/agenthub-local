@@ -100,6 +100,50 @@ class TestKBIsolationAndBoundary(unittest.TestCase):
         # 清理测试知识库目录
         KBStorageManager.physically_destroy_kb(kb_id)
 
+    def test_predicate_normalization(self):
+        """测试谓词同义词标准化归一化（如主办方->主办单位、报名费->收费标准）。"""
+        from backend.app.search.light_graph_rag import LightGraphRAGEngine
+        self.assertEqual(LightGraphRAGEngine.normalize_predicate("主办方"), "主办单位")
+        self.assertEqual(LightGraphRAGEngine.normalize_predicate("承办方"), "承办单位")
+        self.assertEqual(LightGraphRAGEngine.normalize_predicate("报名费"), "收费标准")
+        self.assertEqual(LightGraphRAGEngine.normalize_predicate("开票时间"), "开票日期")
+
+    def test_triple_extraction_idempotence(self):
+        """测试图谱三元组抽取增量水位线与幂等复合唯一写入。"""
+        kb_id = "test_kb_triples_idem"
+        version = "v1.0.0"
+        db_path = KBStorageManager.get_version_db_path(kb_id, version)
+        KBStorageManager.init_version_db_schema(db_path)
+
+        chunks = [
+            {
+                "remote_uri": "test://doc1.pdf",
+                "title": "doc1.pdf",
+                "content": "比赛项目: 篮球公开赛\n主办单位: 中国篮协\n收费标准: 500元",
+                "authority_tier": 1,
+            }
+        ]
+        KBStorageManager.upsert_chunks_to_version_db(kb_id, version, chunks)
+
+        # 第 1 次抽取：应生成三元组并标记切片为已处理
+        new_cnt1, total1 = KBStorageManager.extract_and_save_triples_for_kb(kb_id, version, force_rebuild=False)
+        self.assertGreater(new_cnt1, 0)
+        self.assertEqual(total1, new_cnt1)
+
+        # 第 2 次增量抽取：无新切片，极速返回 0，三元组总数严格守恒
+        new_cnt2, total2 = KBStorageManager.extract_and_save_triples_for_kb(kb_id, version, force_rebuild=False)
+        self.assertEqual(new_cnt2, 0)
+        self.assertEqual(total2, total1)
+
+        # 验证数据库中切片标记状态
+        conn = sqlite3.connect(str(db_path))
+        cur = conn.cursor()
+        cur.execute("SELECT graph_extracted FROM hybrid_chunks")
+        self.assertEqual(cur.fetchone()[0], 1)
+        conn.close()
+
+        KBStorageManager.physically_destroy_kb(kb_id)
+
 
 if __name__ == "__main__":
     unittest.main()

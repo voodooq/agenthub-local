@@ -135,11 +135,22 @@ class KBStorageManager:
         return total_chunks, disk_size
 
     @classmethod
-    def extract_and_save_triples_for_kb(cls, kb_id: str, version: str) -> int:
-        """对指定版本独立库中已有的所有切片批量重新抽取并写入知识图谱三元组。"""
+    def extract_and_save_triples_for_kb(
+        cls, kb_id: str, version: str, force_rebuild: bool = False
+    ) -> tuple[int, int]:
+        """批量抽取并写入知识图谱三元组（支持增量切片水位线与复合唯一幂等写入）。
+
+        Args:
+            kb_id: 知识库 ID
+            version: 版本号
+            force_rebuild: 是否强制重构（缺省 False 为增量水位线模式）
+
+        Returns:
+            tuple[int, int]: (new_extracted_triples, total_triples)
+        """
         db_path = cls.get_version_db_path(kb_id, version)
         if not db_path.exists():
-            return 0
+            return 0, 0
 
         cls.init_version_db_schema(db_path)
         from ..search.light_graph_rag import LightGraphRAGEngine
@@ -149,34 +160,74 @@ class KBStorageManager:
         conn.row_factory = sqlite3.Row
         try:
             cur = conn.cursor()
-            cur.execute("SELECT id, remote_uri, title, content, authority_tier, mtime FROM hybrid_chunks")
-            chunks = cur.fetchall()
+            if force_rebuild:
+                cur.execute("DELETE FROM knowledge_triples")
+                cur.execute("UPDATE hybrid_chunks SET graph_extracted = 0")
+                conn.commit()
+
+            # 仅提取未标记抽取完成的切片（graph_extracted = 0）
+            cur.execute("SELECT id, remote_uri, title, content, authority_tier, mtime FROM hybrid_chunks WHERE graph_extracted = 0")
+            unprocessed_chunks = cur.fetchall()
+
+            cur.execute("SELECT count(*) FROM knowledge_triples")
+            existing_triples_count = cur.fetchone()[0]
+
+            # 极速短路优化：所有切片均已完成图谱抽取，绝不浪费算力
+            if not unprocessed_chunks and not force_rebuild:
+                return 0, existing_triples_count
+
+            new_extracted_count = 0
+            processed_ids = []
 
             with conn:
-                for r in chunks:
+                for r in unprocessed_chunks:
                     chunk_id = str(r["id"])
                     content = r["content"] or ""
                     uri = r["remote_uri"]
                     tier = r["authority_tier"]
                     mtime = r["mtime"] or now
+                    processed_ids.append(chunk_id)
 
                     triples = LightGraphRAGEngine.extract_triples_from_text(
                         content, uri, authority_tier=tier, effective_time=mtime
                     )
                     for t in triples:
-                        conn.execute(
+                        # 幂等 Upsert：同一条关系在不同切片中再次印证，自动累加置信度与更新时间
+                        cur.execute(
                             """
-                            INSERT OR IGNORE INTO knowledge_triples (
-                                subject, predicate, object, chunk_id, created_at
-                            ) VALUES (?, ?, ?, ?, ?)
+                            INSERT INTO knowledge_triples (
+                                subject, predicate, object, chunk_id, confidence, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, 1.0, ?, ?)
+                            ON CONFLICT(subject, predicate, object) DO UPDATE SET
+                                confidence = confidence + 1.0,
+                                updated_at = excluded.updated_at
                             """,
-                            (t.subject, t.predicate, t.object, chunk_id, now),
+                            (t.subject, t.predicate, t.object, chunk_id, now, now),
                         )
+                        if cur.rowcount > 0:
+                            new_extracted_count += 1
+
+                # 批量标记切片为已抽取
+                if processed_ids:
+                    batch_size = 500
+                    for i in range(0, len(processed_ids), batch_size):
+                        sub_ids = processed_ids[i:i + batch_size]
+                        placeholders = ",".join("?" for _ in sub_ids)
+                        cur.execute(f"UPDATE hybrid_chunks SET graph_extracted = 1 WHERE id IN ({placeholders})", sub_ids)
 
                 cur.execute("SELECT count(*) FROM hybrid_chunks")
                 total_chunks = cur.fetchone()[0]
                 cur.execute("SELECT count(*) FROM knowledge_triples")
                 total_triples = cur.fetchone()[0]
+
+            # 触发 FTS5 彻底重构与 SQLite VACUUM 释放物理空间
+            try:
+                conn.execute("INSERT INTO hybrid_chunks_fts(hybrid_chunks_fts) VALUES('rebuild');")
+                conn.commit()
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                conn.execute("VACUUM;")
+            except Exception:
+                pass
 
             cls.write_manifest(
                 kb_id=kb_id,
@@ -185,32 +236,24 @@ class KBStorageManager:
                 embedding_dim=768,
                 chunk_count=total_chunks,
                 triple_count=total_triples,
-                changelog=f"全量图谱三元组抽取构建完成，共生成 {total_triples} 条关系边",
+                changelog=f"图谱抽取构建完成：新增/印证 {new_extracted_count} 条关系，总计 {total_triples} 条",
             )
             try:
                 from ..repository.db import db_manager
-                import asyncio
-                async def _sync_counts():
-                    async with db_manager.get_connection() as mconn:
-                        await mconn.execute(
-                            "UPDATE knowledge_bases SET triple_count = ?, chunk_count = ?, updated_at = ? WHERE kb_id = ?",
-                            (total_triples, total_chunks, now, kb_id),
-                        )
-                        await mconn.execute(
-                            "UPDATE kb_versions SET triple_count = ?, chunk_count = ? WHERE kb_id = ? AND version = ?",
-                            (total_triples, total_chunks, kb_id, version),
-                        )
-                        await mconn.commit()
-                # 若已处于事件循环中则安排任务，否则创建一次性运行
-                try:
-                    loop = asyncio.get_running_loop()
-                    loop.create_task(_sync_counts())
-                except RuntimeError:
-                    asyncio.run(_sync_counts())
+                with sqlite3.connect(str(db_manager._db_path)) as mconn:
+                    mconn.execute(
+                        "UPDATE knowledge_bases SET triple_count = ?, chunk_count = ?, updated_at = ? WHERE kb_id = ?",
+                        (total_triples, total_chunks, now, kb_id),
+                    )
+                    mconn.execute(
+                        "UPDATE kb_versions SET triple_count = ?, chunk_count = ? WHERE kb_id = ? AND version = ?",
+                        (total_triples, total_chunks, kb_id, version),
+                    )
+                    mconn.commit()
             except Exception as e:
                 logger.debug(f"同步三元组统计至元数据表: {e}")
 
-            return total_triples
+            return new_extracted_count, total_triples
         finally:
             conn.close()
 
@@ -306,15 +349,16 @@ class KBStorageManager:
             conn.execute("PRAGMA synchronous = NORMAL;")
             conn.executescript("""
             CREATE TABLE IF NOT EXISTS hybrid_chunks (
-                id             TEXT PRIMARY KEY,
-                remote_uri     TEXT NOT NULL,
-                title          TEXT NOT NULL,
-                content        TEXT NOT NULL,
-                authority_tier INTEGER NOT NULL DEFAULT 2,
-                mtime          REAL NOT NULL DEFAULT 0.0,
-                etag           TEXT NOT NULL DEFAULT '',
-                embedding_blob BLOB,
-                created_at     REAL NOT NULL
+                id              TEXT PRIMARY KEY,
+                remote_uri      TEXT NOT NULL,
+                title           TEXT NOT NULL,
+                content         TEXT NOT NULL,
+                authority_tier  INTEGER NOT NULL DEFAULT 2,
+                mtime           REAL NOT NULL DEFAULT 0.0,
+                etag            TEXT NOT NULL DEFAULT '',
+                embedding_blob  BLOB,
+                graph_extracted INTEGER NOT NULL DEFAULT 0,
+                created_at      REAL NOT NULL
             );
 
             CREATE INDEX IF NOT EXISTS idx_hc_uri ON hybrid_chunks(remote_uri);
@@ -350,13 +394,73 @@ class KBStorageManager:
                 predicate   TEXT NOT NULL,
                 object      TEXT NOT NULL,
                 chunk_id    TEXT NOT NULL,
-                created_at  REAL NOT NULL
+                confidence  REAL NOT NULL DEFAULT 1.0,
+                created_at  REAL NOT NULL,
+                updated_at  REAL NOT NULL DEFAULT 0.0
             );
 
             CREATE INDEX IF NOT EXISTS idx_kt_sub ON knowledge_triples(subject);
             CREATE INDEX IF NOT EXISTS idx_kt_obj ON knowledge_triples(object);
             CREATE INDEX IF NOT EXISTS idx_kt_chunk ON knowledge_triples(chunk_id);
             """)
+
+            # 兼容性平滑升级：补齐 graph_extracted 列
+            try:
+                conn.execute("ALTER TABLE hybrid_chunks ADD COLUMN graph_extracted INTEGER NOT NULL DEFAULT 0;")
+            except Exception:
+                pass
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_gext ON hybrid_chunks(graph_extracted);")
+            except Exception:
+                pass
+
+            # 兼容性平滑升级：补齐 confidence 和 updated_at 列
+            try:
+                conn.execute("ALTER TABLE knowledge_triples ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE knowledge_triples ADD COLUMN updated_at REAL NOT NULL DEFAULT 0.0;")
+            except Exception:
+                pass
+            try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_kt_conf ON knowledge_triples(confidence DESC);")
+            except Exception:
+                pass
+                pass
+
+            # 兼容性平滑升级：补齐 confidence 和 updated_at 列
+            try:
+                conn.execute("ALTER TABLE knowledge_triples ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;")
+            except Exception:
+                pass
+            try:
+                conn.execute("ALTER TABLE knowledge_triples ADD COLUMN updated_at REAL NOT NULL DEFAULT 0.0;")
+            except Exception:
+                pass
+
+            # 清理历史已存在的完全重复三元组，保留置信度最高或最小 id 记录
+            try:
+                conn.execute("""
+                DELETE FROM knowledge_triples
+                WHERE id NOT IN (
+                    SELECT MIN(id)
+                    FROM knowledge_triples
+                    GROUP BY LOWER(TRIM(subject)), LOWER(TRIM(predicate)), LOWER(TRIM(object))
+                );
+                """)
+            except Exception:
+                pass
+
+            # 建立三元组复合唯一约束，杜绝重复边，提升多切片印证时的置信度权重
+            try:
+                conn.execute("""
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_kt_unique
+                ON knowledge_triples (subject, predicate, object);
+                """)
+            except Exception:
+                pass
+
             conn.commit()
         finally:
             conn.close()

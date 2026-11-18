@@ -1908,24 +1908,30 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                       </span>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => handleCopyChunkText(`trip_${t.id}`, `(${t.subject}) --[${t.predicate}]--> (${t.object})`)}
-                      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-muted-foreground hover:text-foreground hover:bg-surface-200 border border-border shrink-0 transition"
-                      title="复制三元组"
-                    >
-                      {copiedChunkId === `trip_${t.id}` ? (
-                        <>
-                          <Check className="w-3 h-3 text-emerald-500" />
-                          <span className="text-emerald-500 text-[10px]">已复制</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3 h-3" />
-                          <span className="text-[10px]">复制</span>
-                        </>
-                      )}
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 font-mono font-medium" title="知识边被切片印证的频次与置信权重">
+                        印证权重 {Number(t.confidence || 1).toFixed(0)}x
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={() => handleCopyChunkText(`trip_${t.id}`, `(${t.subject}) --[${t.predicate}]--> (${t.object})`)}
+                        className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-muted-foreground hover:text-foreground hover:bg-surface-200 border border-border shrink-0 transition"
+                        title="复制三元组"
+                      >
+                        {copiedChunkId === `trip_${t.id}` ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-500" />
+                            <span className="text-emerald-500 text-[10px]">已复制</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span className="text-[10px]">复制</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
                 ))
               )}
@@ -2260,24 +2266,30 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                       </span>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => handleCopyChunkText(`trip_${t.id}`, `(${t.subject}) --[${t.predicate}]--> (${t.object})`)}
-                      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-muted-foreground hover:text-foreground hover:bg-surface-200 border border-border shrink-0 transition"
-                      title="复制三元组"
-                    >
-                      {copiedChunkId === `trip_${t.id}` ? (
-                        <>
-                          <Check className="w-3 h-3 text-emerald-500" />
-                          <span className="text-emerald-500 text-[10px]">已复制</span>
-                        </>
-                      ) : (
-                        <>
-                          <Copy className="w-3 h-3" />
-                          <span className="text-[10px]">复制</span>
-                        </>
-                      )}
-                    </button>
+                    <div className="flex items-center gap-2 shrink-0">
+                      <span className="text-[10px] px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 font-mono font-medium" title="知识边被切片印证的频次与置信权重">
+                        印证权重 {Number(t.confidence || 1).toFixed(0)}x
+                      </span>
+
+                      <button
+                        type="button"
+                        onClick={() => handleCopyChunkText(`trip_${t.id}`, `(${t.subject}) --[${t.predicate}]--> (${t.object})`)}
+                        className="flex items-center gap-1 px-2 py-1 rounded text-[11px] text-muted-foreground hover:text-foreground hover:bg-surface-200 border border-border shrink-0 transition"
+                        title="复制三元组"
+                      >
+                        {copiedChunkId === `trip_${t.id}` ? (
+                          <>
+                            <Check className="w-3 h-3 text-emerald-500" />
+                            <span className="text-emerald-500 text-[10px]">已复制</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3 h-3" />
+                            <span className="text-[10px]">复制</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
                 ))
               )}
