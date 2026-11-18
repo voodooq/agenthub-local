@@ -10,10 +10,13 @@
 import io
 import json
 from pathlib import Path
+import re
+import struct
 import time
 from typing import Any
 import xml.etree.ElementTree as ET
 import zipfile
+from html.parser import HTMLParser
 
 from ..core.logging_config import logger
 
@@ -69,8 +72,15 @@ class DocumentStreamExtractor:
 
         if suffix == ".pdf" and HAS_PYPDF:
             return cls._extract_pdf(raw_bytes, filename, remote_uri, authority_tier)
-        elif suffix in (".docx", ".doc"):
-            return cls._extract_docx(raw_bytes, filename, remote_uri, authority_tier)
+        elif suffix == ".docx":
+            if raw_bytes.startswith(b"PK\x03\x04"):
+                return cls._extract_docx(raw_bytes, filename, remote_uri, authority_tier)
+            return cls._extract_doc(raw_bytes, filename, remote_uri, authority_tier)
+        elif suffix == ".doc":
+            # 区分真实 DOCX 换皮与二进制 OLE2 / RTF / HTML .doc
+            if raw_bytes.startswith(b"PK\x03\x04"):
+                return cls._extract_docx(raw_bytes, filename, remote_uri, authority_tier)
+            return cls._extract_doc(raw_bytes, filename, remote_uri, authority_tier)
         elif suffix in (".xlsx", ".xls") and HAS_OPENPYXL:
             return cls._extract_xlsx(raw_bytes, filename, remote_uri, authority_tier)
         else:
@@ -164,8 +174,289 @@ class DocumentStreamExtractor:
                             "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
                         })
         except Exception as e:
-            logger.warning(f"流式解析 DOCX 失败 ({filename}): {e}")
+            logger.warning(f"流式解析 DOCX 异常 ({filename})，尝试兼容解析二进制 DOC: {e}")
+            return cls._extract_doc(raw_bytes, filename, remote_uri, authority_tier)
         return chunks
+
+    @classmethod
+    def _extract_doc(
+        cls, raw_bytes: bytes, filename: str, remote_uri: str, authority_tier: int
+    ) -> list[dict[str, Any]]:
+        """流式解析旧版 Word 97-2003 (.doc)、RTF 或 HTML 导出的二进制复合文档。"""
+        chunks: list[dict[str, Any]] = []
+        try:
+            paragraphs: list[str] = []
+
+            # 1. 检查是否为 RTF 格式
+            if raw_bytes.lstrip().startswith(b"{\\rtf"):
+                paragraphs = cls._extract_rtf_paragraphs(raw_bytes)
+            # 2. 检查是否为 HTML / XML 伪装的 .doc
+            elif raw_bytes.lstrip()[:100].lower().startswith((b"<html", b"<!doctype", b"<?xml")):
+                paragraphs = cls._extract_html_paragraphs(raw_bytes)
+            # 3. 检查是否为标准 OLE2 CFBF 复合格式 (Word 97-2003)
+            elif raw_bytes.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"):
+                word_stream = cls._extract_ole2_word_stream(raw_bytes)
+                if word_stream:
+                    paragraphs = cls._extract_text_from_binary_stream(word_stream)
+                if not paragraphs:
+                    paragraphs = cls._extract_text_from_binary_stream(raw_bytes)
+            # 4. 其他未知二进制 .doc，直接尝试多编码字符抽取
+            else:
+                paragraphs = cls._extract_text_from_binary_stream(raw_bytes)
+
+            if not paragraphs:
+                return []
+
+            cur_group: list[str] = []
+            cur_len = 0
+            part_idx = 1
+            for p in paragraphs:
+                cur_group.append(p)
+                cur_len += len(p)
+                if cur_len >= cls.MAX_CHUNK_CHARS or len(cur_group) >= 5:
+                    body = "\n\n".join(cur_group)
+                    chunks.append({
+                        "remote_uri": remote_uri,
+                        "title": filename,
+                        "section_path": f"Part_{part_idx}",
+                        "start_line": part_idx,
+                        "end_line": part_idx + len(cur_group),
+                        "content_text": f"# Doc: {filename} (Part {part_idx})\n" + body,
+                        "authority_tier": authority_tier,
+                        "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
+                    })
+                    part_idx += 1
+                    cur_group = []
+                    cur_len = 0
+
+            if cur_group:
+                body = "\n\n".join(cur_group)
+                chunks.append({
+                    "remote_uri": remote_uri,
+                    "title": filename,
+                    "section_path": f"Part_{part_idx}",
+                    "start_line": part_idx,
+                    "end_line": part_idx + len(cur_group),
+                    "content_text": f"# Doc: {filename} (Part {part_idx})\n" + body,
+                    "authority_tier": authority_tier,
+                    "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
+                })
+        except Exception as e:
+            logger.warning(f"流式解析 DOC 失败 ({filename}): {e}")
+        return chunks
+
+    @classmethod
+    def _extract_ole2_word_stream(cls, data: bytes) -> bytes | None:
+        """从 OLE2 复合二进制文件中提取 WordDocument 流。"""
+        try:
+            if not data.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1") or len(data) < 512:
+                return None
+            sector_size = 1 << struct.unpack_from("<H", data, 30)[0]
+            if sector_size not in (512, 4096):
+                sector_size = 512
+
+            num_fat_sectors = struct.unpack_from("<I", data, 44)[0]
+            fat_start_sectors: list[int] = []
+            for i in range(min(num_fat_sectors, 109)):
+                sec = struct.unpack_from("<I", data, 76 + i * 4)[0]
+                if sec < 0xFFFFFFFA:
+                    fat_start_sectors.append(sec)
+
+            fat: list[int] = []
+            for fat_sec in fat_start_sectors:
+                offset = (fat_sec + 1) * sector_size
+                sec_bytes = data[offset : offset + sector_size]
+                entries = struct.unpack(f"<{len(sec_bytes) // 4}I", sec_bytes)
+                fat.extend(entries)
+
+            dir_start_sec = struct.unpack_from("<I", data, 48)[0]
+            dir_sectors: list[int] = []
+            curr = dir_start_sec
+            visited = set()
+            while curr < 0xFFFFFFFA and curr < len(fat) and curr not in visited:
+                visited.add(curr)
+                dir_sectors.append(curr)
+                curr = fat[curr]
+
+            dir_bytes = b"".join(
+                data[(s + 1) * sector_size : (s + 2) * sector_size] for s in dir_sectors
+            )
+
+            for i in range(0, len(dir_bytes), 128):
+                entry = dir_bytes[i : i + 128]
+                if len(entry) < 128:
+                    break
+                name_len = struct.unpack_from("<H", entry, 64)[0]
+                if name_len <= 2:
+                    continue
+                try:
+                    name = entry[: name_len - 2].decode("utf-16le", errors="ignore")
+                except Exception:
+                    continue
+
+                elem_type = entry[66]  # 2 = stream
+                if elem_type == 2 and name == "WordDocument":
+                    start_sec = struct.unpack_from("<I", entry, 116)[0]
+                    size = struct.unpack_from("<I", entry, 120)[0]
+                    chain: list[int] = []
+                    curr = start_sec
+                    stream_visited = set()
+                    while curr < 0xFFFFFFFA and curr < len(fat) and curr not in stream_visited:
+                        stream_visited.add(curr)
+                        chain.append(curr)
+                        curr = fat[curr]
+                    return b"".join(
+                        data[(s + 1) * sector_size : (s + 2) * sector_size] for s in chain
+                    )[:size]
+        except Exception as e:
+            logger.debug(f"OLE2 WordDocument 解析回退: {e}")
+        return None
+
+    @classmethod
+    def _extract_text_from_binary_stream(cls, raw_bytes: bytes) -> list[str]:
+        """从二进制字节流中智能抽取 UTF-16LE / GBK 连续文本段落。"""
+        # 1. 尝试匹配 UTF-16LE 文本 (Word 97-2003 最核心的正文存储格式)
+        utf16_pattern = re.compile(
+            b"(?:[\x20-\x7e\r\n\t]\x00|[\x00-\xff][\x4e-\x9f]|[\x00-\xff][\x30-\x33]|[\x00-\xff][\xff]){3,}"
+        )
+        utf16_blocks: list[str] = []
+        for match in utf16_pattern.finditer(raw_bytes):
+            chunk = match.group(0)
+            try:
+                text = chunk.decode("utf-16le", errors="ignore").strip()
+                if len(text) >= 2:
+                    utf16_blocks.append(text)
+            except Exception:
+                pass
+
+        # 2. 尝试匹配 GBK / CP936 文本
+        gbk_pattern = re.compile(b"(?:[\x81-\xfe][\x40-\xfe]|[\x20-\x7e\r\n\t]){4,}")
+        gbk_blocks: list[str] = []
+        for match in gbk_pattern.finditer(raw_bytes):
+            chunk = match.group(0)
+            try:
+                text = chunk.decode("gbk", errors="ignore").strip()
+                if len(text) >= 2:
+                    gbk_blocks.append(text)
+            except Exception:
+                pass
+
+        # 统计中文字符数进行优选
+        utf16_chinese_count = sum(1 for b in utf16_blocks for c in b if "\u4e00" <= c <= "\u9fff")
+        gbk_chinese_count = sum(1 for b in gbk_blocks for c in b if "\u4e00" <= c <= "\u9fff")
+
+        if utf16_chinese_count >= gbk_chinese_count and utf16_blocks:
+            selected_blocks = utf16_blocks
+        elif gbk_blocks:
+            selected_blocks = gbk_blocks
+        else:
+            selected_blocks = utf16_blocks
+
+        # 常见 Word 样式与字体元数据噪音过滤表
+        noise_names = {
+            "Normal", "Heading", "Default Paragraph Font", "Table Grid",
+            "Times New Roman", "SimSun", "Songti", "Calibri", "Arial",
+            "Microsoft YaHei", "SimHei", "FangSong", "KaiTi", "Body Text",
+        }
+
+        clean_paragraphs: list[str] = []
+        for block in selected_blocks:
+            # 去除低级控制符
+            block = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x07]", "", block).strip()
+            if not block or block in noise_names:
+                continue
+            for line in block.splitlines():
+                line = line.strip()
+                if line and line not in noise_names and len(line) > 1:
+                    clean_paragraphs.append(line)
+
+        return clean_paragraphs
+
+    @classmethod
+    def _extract_rtf_paragraphs(cls, raw_bytes: bytes) -> list[str]:
+        """从 RTF 格式字节流中解析纯文本段落。"""
+        try:
+            content = ""
+            for enc in ("utf-8", "gb18030", "gbk", "cp1252", "latin-1"):
+                try:
+                    content = raw_bytes.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if not content:
+                content = raw_bytes.decode("utf-8", errors="replace")
+
+            # 移除字体表、颜色表、样式表等头信息
+            content = re.sub(r"\{\\fonttbl[^}]*\}", "", content)
+            content = re.sub(r"\{\\colortbl[^}]*\}", "", content)
+            content = re.sub(r"\{\\stylesheet[^}]*\}", "", content)
+
+            # 替换十六进制字节 \'xx
+            def hex_repl(match):
+                hex_str = match.group(1)
+                try:
+                    return bytes.fromhex(hex_str).decode("gbk", errors="ignore")
+                except Exception:
+                    return ""
+
+            content = re.sub(r"\\\'([0-9a-fA-F]{2})", hex_repl, content)
+
+            # 替换 Unicode 转义 \u12345?
+            def unicode_repl(match):
+                code = int(match.group(1))
+                if code < 0:
+                    code += 65536
+                try:
+                    return chr(code)
+                except Exception:
+                    return ""
+
+            content = re.sub(r"\\u(-?[0-9]+)\??", unicode_repl, content)
+
+            # 换行与分段命令映射
+            content = re.sub(r"\\(par|line)\b", "\n", content)
+
+            # 移除 RTF 命令控制字与大括号
+            content = re.sub(r"\\[a-zA-Z]+-?[0-9]*\s?", " ", content)
+            content = re.sub(r"[{}\\]", "", content)
+
+            lines = [line.strip() for line in content.splitlines() if line.strip()]
+            return lines
+        except Exception as e:
+            logger.debug(f"RTF 解析异常: {e}")
+            return []
+
+    @classmethod
+    def _extract_html_paragraphs(cls, raw_bytes: bytes) -> list[str]:
+        """从 HTML 导出的伪 doc 中解析段落。"""
+        class _TextExtractHTMLParser(HTMLParser):
+            def __init__(self):
+                super().__init__()
+                self.text_parts: list[str] = []
+                self.ignore = False
+
+            def handle_starttag(self, tag, attrs):
+                if tag.lower() in ("script", "style"):
+                    self.ignore = True
+
+            def handle_endtag(self, tag):
+                if tag.lower() in ("script", "style"):
+                    self.ignore = False
+
+            def handle_data(self, data):
+                if not self.ignore:
+                    txt = data.strip()
+                    if txt:
+                        self.text_parts.append(txt)
+
+        try:
+            html_str = raw_bytes.decode("utf-8", errors="replace")
+            parser = _TextExtractHTMLParser()
+            parser.feed(html_str)
+            return parser.text_parts
+        except Exception as e:
+            logger.debug(f"HTML doc 解析异常: {e}")
+            return []
 
     @classmethod
     def _extract_xlsx(
