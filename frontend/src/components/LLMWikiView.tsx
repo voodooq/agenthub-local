@@ -268,67 +268,94 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   };
 
   return (
-    <div className="flex-1 h-full overflow-y-auto bg-background text-foreground p-6 md:p-10 select-text">
-      <div className="max-w-7xl mx-auto space-y-6">
-        {/* 顶部标题栏与中枢概览 */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-border pb-5">
-          <div className="space-y-1">
-            <div className="flex items-center space-x-2.5">
-              <div className="p-2 rounded-xl bg-sky-500/10 text-sky-500 border border-sky-500/20">
-                <BookOpen className="w-5 h-5" />
-              </div>
-              <h1 className="text-2xl font-bold tracking-tight text-foreground">
-                LLMWiki 知识中枢
-              </h1>
-              <span className="px-2 py-0.5 rounded-full text-xs font-mono font-medium bg-sky-500/10 text-sky-500 border border-sky-500/20">
-                v1.5.8 Strata
+    <div className="flex-1 flex flex-col h-full bg-background overflow-hidden">
+      {/* 第一层：图标，功能名称，功能描述，全局的功能按钮 放在页面顶部右侧 */}
+      <div className="p-6 border-b border-border flex items-center justify-between shrink-0 bg-background">
+        <div className="flex items-center space-x-2.5">
+          <div className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 border border-sky-500/20">
+            <BookOpen className="w-5 h-5" />
+          </div>
+          <div>
+            <h1 className="text-lg font-bold text-foreground flex items-center space-x-2">
+              <span>LLMwiki (知识中枢)</span>
+              <span className="px-2 py-0.5 rounded-full text-[11px] bg-sky-500/10 text-sky-500 font-mono">
+                {mountsList.length} 挂载 · {kbsList.length} 知识库
               </span>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              统一管理外部数据源（企业微信微盘、WebDAV、S3/OSS），执行规程切片向量化与独立知识库生命周期治理
-              {workspace && (
-                <span className="ml-2 px-2 py-0.5 rounded bg-surface-200 text-foreground border border-border font-mono text-xs">
-                  工作区: {workspace.name}
-                </span>
-              )}
+            </h1>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              统一管理外部数据源（企业微信微盘、WebDAV、S3/OSS），执行规程切片向量化与独立知识库生命周期治理。
             </p>
           </div>
-
-          {/* 两大主分段导航 Pill */}
-          <div className="flex items-center bg-surface-200/80 p-1 rounded-xl border border-border shrink-0">
-            <button
-              type="button"
-              onClick={() => setActiveSection('mount')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
-                activeSection === 'mount'
-                  ? 'bg-surface-card text-foreground shadow-sm border border-border/80'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-surface-200'
-              }`}
-            >
-              <HardDrive className="w-4 h-4 text-sky-500" />
-              <span>1、知识库挂载</span>
-              <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-sky-500/10 text-sky-500 font-mono">
-                {mountsList.length}
-              </span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveSection('train')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-xs font-semibold transition-all ${
-                activeSection === 'train'
-                  ? 'bg-surface-card text-foreground shadow-sm border border-border/80'
-                  : 'text-muted-foreground hover:text-foreground hover:bg-surface-200'
-              }`}
-            >
-              <Sparkles className="w-4 h-4 text-amber-500" />
-              <span>2、知识库训练</span>
-              <span className="ml-1 px-1.5 py-0.2 rounded-full text-[10px] bg-amber-500/10 text-amber-500 font-mono">
-                {kbsList.length}
-              </span>
-            </button>
-          </div>
         </div>
+
+        {/* 全局的功能按钮 放在页面顶部右侧 */}
+        <div className="flex items-center space-x-2.5">
+          <button
+            onClick={() => {
+              loadMounts();
+              loadKBs();
+            }}
+            className="flex items-center space-x-1.5 px-3 py-2 rounded-xl border border-border bg-surface-100 hover:bg-surface-200 text-foreground text-xs font-medium transition-all"
+            title="刷新数据"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loadingMounts || loadingKbs ? 'animate-spin' : ''}`} />
+            <span>刷新</span>
+          </button>
+          <button
+            onClick={() => handleTriggerTrain()}
+            disabled={training || mountsList.length === 0}
+            className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold shadow-md transition-all active:scale-95 disabled:opacity-50"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>{training ? '训练中...' : '启动增量训练'}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 第二层：功能区切换居右对齐 */}
+      <div className="px-6 py-3 border-b border-border bg-surface-100/40 flex items-center justify-between shrink-0">
+        <div className="flex items-center space-x-2 text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">CloudVFS 虚拟文件系统</span>
+          <span>·</span>
+          <span>
+            {workspace?.name ? `当前工作区：${workspace.name}` : '全系统范围'}
+          </span>
+        </div>
+
+        {/* 功能区切换居右对齐 */}
+        <div className="flex items-center space-x-1 p-1 rounded-lg bg-surface-200 border border-border text-xs">
+          <button
+            type="button"
+            onClick={() => setActiveSection('mount')}
+            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${
+              activeSection === 'mount'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <HardDrive className="w-3.5 h-3.5 text-sky-500" />
+            <span>1、知识库挂载</span>
+            <span className="ml-1 text-[10px] font-mono opacity-80">({mountsList.length})</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveSection('train')}
+            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${
+              activeSection === 'train'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+            <span>2、知识库训练</span>
+            <span className="ml-1 text-[10px] font-mono opacity-80">({kbsList.length})</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 第三层：功能操作区 */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-6 select-text">
 
         {/* ========================================================= */}
         {/* 第一部分：1、知识库挂载                                   */}

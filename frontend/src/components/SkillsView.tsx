@@ -12,6 +12,7 @@ import {
   Database,
   RotateCw,
   Trash2,
+  Puzzle,
 } from 'lucide-react';
 import { Workspace, SkillItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
@@ -161,67 +162,103 @@ export function SkillsView({ workspace }: SkillsViewProps) {
   );
 
   return (
-    <div className="flex-1 h-full overflow-y-auto bg-background text-foreground p-6 md:p-10 select-text">
-      <div className="max-w-6xl mx-auto space-y-8">
-        {/* 顶部三标签栏 */}
-        <div className="flex items-center justify-between border-b border-border pb-4">
-          <div className="flex items-center space-x-6">
-            <button
-              onClick={() => setActiveTab('explore')}
-              className={`text-sm pb-2 font-medium transition ${
-                activeTab === 'explore'
-                  ? 'text-foreground border-b-2 border-emerald-500 font-semibold'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {t('探索')}
-            </button>
-            <button
-              onClick={() => setActiveTab('mcp')}
-              className={`text-sm pb-2 font-medium transition ${
-                activeTab === 'mcp'
-                  ? 'text-foreground border-b-2 border-emerald-500 font-semibold'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {t('关联应用 (MCP)')}
-            </button>
-            <button
-              onClick={() => setActiveTab('skills')}
-              className={`text-sm pb-2 font-medium transition ${
-                activeTab === 'skills'
-                  ? 'text-foreground border-b-2 border-emerald-500 font-semibold'
-                  : 'text-muted-foreground hover:text-foreground'
-              }`}
-            >
-              {t('技能 (Skills)')}
-            </button>
+    <div className="flex-1 flex flex-col h-full bg-background overflow-hidden">
+      {/* 第一层：图标，功能名称，功能描述，全局的功能按钮 放在页面顶部右侧 */}
+      <div className="p-6 border-b border-border flex items-center justify-between shrink-0 bg-background">
+        <div className="flex items-center space-x-2.5">
+          <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+            <Puzzle className="w-5 h-5" />
           </div>
-
-          <div className="flex items-center space-x-3">
-            {activeTab === 'skills' && (
-              <button
-                onClick={() => fetchSkills(true)}
-                disabled={loading}
-                title={t('重新扫描工作区与全局底座技能')}
-                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-foreground text-xs transition disabled:opacity-50"
-              >
-                <RotateCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-emerald-500' : ''}`} />
-                <span>{t('扫描同步')}</span>
-              </button>
-            )}
-
-            {activeTab === 'skills' && workspace && (
-              <button
-                onClick={() => setIsCreating(!isCreating)}
-                className="flex items-center space-x-1.5 px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition shadow-sm"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>{isCreating ? t('取消') : t('创建工作区专属技能')}</span>
-              </button>
-            )}
+          <div>
+            <h1 className="text-lg font-bold text-foreground flex items-center space-x-2">
+              <span>{t('技能与应用 (Skills & MCP)')}</span>
+              <span className="px-2 py-0.5 rounded-full text-[11px] bg-emerald-500/10 text-emerald-500 font-mono">
+                {skills.length}
+              </span>
+            </h1>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              {t('装配标准化执行规程 SOP 技能包与多源外部 MCP 工具链，为智能体赋予确定性行动力。')}
+            </p>
           </div>
         </div>
+
+        {/* 全局的功能按钮 放在页面顶部右侧 */}
+        <div className="flex items-center space-x-2.5">
+          <button
+            onClick={() => fetchSkills(true)}
+            disabled={loading}
+            title={t('重新扫描工作区与全局底座技能')}
+            className="flex items-center space-x-1.5 px-3 py-2 rounded-xl border border-border bg-surface-100 hover:bg-surface-200 text-foreground text-xs font-medium transition-all disabled:opacity-50"
+          >
+            <RotateCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-emerald-500' : ''}`} />
+            <span>{t('扫描同步')}</span>
+          </button>
+
+          {workspace && (
+            <button
+              onClick={() => {
+                setActiveTab('skills');
+                setIsCreating(!isCreating);
+              }}
+              className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold shadow-md transition-all active:scale-95"
+            >
+              <Plus className="w-4 h-4" />
+              <span>{isCreating ? t('取消') : t('创建专属技能')}</span>
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* 第二层：功能区切换居右对齐 */}
+      <div className="px-6 py-3 border-b border-border bg-surface-100/40 flex items-center justify-between shrink-0">
+        <div className="relative w-72">
+          <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            placeholder={t('搜索技能名称或描述...')}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500 transition-colors"
+          />
+        </div>
+
+        {/* 功能区切换居右对齐 */}
+        <div className="flex items-center space-x-1 p-1 rounded-lg bg-surface-200 border border-border text-xs">
+          <button
+            onClick={() => setActiveTab('explore')}
+            className={`px-3 py-1 rounded-md transition-colors ${
+              activeTab === 'explore'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {t('探索')}
+          </button>
+          <button
+            onClick={() => setActiveTab('mcp')}
+            className={`px-3 py-1 rounded-md transition-colors ${
+              activeTab === 'mcp'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {t('关联应用 (MCP)')}
+          </button>
+          <button
+            onClick={() => setActiveTab('skills')}
+            className={`px-3 py-1 rounded-md transition-colors ${
+              activeTab === 'skills'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {t('技能 (Skills)')} ({skills.length})
+          </button>
+        </div>
+      </div>
+
+      {/* 第三层：功能操作区 */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-6 select-text">
 
         {/* 新建工作区专属技能表单 */}
         {isCreating && (

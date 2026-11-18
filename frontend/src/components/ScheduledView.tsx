@@ -16,6 +16,7 @@ import {
   Timer,
   CalendarClock,
   ChevronRight,
+  RefreshCw,
 } from 'lucide-react';
 import { Workspace, ScheduledTaskItem, ScheduledTaskRunItem } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
@@ -48,6 +49,7 @@ function formatDuration(ms?: number | null): string {
 export function ScheduledView({ workspace }: ScheduledViewProps) {
   const { t } = useLanguage();
   const [tasks, setTasks] = useState<ScheduledTaskItem[]>([]);
+  const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'paused'>('all');
   const [loading, setLoading] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
@@ -186,33 +188,103 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
 
   const selectedRun = taskRuns.find((r) => r.id === selectedRunId) || taskRuns[0] || null;
 
+  const displayedTasks = tasks.filter((t) => {
+    if (filterStatus === 'all') return true;
+    return t.status === filterStatus;
+  });
+
   return (
-    <div className="flex-1 h-full overflow-y-auto bg-background text-foreground p-6 md:p-10 select-text">
-      <div className="max-w-5xl mx-auto space-y-8">
-        {/* 顶部标题栏 */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-border pb-6">
+    <div className="flex-1 flex flex-col h-full bg-background overflow-hidden">
+      {/* 第一层：图标，功能名称，功能描述，全局的功能按钮 放在页面顶部右侧 */}
+      <div className="p-6 border-b border-border flex items-center justify-between shrink-0 bg-background">
+        <div className="flex items-center space-x-2.5">
+          <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+            <Clock className="w-5 h-5" />
+          </div>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight text-foreground">
-              {t('已安排计划任务')}
+            <h1 className="text-lg font-bold text-foreground flex items-center space-x-2">
+              <span>{t('已安排计划任务 (Scheduled)')}</span>
+              <span className="px-2 py-0.5 rounded-full text-[11px] bg-emerald-500/10 text-emerald-500 font-mono">
+                {tasks.length}
+              </span>
             </h1>
-            <p className="text-sm text-muted-foreground mt-1">
+            <p className="text-xs text-muted-foreground mt-0.5">
               {t('让智能体在后台静默定时调度：拉取外部数据、自动推理核验并落盘报告')}
-              {workspace && (
-                <span className="ml-2 px-2 py-0.5 rounded bg-surface-200 text-foreground border border-border font-mono text-xs">
-                  {workspace.name}
-                </span>
-              )}
             </p>
           </div>
+        </div>
+
+        {/* 全局的功能按钮 放在页面顶部右侧 */}
+        <div className="flex items-center space-x-2.5">
+          <button
+            onClick={() => fetchTasks()}
+            disabled={loading}
+            className="flex items-center space-x-1.5 px-3 py-2 rounded-xl border border-border bg-surface-100 hover:bg-surface-200 text-foreground text-xs font-medium transition-all disabled:opacity-50"
+            title={t('刷新计划任务列表')}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin text-emerald-500' : ''}`} />
+            <span>{t('刷新')}</span>
+          </button>
 
           <button
             onClick={() => setIsDialogOpen(true)}
-            className="flex items-center space-x-2 px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm transition self-start md:self-auto group"
+            className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold shadow-md transition-all active:scale-95"
           >
             <Plus className="w-4 h-4" />
-            <span>{t('新建自动化任务')}</span>
+            <span>{t('新建计划任务')}</span>
           </button>
         </div>
+      </div>
+
+      {/* 第二层：功能区切换居右对齐 */}
+      <div className="px-6 py-3 border-b border-border bg-surface-100/40 flex items-center justify-between shrink-0">
+        <div className="flex items-center space-x-2 text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">静默任务调度引擎</span>
+          <span>·</span>
+          <span>
+            {tasks.filter((t) => t.status === 'active').length} 个活跃中 ·{' '}
+            {tasks.filter((t) => t.status === 'paused').length} 个已暂停
+            {workspace && ` · 当前工作区：${workspace.name}`}
+          </span>
+        </div>
+
+        {/* 功能区切换居右对齐 */}
+        <div className="flex items-center space-x-1 p-1 rounded-lg bg-surface-200 border border-border text-xs">
+          <button
+            onClick={() => setFilterStatus('all')}
+            className={`px-3 py-1 rounded-md transition-colors ${
+              filterStatus === 'all'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {t('全部任务')} ({tasks.length})
+          </button>
+          <button
+            onClick={() => setFilterStatus('active')}
+            className={`px-3 py-1 rounded-md transition-colors ${
+              filterStatus === 'active'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {t('活跃中')} ({tasks.filter((t) => t.status === 'active').length})
+          </button>
+          <button
+            onClick={() => setFilterStatus('paused')}
+            className={`px-3 py-1 rounded-md transition-colors ${
+              filterStatus === 'paused'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            {t('已暂停')} ({tasks.filter((t) => t.status === 'paused').length})
+          </button>
+        </div>
+      </div>
+
+      {/* 第三层：功能操作区 */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-6 select-text">
 
         {/* 快速自然语言对话触发横幅 (Banner) */}
         <div
@@ -244,26 +316,28 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
         <div className="space-y-4">
           <div className="flex items-center justify-between">
             <h3 className="text-sm font-semibold text-foreground">
-              {t('任务列表')} ({tasks.length})
+              {t('任务列表')} ({displayedTasks.length})
             </h3>
           </div>
 
           {loading ? (
             <div className="text-center py-12 text-muted-foreground text-xs">{t('正在加载...')}</div>
-          ) : tasks.length === 0 ? (
+          ) : displayedTasks.length === 0 ? (
             <div
               onClick={() => setIsDialogOpen(true)}
               className="text-center py-16 border border-dashed border-border rounded-2xl p-8 hover:border-border-hover bg-surface-card/40 hover:bg-surface-card transition cursor-pointer"
             >
               <Clock className="w-8 h-8 mx-auto text-muted-foreground/60 mb-3" />
-              <p className="text-sm text-foreground font-medium">{t('当前工作区暂无计划任务')}</p>
+              <p className="text-sm text-foreground font-medium">
+                {filterStatus === 'all' ? t('当前工作区暂无计划任务') : t('无对应状态的计划任务')}
+              </p>
               <p className="text-xs text-muted-foreground mt-1">
-                {t('点击此处或右上角「新建自动化任务」，用自然语言对话快速添加任务')}
+                {t('点击此处或右上角「新建计划任务」，用自然语言对话快速添加任务')}
               </p>
             </div>
           ) : (
             <div className="space-y-3">
-              {tasks.map((task) => {
+              {displayedTasks.map((task) => {
                 const isRunning = runningTaskId === task.id || task.status === 'running';
                 return (
                   <div

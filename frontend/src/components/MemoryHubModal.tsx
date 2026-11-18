@@ -1258,21 +1258,24 @@ export function MemoryHubModal({
       }
       onClick={asView ? undefined : (e) => e.stopPropagation()}
     >
-      {/* 顶部标题栏 */}
+      {/* 第一层：图标，功能名称，功能描述，全局的功能按钮 放在页面顶部右侧 */}
       <div
         className={
           asView
-            ? 'px-6 py-5 border-b border-border flex items-center justify-between bg-surface-100 shrink-0'
+            ? 'p-6 border-b border-border flex items-center justify-between shrink-0 bg-background'
             : 'px-6 py-4 border-b border-border flex items-center justify-between bg-surface-100'
         }
       >
-        <div className="flex items-center space-x-3">
-          <div className="p-2.5 rounded-xl bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+        <div className="flex items-center space-x-2.5">
+          <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
             <Brain className="w-5 h-5" />
           </div>
           <div>
-            <h1 className="text-base font-bold text-foreground">
-              记忆中枢 (Memory Hub)
+            <h1 className="text-lg font-bold text-foreground flex items-center space-x-2">
+              <span>记忆中枢 (Memory Hub)</span>
+              <span className="px-2 py-0.5 rounded-full text-[11px] bg-emerald-500/10 text-emerald-500 font-mono">
+                {memories.length + activeFactsCount} 条记录
+              </span>
             </h1>
             <p className="text-xs text-muted-foreground mt-0.5">
               长期记忆画像 · 精确事实双时间轴 · Append-Only 行为审计账本 · 回复性格与人设
@@ -1280,116 +1283,120 @@ export function MemoryHubModal({
           </div>
         </div>
 
-        {!asView && onClose && (
-          <button
-            onClick={onClose}
-            className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        )}
-      </div>
-
-      {/* 顶部 Tab 切换 */}
-      <div className="px-6 pt-3 border-b border-border flex items-center justify-between gap-3 bg-surface-100/30 overflow-x-auto shrink-0">
-        <div className="flex items-center space-x-4 whitespace-nowrap shrink-0">
-          <button
-            onClick={() => setActiveTab('memories')}
-            className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
-              activeTab === 'memories'
-                ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <Sparkles className="w-3.5 h-3.5" />
-            <span>长期记忆画像 ({memories.length})</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('facts')}
-            className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
-              activeTab === 'facts'
-                ? 'border-teal-500 text-teal-600 dark:text-teal-400'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <Clock className="w-3.5 h-3.5 text-teal-500" />
-            <span>精确事实视图 ({activeFactsCount})</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('ledger')}
-            className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
-              activeTab === 'ledger'
-                ? 'border-amber-500 text-amber-600 dark:text-amber-400'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <History className="w-3.5 h-3.5 text-amber-500" />
-            <span>事件账本追溯</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('personality')}
-            className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
-              activeTab === 'personality'
-                ? 'border-emerald-500 text-emerald-600 dark:text-emerald-400'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <Brain className="w-3.5 h-3.5 text-foreground" />
-            <span>回复性格与人设</span>
-          </button>
-
-          <button
-            onClick={() => setActiveTab('mcp')}
-            className={`pb-2.5 text-xs font-semibold border-b-2 transition-colors flex items-center space-x-1.5 ${
-              activeTab === 'mcp'
-                ? 'border-foreground text-foreground'
-                : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <Globe className="w-3.5 h-3.5 text-foreground" />
-            <span>关联应用与 MCP</span>
-          </button>
-        </div>
-
+        {/* 全局的功能按钮 放在页面顶部右侧 */}
+        <div className="flex items-center space-x-2">
           {activeTab === 'memories' && (
-            <div className="flex items-center space-x-2 pb-2 shrink-0">
+            <>
               <button
                 onClick={() => setIsAdding(!isAdding)}
-                className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition-colors"
+                className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold shadow-md transition-all active:scale-95"
               >
-                <Plus className="w-3.5 h-3.5" />
-                <span>新增画像</span>
+                <Plus className="w-4 h-4" />
+                <span>{isAdding ? '收起表单' : '新增画像'}</span>
               </button>
               {memories.length > 0 && (
                 <button
                   onClick={handleClearAll}
-                  className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 text-xs font-medium transition-colors"
+                  className="flex items-center space-x-1 px-3 py-2 rounded-xl border border-border bg-rose-500/10 hover:bg-rose-500/20 text-rose-600 dark:text-rose-400 text-xs font-medium transition-all"
+                  title="清空当前工作区所有长期记忆画像"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
                   <span>清空全部</span>
                 </button>
               )}
-            </div>
+            </>
           )}
 
           {activeTab === 'facts' && (
-            <div className="flex items-center space-x-2 pb-2 shrink-0">
-              <button
-                onClick={() => setIsAddingFact((prev) => !prev)}
-                className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-teal-600 hover:bg-teal-500 text-white text-xs font-medium transition-colors whitespace-nowrap"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                <span>新增契约事实</span>
-              </button>
-            </div>
+            <button
+              onClick={() => setIsAddingFact(!isAddingFact)}
+              className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-teal-600 hover:bg-teal-700 text-white text-xs font-semibold shadow-md transition-all active:scale-95"
+            >
+              <Plus className="w-4 h-4" />
+              <span>{isAddingFact ? '收起表单' : '新增事实'}</span>
+            </button>
+          )}
+
+          {!asView && onClose && (
+            <button
+              onClick={onClose}
+              className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
+            >
+              <X className="w-4 h-4" />
+            </button>
           )}
         </div>
+      </div>
 
-        {/* 内容区 */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-5">
+      {/* 第二层：功能区切换居右对齐 */}
+      <div className="px-6 py-3 border-b border-border bg-surface-100/40 flex items-center justify-between shrink-0">
+        <div className="flex items-center space-x-2 text-xs text-muted-foreground">
+          <span className="font-medium text-foreground">双时间轴双向检索记忆池</span>
+          <span>·</span>
+          <span>工作区：{workspaceId}</span>
+        </div>
+
+        {/* 功能区切换居右对齐 */}
+        <div className="flex items-center space-x-1 p-1 rounded-lg bg-surface-200 border border-border text-xs">
+          <button
+            onClick={() => setActiveTab('memories')}
+            className={`px-3 py-1 rounded-md transition-colors ${
+              activeTab === 'memories'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            长期记忆 ({memories.length})
+          </button>
+
+          <button
+            onClick={() => setActiveTab('facts')}
+            className={`px-3 py-1 rounded-md transition-colors ${
+              activeTab === 'facts'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            精确事实 ({activeFactsCount})
+          </button>
+
+          <button
+            onClick={() => setActiveTab('ledger')}
+            className={`px-3 py-1 rounded-md transition-colors ${
+              activeTab === 'ledger'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            事件账本
+          </button>
+
+          <button
+            onClick={() => setActiveTab('personality')}
+            className={`px-3 py-1 rounded-md transition-colors ${
+              activeTab === 'personality'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            性格与人设
+          </button>
+
+          <button
+            onClick={() => setActiveTab('mcp')}
+            className={`px-3 py-1 rounded-md transition-colors ${
+              activeTab === 'mcp'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            关联应用
+          </button>
+        </div>
+      </div>
+
+      {/* 第三层：功能操作区 */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-6 select-text">
           {/* ────────── TAB 1: 长期记忆画像 ────────── */}
           {activeTab === 'memories' && (
             <>

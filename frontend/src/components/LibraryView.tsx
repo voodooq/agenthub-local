@@ -23,6 +23,7 @@ import {
   CheckCircle2,
   AlertTriangle,
   Cloud,
+  Library,
 } from 'lucide-react';
 import { Workspace, ArtifactItem } from '@/types';
 import { apiFetch, downloadWorkspaceFile, getAccessToken } from '@/utils/apiClient';
@@ -318,122 +319,148 @@ export function LibraryView({ workspace, onOpenCanvas, onOpenCloudWiki }: Librar
   };
 
   return (
-    <div className="flex-1 h-full overflow-y-auto bg-background text-foreground p-6 md:p-10 select-text">
-      <div className="max-w-6xl mx-auto space-y-6">
-        {/* 顶部标题栏与工作区信息 */}
-        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 border-b border-border pb-5">
+    <div className="flex-1 flex flex-col h-full bg-background overflow-hidden">
+      {/* 第一层：图标，功能名称，功能描述，全局的功能按钮 放在页面顶部右侧 */}
+      <div className="p-6 border-b border-border flex items-center justify-between shrink-0 bg-background">
+        <div className="flex items-center space-x-2.5">
+          <div className="p-2.5 rounded-xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+            <Library className="w-5 h-5" />
+          </div>
           <div>
-            <h1 className="text-2xl font-bold tracking-tight text-foreground">
-              {t('库 (Library)')}
+            <h1 className="text-lg font-bold text-foreground flex items-center space-x-2">
+              <span>{t('资产与库 (Library)')}</span>
+              <span className="px-2 py-0.5 rounded-full text-[11px] bg-emerald-500/10 text-emerald-500 font-mono">
+                {artifacts.length}
+              </span>
             </h1>
-            <p className="text-sm text-muted-foreground mt-1">
+            <p className="text-xs text-muted-foreground mt-0.5">
               {t('集中管理当前工作区内的核心交付物、代码文件与生成资产')}
               {workspace && (
-                <span className="ml-2 px-2 py-0.5 rounded bg-surface-200 text-foreground border border-border font-mono text-xs">
-                  {workspace.name}
+                <span className="ml-2 font-mono text-[11px] text-muted-foreground/80">
+                  · {workspace.name} ({workspace.root_path})
                 </span>
               )}
             </p>
           </div>
-
-          {/* 搜索与过滤栏 */}
-          <div className="flex items-center space-x-2.5">
-            <div className="relative">
-              <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
-              <input
-                type="text"
-                placeholder={t('搜索文件名、路径或摘要...')}
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-9 pr-4 py-1.5 text-xs bg-surface-card border border-border rounded-lg text-foreground placeholder-muted-foreground focus:outline-none focus:border-accent w-48 sm:w-60 transition"
-              />
-            </div>
-
-            <div className="flex bg-surface-card p-0.5 rounded-lg border border-border text-xs">
-              <button
-                onClick={() => setFilterType('all')}
-                className={`px-2.5 py-1 rounded-md transition ${
-                  filterType === 'all' ? 'bg-surface-200 text-foreground font-semibold shadow-sm' : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                {t('全部')}
-              </button>
-              <button
-                onClick={() => setFilterType('docs')}
-                className={`px-2.5 py-1 rounded-md transition ${
-                  filterType === 'docs' ? 'bg-surface-200 text-foreground font-semibold shadow-sm' : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                {t('文档与代码')}
-              </button>
-              <button
-                onClick={() => setFilterType('media')}
-                className={`px-2.5 py-1 rounded-md transition ${
-                  filterType === 'media' ? 'bg-surface-200 text-foreground font-semibold shadow-sm' : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                {t('媒体与图表')}
-              </button>
-            </div>
-          </div>
         </div>
 
-        {/* 物理工作区根目录与快捷同步 */}
-        {workspace && (
-          <div className="p-3.5 rounded-xl bg-surface-card border border-border flex flex-col sm:flex-row sm:items-center justify-between gap-3 shadow-sm">
-            <div className="flex items-center space-x-3 min-w-0">
-              <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-500 shrink-0">
-                <HardDrive className="w-4 h-4" />
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center space-x-2">
-                  <h4 className="text-xs font-semibold text-foreground">
-                    {t('工作区物理根路径')}
-                  </h4>
-                  <span className="text-[11px] text-muted-foreground">
-                    ({t('已登记资产')}: <strong className="text-emerald-500 font-semibold">{artifacts.length}</strong>)
-                  </span>
-                </div>
-                <p className="text-xs font-mono text-muted-foreground mt-0.5 truncate max-w-xl">
-                  {workspace.root_path}
-                </p>
-              </div>
-            </div>
-            <div className="flex items-center space-x-2 shrink-0">
-              <button
-                onClick={handleSyncArtifacts}
-                disabled={syncing}
-                className="px-2.5 py-1.5 rounded-lg bg-surface-100 hover:bg-surface-200 text-foreground transition text-xs flex items-center space-x-1.5 border border-border"
-                title={t('立即扫描物理工作区目录增量同步资产')}
-              >
-                <RefreshCw className={`w-3.5 h-3.5 text-emerald-500 ${syncing ? 'animate-spin' : ''}`} />
-                <span>{syncing ? t('同步中...') : t('扫描同步')}</span>
-              </button>
-              <button
-                onClick={() => handleOpenWorkspaceFolder(currentPath)}
-                className="px-2.5 py-1.5 rounded-lg bg-surface-100 hover:bg-surface-200 text-foreground transition text-xs flex items-center space-x-1.5 border border-border"
-                title={t('在系统文件资源管理器中打开当前所在目录')}
-              >
-                <ExternalLink className="w-3.5 h-3.5 text-blue-500" />
-                <span>{t('在本地打开')}</span>
-              </button>
-              <button
-                onClick={() => {
-                  if (onOpenCloudWiki) {
-                    onOpenCloudWiki();
-                  } else {
-                    setIsCloudWikiOpen(true);
-                  }
-                }}
-                className="px-2.5 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 transition text-xs flex items-center space-x-1.5 border border-emerald-500/30 font-medium"
-                title={t('挂载企业微信微盘、WebDAV 或 OSS 虚拟知识库')}
-              >
-                <Cloud className="w-3.5 h-3.5" />
-                <span>{t('挂载云端 Wiki')}</span>
-              </button>
-            </div>
+        {/* 全局的功能按钮 放在页面顶部右侧 */}
+        <div className="flex items-center space-x-2.5">
+          <button
+            onClick={handleSyncArtifacts}
+            disabled={syncing}
+            className="flex items-center space-x-1.5 px-3 py-2 rounded-xl border border-border bg-surface-100 hover:bg-surface-200 text-foreground text-xs font-medium transition-all disabled:opacity-50"
+            title={t('立即扫描物理工作区目录增量同步资产')}
+          >
+            <RefreshCw className={`w-3.5 h-3.5 text-emerald-500 ${syncing ? 'animate-spin' : ''}`} />
+            <span>{syncing ? t('同步中...') : t('扫描同步')}</span>
+          </button>
+
+          <button
+            onClick={() => handleOpenWorkspaceFolder(currentPath)}
+            className="flex items-center space-x-1.5 px-3 py-2 rounded-xl border border-border bg-surface-100 hover:bg-surface-200 text-foreground text-xs font-medium transition-all"
+            title={t('在系统文件资源管理器中打开当前所在目录')}
+          >
+            <ExternalLink className="w-3.5 h-3.5 text-blue-500" />
+            <span>{t('在本地打开')}</span>
+          </button>
+
+          <button
+            onClick={() => {
+              if (onOpenCloudWiki) {
+                onOpenCloudWiki();
+              } else {
+                setIsCloudWikiOpen(true);
+              }
+            }}
+            className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold shadow-md transition-all active:scale-95"
+            title={t('挂载企业微信微盘、WebDAV 或 OSS 虚拟知识库')}
+          >
+            <Cloud className="w-4 h-4" />
+            <span>{t('云端 Wiki 知识库')}</span>
+          </button>
+        </div>
+      </div>
+
+      {/* 第二层：功能区切换居右对齐 */}
+      <div className="px-6 py-3 border-b border-border bg-surface-100/40 flex items-center justify-between shrink-0">
+        <div className="relative w-80">
+          <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
+          <input
+            type="text"
+            placeholder={t('搜索文件名、路径或摘要...')}
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-emerald-500 transition-colors"
+          />
+        </div>
+
+        {/* 功能区切换居右对齐 */}
+        <div className="flex items-center space-x-2">
+          {/* 类型过滤 Tab */}
+          <div className="flex items-center space-x-1 p-1 rounded-lg bg-surface-200 border border-border text-xs">
+            <button
+              onClick={() => setFilterType('all')}
+              className={`px-3 py-1 rounded-md transition-colors ${
+                filterType === 'all'
+                  ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {t('全部')} ({artifacts.length})
+            </button>
+            <button
+              onClick={() => setFilterType('docs')}
+              className={`px-3 py-1 rounded-md transition-colors ${
+                filterType === 'docs'
+                  ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {t('文档与代码')}
+            </button>
+            <button
+              onClick={() => setFilterType('media')}
+              className={`px-3 py-1 rounded-md transition-colors ${
+                filterType === 'media'
+                  ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              {t('媒体与图表')}
+            </button>
           </div>
-        )}
+
+          {/* 视图模式切换 */}
+          <div className="flex items-center space-x-1 p-1 rounded-lg bg-surface-200 border border-border text-xs">
+            <button
+              onClick={() => setViewMode('grid')}
+              className={`p-1.5 rounded-md transition-colors ${
+                viewMode === 'grid'
+                  ? 'bg-surface-card text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+              title="网格视图"
+            >
+              <LayoutGrid className="w-3.5 h-3.5" />
+            </button>
+            <button
+              onClick={() => setViewMode('table')}
+              className={`p-1.5 rounded-md transition-colors ${
+                viewMode === 'table'
+                  ? 'bg-surface-card text-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground'
+              }`}
+              title="表格列表视图"
+            >
+              <List className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* 第三层：功能操作区 */}
+      <div className="flex-1 overflow-y-auto p-6 space-y-6 select-text">
 
         {/* 操作结果内联反馈条（直接打开 / 安全降级 / 定位提示） */}
         {actionFeedback && (
