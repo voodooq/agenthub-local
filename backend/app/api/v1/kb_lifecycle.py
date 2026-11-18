@@ -318,3 +318,87 @@ async def test_retrieval_playground(kb_id: str, payload: PlaygroundQueryPayload)
         "chunks": chunks,
     }
 
+
+@router.get("/bases/{kb_id}/chunks")
+async def list_kb_chunks(
+    kb_id: str,
+    version: str | None = Query(default=None, description="版本号，缺省为当前激活版本"),
+    page: int = Query(default=1, ge=1, description="页码"),
+    page_size: int = Query(default=20, ge=1, le=100, description="每页切片数"),
+    search: str | None = Query(default=None, description="可选搜索关键词过滤"),
+) -> dict[str, Any]:
+    """分页查看指定独立知识库中的规程切片与分块详情。"""
+    kbs = await KBLifecycleManager.list_knowledge_bases()
+    target_kb = next((k for k in kbs if k["kb_id"] == kb_id), None)
+    if not target_kb:
+        raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+
+    target_ver = version or target_kb["active_version"]
+    db_p = KBStorageManager.get_version_db_path(kb_id, target_ver)
+    if not db_p.exists():
+        return {
+            "success": True,
+            "kb_id": kb_id,
+            "name": target_kb["name"],
+            "version": target_ver,
+            "total_count": 0,
+            "page": page,
+            "page_size": page_size,
+            "chunks": [],
+        }
+
+    import sqlite3
+    conn = sqlite3.connect(str(db_p))
+    conn.row_factory = sqlite3.Row
+    try:
+        where_clause = ""
+        params: list[Any] = []
+        if search and search.strip():
+            kw = f"%{search.strip()}%"
+            where_clause = "WHERE content LIKE ? OR title LIKE ?"
+            params.extend([kw, kw])
+
+        # 统计总数
+        count_sql = f"SELECT count(*) FROM hybrid_chunks {where_clause}"
+        cursor = conn.execute(count_sql, params)
+        total_count = cursor.fetchone()[0]
+
+        # 分页查询
+        offset = (page - 1) * page_size
+        query_sql = f"""
+        SELECT id, remote_uri, title, content, authority_tier, mtime, created_at
+        FROM hybrid_chunks
+        {where_clause}
+        ORDER BY rowid ASC
+        LIMIT ? OFFSET ?
+        """
+        cursor = conn.execute(query_sql, params + [page_size, offset])
+        rows = cursor.fetchall()
+
+        chunks_data = []
+        for r in rows:
+            content_str = r["content"] or ""
+            chunks_data.append({
+                "id": str(r["id"]),
+                "remote_uri": r["remote_uri"],
+                "title": r["title"],
+                "content": content_str,
+                "authority_tier": r["authority_tier"],
+                "mtime": r["mtime"],
+                "created_at": r["created_at"],
+                "char_count": len(content_str),
+            })
+
+        return {
+            "success": True,
+            "kb_id": kb_id,
+            "name": target_kb["name"],
+            "version": target_ver,
+            "total_count": total_count,
+            "page": page,
+            "page_size": page_size,
+            "chunks": chunks_data,
+        }
+    finally:
+        conn.close()
+

@@ -86,6 +86,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [playgroundTesting, setPlaygroundTesting] = useState(false);
   const [playgroundHits, setPlaygroundHits] = useState<any[] | null>(null);
   const [selectedKbId, setSelectedKbId] = useState<string>('');
+  const [expandedHitIdx, setExpandedHitIdx] = useState<number | null>(null);
 
   // ── 查看空间文件状态 ──
   const [viewingMount, setViewingMount] = useState<CloudMountItem | null>(null);
@@ -93,6 +94,15 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [loadingFiles, setLoadingFiles] = useState(false);
   const [filesError, setFilesError] = useState<string | null>(null);
   const [filesSearchQuery, setFilesSearchQuery] = useState('');
+
+  // ── 查看知识库切片资产状态 ──
+  const [viewingChunksKb, setViewingChunksKb] = useState<KnowledgeBaseItem | null>(null);
+  const [kbChunks, setKbChunks] = useState<any[]>([]);
+  const [totalChunksCount, setTotalChunksCount] = useState<number>(0);
+  const [loadingChunks, setLoadingChunks] = useState(false);
+  const [chunksPage, setChunksPage] = useState<number>(1);
+  const [chunksSearchQuery, setChunksSearchQuery] = useState<string>('');
+  const [copiedChunkId, setCopiedChunkId] = useState<string | null>(null);
 
   useEffect(() => {
     loadMounts();
@@ -335,6 +345,34 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     } finally {
       setLoadingFiles(false);
     }
+  };
+
+  // 查看知识库切片资产详情
+  const handleViewKbChunks = async (kb: KnowledgeBaseItem, page: number = 1, search: string = '') => {
+    setViewingChunksKb(kb);
+    setChunksPage(page);
+    setChunksSearchQuery(search);
+    setLoadingChunks(true);
+    try {
+      const q = encodeURIComponent(search.trim());
+      const resp = await apiFetch(`/api/v1/kb/bases/${kb.kb_id}/chunks?page=${page}&page_size=20&search=${q}`);
+      if (resp.ok) {
+        const json = await resp.json();
+        setKbChunks(json.chunks || []);
+        setTotalChunksCount(json.total_count || 0);
+      }
+    } catch (e) {
+      console.error('加载切片失败:', e);
+    } finally {
+      setLoadingChunks(false);
+    }
+  };
+
+  // 复制切片全文
+  const handleCopyChunkText = (chunkId: string, text: string) => {
+    navigator.clipboard.writeText(text);
+    setCopiedChunkId(chunkId);
+    setTimeout(() => setCopiedChunkId(null), 2000);
   };
 
   return (
@@ -1072,6 +1110,19 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
+                                  handleViewKbChunks(kb, 1, '');
+                                }}
+                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-sky-600 dark:text-sky-400 hover:text-sky-700 bg-sky-500/10 hover:bg-sky-500/15 rounded-lg border border-sky-500/20 transition-all font-medium"
+                                title="查看此知识库中已训练切分的规程分块详情"
+                              >
+                                <FileText className="w-3.5 h-3.5 text-sky-500" />
+                                <span>查看切片</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
                                   handlePruneKb(kb.kb_id);
                                 }}
                                 className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-surface-200 rounded-lg border border-border transition-colors"
@@ -1186,24 +1237,54 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                       </div>
                     ) : (
                       <div className="space-y-2.5 max-h-[460px] overflow-y-auto pr-1">
-                        {playgroundHits.map((h, i) => (
-                          <div
-                            key={i}
-                            className="p-3 rounded-xl bg-surface-100/60 border border-border text-xs space-y-1.5 hover:border-border/80 transition-all"
-                          >
-                            <div className="flex items-center justify-between">
-                              <span className="font-semibold text-foreground truncate max-w-[200px]">
-                                {h.title}
-                              </span>
-                              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-500 font-semibold">
-                                得分: {h.final_score.toFixed(3)}
-                              </span>
+                        {playgroundHits.map((h, i) => {
+                          const isExpanded = expandedHitIdx === i;
+                          return (
+                            <div
+                              key={i}
+                              className="p-3 rounded-xl bg-surface-100/60 border border-border text-xs space-y-2 hover:border-border/80 transition-all"
+                            >
+                              <div className="flex items-center justify-between">
+                                <span className="font-semibold text-foreground truncate max-w-[210px]" title={h.title}>
+                                  {h.title}
+                                </span>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-500 font-semibold">
+                                    得分: {h.final_score.toFixed(3)}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyChunkText(`hit_${i}`, h.content)}
+                                    className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-surface-200 transition"
+                                    title="复制此切片原文"
+                                  >
+                                    {copiedChunkId === `hit_${i}` ? (
+                                      <Check className="w-3 h-3 text-emerald-500" />
+                                    ) : (
+                                      <Copy className="w-3 h-3" />
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                              <p
+                                className={`text-muted-foreground text-[11px] leading-relaxed whitespace-pre-wrap ${
+                                  isExpanded ? '' : 'line-clamp-4'
+                                }`}
+                              >
+                                {h.content}
+                              </p>
+                              {h.content.length > 140 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedHitIdx(isExpanded ? null : i)}
+                                  className="text-[10px] text-sky-500 hover:text-sky-600 font-medium"
+                                >
+                                  {isExpanded ? '收起原文' : '展开查看切片全文...'}
+                                </button>
+                              )}
                             </div>
-                            <p className="text-muted-foreground text-[11px] leading-relaxed line-clamp-3 whitespace-pre-wrap">
-                              {h.content}
-                            </p>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -1408,6 +1489,184 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                 >
                   <span>前往训练该数据源</span>
                   <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* 知识库规程切片详情浏览器模态框 */}
+      {viewingChunksKb && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 animate-fade-in"
+          onClick={() => setViewingChunksKb(null)}
+        >
+          <div
+            className="w-full max-w-4xl max-h-[85vh] rounded-2xl border border-border bg-surface-card shadow-2xl flex flex-col overflow-hidden text-foreground animate-scale-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* 模态框顶部 Header */}
+            <div className="px-6 py-4 border-b border-border flex items-center justify-between gap-4 bg-surface-100/60">
+              <div className="flex items-center space-x-3 min-w-0">
+                <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-500 border border-emerald-500/20">
+                  <FileText className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-base font-bold text-foreground truncate">
+                      {viewingChunksKb.name} · 规程切片与分块详情
+                    </h3>
+                    <span className="px-2 py-0.5 rounded font-mono text-[10px] bg-surface-200 text-foreground border border-border">
+                      {viewingChunksKb.active_version}
+                    </span>
+                  </div>
+                  <div className="flex items-center space-x-2 text-xs text-muted-foreground mt-0.5">
+                    <span>总计纳管切片：<strong className="text-foreground">{totalChunksCount}</strong> 个</span>
+                    <span>·</span>
+                    <span>独立 SQLite index.db 存储</span>
+                  </div>
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setViewingChunksKb(null)}
+                className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* 搜索与工具栏 */}
+            <div className="p-4 border-b border-border bg-surface-100/40 flex items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="搜索切片内容或文件标题（如: 报名、U10、参赛办法）..."
+                  value={chunksSearchQuery}
+                  onChange={(e) => {
+                    setChunksSearchQuery(e.target.value);
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      handleViewKbChunks(viewingChunksKb, 1, chunksSearchQuery);
+                    }
+                  }}
+                  className="w-full pl-9 pr-3 py-1.5 rounded-xl border border-border bg-surface-card text-xs text-foreground placeholder:text-muted-foreground outline-none focus:border-sky-500 transition"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => handleViewKbChunks(viewingChunksKb, chunksPage, chunksSearchQuery)}
+                  disabled={loadingChunks}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-border bg-surface-card text-xs text-foreground hover:bg-surface-200 transition"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingChunks ? 'animate-spin' : ''}`} />
+                  <span>刷新</span>
+                </button>
+              </div>
+            </div>
+
+            {/* 切片卡片列表 Body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              {loadingChunks ? (
+                <div className="py-16 text-center text-xs text-muted-foreground space-y-2">
+                  <RefreshCw className="w-6 h-6 animate-spin mx-auto text-sky-500" />
+                  <div>正在加载规程切片与分块详情...</div>
+                </div>
+              ) : kbChunks.length === 0 ? (
+                <div className="py-16 text-center text-xs text-muted-foreground space-y-2">
+                  <FileText className="w-8 h-8 mx-auto text-muted-foreground/40" />
+                  <div>暂未匹配到切片内容</div>
+                  <p className="text-[11px] text-muted-foreground/80">
+                    请尝试更换搜索关键字，或在上方点击“启动增量训练”重新解析
+                  </p>
+                </div>
+              ) : (
+                kbChunks.map((c, idx) => (
+                  <div
+                    key={c.id || idx}
+                    className="rounded-xl border border-border bg-surface-100/50 p-4 space-y-3 hover:border-border/80 transition-all shadow-xs"
+                  >
+                    <div className="flex items-center justify-between border-b border-border/60 pb-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono text-[11px] font-semibold text-sky-500 bg-sky-500/10 px-2 py-0.5 rounded">
+                          #{(chunksPage - 1) * 20 + idx + 1}
+                        </span>
+                        <h4 className="font-semibold text-xs text-foreground truncate max-w-lg" title={c.title}>
+                          {c.title}
+                        </h4>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span className="text-[10px] text-muted-foreground font-mono">
+                          {c.char_count || c.content?.length || 0} 字符
+                        </span>
+                        <span className="text-[10px] rounded px-1.5 py-0.5 bg-surface-200 text-muted-foreground font-medium">
+                          Tier {c.authority_tier}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => handleCopyChunkText(c.id, c.content)}
+                          className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] text-muted-foreground hover:text-foreground hover:bg-surface-200 border border-border transition"
+                          title="复制切片原文"
+                        >
+                          {copiedChunkId === c.id ? (
+                            <>
+                              <Check className="w-3 h-3 text-emerald-500" />
+                              <span className="text-emerald-500 text-[10px]">已复制</span>
+                            </>
+                          ) : (
+                            <>
+                              <Copy className="w-3 h-3" />
+                              <span className="text-[10px]">复制</span>
+                            </>
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg bg-surface-card p-3 border border-border/50 text-xs text-foreground/90 font-mono leading-relaxed whitespace-pre-wrap max-h-56 overflow-y-auto">
+                      {c.content}
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            {/* 模态框底部 Footer 与分页 */}
+            <div className="px-6 py-3 border-t border-border bg-surface-100/60 flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">
+                共 {totalChunksCount} 条切片 · 当前第 {chunksPage} / {Math.ceil(totalChunksCount / 20) || 1} 页
+              </span>
+
+              <div className="flex items-center space-x-2">
+                <button
+                  type="button"
+                  disabled={chunksPage <= 1 || loadingChunks}
+                  onClick={() => handleViewKbChunks(viewingChunksKb, chunksPage - 1, chunksSearchQuery)}
+                  className="px-3 py-1.5 rounded-lg border border-border text-xs text-foreground hover:bg-surface-200 transition disabled:opacity-40"
+                >
+                  上一页
+                </button>
+                <button
+                  type="button"
+                  disabled={chunksPage * 20 >= totalChunksCount || loadingChunks}
+                  onClick={() => handleViewKbChunks(viewingChunksKb, chunksPage + 1, chunksSearchQuery)}
+                  className="px-3 py-1.5 rounded-lg border border-border text-xs text-foreground hover:bg-surface-200 transition disabled:opacity-40"
+                >
+                  下一页
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewingChunksKb(null)}
+                  className="px-3 py-1.5 rounded-lg bg-surface-200 hover:bg-surface-300 text-xs text-foreground font-medium transition"
+                >
+                  关闭
                 </button>
               </div>
             </div>

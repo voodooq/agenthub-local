@@ -7,6 +7,7 @@ AgentHub Local v1.5.8 多知识库隔离检索路由与门控中心 (Multi-KB Re
 """
 import asyncio
 from pathlib import Path
+import re
 import sqlite3
 import time
 from typing import Any
@@ -146,20 +147,49 @@ class MultiKBRetrievalRouter:
         priority_weight: float,
         include_archived: bool,
     ) -> list[dict[str, Any]]:
-        """在单个独立 index.db 中执行 FTS5 + 词法/语义检索并施加优先级。"""
+        """在单个独立 index.db 中执行自然语言分词、FTS5 与智能多关键词加权检索。"""
         results: list[dict[str, Any]] = []
+
+        # 中文问句常见停用词/疑问助词表
+        stop_words = {
+            "有什么", "怎么", "如何", "是多少", "是什么", "请问", "在哪里", "有哪些",
+            "谁可以", "怎样", "想知道", "能不能", "可以吗", "请介绍", "讲讲", "帮我查",
+            "关于", "以及", "并且", "的话", "吗", "呢", "吧", "呀", "有啥", "怎么弄",
+        }
 
         def _do_query():
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
             try:
-                clean_q = " ".join([w for w in query.split() if len(w.strip()) > 0])
-                if not clean_q:
-                    clean_q = query
+                # 1. 提取关键词与 2-gram 候选集
+                clean_q = re.sub(r"[^\w\u4e00-\u9fa5\s]", " ", query).strip()
+                raw_tokens = [w for w in clean_q.split() if w]
+
+                keywords: list[str] = []
+                for t in raw_tokens:
+                    sub = t
+                    for sw in stop_words:
+                        sub = sub.replace(sw, " ")
+                    for s in sub.split():
+                        s_str = s.strip()
+                        if len(s_str) >= 2 and s_str not in keywords:
+                            keywords.append(s_str)
+                    # 2-gram 兜底
+                    if len(t) >= 2:
+                        for i in range(len(t) - 1):
+                            bg = t[i : i + 2]
+                            if bg not in stop_words and bg not in keywords:
+                                keywords.append(bg)
+
+                if not keywords:
+                    keywords = [clean_q] if clean_q else [query]
 
                 rows = []
-                # FTS5 trigram 仅在查询词 >= 3 字符时有效
-                if len(clean_q.strip()) >= 3:
+
+                # 2. 优先尝试 FTS5 全文索引匹配 (使用 OR 链接关键词)
+                fts_candidates = [k for k in keywords if len(k) >= 2]
+                if fts_candidates:
+                    fts_query_str = " OR ".join([f'"{k}"' for k in fts_candidates[:8]])
                     try:
                         fts_sql = """
                         SELECT c.id, c.remote_uri, c.title, c.content, c.authority_tier, c.mtime,
@@ -170,60 +200,65 @@ class MultiKBRetrievalRouter:
                         ORDER BY rank
                         LIMIT ?
                         """
-                        cursor = conn.execute(fts_sql, (clean_q, top_k * 2))
+                        cursor = conn.execute(fts_sql, (fts_query_str, top_k * 2))
                         rows = cursor.fetchall()
                     except Exception:
                         rows = []
 
-                if rows:
-                    for r in rows:
-                        if not include_archived and r["authority_tier"] >= 3:
-                            continue
-                        tier = r["authority_tier"]
-                        tier_bonus = 1.25 if tier == 1 else 1.0
-                        base_score = 1.0 / (abs(r["fts_rank"]) + 1.0)
-                        final_score = base_score * tier_bonus * priority_weight
-
-                        results.append({
-                            "id": r["id"],
-                            "kb_id": kb_id,
-                            "kb_name": kb_name,
-                            "version": version,
-                            "remote_uri": r["remote_uri"],
-                            "title": r["title"],
-                            "content": r["content"],
-                            "authority_tier": tier,
-                            "mtime": r["mtime"],
-                            "priority_weight": priority_weight,
-                            "final_score": final_score,
-                        })
-                else:
-                    # 短词或 trigram 未命中时，自动回退 LIKE 模糊查询
-                    like_sql = """
+                # 3. 若 FTS5 未命中，执行多关键词 LIKE 模糊匹配
+                if not rows and keywords:
+                    where_clauses = ["(content LIKE ? OR title LIKE ?)" for _ in keywords[:6]]
+                    like_sql = f"""
                     SELECT id, remote_uri, title, content, authority_tier, mtime
                     FROM hybrid_chunks
-                    WHERE content LIKE ? OR title LIKE ?
+                    WHERE {" OR ".join(where_clauses)}
                     LIMIT ?
                     """
-                    cursor = conn.execute(like_sql, (f"%{clean_q}%", f"%{clean_q}%", top_k))
-                    for r in cursor.fetchall():
-                        if not include_archived and r["authority_tier"] >= 3:
-                            continue
-                        tier = r["authority_tier"]
-                        tier_bonus = 1.25 if tier == 1 else 1.0
-                        results.append({
-                            "id": r["id"],
-                            "kb_id": kb_id,
-                            "kb_name": kb_name,
-                            "version": version,
-                            "remote_uri": r["remote_uri"],
-                            "title": r["title"],
-                            "content": r["content"],
-                            "authority_tier": tier,
-                            "mtime": r["mtime"],
-                            "priority_weight": priority_weight,
-                            "final_score": 0.8 * tier_bonus * priority_weight,
-                        })
+                    params: list[Any] = []
+                    for k in keywords[:6]:
+                        params.extend([f"%{k}%", f"%{k}%"])
+                    params.append(top_k * 3)
+                    cursor = conn.execute(like_sql, params)
+                    rows = cursor.fetchall()
+
+                # 4. 结果打分与排序
+                scored_list = []
+                for r in rows:
+                    if not include_archived and r["authority_tier"] >= 3:
+                        continue
+                    tier = r["authority_tier"]
+                    tier_bonus = 1.25 if tier == 1 else 1.0
+
+                    content_str = r["content"]
+                    title_str = r["title"]
+
+                    hit_cnt = sum(1 for kw in keywords if kw in content_str or kw in title_str)
+                    base_score = min(1.0, 0.4 + 0.2 * hit_cnt)
+
+                    if "fts_rank" in r.keys():
+                        try:
+                            fts_bonus = 1.0 / (abs(float(r["fts_rank"])) + 1.0)
+                            base_score = max(base_score, fts_bonus)
+                        except Exception:
+                            pass
+
+                    final_score = base_score * tier_bonus * priority_weight
+                    scored_list.append((final_score, {
+                        "id": r["id"],
+                        "kb_id": kb_id,
+                        "kb_name": kb_name,
+                        "version": version,
+                        "remote_uri": r["remote_uri"],
+                        "title": r["title"],
+                        "content": r["content"],
+                        "authority_tier": tier,
+                        "mtime": r["mtime"],
+                        "priority_weight": priority_weight,
+                        "final_score": round(final_score, 4),
+                    }))
+
+                scored_list.sort(key=lambda x: x[0], reverse=True)
+                results = [item[1] for item in scored_list[:top_k]]
             finally:
                 conn.close()
             return results
