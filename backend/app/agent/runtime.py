@@ -5389,7 +5389,7 @@ class AgentRuntime:
                         from ..governance.confidence_evaluator import ConfidenceEvaluator
 
                         critique_res = SelfCritiqueCritic.evaluate_draft(
-                            user_query=content_prompt,
+                            user_query=user_message,
                             retrieved_evidence=retrieved_evidence_chunks,
                             draft_response=clean_deliverable,
                             has_version_conflict=False,
