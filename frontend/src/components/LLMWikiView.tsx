@@ -1135,14 +1135,14 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                               : 'border-border bg-surface-100/50 hover:border-border/80'
                           }`}
                         >
-                          <div className="flex items-center justify-between">
-                            <div className="flex items-center gap-2">
-                              <span className="font-semibold text-sm text-foreground">{kb.name}</span>
-                              <span className="px-2 py-0.5 rounded font-mono text-[10px] bg-surface-200 text-foreground border border-border">
+                          <div className="flex items-center justify-between gap-3">
+                            <div className="flex items-center gap-2 min-w-0 flex-1">
+                              <span className="font-semibold text-sm text-foreground truncate" title={kb.name}>{kb.name}</span>
+                              <span className="px-2 py-0.5 rounded font-mono text-[10px] bg-surface-200 text-foreground border border-border shrink-0">
                                 {kb.active_version}
                               </span>
                               <span
-                                className={`px-2 py-0.5 rounded text-[10px] font-medium ${
+                                className={`px-2 py-0.5 rounded text-[10px] font-medium shrink-0 ${
                                   kb.ownership_type === 'subscribed_ro'
                                     ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20'
                                     : kb.ownership_type === 'frozen_snapshot'
@@ -1158,14 +1158,14 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                               </span>
                             </div>
 
-                            <div className="flex items-center gap-1.5">
+                            <div className="flex items-center gap-1.5 shrink-0">
                               <button
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   handleViewKbChunks(kb, 1, '');
                                 }}
-                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-sky-600 dark:text-sky-400 hover:text-sky-700 bg-sky-500/10 hover:bg-sky-500/15 rounded-lg border border-sky-500/20 transition-all font-medium"
+                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-sky-600 dark:text-sky-400 hover:text-sky-700 bg-sky-500/10 hover:bg-sky-500/15 rounded-lg border border-sky-500/20 transition-all font-medium whitespace-nowrap"
                                 title="查看此知识库中已训练切分的规程分块详情"
                               >
                                 <FileText className="w-3.5 h-3.5 text-sky-500" />
@@ -1179,34 +1179,8 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                   e.stopPropagation();
                                   handleExtractGraph(kb.kb_id);
                                 }}
-                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700 bg-amber-500/10 hover:bg-amber-500/15 rounded-lg border border-amber-500/20 transition-all font-medium disabled:opacity-50"
-                                title="对已有切片重新批量提取知识图谱三元组"
-                              >
-                                <Zap className={`w-3.5 h-3.5 text-amber-500 ${extractingGraphKbId === kb.kb_id ? 'animate-bounce' : ''}`} />
-                                <span>{extractingGraphKbId === kb.kb_id ? '提取中...' : '提取图谱'}</span>
-                              </button>
-
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleViewKbChunks(kb, 1, '');
-                                }}
-                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-sky-600 dark:text-sky-400 hover:text-sky-700 bg-sky-500/10 hover:bg-sky-500/15 rounded-lg border border-sky-500/20 transition-all font-medium"
-                                title="查看此知识库中已训练切分的规程分块详情"
-                              >
-                                <FileText className="w-3.5 h-3.5 text-sky-500" />
-                                <span>查看切片</span>
-                              </button>
-
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleExtractGraph(kb.kb_id);
-                                }}
-                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700 bg-amber-500/10 hover:bg-amber-500/15 rounded-lg border border-amber-500/20 transition-all font-medium disabled:opacity-50"
-                                title="对已有切片重新批量提取知识图谱三元组"
+                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700 bg-amber-500/10 hover:bg-amber-500/15 rounded-lg border border-amber-500/20 transition-all font-medium disabled:opacity-50 whitespace-nowrap"
+                                title="对已有切片批量提取知识图谱三元组"
                               >
                                 <Zap className={`w-3.5 h-3.5 text-amber-500 ${extractingGraphKbId === kb.kb_id ? 'animate-bounce' : ''}`} />
                                 <span>{extractingGraphKbId === kb.kb_id ? '提取中...' : '提取图谱'}</span>
@@ -1218,7 +1192,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                   e.stopPropagation();
                                   handlePruneKb(kb.kb_id);
                                 }}
-                                className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-surface-200 rounded-lg border border-border transition-colors"
+                                className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-surface-200 rounded-lg border border-border transition-colors whitespace-nowrap"
                                 title="清理旧历史版本快照，执行 VACUUM 释放磁盘"
                               >
                                 <Scissors className="w-3 h-3" />
@@ -1231,7 +1205,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                   e.stopPropagation();
                                   handleDeleteKb(kb.kb_id, kb.name);
                                 }}
-                                className="flex items-center gap-1 px-2 py-1 text-xs text-rose-500 hover:text-rose-600 hover:bg-rose-500/10 rounded-lg border border-rose-500/20 transition-colors"
+                                className="flex items-center gap-1 px-2 py-1 text-xs text-rose-500 hover:text-rose-600 hover:bg-rose-500/10 rounded-lg border border-rose-500/20 transition-colors whitespace-nowrap"
                                 title="彻底物理销毁此知识库及历史快照"
                               >
                                 <Trash2 className="w-3 h-3" />

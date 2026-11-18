@@ -377,7 +377,7 @@ class KBLifecycleManager:
                 SELECT kb.*, ds.name as source_name, ds.source_type
                 FROM knowledge_bases kb
                 LEFT JOIN kb_data_sources ds ON kb.source_id = ds.source_id
-                ORDER BY kb.updated_at DESC
+                ORDER BY kb.created_at ASC, kb.kb_id ASC
             """) as cursor:
                 rows = await cursor.fetchall()
                 kbs = []
