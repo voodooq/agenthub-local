@@ -22,6 +22,10 @@ import {
   FileText,
   Activity,
   Copy,
+  FolderOpen,
+  FileSpreadsheet,
+  FileCode,
+  X,
 } from 'lucide-react';
 import { Workspace } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
@@ -82,6 +86,13 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [playgroundTesting, setPlaygroundTesting] = useState(false);
   const [playgroundHits, setPlaygroundHits] = useState<any[] | null>(null);
   const [selectedKbId, setSelectedKbId] = useState<string>('');
+
+  // ── 查看空间文件状态 ──
+  const [viewingMount, setViewingMount] = useState<CloudMountItem | null>(null);
+  const [mountFiles, setMountFiles] = useState<any[]>([]);
+  const [loadingFiles, setLoadingFiles] = useState(false);
+  const [filesError, setFilesError] = useState<string | null>(null);
+  const [filesSearchQuery, setFilesSearchQuery] = useState('');
 
   useEffect(() => {
     loadMounts();
@@ -301,6 +312,28 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
       await loadKBs();
     } catch (e: any) {
       alert('清空异常: ' + e.message);
+    }
+  };
+
+  // 实时读取空间文件列表
+  const handleViewFiles = async (mount: CloudMountItem) => {
+    setViewingMount(mount);
+    setLoadingFiles(true);
+    setFilesError(null);
+    setMountFiles([]);
+    setFilesSearchQuery('');
+    try {
+      const resp = await apiFetch(`/api/v1/knowledge/mounts/${mount.mount_id}/files`);
+      const data = await resp.json();
+      if (resp.ok && data.success) {
+        setMountFiles(data.files || []);
+      } else {
+        setFilesError(data.detail || data.message || '读取空间文件列表失败');
+      }
+    } catch (e: any) {
+      setFilesError(e.message || '网络请求异常');
+    } finally {
+      setLoadingFiles(false);
     }
   };
 
@@ -799,21 +832,33 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                         </div>
 
                         <div className="pt-2 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
-                          <span className="truncate max-w-[200px]">
+                          <span className="truncate max-w-[170px]">
                             {m.provider_type === 'wecom' && `微盘 Space: ${m.config?.space_id || '未知'}`}
                             {m.provider_type === 'webdav' && `URL: ${m.config?.base_url || '未知'}`}
                             {m.provider_type === 'oss' && `Bucket: ${m.config?.bucket || '未知'}`}
                           </span>
-                          <button
-                            onClick={() => {
-                              setSelectedMountForTrain(m.mount_id);
-                              setActiveSection('train');
-                            }}
-                            className="text-sky-500 hover:text-sky-600 font-medium flex items-center gap-0.5"
-                          >
-                            <span>前往训练</span>
-                            <ArrowRight className="w-3 h-3" />
-                          </button>
+                          <div className="flex items-center gap-2.5 shrink-0">
+                            <button
+                              type="button"
+                              onClick={() => handleViewFiles(m)}
+                              className="text-foreground hover:text-sky-500 font-medium flex items-center gap-1 hover:underline transition-colors"
+                              title="实时查看空间内所有文件与目录"
+                            >
+                              <FolderOpen className="w-3.5 h-3.5 text-sky-500" />
+                              <span>浏览文件</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSelectedMountForTrain(m.mount_id);
+                                setActiveSection('train');
+                              }}
+                              className="text-sky-500 hover:text-sky-600 font-medium flex items-center gap-0.5"
+                            >
+                              <span>前往训练</span>
+                              <ArrowRight className="w-3 h-3" />
+                            </button>
+                          </div>
                         </div>
                       </div>
                     ))
@@ -1144,6 +1189,207 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
           </div>
         )}
       </div>
+
+      {/* 空间文件列表浏览器模态框 */}
+      {viewingMount && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 backdrop-blur-xs p-4 animate-fade-in"
+          onClick={() => setViewingMount(null)}
+        >
+          <div
+            className="w-full max-w-4xl max-h-[85vh] rounded-2xl border border-border bg-surface-card shadow-2xl flex flex-col overflow-hidden text-foreground animate-scale-in"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* 模态框顶部 Header */}
+            <div className="px-6 py-4 border-b border-border flex items-center justify-between gap-4 bg-surface-100/60">
+              <div className="flex items-center space-x-3 min-w-0">
+                <div className="p-2 rounded-xl bg-sky-500/10 text-sky-500 border border-sky-500/20">
+                  <FolderOpen className="w-5 h-5" />
+                </div>
+                <div className="min-w-0">
+                  <div className="flex items-center space-x-2">
+                    <h3 className="text-base font-bold text-foreground truncate">
+                      {viewingMount.mount_name} · 空间文件列表
+                    </h3>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-mono uppercase bg-surface-200 text-muted-foreground border border-border">
+                      {viewingMount.provider_type}
+                    </span>
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-0.5 truncate max-w-xl">
+                    {viewingMount.provider_type === 'wecom' && `微盘 SpaceId: ${viewingMount.config?.space_id || '未指定'}`}
+                    {viewingMount.provider_type === 'webdav' && `WebDAV URL: ${viewingMount.config?.base_url || '未指定'}`}
+                    {viewingMount.provider_type === 'oss' && `OSS Bucket: ${viewingMount.config?.bucket || '未指定'}`}
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex items-center space-x-2">
+                <button
+                  type="button"
+                  onClick={() => handleViewFiles(viewingMount)}
+                  disabled={loadingFiles}
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded-lg border border-border bg-surface-card hover:bg-surface-200 text-foreground text-xs font-medium transition disabled:opacity-50"
+                  title="重新拉取微盘远程文件树"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${loadingFiles ? 'animate-spin text-sky-500' : ''}`} />
+                  <span>刷新</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewingMount(null)}
+                  className="p-1.5 rounded-lg hover:bg-surface-200 text-muted-foreground hover:text-foreground transition"
+                  title="关闭"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* 模态框二级搜索工具栏 */}
+            <div className="px-6 py-2.5 border-b border-border bg-surface-100/30 flex items-center justify-between gap-4">
+              <div className="relative flex-1 max-w-sm">
+                <Search className="w-3.5 h-3.5 text-muted-foreground absolute left-3 top-1/2 -translate-y-1/2" />
+                <input
+                  type="text"
+                  placeholder="搜索空间中的文件名..."
+                  value={filesSearchQuery}
+                  onChange={(e) => setFilesSearchQuery(e.target.value)}
+                  className="w-full pl-9 pr-3 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-sky-500"
+                />
+              </div>
+
+              <div className="text-xs text-muted-foreground">
+                共检索到 <strong className="text-foreground">{mountFiles.length}</strong> 个空间文件
+              </div>
+            </div>
+
+            {/* 模态框主体内容列表 */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-3">
+              {loadingFiles ? (
+                <div className="py-20 text-center text-xs text-muted-foreground flex flex-col items-center justify-center space-y-2">
+                  <RefreshCw className="w-6 h-6 animate-spin text-sky-500" />
+                  <div>正在实时连接微盘空间拉取文件清单...</div>
+                </div>
+              ) : filesError ? (
+                <div className="py-12 text-center text-xs text-rose-500 border border-dashed border-rose-500/30 rounded-xl p-6 bg-rose-500/5 space-y-2">
+                  <AlertCircle className="w-8 h-8 text-rose-500 mx-auto" />
+                  <div className="font-semibold text-sm">读取空间文件失败</div>
+                  <p className="text-xs text-muted-foreground max-w-md mx-auto">{filesError}</p>
+                </div>
+              ) : mountFiles.length === 0 ? (
+                <div className="py-16 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl space-y-2 bg-surface-100/20">
+                  <FolderOpen className="w-8 h-8 text-muted-foreground/40 mx-auto" />
+                  <div>该微盘空间根目录下暂无文件</div>
+                  <p className="text-[11px] text-muted-foreground/80 max-w-xs mx-auto">
+                    请在企业微信电脑端或微盘中将规程文档上传至该空间，然后点击右上角刷新。
+                  </p>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-border overflow-hidden bg-surface-card">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-surface-100/80 border-b border-border text-muted-foreground font-medium">
+                      <tr>
+                        <th className="py-2.5 px-4">文件名称</th>
+                        <th className="py-2.5 px-4 w-28">大小</th>
+                        <th className="py-2.5 px-4 w-36">切片支持</th>
+                        <th className="py-2.5 px-4 w-40">最后修改时间</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border/60">
+                      {mountFiles
+                        .filter((f) =>
+                          !filesSearchQuery.trim() ||
+                          f.title.toLowerCase().includes(filesSearchQuery.toLowerCase())
+                        )
+                        .map((f, idx) => {
+                          const isPdf = f.title.toLowerCase().endsWith('.pdf');
+                          const isDocx = /\.(docx?|doc)$/i.test(f.title);
+                          const isXlsx = /\.(xlsx?|xls|csv)$/i.test(f.title);
+                          const isMd = /\.(md|markdown|txt)$/i.test(f.title);
+
+                          return (
+                            <tr key={idx} className="hover:bg-surface-100/50 transition-colors">
+                              <td className="py-2.5 px-4">
+                                <div className="flex items-center space-x-2.5 min-w-0">
+                                  {f.is_dir ? (
+                                    <FolderOpen className="w-4 h-4 text-sky-500 shrink-0" />
+                                  ) : isPdf ? (
+                                    <FileText className="w-4 h-4 text-rose-500 shrink-0" />
+                                  ) : isDocx ? (
+                                    <FileText className="w-4 h-4 text-blue-500 shrink-0" />
+                                  ) : isXlsx ? (
+                                    <FileSpreadsheet className="w-4 h-4 text-emerald-500 shrink-0" />
+                                  ) : isMd ? (
+                                    <FileCode className="w-4 h-4 text-amber-500 shrink-0" />
+                                  ) : (
+                                    <FileText className="w-4 h-4 text-muted-foreground shrink-0" />
+                                  )}
+                                  <span className="font-medium text-foreground truncate max-w-md">
+                                    {f.title}
+                                  </span>
+                                </div>
+                              </td>
+                              <td className="py-2.5 px-4 font-mono text-[11px] text-muted-foreground">
+                                {f.is_dir ? '—' : f.size_formatted || `${(f.size / 1024).toFixed(1)} KB`}
+                              </td>
+                              <td className="py-2.5 px-4">
+                                {f.is_dir ? (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-sky-500/10 text-sky-500 font-medium">
+                                    📁 目录
+                                  </span>
+                                ) : f.supported ? (
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 font-medium">
+                                    <CheckCircle2 className="w-3 h-3" />
+                                    <span>可切片入库</span>
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] bg-surface-200 text-muted-foreground">
+                                    纯文本嗅探
+                                  </span>
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 text-muted-foreground font-mono text-[11px]">
+                                {f.mtime ? new Date(f.mtime * 1000).toLocaleString('zh-CN') : '—'}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+
+            {/* 模态框底部 Footer */}
+            <div className="px-6 py-3 border-t border-border bg-surface-100/60 flex items-center justify-between text-xs">
+              <span className="text-muted-foreground">
+                提示：空间内所有规程文档将在点击【知识库训练】时自动增量解析并提取语义切片。
+              </span>
+              <div className="flex items-center space-x-2">
+                <button
+                  type="button"
+                  onClick={() => setViewingMount(null)}
+                  className="px-3 py-1.5 rounded-lg border border-border text-xs text-muted-foreground hover:text-foreground hover:bg-surface-200 transition"
+                >
+                  关闭
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedMountForTrain(viewingMount.mount_id);
+                    setViewingMount(null);
+                    setActiveSection('train');
+                  }}
+                  className="flex items-center space-x-1 px-3 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-700 text-white text-xs font-semibold shadow-sm transition"
+                >
+                  <span>前往训练该数据源</span>
+                  <ArrowRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

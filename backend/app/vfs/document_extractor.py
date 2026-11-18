@@ -52,6 +52,21 @@ class DocumentStreamExtractor:
         """
         suffix = Path(filename).suffix.lower()
 
+        # 智能魔数与内容嗅探（应对微盘中无后缀的表格或文档）
+        if not suffix or suffix not in (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".md", ".txt", ".json", ".csv"):
+            if raw_bytes.startswith(b"%PDF-") and HAS_PYPDF:
+                suffix = ".pdf"
+            elif raw_bytes.startswith(b"PK\x03\x04"):
+                try:
+                    with zipfile.ZipFile(io.BytesIO(raw_bytes)) as zf:
+                        names = zf.namelist()
+                        if any(n.startswith("xl/") for n in names):
+                            suffix = ".xlsx"
+                        elif any(n.startswith("word/") for n in names):
+                            suffix = ".docx"
+                except Exception:
+                    pass
+
         if suffix == ".pdf" and HAS_PYPDF:
             return cls._extract_pdf(raw_bytes, filename, remote_uri, authority_tier)
         elif suffix in (".docx", ".doc"):

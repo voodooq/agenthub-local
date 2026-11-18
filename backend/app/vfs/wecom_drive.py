@@ -173,21 +173,26 @@ class WeComDriveProvider(CloudVFSProvider):
                         title = item.get("file_name", "")
                         size = item.get("file_size", 0)
                         mtime = float(item.get("mtime", time.time()))
-                        file_type = item.get("file_type", 1)  # 1=文件, 2=目录, 3=微文档
-                        is_dir = (file_type == 2)
+                        # 企微 API 标准定义: file_type 1=目录/文件夹, 2=普通文件, 3=微文档, 4=微表格, 5=微白板
+                        file_type = item.get("file_type", 2)
+                        is_dir = (file_type == 1)
 
                         if is_dir and recursive:
                             folder_queue.append(fileid)
 
                         remote_uri = f"wecom://{self.space_id}/{fileid}"
+                        ext = item.get("file_ext", "")
+                        if not ext and "." in title:
+                            ext = title.split(".")[-1].lower()
+
                         files.append(
                             CloudFileMeta(
                                 remote_uri=remote_uri,
                                 title=title,
                                 size=size,
-                                etag=fileid,
+                                etag=item.get("sha") or item.get("md5") or fileid,
                                 mtime=mtime,
-                                mime_type=item.get("file_ext", ""),
+                                mime_type=ext,
                                 is_dir=is_dir,
                                 authority_tier=self.authority_tier,
                             )
@@ -211,7 +216,13 @@ class WeComDriveProvider(CloudVFSProvider):
             if data.get("errcode") == 0:
                 download_url = data.get("download_url")
                 if download_url:
-                    content_resp = await client.get(download_url)
-                    return content_resp.content
+                    # 企微鉴权 CDN 要求必须附带对应 cookie (如 authkey)
+                    c_name = data.get("cookie_name")
+                    c_val = data.get("cookie_value")
+                    cookies = {c_name: c_val} if c_name and c_val else {}
+                    content_resp = await client.get(download_url, cookies=cookies)
+                    if content_resp.status_code == 200:
+                        return content_resp.content
+                    raise RuntimeError(f"微盘 CDN 下载失败 HTTP {content_resp.status_code}")
             # 若是直接流数据或失败
-            raise RuntimeError(f"微盘下载失败: {data.get('errmsg')}")
+            raise RuntimeError(f"微盘获取下载链接失败: {data.get('errmsg')} (code: {data.get('errcode')})")

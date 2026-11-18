@@ -154,6 +154,66 @@ async def test_cloud_mount(payload: CloudMountPayload) -> dict[str, Any]:
         return {"success": False, "message": f"测试连通性异常: {str(e)}"}
 
 
+def _format_bytes(size: int) -> str:
+    if size < 1024:
+        return f"{size} B"
+    elif size < 1024 * 1024:
+        return f"{size / 1024:.1f} KB"
+    else:
+        return f"{size / (1024 * 1024):.1f} MB"
+
+
+@router.get("/mounts/{mount_id}/files")
+async def list_mount_remote_files(
+    mount_id: str,
+    recursive: bool = Query(default=True, description="是否递归遍历子文件夹"),
+) -> dict[str, Any]:
+    """实时读取指定云端挂载源的远程空间文件列表，便于排查文件可达性与格式。"""
+    mounts = _load_mounts()
+    target = next((m for m in mounts if m["mount_id"] == mount_id), None)
+    if not target:
+        raise HTTPException(status_code=404, detail="未找到该挂载源")
+
+    provider = create_cloud_provider(
+        mount_id=target["mount_id"],
+        mount_name=target["mount_name"],
+        provider_type=target["provider_type"],
+        config=target.get("config", {}),
+        authority_tier=target.get("authority_tier", 1),
+    )
+    if not provider:
+        raise HTTPException(status_code=400, detail="不支持的提供商类型")
+
+    try:
+        files_meta = await provider.list_files(recursive=recursive)
+        result_files = []
+        for f in files_meta:
+            ext = Path(f.title).suffix.lower()
+            is_supported = ext in (".pdf", ".docx", ".doc", ".xlsx", ".xls", ".md", ".txt", ".json", ".csv") or f.is_dir
+            result_files.append({
+                "remote_uri": f.remote_uri,
+                "title": f.title,
+                "size": f.size,
+                "size_formatted": _format_bytes(f.size),
+                "is_dir": f.is_dir,
+                "mtime": f.mtime,
+                "mime_type": f.mime_type or (ext[1:] if ext else "unknown"),
+                "supported": is_supported,
+            })
+
+        return {
+            "success": True,
+            "mount_id": mount_id,
+            "mount_name": target["mount_name"],
+            "provider_type": target["provider_type"],
+            "total_count": len(result_files),
+            "files": result_files,
+        }
+    except Exception as e:
+        logger.warning(f"获取挂载文件列表失败: {e}")
+        raise HTTPException(status_code=500, detail=f"读取空间文件失败: {str(e)}")
+
+
 @router.delete("/mounts/{mount_id}")
 async def delete_cloud_mount(mount_id: str) -> dict[str, Any]:
     """删除指定的云端挂载源配置。"""
