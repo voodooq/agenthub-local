@@ -22,10 +22,12 @@ import {
   Clock,
   CheckCircle2,
   AlertTriangle,
+  Cloud,
 } from 'lucide-react';
 import { Workspace, ArtifactItem } from '@/types';
 import { apiFetch, downloadWorkspaceFile, getAccessToken } from '@/utils/apiClient';
 import { useLanguage } from '@/context/LanguageContext';
+import { CloudWikiMountModal } from './CloudWikiMountModal';
 
 interface LibraryViewProps {
   workspace: Workspace | undefined;
@@ -45,6 +47,7 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
   const [artifacts, setArtifacts] = useState<ArtifactItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [syncing, setSyncing] = useState(false);
+  const [isCloudWikiOpen, setIsCloudWikiOpen] = useState(false);
   const [actionFeedback, setActionFeedback] = useState<{
     message: string;
     type: 'success' | 'warning' | 'error';
@@ -413,6 +416,14 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
                 <ExternalLink className="w-3.5 h-3.5 text-blue-500" />
                 <span>{t('在本地打开')}</span>
               </button>
+              <button
+                onClick={() => setIsCloudWikiOpen(true)}
+                className="px-2.5 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 transition text-xs flex items-center space-x-1.5 border border-emerald-500/30 font-medium"
+                title={t('挂载企业微信微盘、WebDAV 或 OSS 虚拟知识库')}
+              >
+                <Cloud className="w-3.5 h-3.5" />
+                <span>{t('挂载云端 Wiki')}</span>
+              </button>
             </div>
           </div>
         )}
@@ -772,6 +783,13 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
           </div>
         )}
       </div>
+
+      {/* 云端规程 Wiki 挂载弹窗 (v1.5.5) */}
+      <CloudWikiMountModal
+        isOpen={isCloudWikiOpen}
+        onClose={() => setIsCloudWikiOpen(false)}
+        workspaceRoot={workspace?.root_path || '.'}
+      />
     </div>
   );
 }

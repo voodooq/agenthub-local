@@ -34,11 +34,13 @@ import {
   Box,
   Users,
   Bot,
+  Cloud,
 } from 'lucide-react';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
 import { AgentsView, AgentItem } from '@/components/AgentsView';
 import { LibraryView } from '@/components/LibraryView';
+import { CloudWikiMountModal } from '@/components/CloudWikiMountModal';
 import { ScheduledView } from '@/components/ScheduledView';
 import { SkillsView } from '@/components/SkillsView';
 import { StatusPill } from '@/components/StatusPill';
@@ -185,6 +187,7 @@ export default function WorkbenchPage() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<'models' | 'appearance' | 'personality'>('models');
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('high');
+  const [isCloudWikiModalOpen, setIsCloudWikiModalOpen] = useState(false);
 
   // 工作模式与系统治理
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -3318,6 +3321,17 @@ export default function WorkbenchPage() {
               </button>
             )}
 
+            {/* 云端 Wiki 挂载入口 (v1.5.5) */}
+            <button
+              type="button"
+              onClick={() => setIsCloudWikiModalOpen(true)}
+              className="flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs text-muted-foreground hover:text-foreground hover:bg-surface-200/70 transition-all"
+              title="挂载企业微信微盘、WebDAV 或 OSS 虚拟知识库"
+            >
+              <Cloud className="w-3.5 h-3.5 text-sky-500 shrink-0" />
+              <span className="text-[12px]">云端 Wiki</span>
+            </button>
+
             {/* Canvas 画布极简入口 */}
             <button
               onClick={() => setCanvasState((prev) => ({ ...prev, isOpen: !prev.isOpen }))}
@@ -4767,6 +4781,13 @@ export default function WorkbenchPage() {
         liveTurnMetrics={messages
           .filter((m) => m.role === 'model' && m.token_stats)
           .map((m) => m.token_stats as TurnTokenMetrics)}
+      />
+
+      {/* 云端规程知识库挂载模态框 (v1.5.5) */}
+      <CloudWikiMountModal
+        isOpen={isCloudWikiModalOpen}
+        onClose={() => setIsCloudWikiModalOpen(false)}
+        workspaceRoot={workspaces.find((w) => w.id === activeWorkspaceId)?.root_path || '.'}
       />
     </div>
   );
