@@ -2005,6 +2005,8 @@ class AgentRuntime:
             step_idx = 0
             force_final_text_only_step = False
             executed_tools_record: list[dict[str, Any]] = []
+            retrieved_evidence_chunks: list[dict[str, Any]] = []
+            critique_retry_count: int = 0
             while step_idx < current_max_steps:
                 if await _check_cancelled():
                     was_cancelled = True
@@ -2540,6 +2542,56 @@ class AgentRuntime:
                     is_waiting_user_decision = bool(
                         active_scene == "agent" and (has_inquiry_card or is_planning_phase)
                     )
+
+                    # 阶段四：自然收尾自审与多维置信度治理 (v1.5.5)
+                    try:
+                        from ..governance.self_critique import SelfCritiqueCritic
+                        from ..governance.confidence_evaluator import ConfidenceEvaluator
+
+                        critique_res = SelfCritiqueCritic.evaluate_draft(
+                            user_query=user_message,
+                            retrieved_evidence=retrieved_evidence_chunks,
+                            draft_response=final_saved_text or accumulated_visible_text,
+                            has_version_conflict=False,
+                        )
+                        if not critique_res.is_passed and critique_retry_count < 1:
+                            critique_retry_count += 1
+                            yield {
+                                "type": "critique_redraft",
+                                "reasons": critique_res.critique_points,
+                                "message": f"自审检出潜在缺陷: {'; '.join(critique_res.critique_points)}，正在触发一次自动纠偏重写...",
+                            }
+                            critique_prompt = (
+                                f"[系统自审质量拦截]: 前置交付草稿经自审查验发现以下缺陷:\n"
+                                + "\n".join(f"- {p}" for p in critique_res.critique_points)
+                                + "\n请严格依据真实检索到的事实依据修正上述问题，重新输出严谨准确的最终回答。"
+                            )
+                            await MessageRepository.save_message(
+                                conversation_id=conv_id,
+                                role="user",
+                                content=critique_prompt,
+                            )
+                            step_idx += 1
+                            continue
+
+                        conf_rep = ConfidenceEvaluator.evaluate(
+                            retrieved_chunks=retrieved_evidence_chunks,
+                            critique_res=critique_res,
+                            tools_executed=executed_tools_record,
+                            strict_mode=False,
+                        )
+                        yield {
+                            "type": "confidence_report",
+                            "score": conf_rep.score,
+                            "tier_level": conf_rep.tier_level,
+                            "reasons": conf_rep.reasons,
+                            "requires_confirmation": conf_rep.requires_confirmation,
+                            "evidence_sources": conf_rep.evidence_sources,
+                        }
+                        if conf_rep.requires_confirmation:
+                            is_waiting_user_decision = True
+                    except Exception as conf_err:
+                        logger.debug(f"[AgentRuntime] 自然收尾置信度治理跳过: {conf_err}")
 
                     if final_saved_text:
                         await MessageRepository.save_message(
@@ -4510,6 +4562,7 @@ class AgentRuntime:
                         q_str = str(args.get("query") or "").strip()
                         top_k_val = int(args.get("top_k") or 8)
                         pod_id_val = str(args.get("pod_id") or "global")
+                        inc_arch = bool(args.get("include_archived", False))
                         ws_root = target_cwd or "."
 
                         res_text = await workspace_hybrid_search(
@@ -4517,7 +4570,15 @@ class AgentRuntime:
                             query=q_str,
                             top_k=top_k_val,
                             pod_id=pod_id_val,
+                            include_archived=inc_arch,
                         )
+                        if res_text and "未在工作区找到" not in res_text:
+                            retrieved_evidence_chunks.append({
+                                "source_uri": f"workspace://{q_str}",
+                                "content_text": res_text[:1200],
+                                "authority_tier": 2,
+                                "score": 0.85,
+                            })
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4543,6 +4604,13 @@ class AgentRuntime:
                             top_k=top_k_val,
                             pod_id=pod_id_val,
                         )
+                        if res_text and "未检索到" not in res_text:
+                            retrieved_evidence_chunks.append({
+                                "source_uri": f"cloud_wiki://{q_str}",
+                                "content_text": res_text[:1200],
+                                "authority_tier": 1,
+                                "score": 0.95,
+                            })
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4566,6 +4634,13 @@ class AgentRuntime:
                             section_path=s_path,
                             workspace_root=ws_root,
                         )
+                        if res_text and "读取云端切片失败" not in res_text:
+                            retrieved_evidence_chunks.append({
+                                "source_uri": r_uri or s_path,
+                                "content_text": res_text[:1200],
+                                "authority_tier": 1,
+                                "score": 0.98,
+                            })
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4600,6 +4675,62 @@ class AgentRuntime:
                             "status": "completed",
                             "output": res_text,
                             "compressed": f"[知识图谱查询完成: '{target_ent}']",
+                        }
+
+                    # ── 工具: 离线语音转写 (transcribe_audio_file) ──
+                    elif func_name == "transcribe_audio_file":
+                        from ..multimodal.audio_transcriber import AudioTranscriber
+                        a_path = str(args.get("audio_path") or "").strip()
+                        a_lang = str(args.get("language") or "zh").strip()
+                        try:
+                            t_res = AudioTranscriber.transcribe(audio_file_path=a_path, language=a_lang)
+                            res_text = f"### 🎙️ 语音转写结果 ({t_res.get('file_name')}):\n\n{t_res.get('text', '')}"
+                        except Exception as a_err:
+                            res_text = f"语音转写失败: {str(a_err)}"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"transcribe_audio_file({a_path})",
+                            "reason": f"转写音频文件: {a_path}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": f"[音频转写完成: '{a_path}']",
+                        }
+
+                    # ── 工具: 浏览器多模态页面审查 (browser_inspect_page) ──
+                    elif func_name == "browser_inspect_page":
+                        from ..tools.browser_agent import browser_inspect_page
+                        t_url = str(args.get("url") or "").strip()
+                        w_sec = float(args.get("wait_seconds") or 2.0)
+                        res_text = await browser_inspect_page(url=t_url, wait_seconds=w_sec)
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"browser_inspect_page({t_url})",
+                            "reason": f"无头浏览器页面审查: {t_url}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": f"[浏览器审查完成: '{t_url}']",
+                        }
+
+                    # ── 工具: 浏览器拟人化交互操作 (browser_interact_action) ──
+                    elif func_name == "browser_interact_action":
+                        from ..tools.browser_agent import browser_interact_action
+                        b_act = str(args.get("action") or "").strip()
+                        b_tgt = str(args.get("target") or "").strip()
+                        b_txt = str(args.get("text") or "").strip()
+                        res_text = await browser_interact_action(action=b_act, target=b_tgt, text=b_txt)
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"browser_interact_action({b_act} on {b_tgt})",
+                            "reason": f"浏览器交互操作: {b_act}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": f"[浏览器操作完成: {b_act}]",
                         }
 
                     # ── Swarm 四原语执行分支 (swarm_control / swarm_post / swarm_read / swarm_wait) ──
@@ -5259,14 +5390,34 @@ class AgentRuntime:
 
                         critique_res = SelfCritiqueCritic.evaluate_draft(
                             user_query=content_prompt,
-                            retrieved_evidence=[],
+                            retrieved_evidence=retrieved_evidence_chunks,
                             draft_response=clean_deliverable,
                             has_version_conflict=False,
                         )
+                        if not critique_res.is_passed and critique_retry_count < 1:
+                            critique_retry_count += 1
+                            yield {
+                                "type": "critique_redraft",
+                                "reasons": critique_res.critique_points,
+                                "message": f"自审检出潜在缺陷: {'; '.join(critique_res.critique_points)}，正在触发一次自动纠偏重写...",
+                            }
+                            critique_prompt = (
+                                f"[系统自审质量拦截]: 前置交付草稿经自审查验发现以下缺陷:\n"
+                                + "\n".join(f"- {p}" for p in critique_res.critique_points)
+                                + "\n请严格依据真实检索到的事实依据修正上述问题，重新输出严谨准确的最终回答。"
+                            )
+                            await MessageRepository.save_message(
+                                conversation_id=conv_id,
+                                role="user",
+                                content=critique_prompt,
+                            )
+                            step_idx += 1
+                            continue
+
                         conf_rep = ConfidenceEvaluator.evaluate(
-                            retrieved_chunks=[],
+                            retrieved_chunks=retrieved_evidence_chunks,
                             critique_res=critique_res,
-                            tools_executed=[],
+                            tools_executed=executed_tools_record,
                             strict_mode=False,
                         )
                         yield {

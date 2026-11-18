@@ -10,11 +10,19 @@ interface CloudWikiMountModalProps {
   workspaceRoot?: string;
 }
 
+export interface CloudMountItem {
+  mount_id: string;
+  mount_name: string;
+  provider_type: 'wecom' | 'webdav' | 'oss';
+  authority_tier: number;
+  config: Record<string, any>;
+}
+
 export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: CloudWikiMountModalProps) {
   const [activeTab, setActiveTab] = useState<'wecom' | 'webdav' | 'oss'>('wecom');
   const [mountName, setMountName] = useState('');
   const [authorityTier, setAuthorityTier] = useState<number>(1);
-  const [mountsList, setMountsList] = useState<any[]>([]);
+  const [mountsList, setMountsList] = useState<CloudMountItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [testing, setTesting] = useState(false);
   const [syncing, setSyncing] = useState(false);
@@ -406,3 +414,4 @@ export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: Cl
     </div>
   );
 }
+

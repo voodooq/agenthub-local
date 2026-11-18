@@ -24,6 +24,7 @@ async def workspace_hybrid_search(
     top_k: int = 10,
     pod_id: str = "global",
     use_agentic_loop: bool = True,
+    include_archived: bool = False,
 ) -> str:
     """在当前本地工作区执行多维度混合语义检索。
 
@@ -33,6 +34,7 @@ async def workspace_hybrid_search(
         top_k: 期望返回的高置信证据切片上限。
         pod_id: 客户/群组隔离域。
         use_agentic_loop: 是否启用最多 3 跳的自主追问自检闭环。
+        include_archived: 是否包含已废止/历史归档版本规程（默认 False）。
 
     Returns:
         str: 包含“时空身份证”和冲突审计警示的标准证据块。
@@ -42,12 +44,17 @@ async def workspace_hybrid_search(
         return "检索关键词为空。"
 
     try:
-        if use_agentic_loop:
+        if use_agentic_loop and not include_archived:
             loop = AgenticRetrievalLoop(workspace_root)
             chunks = await loop.execute_loop(clean_q, max_hops=3, top_k=top_k, pod_id=pod_id)
         else:
             engine = HybridSearchEngine(workspace_root)
-            chunks = await engine.search(clean_q, top_k=top_k, pod_id=pod_id)
+            chunks = await engine.search(
+                clean_q,
+                top_k=top_k,
+                pod_id=pod_id,
+                include_superseded=include_archived,
+            )
     except Exception as e:
         logger.warning(f"工作区混合检索执行异常: {e}")
         return f"检索异常: {str(e)}"
@@ -161,3 +168,4 @@ __all__ = [
     "read_cloud_wiki_section",
     "query_knowledge_graph",
 ]
+

@@ -35,11 +35,31 @@ class LightGraphRAGEngine:
         self.workspace_root = Path(workspace_root).resolve()
         self.db_path = self.workspace_root / ".agenthub" / "index.db"
 
+    def _init_db(self, conn: sqlite3.Connection) -> None:
+        conn.execute("""
+        CREATE TABLE IF NOT EXISTS knowledge_triples (
+            triple_id        INTEGER PRIMARY KEY AUTOINCREMENT,
+            pod_id           TEXT NOT NULL DEFAULT 'global',
+            subject          TEXT NOT NULL,
+            predicate        TEXT NOT NULL,
+            object           TEXT NOT NULL,
+            source_uri       TEXT NOT NULL,
+            authority_tier   INTEGER NOT NULL DEFAULT 2,
+            effective_time   REAL NOT NULL,
+            confidence       REAL NOT NULL DEFAULT 1.0,
+            UNIQUE(pod_id, subject, predicate, object, source_uri)
+        );
+        """)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_triples_sub ON knowledge_triples(pod_id, subject);")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_triples_obj ON knowledge_triples(pod_id, object);")
+
     def _get_connection(self) -> sqlite3.Connection:
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(self.db_path), timeout=60.0)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode = WAL;")
         conn.execute("PRAGMA busy_timeout = 60000;")
+        self._init_db(conn)
         return conn
 
     @staticmethod
@@ -101,7 +121,19 @@ class LightGraphRAGEngine:
         inserted = 0
         with closing(self._get_connection()) as conn:
             with conn:
-                for t in triples:
+                for item in triples:
+                    if isinstance(item, tuple):
+                        t = KnowledgeTriple(
+                            subject=item[0],
+                            predicate=item[1],
+                            object=item[2],
+                            source_uri=item[3] if len(item) > 3 else "",
+                            authority_tier=item[4] if len(item) > 4 else 2,
+                            effective_time=item[5] if len(item) > 5 else 0.0,
+                            confidence=item[6] if len(item) > 6 else 1.0,
+                        )
+                    else:
+                        t = item
                     conn.execute("""
                     INSERT INTO knowledge_triples (
                         pod_id, subject, predicate, object, source_uri,
@@ -118,6 +150,32 @@ class LightGraphRAGEngine:
                     inserted += 1
         return inserted
 
+    def find_anchor_entities(self, seed: str, pod_id: str = "global") -> list[str]:
+        """定位图谱起点实体：双向包含匹配（实体包含提问词 或 提问句包含已知实体名）。"""
+        clean_seed = seed.strip()
+        if not clean_seed:
+            return []
+
+        with closing(self._get_connection()) as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT entity FROM (
+                    SELECT subject as entity FROM knowledge_triples 
+                    WHERE pod_id = ? AND (subject = ? OR subject LIKE '%' || ? || '%' OR (length(subject) >= 2 AND instr(?, subject) > 0))
+                    UNION
+                    SELECT object as entity FROM knowledge_triples 
+                    WHERE pod_id = ? AND (object = ? OR object LIKE '%' || ? || '%' OR (length(object) >= 2 AND instr(?, object) > 0))
+                )
+                ORDER BY length(entity) DESC
+                LIMIT 5;
+                """,
+                (pod_id, clean_seed, clean_seed, clean_seed, pod_id, clean_seed, clean_seed, clean_seed),
+            ).fetchall()
+            if rows:
+                return [r["entity"] for r in rows]
+
+        return [clean_seed]
+
     def query_subgraph(
         self,
         seed_entity: str,
@@ -128,7 +186,7 @@ class LightGraphRAGEngine:
         """基于 SQLite 原生 WITH RECURSIVE 执行双向 2~3 跳子图查询。
 
         Args:
-            seed_entity: 起点实体名称。
+            seed_entity: 起点实体名称或包含实体的问句。
             max_hops: 最大递归跳数（限制 <= 3）。
             pod_id: 隔离域。
             max_edges: 返回边数量上限。
@@ -140,7 +198,13 @@ class LightGraphRAGEngine:
         if not clean_seed:
             return []
 
+        # 智能实体模糊锚定
+        anchors = self.find_anchor_entities(clean_seed, pod_id=pod_id)
+        if not anchors:
+            anchors = [clean_seed]
+
         hops_limit = max(1, min(max_hops, 3))
+        placeholders = ",".join("?" for _ in anchors)
 
         # 双向扩展：同时沿着 subject -> object 出边与 object -> subject 入边扩展
         # 使用 visited 字符串防止环路: '|' || next_node || '|'
@@ -153,7 +217,7 @@ class LightGraphRAGEngine:
                 1 AS hop,
                 '|' || subject || '|' || object || '|' AS visited
             FROM knowledge_triples
-            WHERE pod_id = ? AND (subject = ? OR subject LIKE '%' || ? || '%')
+            WHERE pod_id = ? AND (subject IN ({placeholders}) OR subject LIKE '%' || ? || '%')
             
             UNION ALL
             
@@ -163,7 +227,7 @@ class LightGraphRAGEngine:
                 1 AS hop,
                 '|' || object || '|' || subject || '|' AS visited
             FROM knowledge_triples
-            WHERE pod_id = ? AND (object = ? OR object LIKE '%' || ? || '%')
+            WHERE pod_id = ? AND (object IN ({placeholders}) OR object LIKE '%' || ? || '%')
             
             UNION ALL
             
@@ -186,12 +250,11 @@ class LightGraphRAGEngine:
         LIMIT ?;
         """
 
-        params = [
-            pod_id, clean_seed, clean_seed,
-            pod_id, clean_seed, clean_seed,
-            pod_id,
-            max_edges,
-        ]
+        params = (
+            [pod_id] + anchors + [clean_seed]
+            + [pod_id] + anchors + [clean_seed]
+            + [pod_id, max_edges]
+        )
 
         with closing(self._get_connection()) as conn:
             try:
@@ -241,3 +304,4 @@ def query_knowledge_graph(
     engine = LightGraphRAGEngine(workspace_root)
     edges = engine.query_subgraph(entity, max_hops=max_hops, pod_id=pod_id)
     return engine.format_subgraph_markdown(entity, edges)
+

@@ -445,6 +445,35 @@ class HybridSearchEngine:
 
             rrf_scored_items.append((arbitrated, item_out))
 
+        # 阶段二点五：微经验 (L5 Experience) 双路召回融合 (v1.5.5)
+        try:
+            from ..memory.experience_store import experience_store
+            exp_cases = await experience_store.search_for_context(
+                clean_query,
+                workspace_id=pod_id if pod_id != "global" else "GLOBAL",
+                limit=2,
+            )
+            for c in exp_cases:
+                exp_score = 0.85 * float(c.confidence)
+                rrf_scored_items.append((
+                    exp_score,
+                    {
+                        "chunk_id": f"exp_{c.id}",
+                        "title": f"实战微经验: {c.scene_summary[:30]}",
+                        "section_path": c.task_category,
+                        "source_type": "experience",
+                        "authority_tier": 2,
+                        "effective_time": c.updated_at or c.created_at,
+                        "is_superseded": 0,
+                        "content_text": f"【场景】{c.scene_summary}\n【根因】{c.root_cause}\n【方案】{c.verified_solution}",
+                        "remote_uri": f"experience://{c.id}",
+                        "rrf_score": exp_score,
+                        "arbitrated_score": exp_score,
+                    }
+                ))
+        except Exception as exp_err:
+            logger.debug(f"微经验召回跳过: {exp_err}")
+
         rrf_scored_items.sort(key=lambda x: x[0], reverse=True)
         top_results = [it[1] for it in rrf_scored_items[:top_k]]
 
@@ -453,3 +482,25 @@ class HybridSearchEngine:
             res["spatial_temporal_text"] = ConflictResolver.format_spatial_temporal_id(res, idx)
 
         return top_results
+
+    def get_knowledge_stats(self) -> dict[str, int]:
+        """查询底层知识切片、图谱三元组与云盘同步状态指标。"""
+        with closing(self._get_connection()) as conn:
+            try:
+                chunk_cnt = conn.execute("SELECT COUNT(*) as c FROM hybrid_chunks").fetchone()["c"]
+            except Exception:
+                chunk_cnt = 0
+            try:
+                triple_cnt = conn.execute("SELECT COUNT(*) as c FROM knowledge_triples").fetchone()["c"]
+            except Exception:
+                triple_cnt = 0
+            try:
+                cloud_cnt = conn.execute("SELECT COUNT(DISTINCT mount_id) as c FROM cloud_vfs_sync_state").fetchone()["c"]
+            except Exception:
+                cloud_cnt = 0
+
+        return {
+            "total_chunks": int(chunk_cnt),
+            "total_triples": int(triple_cnt),
+            "synced_cloud_mounts": int(cloud_cnt),
+        }

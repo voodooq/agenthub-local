@@ -20,6 +20,14 @@ class CritiqueResult:
     revision_hint: str = ""
     score_deduction: float = 0.0
 
+    @property
+    def is_passed(self) -> bool:
+        return self.passed
+
+    @property
+    def critique_points(self) -> list[str]:
+        return self.issues
+
 
 class SelfCritiqueCritic:
     """输出前自我审查 Critic 节点。"""
@@ -33,7 +41,7 @@ class SelfCritiqueCritic:
     def evaluate_draft(
         cls,
         user_query: str,
-        retrieved_evidence: list[str],
+        retrieved_evidence: list[Any],
         draft_response: str,
         has_version_conflict: bool = False,
     ) -> CritiqueResult:
@@ -41,7 +49,7 @@ class SelfCritiqueCritic:
 
         Args:
             user_query: 用户初始提问。
-            retrieved_evidence: 检索召回的证据切片纯文本列表。
+            retrieved_evidence: 检索召回的证据切片纯文本列表或切片字典列表。
             draft_response: 模型草拟的最终回答。
             has_version_conflict: 是否检测到多源版本冲突。
 
@@ -51,7 +59,16 @@ class SelfCritiqueCritic:
         issues: list[str] = []
         deduction = 0.0
 
-        if not retrieved_evidence:
+        # 归一化提取证据纯文本
+        normalized_ev: list[str] = []
+        for ev in (retrieved_evidence or []):
+            if isinstance(ev, dict):
+                txt = ev.get("content_text") or ev.get("text") or str(ev)
+                normalized_ev.append(str(txt))
+            elif ev:
+                normalized_ev.append(str(ev))
+
+        if not normalized_ev:
             # 无检索证据时，若回答中出现大量具体数字与断言，给出审慎提示
             numbers_in_draft = cls.NUMBER_PATTERN.findall(draft_response)
             if len(numbers_in_draft) >= 4:
@@ -64,7 +81,7 @@ class SelfCritiqueCritic:
                 score_deduction=deduction,
             )
 
-        evidence_combined = "\n".join(retrieved_evidence)
+        evidence_combined = "\n".join(normalized_ev)
 
         # 1. 版本冲突披露核查：如果证据中存在版本冲突，但草稿中完全未提及旧版/差异/冲突
         if has_version_conflict:
@@ -77,9 +94,16 @@ class SelfCritiqueCritic:
         # 2. 数字核验：比对草稿中的关键数字在证据中是否存在
         draft_numbers = set(cls.NUMBER_PATTERN.findall(draft_response))
         evidence_numbers = set(cls.NUMBER_PATTERN.findall(evidence_combined))
-        # 排除纯序号 1、2、3 等
-        suspicious_numbers = [n for n in draft_numbers if n not in evidence_numbers and len(n) > 1 and not n.isdigit()]
-        if len(suspicious_numbers) > 2:
+
+        def is_small_ordinal(tok: str) -> bool:
+            return tok.isdigit() and int(tok) <= 10
+
+        # 排除纯小序号 (1~10)，若数值在证据文本或集合中均不存在，判定为存疑数值
+        suspicious_numbers = [
+            n for n in draft_numbers
+            if n not in evidence_numbers and n not in evidence_combined and not is_small_ordinal(n)
+        ]
+        if suspicious_numbers:
             issues.append(f"草稿中的数值 {suspicious_numbers[:3]} 在检索证据中未找到确切佐证")
             deduction += 0.20
 
@@ -105,3 +129,4 @@ class SelfCritiqueCritic:
             revision_hint=revision_hint,
             score_deduction=min(deduction, 0.60),
         )
+

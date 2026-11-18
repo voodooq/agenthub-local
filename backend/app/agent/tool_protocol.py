@@ -880,8 +880,75 @@ class ToolProtocolAdapter:
                             "description": "可选客户/群组隔离域标识（默认 global）。",
                             "default": "global",
                         },
+                        "include_archived": {
+                            "type": "boolean",
+                            "description": "是否包含已废止/历史归档版本规程（默认 false，仅检索最新有效版本）。",
+                            "default": False,
+                        },
                     },
                     "required": ["query"],
+                },
+            },
+            {
+                "name": "transcribe_audio_file",
+                "description": "离线语音转写工具：调用本地轻量 Faster-Whisper 模型，将录音/音频文件转写为带时间戳的结构化文字。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "audio_path": {
+                            "type": "string",
+                            "description": "本地音频文件路径（支持 wav, mp3, m4a, ogg, flac 等）。",
+                        },
+                        "language": {
+                            "type": "string",
+                            "description": "音频主语言（默认 zh）。",
+                            "default": "zh",
+                        },
+                    },
+                    "required": ["audio_path"],
+                },
+            },
+            {
+                "name": "browser_inspect_page",
+                "description": "多模态页面审查工具：捕获当前活动网页的 DOM 无障碍可访问性树（AXTree）精简快照与控制台日志，返回可操作元素列表及视觉渲染状态。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "待审查的目标网页地址（如 http://localhost:3000 或外部网址）。",
+                        },
+                        "wait_seconds": {
+                            "type": "number",
+                            "description": "页面加载后的等待时间（秒，默认 2.0）。",
+                            "default": 2.0,
+                        },
+                    },
+                    "required": ["url"],
+                },
+            },
+            {
+                "name": "browser_interact_action",
+                "description": "浏览器拟人化交互操作工具：在当前页面上执行点击、输入、滚动或导航操作。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "description": "交互动作类型：click（点击元素）、type（输入文本）、scroll（滚动页面）、navigate（跳转 URL）。",
+                            "enum": ["click", "type", "scroll", "navigate"],
+                        },
+                        "target": {
+                            "type": "string",
+                            "description": "操作目标：元素 CSS 选择器、节点文本或跳转目标 URL。",
+                        },
+                        "text": {
+                            "type": "string",
+                            "description": "输入文本内容或滚动像素值（action 为 type 或 scroll 时有效）。",
+                            "default": "",
+                        },
+                    },
+                    "required": ["action", "target"],
                 },
             },
             {

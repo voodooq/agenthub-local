@@ -121,6 +121,44 @@ class BrowserSessionManager:
                     "console_logs": list(self._console_logs)[-20:],
                 }
 
+    async def interact(self, action: str, target: str, text: str = "") -> dict[str, Any]:
+        """在当前活动页面上执行拟人化操作 (click, type, scroll, navigate)。"""
+        async with self._lock:
+            page = await self._ensure_browser()
+            action_type = (action or "").strip().lower()
+            try:
+                if action_type == "navigate":
+                    await page.goto(target, timeout=30000, wait_until="domcontentloaded")
+                    await asyncio.sleep(1.0)
+                    msg = f"已成功导航至: {target}"
+                elif action_type == "click":
+                    await page.click(target, timeout=10000)
+                    await asyncio.sleep(0.5)
+                    msg = f"已成功点击目标元素: {target}"
+                elif action_type == "type":
+                    await page.fill(target, text or "", timeout=10000)
+                    msg = f"已在元素 {target} 填入文本 (长度: {len(text)})"
+                elif action_type == "scroll":
+                    delta = int(text) if text.isdigit() else 600
+                    await page.evaluate(f"window.scrollBy(0, {delta})")
+                    msg = f"页面向下滚动 {delta}px"
+                else:
+                    return {"status": "error", "error": f"不支持的交互动作: {action_type}"}
+
+                title = await page.title()
+                return {
+                    "status": "success",
+                    "message": msg,
+                    "current_url": page.url,
+                    "title": title,
+                }
+            except Exception as e:
+                return {
+                    "status": "error",
+                    "error": f"执行交互操作失败 ({action_type} on {target}): {str(e)}",
+                    "current_url": page.url if page else "",
+                }
+
     def _compress_ax_node(self, node: dict[str, Any] | None) -> dict[str, Any] | None:
         if not node:
             return None
@@ -174,3 +212,12 @@ async def browser_inspect_page(url: str, wait_seconds: float = 2.0) -> str:
         lines.append("\n控制台未检出任何报错日志。")
 
     return "\n".join(lines)
+
+
+async def browser_interact_action(action: str, target: str, text: str = "") -> str:
+    """浏览器拟人化交互操作工具。"""
+    res = await browser_session_manager.interact(action=action, target=target, text=text)
+    if res.get("status") == "error":
+        return f"浏览器操作失败: {res.get('error')}"
+    return f"浏览器操作成功: {res.get('message')} (当前URL: {res.get('current_url')}, 标题: {res.get('title')})"
+
