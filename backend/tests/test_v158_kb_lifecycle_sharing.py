@@ -203,3 +203,4 @@ async def test_expert_binding_and_search_gate():
     assert "重剑比赛中" in hits[0]["content"]
 
     KBStorageManager.physically_destroy_kb(kb_id)
+

@@ -265,3 +265,4 @@ class KBStorageManager:
             logger.info(f"已彻底物理销毁知识库存储目录: {kb_dir}")
             return True
         return False
+

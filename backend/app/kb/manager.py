@@ -424,3 +424,4 @@ class KBLifecycleManager:
                     }
                     for r in rows
                 ]
+

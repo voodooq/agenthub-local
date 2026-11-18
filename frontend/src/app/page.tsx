@@ -40,7 +40,7 @@ import {
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
 import { AgentsView, AgentItem } from '@/components/AgentsView';
 import { LibraryView } from '@/components/LibraryView';
-import { CloudWikiMountModal } from '@/components/CloudWikiMountModal';
+import { LLMWikiDrawer } from '@/components/LLMWikiDrawer';
 import { ScheduledView } from '@/components/ScheduledView';
 import { SkillsView } from '@/components/SkillsView';
 import { StatusPill } from '@/components/StatusPill';
@@ -4773,8 +4773,8 @@ export default function WorkbenchPage() {
           .map((m) => m.token_stats as TurnTokenMetrics)}
       />
 
-      {/* 云端规程知识库挂载模态框 (v1.5.5) */}
-      <CloudWikiMountModal
+      {/* 右侧 LLMWiki 知识中枢抽屉面板 (知识库挂载与训练) */}
+      <LLMWikiDrawer
         isOpen={isCloudWikiModalOpen}
         onClose={() => setIsCloudWikiModalOpen(false)}
         workspaceRoot={workspaces.find((w) => w.id === activeWorkspaceId)?.root_path || '.'}

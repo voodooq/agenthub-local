@@ -300,3 +300,4 @@ async def test_retrieval_playground(kb_id: str, payload: PlaygroundQueryPayload)
         "total_hits": len(chunks),
         "chunks": chunks,
     }
+

@@ -27,7 +27,7 @@ import {
 import { Workspace, ArtifactItem } from '@/types';
 import { apiFetch, downloadWorkspaceFile, getAccessToken } from '@/utils/apiClient';
 import { useLanguage } from '@/context/LanguageContext';
-import { CloudWikiMountModal } from './CloudWikiMountModal';
+import { LLMWikiDrawer } from './LLMWikiDrawer';
 
 interface LibraryViewProps {
   workspace: Workspace | undefined;
@@ -784,8 +784,8 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
         )}
       </div>
 
-      {/* 云端规程 Wiki 挂载弹窗 (v1.5.5) */}
-      <CloudWikiMountModal
+      {/* LLMWiki 知识中枢抽屉面板 (知识库挂载与训练) */}
+      <LLMWikiDrawer
         isOpen={isCloudWikiOpen}
         onClose={() => setIsCloudWikiOpen(false)}
         workspaceRoot={workspace?.root_path || '.'}
