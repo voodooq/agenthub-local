@@ -23,7 +23,7 @@ class AudioTranscriber:
             return cls._model_instance
 
         try:
-            from faster_whisper import WhisperModel
+            from faster_whisper import WhisperModel  # type: ignore
             cls.MODEL_DIR.mkdir(parents=True, exist_ok=True)
             # 使用 CPU int8 推理，内存占用极低 (< 150MB)
             cls._model_instance = WhisperModel(
