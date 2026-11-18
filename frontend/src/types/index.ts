@@ -353,7 +353,7 @@ export interface LLMProviderItem {
   cooldown_until?: string | null;
   is_cooling_down?: boolean;
   models: string[];
-  role_binding: 'primary' | 'light' | 'both';
+  role_binding: 'primary' | 'light' | 'both' | 'embedding_only';
   tool_call_mode: 'auto' | 'native' | 'xml_prompt';
   max_context_tokens?: number;
   priority: number;

@@ -107,7 +107,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
   const [provBaseUrl, setProvBaseUrl] = useState('https://api.deepseek.com/v1');
   const [provApiKey, setProvApiKey] = useState('');
   const [provModels, setProvModels] = useState('deepseek-chat, deepseek-reasoner');
-  const [provRole, setProvRole] = useState<'both' | 'primary' | 'light'>('both');
+  const [provRole, setProvRole] = useState<'both' | 'primary' | 'light' | 'embedding_only'>('both');
   const [provPriority, setProvPriority] = useState<number>(2);
   const [provMaxContextTokens, setProvMaxContextTokens] = useState<number>(0);
   const [copiedLlamaCmd, setCopiedLlamaCmd] = useState<boolean>(false);
@@ -135,14 +135,14 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
   const [googleSubTab, setGoogleSubTab] = useState<'browser' | 'token' | 'batch'>('browser');
   const [rawTokenInput, setRawTokenInput] = useState('');
   const [tokenRemark, setTokenRemark] = useState('');
-  const [tokenRole, setTokenRole] = useState<'both' | 'primary' | 'light'>('both');
+  const [tokenRole, setTokenRole] = useState<'both' | 'primary' | 'light' | 'embedding_only'>('both');
   const [tokenPriority, setTokenPriority] = useState<number>(1);
   const [importingToken, setImportingToken] = useState(false);
 
   // Google 官方 PKCE OAuth 授权状态 (1455 端口自动回环 + 手动粘贴 URL 双模)
   const [pkceState, setPkceState] = useState<string>('');
   const [pkceRemark, setPkceRemark] = useState<string>('');
-  const [pkceRole, setPkceRole] = useState<'both' | 'primary' | 'light'>('both');
+  const [pkceRole, setPkceRole] = useState<'both' | 'primary' | 'light' | 'embedding_only'>('both');
   const [pkcePriority, setPkcePriority] = useState<number>(1);
   const [pkceManualUrl, setPkceManualUrl] = useState<string>('');
   const [pkceSubmitting, setPkceSubmitting] = useState<boolean>(false);
@@ -1389,7 +1389,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                               {p.provider_type}
                             </span>
                             <span className="px-2 py-0.5 rounded bg-purple-500/15 text-purple-700 dark:text-purple-400 border border-purple-500/30 text-[10px]">
-                              职责: {p.role_binding === 'primary' ? '主力推理' : p.role_binding === 'light' ? '后台轻量提炼' : '主力+后台通用'}
+                              职责: {p.role_binding === 'primary' ? '主力推理' : p.role_binding === 'light' ? '后台轻量提炼' : p.role_binding === 'embedding_only' ? '🔢 纯向量 Embedding' : '主力+后台通用'}
                             </span>
                             {Number(p.max_context_tokens || 0) > 0 && (
                               <span className="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-400 border border-indigo-500/30 text-[10px] font-mono">
@@ -1696,7 +1696,13 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                             <option value="both">🧠+⚡ 主力推理 + 后台记忆通用</option>
                             <option value="primary">🧠 仅作为主力对话与 Agent 推理</option>
                             <option value="light">⚡ 仅作为后台轻量记忆提炼</option>
+                            <option value="embedding_only">🔢 仅用于知识库向量化 / Embedding</option>
                           </select>
+                          {pkceRole === 'embedding_only' && (
+                            <p className="text-[11px] text-sky-500 mt-1">
+                              该节点仅响应 /v1/embeddings 向量计算，不参与文本生成。
+                            </p>
+                          )}
                         </div>
                         <div>
                           <label className="block text-foreground/90 mb-1.5 font-medium">调度优先级 (越小越优先)</label>
@@ -1792,7 +1798,13 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                             <option value="both">🧠+⚡ 主力推理 + 后台记忆通用</option>
                             <option value="primary">🧠 仅作为主力对话与 Agent 推理</option>
                             <option value="light">⚡ 仅作为后台轻量记忆提炼</option>
+                            <option value="embedding_only">🔢 仅用于知识库向量化 / Embedding</option>
                           </select>
+                          {tokenRole === 'embedding_only' && (
+                            <p className="text-[11px] text-sky-500 mt-1">
+                              该节点仅响应 /v1/embeddings 向量计算，不参与文本生成。
+                            </p>
+                          )}
                         </div>
                         <div>
                           <label className="block text-foreground/90 mb-1.5 font-medium">调度优先级</label>
@@ -1997,7 +2009,13 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                         <option value="both">🧠+⚡ 主力推理 + 后台记忆通用</option>
                         <option value="primary">🧠 仅作为主力对话与 Agent 推理 (Primary)</option>
                         <option value="light">⚡ 仅作为后台轻量记忆提炼与摘要 (Light)</option>
+                        <option value="embedding_only">🔢 仅用于知识库向量化 / Embedding（不参与对话）</option>
                       </select>
+                      {provRole === 'embedding_only' && (
+                        <p className="text-[11px] text-sky-500 mt-1">
+                          该节点仅响应 /v1/embeddings 向量计算请求，不参与文本生成。
+                        </p>
+                      )}
                     </div>
                   </div>
 

@@ -111,6 +111,7 @@ class ProviderAdapter:
                 """
                 SELECT * FROM llm_providers
                 WHERE is_enabled = 1
+                  AND role_binding != 'embedding_only'
                   AND (role_binding = ? OR role_binding = 'both')
                   AND (cooldown_until IS NULL OR cooldown_until <= ?)
                 ORDER BY priority ASC
@@ -309,6 +310,14 @@ class ProviderAdapter:
             )
             await conn.commit()
 
+        if role_binding == "embedding_only":
+            try:
+                from ..search.embedding_provider import embedding_router
+                embedding_router.invalidate_cache()
+                logger.info("embedding_only 节点保存后自动失效 Embedding 路由缓存")
+            except Exception as e:
+                logger.debug(f"失效 Embedding 路由缓存异常: {e}")
+
         return {
             "id": pid,
             "name": name.strip(),
@@ -388,6 +397,11 @@ class ProviderAdapter:
                 slug = provider_id.replace("google_oauth_", "")
                 await conn.execute("DELETE FROM accounts WHERE name LIKE ? OR email LIKE ?", (f"%{slug}%", f"%{slug}%"))
             await conn.commit()
+            try:
+                from ..search.embedding_provider import embedding_router
+                embedding_router.invalidate_cache()
+            except Exception:
+                pass
             return (cur.rowcount or 0) > 0
 
     @classmethod

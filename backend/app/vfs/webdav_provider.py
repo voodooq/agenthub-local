@@ -304,13 +304,24 @@ class WebDAVProvider(CloudVFSProvider):
             err_msg = str(e) or repr(e) or type(e).__name__
             logger.warning(f"WebDAV 遍历异常: {err_msg}", exc_info=True)
 
-        # 严格按 remote_uri 去重，防止重定向或父子遍历导致同一个文件出现多次
+        # 两层去重：
+        # 第一层：remote_uri 路径完全一致（防止同路径多次出现）
+        # 第二层：(title, size) 内容指纹（防止 Alist 等服务对同一文件返回不同格式 href）
+        # NOTE: 某些 WebDAV 服务器（如 Alist）在 PROPFIND 响应中会同时返回
+        #       绝对 URL 形式和相对路径形式的 href，导致 remote_uri 字符串不同但文件相同
         seen_uris: set[str] = set()
+        seen_file_fingerprints: set[tuple[str, int]] = set()
         unique_files: list[CloudFileMeta] = []
         for f in files:
-            if f.remote_uri not in seen_uris:
-                seen_uris.add(f.remote_uri)
+            # 规范化 remote_uri：统一转为小写路径部分做比较（但保留原始大小写存储）
+            normalized_uri = f.remote_uri.lower().rstrip("/")
+            fingerprint = (f.title.lower(), f.size)
+            if normalized_uri not in seen_uris and fingerprint not in seen_file_fingerprints:
+                seen_uris.add(normalized_uri)
+                seen_file_fingerprints.add(fingerprint)
                 unique_files.append(f)
+            else:
+                logger.debug(f"WebDAV 文件列表去重：跳过重复文件 [{f.title}] uri={f.remote_uri}")
 
         return unique_files
 

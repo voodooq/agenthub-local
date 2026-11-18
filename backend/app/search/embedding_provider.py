@@ -57,6 +57,10 @@ class _DummyNumPy:
         return None
 
     @staticmethod
+    def maximum(*args: Any, **kwargs: Any) -> Any:
+        return None
+
+    @staticmethod
     def concatenate(*args: Any, **kwargs: Any) -> Any:
         return []
 
@@ -885,6 +889,65 @@ class AdaptiveEmbeddingRouter:
         async with self._lock:
             if self._provider is not None and self._provider.is_available:
                 return self._provider
+
+            # 0. Tier 0: 优先从账号算力池读取 role_binding='embedding_only' 的节点
+            try:
+                from ..repository.db import db_manager
+                from datetime import datetime, timezone
+
+                now_utc_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+                async with db_manager.get_connection() as conn:
+                    async with conn.execute(
+                        """
+                        SELECT name, base_url, models_json FROM llm_providers
+                        WHERE is_enabled = 1
+                          AND role_binding = 'embedding_only'
+                          AND (cooldown_until IS NULL OR cooldown_until <= ?)
+                        ORDER BY priority ASC
+                        """,
+                        (now_utc_str,),
+                    ) as cur:
+                        embed_accounts = await cur.fetchall()
+
+                for acc in embed_accounts:
+                    base_url = (acc["base_url"] or "").rstrip("/")
+                    if not base_url:
+                        continue
+                    models_raw = acc["models_json"] or "[]"
+                    try:
+                        import json as _json
+                        models_list = _json.loads(models_raw) if isinstance(models_raw, str) else models_raw
+                    except Exception:
+                        models_list = []
+                    # 自动嗅探模型名 —— 取第一个带 embed/bge/m3e 关键词的，或首个模型名
+                    model_name = "bge-m3"
+                    for m in models_list:
+                        ml = m.lower()
+                        if any(kw in ml for kw in ("embed", "bge", "m3e", "nomic", "e5")):
+                            model_name = m
+                            break
+                    if not model_name and models_list:
+                        model_name = models_list[0]
+
+                    # 判断 server_type
+                    server_type = "llama_server"
+                    if "11434" in base_url or "ollama" in base_url.lower():
+                        server_type = "ollama"
+
+                    pool_provider = LocalServerEmbeddingProvider(
+                        server_type=server_type,
+                        base_url=base_url,
+                        model_name=model_name,
+                    )
+                    if await pool_provider.probe_and_activate():
+                        logger.info(
+                            f"Embedding 路由命中 Tier 0 (算力池绑定 embedding_only): "
+                            f"{acc['name']} ({base_url}, model={model_name}, dim={pool_provider.dimension})"
+                        )
+                        self._provider = pool_provider
+                        return self._provider
+            except Exception as pool_err:
+                logger.debug(f"算力池 embedding_only 节点探测跳过: {pool_err}")
 
             # 1. 尝试 Tier 1: 本地 Ollama 探测
             ollama = LocalServerEmbeddingProvider(server_type="ollama")

@@ -58,6 +58,7 @@ class KBStorageManager:
         conn = sqlite3.connect(str(db_path))
         try:
             from ..search.light_graph_rag import LightGraphRAGEngine
+            from ..vfs.document_extractor import DocumentStreamExtractor
             actual_written = 0
             with conn:
                 # 预读已有切片 ID 与内容哈希，严格比对已有内容，避免盲目重写与 FTS5 索引无脑膨胀
@@ -65,34 +66,64 @@ class KBStorageManager:
                 cur.execute("SELECT id, content FROM hybrid_chunks")
                 existing_map = {r[0]: hashlib.md5(r[1].encode("utf-8")).hexdigest() for r in cur.fetchall()}
 
+                # 本批次内部去重 set，防止同批次内重复扫描导致重复插入
+                seen_chunk_ids_in_batch: set[str] = set()
+
                 for c in chunks:
                     content = c.get("content_text") or c.get("content") or ""
-                    chunk_id = str(
-                        c.get("chunk_id")
-                        or c.get("id")
-                        or hashlib.md5(
-                            f"{c['remote_uri']}:{c.get('section_path', '')}:{content[:64]}".encode("utf-8")
-                        ).hexdigest()
-                    )
+                    title = c.get("title") or Path(c["remote_uri"]).name
                     content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+                    section_p = str(c.get("section_path") or "")
+
+                    # 严格确定性唯一哈希 ID：杜绝重复切片
+                    chunk_id = hashlib.md5(
+                        f"{c['remote_uri']}:{section_p}:{content_hash}".encode("utf-8")
+                    ).hexdigest()
+
+                    if chunk_id in seen_chunk_ids_in_batch:
+                        continue
+                    seen_chunk_ids_in_batch.add(chunk_id)
 
                     # 核心对比防无脑叠加：内容未变且 ID 存在时跳过
                     if chunk_id in existing_map and existing_map[chunk_id] == content_hash:
                         continue
 
-                    title = c.get("title") or Path(c["remote_uri"]).name
                     tier = c.get("authority_tier", 2)
                     mtime = c.get("mtime", now)
                     etag = c.get("etag", "")
                     blob = c.get("embedding_blob")
 
+                    doc_year = c.get("doc_year")
+                    if doc_year is None or doc_year == 0:
+                        doc_year = DocumentStreamExtractor.extract_doc_year(title, content[:400])
+
+                    topic_cluster_id = c.get("topic_cluster_id")
+                    if not topic_cluster_id:
+                        topic_cluster_id = DocumentStreamExtractor.extract_topic_cluster_id(title)
+
+                    is_latest = c.get("is_latest_in_cluster", 1)
+
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO hybrid_chunks (
-                            id, remote_uri, title, content, authority_tier, mtime, etag, embedding_blob, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            id, remote_uri, title, content, authority_tier, mtime, etag, embedding_blob,
+                            doc_year, topic_cluster_id, is_latest_in_cluster, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
-                        (chunk_id, c["remote_uri"], title, content, tier, mtime, etag, blob, now),
+                        (
+                            chunk_id,
+                            c["remote_uri"],
+                            title,
+                            content,
+                            tier,
+                            mtime,
+                            etag,
+                            blob,
+                            doc_year,
+                            topic_cluster_id,
+                            is_latest,
+                            now,
+                        ),
                     )
                     actual_written += 1
 
@@ -103,12 +134,30 @@ class KBStorageManager:
                     for t in triples:
                         conn.execute(
                             """
-                            INSERT OR IGNORE INTO knowledge_triples (
-                                subject, predicate, object, chunk_id, created_at
-                            ) VALUES (?, ?, ?, ?, ?)
+                            INSERT INTO knowledge_triples (
+                                subject, predicate, object, chunk_id, confidence, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, 1.0, ?, ?)
+                            ON CONFLICT(subject, predicate, object)
+                            DO UPDATE SET
+                                confidence = MIN(confidence + 0.1, 2.0),
+                                updated_at = excluded.created_at
                             """,
-                            (t.subject, t.predicate, t.object, chunk_id, now),
+                            (t.subject.strip(), t.predicate.strip(), t.object.strip(), chunk_id, now, now),
                         )
+
+                # 族内最新版本定标（Cluster Head Refresh）：自动标记每个主题族最新年份为 is_latest_in_cluster=1
+                conn.execute("""
+                    UPDATE hybrid_chunks
+                    SET is_latest_in_cluster = CASE
+                        WHEN doc_year = (
+                            SELECT MAX(c2.doc_year)
+                            FROM hybrid_chunks c2
+                            WHERE c2.topic_cluster_id = hybrid_chunks.topic_cluster_id
+                        ) THEN 1
+                        ELSE 0
+                    END
+                    WHERE topic_cluster_id != '';
+                """)
 
                 cursor = conn.cursor()
                 cursor.execute("SELECT count(*) FROM hybrid_chunks")
@@ -240,7 +289,7 @@ class KBStorageManager:
             )
             try:
                 from ..repository.db import db_manager
-                with sqlite3.connect(str(db_manager._db_path)) as mconn:
+                with sqlite3.connect(str(db_manager.db_path)) as mconn:
                     mconn.execute(
                         "UPDATE knowledge_bases SET triple_count = ?, chunk_count = ?, updated_at = ? WHERE kb_id = ?",
                         (total_triples, total_chunks, now, kb_id),
@@ -414,28 +463,33 @@ class KBStorageManager:
             except Exception:
                 pass
 
-            # 兼容性平滑升级：补齐 confidence 和 updated_at 列
-            try:
-                conn.execute("ALTER TABLE knowledge_triples ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;")
-            except Exception:
-                pass
-            try:
-                conn.execute("ALTER TABLE knowledge_triples ADD COLUMN updated_at REAL NOT NULL DEFAULT 0.0;")
-            except Exception:
-                pass
+            # 兼容性平滑升级：补齐 knowledge_triples 的 confidence / updated_at 列
+            for _col, _col_def in [
+                ("confidence", "REAL NOT NULL DEFAULT 1.0"),
+                ("updated_at", "REAL NOT NULL DEFAULT 0.0"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE knowledge_triples ADD COLUMN {_col} {_col_def};")
+                except Exception:
+                    pass
             try:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_kt_conf ON knowledge_triples(confidence DESC);")
             except Exception:
                 pass
-                pass
 
-            # 兼容性平滑升级：补齐 confidence 和 updated_at 列
+            # 兼容性平滑升级：补齐 hybrid_chunks 的时空元数据三字段（v1.5.9+）
+            for _col, _col_def in [
+                ("doc_year",             "INTEGER NOT NULL DEFAULT 0"),
+                ("topic_cluster_id",     "TEXT NOT NULL DEFAULT ''"),
+                ("is_latest_in_cluster", "INTEGER NOT NULL DEFAULT 1"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE hybrid_chunks ADD COLUMN {_col} {_col_def};")
+                except Exception:
+                    pass
             try:
-                conn.execute("ALTER TABLE knowledge_triples ADD COLUMN confidence REAL NOT NULL DEFAULT 1.0;")
-            except Exception:
-                pass
-            try:
-                conn.execute("ALTER TABLE knowledge_triples ADD COLUMN updated_at REAL NOT NULL DEFAULT 0.0;")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_cluster ON hybrid_chunks(topic_cluster_id, doc_year);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_latest  ON hybrid_chunks(is_latest_in_cluster);")
             except Exception:
                 pass
 

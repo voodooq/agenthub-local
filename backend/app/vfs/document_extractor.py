@@ -27,16 +27,79 @@ except ImportError:
     HAS_PYPDF = False
 
 try:
+    import pymupdf as fitz  # PyMuPDF 现代标准包名
+    HAS_FITZ = True
+except ImportError:
+    try:
+        import fitz  # 传统回退
+        HAS_FITZ = True
+    except ImportError:
+        HAS_FITZ = False
+
+try:
     import openpyxl
     HAS_OPENPYXL = True
 except ImportError:
     HAS_OPENPYXL = False
+
+_ocr_engine_instance = None
+
+
+def get_ocr_engine():
+    """获取 RapidOCR 单例实例（纯 ONNX 运行，零显存消耗，CPU 毫秒级识别）。"""
+    global _ocr_engine_instance
+    if _ocr_engine_instance is None:
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            _ocr_engine_instance = RapidOCR()
+            logger.info("RapidOCR 离线 OCR 引擎初始化成功")
+        except Exception as e:
+            logger.debug(f"RapidOCR 初始化跳过: {e}")
+            _ocr_engine_instance = False
+    return _ocr_engine_instance if _ocr_engine_instance is not False else None
 
 
 class DocumentStreamExtractor:
     """流式文档轻量解析器。"""
 
     MAX_CHUNK_CHARS = 1000
+
+    @staticmethod
+    def extract_doc_year(file_name: str, head_text: str = "") -> int:
+        """从文件名或首页落款提取生效年份（2020~2039）。"""
+        m_file = re.search(r"(20[2-3]\d)", file_name)
+        if m_file:
+            return int(m_file.group(1))
+        m_head = re.search(r"(20[2-3]\d)\s*年", head_text[:600])
+        return int(m_head.group(1)) if m_head else 0
+
+    @staticmethod
+    def extract_topic_cluster_id(file_name: str) -> str:
+        """剥离年份、副本序号、版本标识与扩展名，生成同主题族归一化 ID。"""
+        name = re.sub(r"\.[^.]+$", "", file_name)
+        name = re.sub(r"20[2-3]\d年?", "", name)
+        name = re.sub(r"[\(（]\s*\d+\s*[\)）]|v\d+(\.\d+)*|试行|修订版|正式版|定稿", "", name, flags=re.I)
+        return re.sub(r"[\s_\-]+", "", name).strip()
+
+    @staticmethod
+    def detect_authority_tier(file_name: str, fallback_tier: int = 2) -> int:
+        """判定文档权威等级：1=正式规程/办法，2=通知细则，3=草稿/历史归档。"""
+        if any(k in file_name for k in ["草稿", "draft", "旧版", "废弃", "归档", "backup"]):
+            return 3
+        if any(k in file_name for k in ["规程", "规则", "管理办法", "实施细则", "标准"]):
+            return 1
+        return fallback_tier
+
+    @classmethod
+    def _needs_ocr_fallback(cls, raw_text: str, page: Any = None) -> bool:
+        """页面提取质量探针：字符过少或乱码占比过高时触发 OCR。"""
+        cleaned = re.sub(r"\s+", "", raw_text)
+        if len(cleaned) < 20:
+            return True
+        valid_chars = re.findall(r"[\u4e00-\u9fa5a-zA-Z0-9]", cleaned)
+        if len(cleaned) > 0 and (len(valid_chars) / len(cleaned)) < 0.45:
+            return True
+        return False
 
     @classmethod
     def extract_chunks(
@@ -70,7 +133,7 @@ class DocumentStreamExtractor:
                 except Exception:
                     pass
 
-        if suffix == ".pdf" and HAS_PYPDF:
+        if suffix == ".pdf" and (HAS_FITZ or HAS_PYPDF):
             return cls._extract_pdf(raw_bytes, filename, remote_uri, authority_tier)
         elif suffix == ".docx":
             if raw_bytes.startswith(b"PK\x03\x04"):
@@ -90,28 +153,122 @@ class DocumentStreamExtractor:
     def _extract_pdf(
         cls, raw_bytes: bytes, filename: str, remote_uri: str, authority_tier: int
     ) -> list[dict[str, Any]]:
-        """流式解析 PDF 页面。"""
+        """四级递进式 PDF 鲁棒解析器：原生表格解析 -> 文本层 -> 乱码/稀疏检测 -> RapidOCR 离线兜底。"""
         chunks: list[dict[str, Any]] = []
-        try:
-            reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
-            for page_idx, page in enumerate(reader.pages, 1):
-                text = page.extract_text() or ""
-                text = text.strip()
-                if not text:
-                    continue
-                header = f"# Doc: {filename} | Page {page_idx}\n"
-                chunks.append({
-                    "remote_uri": remote_uri,
-                    "title": filename,
-                    "section_path": f"Page_{page_idx}",
-                    "start_line": page_idx,
-                    "end_line": page_idx,
-                    "content_text": header + text,
-                    "authority_tier": authority_tier,
-                    "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
-                })
-        except Exception as e:
-            logger.warning(f"流式解析 PDF 失败 ({filename}): {e}")
+        doc_year = cls.extract_doc_year(filename)
+        topic_cluster_id = cls.extract_topic_cluster_id(filename)
+        effective_tier = cls.detect_authority_tier(filename, authority_tier)
+
+        # 1. 优先使用 PyMuPDF (fitz)
+        if HAS_FITZ:
+            try:
+                doc = fitz.open(stream=raw_bytes, filetype="pdf")
+                ocr_used_pages = 0
+                for page_idx, page in enumerate(doc, 1):
+                    # 1.1 结构化表格抽取为 Markdown
+                    md_tables: list[str] = []
+                    try:
+                        tables = page.find_tables()
+                        for tab in (tables or []):
+                            md_str = tab.to_markdown()
+                            if md_str and md_str.strip():
+                                md_tables.append(md_str.strip())
+                    except Exception as tab_err:
+                        logger.debug(f"[{filename}] P{page_idx} 表格抽取跳过: {tab_err}")
+
+                    # 1.2 页面常规文本层
+                    raw_text_val = page.get_text("text")
+                    raw_text: str = str(raw_text_val) if raw_text_val is not None else ""
+
+                    # 1.3 质量门控探针：若乱码或文本过少，触发离线 RapidOCR 兜底
+                    if cls._needs_ocr_fallback(raw_text, page):
+                        ocr_eng = get_ocr_engine()
+                        if ocr_eng is not None:
+                            try:
+                                pix = page.get_pixmap(dpi=150, colorspace=fitz.csGRAY)
+                                ocr_res, _ = ocr_eng(pix.tobytes("png"))
+                                if ocr_res:
+                                    ocr_text = "\n".join([item[1] for item in ocr_res if item[1]])
+                                    if len(ocr_text) > len(raw_text):
+                                        raw_text = ocr_text
+                                        ocr_used_pages += 1
+                            except Exception as ocr_err:
+                                logger.debug(f"[{filename}] P{page_idx} OCR 兜底异常: {ocr_err}")
+
+                    merged_content = raw_text.strip()
+                    if md_tables:
+                        merged_content = f"{merged_content}\n\n" + "\n\n".join(md_tables) if merged_content else "\n\n".join(md_tables)
+
+                    if not merged_content:
+                        continue
+
+                    if doc_year == 0 and page_idx == 1:
+                        doc_year = cls.extract_doc_year(filename, merged_content)
+
+                    # 注入时空上下文强元数据头
+                    header = (
+                        f"【文档来源】{filename} | "
+                        f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
+                        f"【主题族】{topic_cluster_id or filename} | "
+                        f"【页码】第 {page_idx} 页\n"
+                    )
+
+                    chunks.append({
+                        "remote_uri": remote_uri,
+                        "title": filename,
+                        "section_path": f"Page_{page_idx}",
+                        "start_line": page_idx,
+                        "end_line": page_idx,
+                        "content_text": header + merged_content,
+                        "authority_tier": effective_tier,
+                        "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
+                        "doc_year": doc_year,
+                        "topic_cluster_id": topic_cluster_id,
+                        "is_latest_in_cluster": 1,
+                    })
+
+                if chunks:
+                    logger.info(
+                        f"PyMuPDF 成功解析 PDF [{filename}]: 总页数={len(doc)}, 生成切片={len(chunks)}, OCR兜底={ocr_used_pages}页"
+                    )
+                    return chunks
+            except Exception as fitz_err:
+                logger.warning(f"PyMuPDF 解析 [{filename}] 失败，尝试回退至 pypdf: {fitz_err}")
+
+        # 2. 回退机制：若无 fitz 或 fitz 解析报错，使用 pypdf
+        if HAS_PYPDF:
+            try:
+                reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
+                for page_idx, page in enumerate(reader.pages, 1):
+                    text = page.extract_text() or ""
+                    text = text.strip()
+                    if not text:
+                        continue
+                    if doc_year == 0 and page_idx == 1:
+                        doc_year = cls.extract_doc_year(filename, text)
+
+                    header = (
+                        f"【文档来源】{filename} | "
+                        f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
+                        f"【主题族】{topic_cluster_id or filename} | "
+                        f"【页码】第 {page_idx} 页\n"
+                    )
+                    chunks.append({
+                        "remote_uri": remote_uri,
+                        "title": filename,
+                        "section_path": f"Page_{page_idx}",
+                        "start_line": page_idx,
+                        "end_line": page_idx,
+                        "content_text": header + text,
+                        "authority_tier": effective_tier,
+                        "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
+                        "doc_year": doc_year,
+                        "topic_cluster_id": topic_cluster_id,
+                        "is_latest_in_cluster": 1,
+                    })
+            except Exception as e:
+                logger.warning(f"流式解析 PDF 失败 ({filename}): {e}")
+
         return chunks
 
     @classmethod
@@ -120,6 +277,10 @@ class DocumentStreamExtractor:
     ) -> list[dict[str, Any]]:
         """通过标准库 zipfile 解析 DOCX word/document.xml。"""
         chunks: list[dict[str, Any]] = []
+        doc_year = cls.extract_doc_year(filename)
+        topic_cluster_id = cls.extract_topic_cluster_id(filename)
+        effective_tier = cls.detect_authority_tier(filename, authority_tier)
+
         try:
             with zipfile.ZipFile(io.BytesIO(raw_bytes)) as z:
                 if "word/document.xml" not in z.namelist():
@@ -138,6 +299,9 @@ class DocumentStreamExtractor:
                         paragraphs.append(p_text)
 
                 if paragraphs:
+                    if doc_year == 0:
+                        doc_year = cls.extract_doc_year(filename, "\n".join(paragraphs[:5]))
+
                     # 每 5 个段落或 800 字符聚合为一个切片
                     cur_group: list[str] = []
                     cur_len = 0
@@ -147,15 +311,24 @@ class DocumentStreamExtractor:
                         cur_len += len(p)
                         if cur_len >= cls.MAX_CHUNK_CHARS or len(cur_group) >= 5:
                             body = "\n\n".join(cur_group)
+                            header = (
+                                f"【文档来源】{filename} | "
+                                f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
+                                f"【主题族】{topic_cluster_id or filename} | "
+                                f"【分段】第 {part_idx} 节\n"
+                            )
                             chunks.append({
                                 "remote_uri": remote_uri,
                                 "title": filename,
                                 "section_path": f"Part_{part_idx}",
                                 "start_line": part_idx,
                                 "end_line": part_idx + len(cur_group),
-                                "content_text": f"# Doc: {filename} (Part {part_idx})\n" + body,
-                                "authority_tier": authority_tier,
+                                "content_text": header + body,
+                                "authority_tier": effective_tier,
                                 "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
+                                "doc_year": doc_year,
+                                "topic_cluster_id": topic_cluster_id,
+                                "is_latest_in_cluster": 1,
                             })
                             part_idx += 1
                             cur_group = []
@@ -163,15 +336,24 @@ class DocumentStreamExtractor:
 
                     if cur_group:
                         body = "\n\n".join(cur_group)
+                        header = (
+                            f"【文档来源】{filename} | "
+                            f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
+                            f"【主题族】{topic_cluster_id or filename} | "
+                            f"【分段】第 {part_idx} 节\n"
+                        )
                         chunks.append({
                             "remote_uri": remote_uri,
                             "title": filename,
                             "section_path": f"Part_{part_idx}",
                             "start_line": part_idx,
                             "end_line": part_idx + len(cur_group),
-                            "content_text": f"# Doc: {filename} (Part {part_idx})\n" + body,
-                            "authority_tier": authority_tier,
+                            "content_text": header + body,
+                            "authority_tier": effective_tier,
                             "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
+                            "doc_year": doc_year,
+                            "topic_cluster_id": topic_cluster_id,
+                            "is_latest_in_cluster": 1,
                         })
         except Exception as e:
             logger.warning(f"流式解析 DOCX 异常 ({filename})，尝试兼容解析二进制 DOC: {e}")
@@ -184,6 +366,10 @@ class DocumentStreamExtractor:
     ) -> list[dict[str, Any]]:
         """流式解析旧版 Word 97-2003 (.doc)、RTF 或 HTML 导出的二进制复合文档。"""
         chunks: list[dict[str, Any]] = []
+        doc_year = cls.extract_doc_year(filename)
+        topic_cluster_id = cls.extract_topic_cluster_id(filename)
+        effective_tier = cls.detect_authority_tier(filename, authority_tier)
+
         try:
             paragraphs: list[str] = []
 
@@ -207,6 +393,9 @@ class DocumentStreamExtractor:
             if not paragraphs:
                 return []
 
+            if doc_year == 0:
+                doc_year = cls.extract_doc_year(filename, "\n".join(paragraphs[:5]))
+
             cur_group: list[str] = []
             cur_len = 0
             part_idx = 1
@@ -215,15 +404,24 @@ class DocumentStreamExtractor:
                 cur_len += len(p)
                 if cur_len >= cls.MAX_CHUNK_CHARS or len(cur_group) >= 5:
                     body = "\n\n".join(cur_group)
+                    header = (
+                        f"【文档来源】{filename} | "
+                        f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
+                        f"【主题族】{topic_cluster_id or filename} | "
+                        f"【分段】第 {part_idx} 节\n"
+                    )
                     chunks.append({
                         "remote_uri": remote_uri,
                         "title": filename,
                         "section_path": f"Part_{part_idx}",
                         "start_line": part_idx,
                         "end_line": part_idx + len(cur_group),
-                        "content_text": f"# Doc: {filename} (Part {part_idx})\n" + body,
-                        "authority_tier": authority_tier,
+                        "content_text": header + body,
+                        "authority_tier": effective_tier,
                         "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
+                        "doc_year": doc_year,
+                        "topic_cluster_id": topic_cluster_id,
+                        "is_latest_in_cluster": 1,
                     })
                     part_idx += 1
                     cur_group = []
@@ -231,15 +429,24 @@ class DocumentStreamExtractor:
 
             if cur_group:
                 body = "\n\n".join(cur_group)
+                header = (
+                    f"【文档来源】{filename} | "
+                    f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
+                    f"【主题族】{topic_cluster_id or filename} | "
+                    f"【分段】第 {part_idx} 节\n"
+                )
                 chunks.append({
                     "remote_uri": remote_uri,
                     "title": filename,
                     "section_path": f"Part_{part_idx}",
                     "start_line": part_idx,
                     "end_line": part_idx + len(cur_group),
-                    "content_text": f"# Doc: {filename} (Part {part_idx})\n" + body,
-                    "authority_tier": authority_tier,
+                    "content_text": header + body,
+                    "authority_tier": effective_tier,
                     "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
+                    "doc_year": doc_year,
+                    "topic_cluster_id": topic_cluster_id,
+                    "is_latest_in_cluster": 1,
                 })
         except Exception as e:
             logger.warning(f"流式解析 DOC 失败 ({filename}): {e}")
@@ -464,6 +671,10 @@ class DocumentStreamExtractor:
     ) -> list[dict[str, Any]]:
         """通过 openpyxl 只读流式解析 Excel 工作表并转为 Markdown 表格。"""
         chunks: list[dict[str, Any]] = []
+        doc_year = cls.extract_doc_year(filename)
+        topic_cluster_id = cls.extract_topic_cluster_id(filename)
+        effective_tier = cls.detect_authority_tier(filename, authority_tier)
+
         try:
             wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), read_only=True, data_only=True)
             for sheetname in wb.sheetnames:
@@ -479,21 +690,30 @@ class DocumentStreamExtractor:
                     table_lines.append("| " + " | ".join(header_row) + " |")
                     table_lines.append("| " + " | ".join(["---"] * len(header_row)) + " |")
 
-                for r in rows[1:50]:  # 截取前 50 行
+                for r in rows[1:60]:  # 截取前 60 行
                     r_str = [str(cell) if cell is not None else "" for cell in r]
                     if any(r_str):
                         table_lines.append("| " + " | ".join(r_str) + " |")
 
                 table_text = "\n".join(table_lines)
+                header = (
+                    f"【文档来源】{filename} | "
+                    f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
+                    f"【主题族】{topic_cluster_id or filename} | "
+                    f"【工作表】{sheetname}\n"
+                )
                 chunks.append({
                     "remote_uri": remote_uri,
                     "title": filename,
                     "section_path": sheetname,
                     "start_line": 1,
                     "end_line": len(rows),
-                    "content_text": f"# Sheet: {filename} | {sheetname}\n" + table_text,
-                    "authority_tier": authority_tier,
+                    "content_text": header + table_text,
+                    "authority_tier": effective_tier,
                     "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
+                    "doc_year": doc_year,
+                    "topic_cluster_id": topic_cluster_id,
+                    "is_latest_in_cluster": 1,
                 })
         except Exception as e:
             logger.warning(f"流式解析 Excel 失败 ({filename}): {e}")
@@ -506,8 +726,11 @@ class DocumentStreamExtractor:
         """纯文本或 Markdown 切分。"""
         content = raw_bytes.decode("utf-8", errors="replace")
         chunks: list[dict[str, Any]] = []
+        doc_year = cls.extract_doc_year(filename, content[:600])
+        topic_cluster_id = cls.extract_topic_cluster_id(filename)
+        effective_tier = cls.detect_authority_tier(filename, authority_tier)
+
         lines = content.splitlines(keepends=True)
-        # 滑动窗口切分
         start = 0
         text_len = len(content)
         part_idx = 1
@@ -515,15 +738,24 @@ class DocumentStreamExtractor:
             end = min(start + cls.MAX_CHUNK_CHARS, text_len)
             seg = content[start:end].strip()
             if seg:
+                header = (
+                    f"【文档来源】{filename} | "
+                    f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
+                    f"【主题族】{topic_cluster_id or filename} | "
+                    f"【分段】第 {part_idx} 节\n"
+                )
                 chunks.append({
                     "remote_uri": remote_uri,
                     "title": filename,
                     "section_path": f"Part_{part_idx}",
                     "start_line": 1,
                     "end_line": len(lines),
-                    "content_text": f"# Doc: {filename} (Part {part_idx})\n" + seg,
-                    "authority_tier": authority_tier,
+                    "content_text": header + seg,
+                    "authority_tier": effective_tier,
                     "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
+                    "doc_year": doc_year,
+                    "topic_cluster_id": topic_cluster_id,
+                    "is_latest_in_cluster": 1,
                 })
                 part_idx += 1
             if end >= text_len:

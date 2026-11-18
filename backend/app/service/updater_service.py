@@ -352,6 +352,7 @@ def _restore_file_permissions(target_path: Path, archived_mode: int) -> None:
     if sys.platform == "win32":
         return
     mode = archived_mode & 0o777
+    target_mode: int = 0
     if target_path.suffix.lower() == ".sh":
         target_mode = (mode | 0o755) if mode else 0o755
     elif mode & 0o111:

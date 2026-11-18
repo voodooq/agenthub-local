@@ -262,6 +262,18 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
                     sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请确认挂载根路径下是否存在支持切片的文档 (PDF/DOCX/TXT/MD)。")
                 elif m["provider_type"] == "oss":
                     sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请检查存储桶与前缀配置。")
+            # NOTE: 训练入口二次去重兜底，防止 provider.list_files 因路径格式差异
+            #       返回重复文件条目（同名+同大小视为同一文件，保留首次出现）
+            dedup_seen: set[tuple[str, int]] = set()
+            deduped_files: list = []
+            for _f in files:
+                _fp = (_f.title.lower(), _f.size)
+                if _fp not in dedup_seen:
+                    dedup_seen.add(_fp)
+                    deduped_files.append(_f)
+                else:
+                    logger.warning(f"训练去重：跳过重复文件 [{_f.title}] size={_f.size}")
+            files = deduped_files
             modified = sync_mgr.filter_modified_files(m["mount_id"], files)
             mount_new_chunks: list[dict[str, Any]] = []
             for f in modified:
