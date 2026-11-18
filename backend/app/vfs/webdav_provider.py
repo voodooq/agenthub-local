@@ -124,7 +124,7 @@ class WebDAVProvider(CloudVFSProvider):
                     # 针对用户常见手误 (/dev 与 /dav 混淆、或漏填 /dav) 的智能诊断
                     if "/dev" in self.base_url:
                         candidate = self.base_url.replace("/dev", "/dav")
-                        cand_url = f"{candidate}{req_path}" if req_path != "/" else f"{candidate}/"
+                        cand_url = url.replace(self.base_url, candidate)
                         try:
                             cand_resp = await client.request("PROPFIND", cand_url, headers={"Depth": "0"})
                             if cand_resp.status_code in (200, 207, 401):
