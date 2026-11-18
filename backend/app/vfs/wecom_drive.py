@@ -73,7 +73,8 @@ class WeComDriveProvider(CloudVFSProvider):
                 return True, "企业微信鉴权成功(Token有效)，但请填写微盘 SpaceId 才能遍历具体文件"
 
             url = f"{self.API_BASE}/wedrive/file_list?access_token={token}"
-            payload = {"spaceid": self.space_id, "limit": 1}
+            father_id = (self.config.get("fatherid") if self.config else None) or self.space_id
+            payload = {"spaceid": self.space_id, "fatherid": father_id, "limit": 1}
             async with httpx.AsyncClient(timeout=10.0) as client:
                 resp = await client.post(url, json=payload)
                 data = resp.json()
@@ -82,6 +83,8 @@ class WeComDriveProvider(CloudVFSProvider):
                     return True, "企业微信连通成功，微盘目标空间鉴权通过"
                 elif errcode == 640001:
                     return False, f"微盘空间不存在 (space not exist)，请检查 SpaceId ({self.space_id}) 是否正确"
+                elif errcode == 640021:
+                    return False, f"无效父目录 (invalid fatherid)，空间根目录 fatherid 应等于 spaceid"
                 elif errcode in (2000002, 640002, 640003, 640004):
                     return False, "无微盘空间访问权限，请在企业微信微盘中将该自建应用添加为空间成员"
                 return False, f"微盘校验失败: {data.get('errmsg')} (code: {errcode})"
@@ -89,60 +92,69 @@ class WeComDriveProvider(CloudVFSProvider):
             return False, f"企业微信鉴权失败: {str(e)}"
 
     async def list_files(self, recursive: bool = True) -> list[CloudFileMeta]:
-        """遍历微盘指定空间或根目录下的文件。"""
+        """遍历微盘指定空间或根目录下的文件（支持多层子文件夹递归）。"""
         if not self.space_id:
             logger.warning("未配置微盘 space_id，企业微信 API 无法遍历空间文件")
             return []
 
         token = await self._get_access_token()
         files: list[CloudFileMeta] = []
-
-        url = f"{self.API_BASE}/wedrive/file_list?access_token={token}"
-        payload = {
-            "spaceid": self.space_id,
-            "fatherid": self.config.get("fatherid", ""),
-            "sort_type": 1,
-            "start": 0,
-            "limit": 100,
-        }
+        root_father = (self.config.get("fatherid") if self.config else None) or self.space_id
+        folder_queue: list[str] = [root_father]
 
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.post(url, json=payload)
-                data = resp.json()
-                if data.get("errcode") != 0:
-                    errcode = data.get("errcode")
-                    errmsg = data.get("errmsg", "")
-                    if errcode == 640001:
-                        logger.warning(f"微盘遍历失败: 空间不存在 (space not exist)。请检查 SpaceId ({self.space_id}) 是否准确。")
-                    elif errcode in (2000002, 640002, 640003, 640004):
-                        logger.warning("微盘遍历失败: 无空间权限。请在企微信微盘中将当前应用添加为空间成员。")
-                    else:
-                        logger.warning(f"微盘遍历失败: {errmsg} (code: {errcode})")
-                    return []
+                while folder_queue:
+                    cur_father = folder_queue.pop(0)
+                    url = f"{self.API_BASE}/wedrive/file_list?access_token={token}"
+                    payload = {
+                        "spaceid": self.space_id,
+                        "fatherid": cur_father,
+                        "sort_type": 1,
+                        "start": 0,
+                        "limit": 100,
+                    }
 
-                file_list = data.get("file_list", {}).get("item", [])
-                for item in file_list:
-                    fileid = item.get("fileid", "")
-                    title = item.get("file_name", "")
-                    size = item.get("file_size", 0)
-                    mtime = float(item.get("mtime", time.time()))
-                    file_type = item.get("file_type", 1)  # 1=文件, 2=目录, 3=微文档
-                    is_dir = (file_type == 2)
+                    resp = await client.post(url, json=payload)
+                    data = resp.json()
+                    errcode = data.get("errcode", 0)
+                    if errcode != 0:
+                        errmsg = data.get("errmsg", "")
+                        if errcode == 640001:
+                            logger.warning(f"微盘遍历失败: 空间不存在 (space not exist)。请检查 SpaceId ({self.space_id}) 是否准确。")
+                        elif errcode == 640021:
+                            logger.warning(f"微盘遍历失败: 无效目录 (invalid fatherid: {cur_father})。")
+                        elif errcode in (2000002, 640002, 640003, 640004):
+                            logger.warning("微盘遍历失败: 无空间权限。请在企微信微盘中将当前应用添加为空间成员。")
+                        else:
+                            logger.warning(f"微盘遍历失败: {errmsg} (code: {errcode})")
+                        break
 
-                    remote_uri = f"wecom://{self.space_id or 'default'}/{fileid}"
-                    files.append(
-                        CloudFileMeta(
-                            remote_uri=remote_uri,
-                            title=title,
-                            size=size,
-                            etag=fileid,
-                            mtime=mtime,
-                            mime_type=item.get("file_ext", ""),
-                            is_dir=is_dir,
-                            authority_tier=self.authority_tier,
+                    file_list = data.get("file_list", {}).get("item", [])
+                    for item in file_list:
+                        fileid = item.get("fileid", "")
+                        title = item.get("file_name", "")
+                        size = item.get("file_size", 0)
+                        mtime = float(item.get("mtime", time.time()))
+                        file_type = item.get("file_type", 1)  # 1=文件, 2=目录, 3=微文档
+                        is_dir = (file_type == 2)
+
+                        if is_dir and recursive:
+                            folder_queue.append(fileid)
+
+                        remote_uri = f"wecom://{self.space_id}/{fileid}"
+                        files.append(
+                            CloudFileMeta(
+                                remote_uri=remote_uri,
+                                title=title,
+                                size=size,
+                                etag=fileid,
+                                mtime=mtime,
+                                mime_type=item.get("file_ext", ""),
+                                is_dir=is_dir,
+                                authority_tier=self.authority_tier,
+                            )
                         )
-                    )
         except Exception as e:
             logger.warning(f"微盘请求异常: {e}")
 
