@@ -845,6 +845,17 @@ class DatabaseManager:
                 ON swarm_messages(swarm_id, seq);
             """)
 
+            # 14. L5 实战微经验向量扩展表 (v1.5.5)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS experience_embeddings (
+                exp_id           TEXT PRIMARY KEY,
+                anchor_hash      TEXT NOT NULL,
+                model_id         TEXT NOT NULL,
+                embedding_blob   BLOB NOT NULL,
+                updated_at       REAL NOT NULL
+            );
+            """)
+
             await conn.commit()
             try:
                 from .agent_repository import AgentProfileRepository
@@ -852,7 +863,7 @@ class DatabaseManager:
             except Exception as agent_init_err:
                 logger.warning(f"初始化 agent_profiles 表及官方专家种子跳过: {agent_init_err}")
             logger.info(
-                "SQLite 全景架构表 (conversations/messages/long_term_memories/memory_facts/event_ledger/session_summaries/experience_proposals/task_loop_runs/workspace_artifacts/scheduled_tasks/experience_cases/session_checkpoints/swarms/agent_profiles) 初始化完成"
+                "SQLite 全景架构表 (conversations/messages/long_term_memories/memory_facts/event_ledger/session_summaries/experience_proposals/task_loop_runs/workspace_artifacts/scheduled_tasks/experience_cases/session_checkpoints/swarms/agent_profiles/experience_embeddings) 初始化完成"
             )
 
 

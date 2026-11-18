@@ -16,6 +16,11 @@ from ..core.logging_config import logger
 # 铁律级只读工具白名单
 READONLY_SUBAGENT_TOOLS: frozenset[str] = frozenset({
     "workspace_fts_search",
+    "workspace_hybrid_search",
+    "query_knowledge_graph",
+    "search_cloud_wiki",
+    "read_cloud_wiki_section",
+    "browser_inspect_page",
     "get_file_ast_skeleton",
     "read_local_file_sliced",
     "read_local_file",

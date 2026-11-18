@@ -860,6 +860,96 @@ class ToolProtocolAdapter:
                     "required": ["server_name", "artifact_url", "save_rel_path"],
                 },
             },
+            {
+                "name": "workspace_hybrid_search",
+                "description": "在当前本地工作区执行多维度混合语义检索（向量 + FTS5 trigram + RRF 倒数排名融合 + 时序权威仲裁）。支持智能体多跳追问补全证据链。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "用户问句或代码符号关键词。",
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "description": "返回证据切片上限（默认 8）。",
+                            "default": 8,
+                        },
+                        "pod_id": {
+                            "type": "string",
+                            "description": "可选客户/群组隔离域标识（默认 global）。",
+                            "default": "global",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "search_cloud_wiki",
+                "description": "在已挂载的企业微信微盘、WebDAV 或 OSS 云端知识库中检索规程、管理细则与制度切片。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "检索的规程主题、费用条款或制度问句。",
+                        },
+                        "top_k": {
+                            "type": "integer",
+                            "description": "返回切片数量（默认 6）。",
+                            "default": 6,
+                        },
+                        "pod_id": {
+                            "type": "string",
+                            "description": "隔离域标识（默认 global）。",
+                            "default": "global",
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "read_cloud_wiki_section",
+                "description": "按需精读云端知识库特定章节原文（优先命中 24 小时本地 LRU 缓存）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "remote_uri": {
+                            "type": "string",
+                            "description": "云端规程 URI（如 wecom://space/fileid 或 webdav://mount/doc.docx）。",
+                        },
+                        "section_path": {
+                            "type": "string",
+                            "description": "章节面包屑或段落定位标识。",
+                        },
+                    },
+                    "required": ["remote_uri", "section_path"],
+                },
+            },
+            {
+                "name": "query_knowledge_graph",
+                "description": "基于 SQLite 递归 CTE 查询以目标实体为中心的 2~3 跳知识图谱关系路径（用于梳理组织归属、历任对接人、兼项限制等关联关系链）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "entity": {
+                            "type": "string",
+                            "description": "查询的目标实体名称（如机构名、项目名、负责人姓名）。",
+                        },
+                        "max_hops": {
+                            "type": "integer",
+                            "description": "最大多跳关系层数（1~3，默认 2）。",
+                            "default": 2,
+                        },
+                        "pod_id": {
+                            "type": "string",
+                            "description": "隔离域（默认 global）。",
+                            "default": "global",
+                        },
+                    },
+                    "required": ["entity"],
+                },
+            },
         ]
 
     @staticmethod

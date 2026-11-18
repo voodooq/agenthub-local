@@ -7,10 +7,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import sqlite3
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -453,6 +455,24 @@ class EpisodicExperienceStore:
                     ),
                 )
                 await conn.commit()
+
+                # v1.5.5: 异步计算微经验向量并持久化至 experience_embeddings
+                try:
+                    from app.search.embedding_provider import embedding_router
+                    prov = await embedding_router.get_provider()
+                    if prov.is_available and prov.dimension > 0:
+                        anchor_text = f"{merged_err} {merged_symptoms} {merged_scene} {merged_root}".strip()
+                        if anchor_text:
+                            vec_arr = await prov.embed_texts([anchor_text])
+                            if len(vec_arr) > 0 and vec_arr[0].shape[0] > 0:
+                                await conn.execute("""
+                                INSERT OR REPLACE INTO experience_embeddings (exp_id, anchor_hash, model_id, embedding_blob, updated_at)
+                                VALUES (?, ?, ?, ?, ?)
+                                """, (old.id, hashlib.sha256(anchor_text.encode()).hexdigest(), prov.model_id, vec_arr[0].tobytes(), time.time()))
+                                await conn.commit()
+                except Exception as emb_e:
+                    logger.debug("更新经验向量跳过: %s", emb_e)
+
                 cursor = await conn.execute("SELECT * FROM experience_cases WHERE id = ?", (old.id,))
                 updated_row = await cursor.fetchone()
                 return ExperienceCase.from_row(updated_row) if updated_row else old
@@ -488,6 +508,24 @@ class EpisodicExperienceStore:
                 ),
             )
             await conn.commit()
+
+            # v1.5.5: 异步计算微经验向量并持久化至 experience_embeddings
+            try:
+                from app.search.embedding_provider import embedding_router
+                prov = await embedding_router.get_provider()
+                if prov.is_available and prov.dimension > 0:
+                    anchor_text = f"{clean_error_sig} {clean_symptoms} {clean_scene} {clean_root}".strip()
+                    if anchor_text:
+                        vec_arr = await prov.embed_texts([anchor_text])
+                        if len(vec_arr) > 0 and vec_arr[0].shape[0] > 0:
+                            await conn.execute("""
+                            INSERT OR REPLACE INTO experience_embeddings (exp_id, anchor_hash, model_id, embedding_blob, updated_at)
+                            VALUES (?, ?, ?, ?, ?)
+                            """, (case_id, hashlib.sha256(anchor_text.encode()).hexdigest(), prov.model_id, vec_arr[0].tobytes(), time.time()))
+                            await conn.commit()
+            except Exception as emb_e:
+                logger.debug("新建经验向量跳过: %s", emb_e)
+
             return ExperienceCase(
                 id=case_id,
                 workspace_id=ws,

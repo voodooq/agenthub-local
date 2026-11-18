@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.5.1-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.5.5-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.5.1 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.5.5 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -431,6 +431,27 @@ docker compose exec backend bash
 - **计划任务真实 Cron 调度、无头执行与状态详情（`TaskScheduler` · `scheduled` · `ScheduledView`）**：
   - 实现纯 Python 标准 5 段 Cron 解析（含 `*`、`*/n`、`a-b`、`a,b` 及 `@hourly`/`@daily` 等别名）与 `start_loop()` 防同分钟重入自动巡检；`run_task()` 真实无头调用 `agent_runtime.chat_stream`，捕获 `running` / `success` / `failed` 状态、耗时与完整输出落库至 `scheduled_task_runs`。
   - 新增 `GET /api/v1/scheduled/{task_id}/runs` 接口；前端 `ScheduledView` 升级为展示状态徽章、上次/下次运行时间、耗时及完整执行历史详情弹窗。
+
+### 🚀 v1.5.5 — 认知大脑、云端 LLM Wiki、输出前自审与生产治理全栈 (Strata Edition)
+- **四维一体本地检索大脑（`HybridSearchEngine` · `LightGraphRAGEngine` · `AgenticRetrievalLoop`）**：
+  - **三级自适应 Embedding**：Tier 1 优先探活复用本机 Ollama/`llama-server` 端点（0 MB 额外内存） $\rightarrow$ Tier 2 本地加载 24MB INT8 量化 ONNX `bge-small-zh-v1.5`（限 2 线程） $\rightarrow$ Tier 3 极限离线纯 FTS5 trigram 自动降级。
+  - **Tree-sitter AST 代码与 Markdown 分块**：按完整类与函数边界切分，注入上下文面包屑头；
+  - **SQLite WAL 向量存取与 NumPy 余弦点积**：原生 BLOB 存储结合纯 NumPy 矩阵点积（20,000 切片耗时 < 4ms），结合 FTS5 与 RRF 倒数排名融合，支持动态 Query 意图权重路由（代码符号 0.7:0.3，自然语言 0.3:0.7）；
+  - **轻量 SQLite 图 RAG**：启发式三元组抽取，纯 SQLite 原生 `WITH RECURSIVE` 递归 CTE 执行 2~3 跳双向子图扩展（单次上限 30 条关系边），封装 `query_knowledge_graph` 工具；
+  - **智能体 RAG 多跳追问自检闭环**：最多 3 跳证据链覆盖度自检，检测未展开的附件或关联规则指针并自动改写 Query 定向补全检索。
+- **CloudVFS 云端虚拟知识库与时序权威冲突仲裁（`CloudVFS` · `ConflictResolver`）**：
+  - **三大云端适配器**：企业微信微盘/知识库（`wecom_drive.py`）、WebDAV 兼容 Alist/坚果云/群晖 NAS（`webdav_provider.py`）、S3/阿里云 OSS/MinIO（`oss_provider.py`）；
+  - **阅后即焚流式解析**：基于 `pypdf`、原生 `zipfile` DOCX 提取与 `openpyxl` 内存流式切片入库，零本地文件持久化堆积，内置 24 小时 TTL 本地 LRU 章节精读缓存；
+  - **多源版本冲突仲裁**：自动判定 Tier 1~3 权威等级与业务生效时间戳 `effective_time`，归一化主题簇 `topic_cluster_id` 自动标记旧版本 `is_superseded=1`，跨源 SHA-256 去重，重排阶段叠加权威与新鲜度系数，自动包装“时空身份证”头部并显性披露版本条款冲突。
+- **输出前自审与动态置信度治理（`SelfCritiqueCritic` · `ConfidenceEvaluator`）**：
+  - **输出前事实核对**：严谨模式下对草稿事实、数字、日期、条款进行 Critic 自审，检出矛盾触发最多 1 次后台无感重写修订（Re-draft）；
+  - **动态置信度评分（`0.00 ~ 1.00`）**：综合检索、版本一致性、Critic 与工具完整性生成分值与归因标签，通过 SSE 推送 `confidence_report`；
+  - **低置信度人工介入门控（HITL）**：严谨模式下置信度 `< 0.60` 触发 `low_confidence_confirmation` 挂起确认卡片。
+- **L5 经验库语义升级、无头浏览器与多模态**：
+  - L5 实战微经验库持久化向量至 `experience_embeddings`，召回接入双路 RRF 并保留历史复用奖惩闭环；
+  - 基于 Playwright 封装懒加载无头浏览器（5 分钟闲置自动回收），提取精简无障碍树快照与控制台日志；
+  - 多模态图片结构化表格/实体提取器与轻量离线语音转写管道（按需加载 `faster-whisper`）；
+  - 前端单色扁平组件 `CloudWikiMountModal.tsx`、`ConfidenceBadgeBar.tsx`、`LowConfidenceConfirmCard.tsx`（纯实底零毛玻璃穿透）。
 
 ### 🚀 v1.5.1 — MCP 服务双中枢管理、全栈严格类型安全加固与极致纯实底体验
 - **MCP 服务双中枢管理（`McpServerManager` · `SkillsView` · `MemoryHubModal`）**：

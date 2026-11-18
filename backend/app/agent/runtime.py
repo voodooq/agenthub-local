@@ -4504,6 +4504,104 @@ class AgentRuntime:
                             "file_size": int(bridge_meta.get("file_size") or 0) if bridge_status == "completed" else 0,
                         }
 
+                    # ── 工具: 本地工作区混合检索 (workspace_hybrid_search) ──
+                    elif func_name == "workspace_hybrid_search":
+                        from ..tools.workspace_fts import workspace_hybrid_search
+                        q_str = str(args.get("query") or "").strip()
+                        top_k_val = int(args.get("top_k") or 8)
+                        pod_id_val = str(args.get("pod_id") or "global")
+                        ws_root = target_cwd or "."
+
+                        res_text = await workspace_hybrid_search(
+                            workspace_root=ws_root,
+                            query=q_str,
+                            top_k=top_k_val,
+                            pod_id=pod_id_val,
+                        )
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"workspace_hybrid_search({q_str})",
+                            "reason": f"工作区混合语义检索: {q_str}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": f"[混合检索完成: 关键词 '{q_str}']",
+                        }
+
+                    # ── 工具: 云端 LLM Wiki 规程检索 (search_cloud_wiki) ──
+                    elif func_name == "search_cloud_wiki":
+                        from ..tools.workspace_fts import search_cloud_wiki
+                        q_str = str(args.get("query") or "").strip()
+                        top_k_val = int(args.get("top_k") or 6)
+                        pod_id_val = str(args.get("pod_id") or "global")
+                        ws_root = target_cwd or "."
+
+                        res_text = await search_cloud_wiki(
+                            workspace_root=ws_root,
+                            query=q_str,
+                            top_k=top_k_val,
+                            pod_id=pod_id_val,
+                        )
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"search_cloud_wiki({q_str})",
+                            "reason": f"云端知识库规程检索: {q_str}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": f"[云端规程检索完成: '{q_str}']",
+                        }
+
+                    # ── 工具: 云端章节精读 (read_cloud_wiki_section) ──
+                    elif func_name == "read_cloud_wiki_section":
+                        from ..tools.workspace_fts import read_cloud_wiki_section
+                        r_uri = str(args.get("remote_uri") or "").strip()
+                        s_path = str(args.get("section_path") or "").strip()
+                        ws_root = target_cwd or "."
+
+                        res_text = await read_cloud_wiki_section(
+                            remote_uri=r_uri,
+                            section_path=s_path,
+                            workspace_root=ws_root,
+                        )
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"read_cloud_wiki_section({r_uri} § {s_path})",
+                            "reason": f"精读云端章节: {s_path}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": f"[云端章节精读: {s_path}]",
+                        }
+
+                    # ── 工具: 知识图谱关系推理 (query_knowledge_graph) ──
+                    elif func_name == "query_knowledge_graph":
+                        from ..tools.workspace_fts import query_knowledge_graph
+                        target_ent = str(args.get("entity") or "").strip()
+                        hops = int(args.get("max_hops") or 2)
+                        pod_id_val = str(args.get("pod_id") or "global")
+                        ws_root = target_cwd or "."
+
+                        res_text = query_knowledge_graph(
+                            workspace_root=ws_root,
+                            entity=target_ent,
+                            max_hops=hops,
+                            pod_id=pod_id_val,
+                        )
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"query_knowledge_graph({target_ent}, hops={hops})",
+                            "reason": f"查询知识图谱实体关系: {target_ent}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": f"[知识图谱查询完成: '{target_ent}']",
+                        }
+
                     # ── Swarm 四原语执行分支 (swarm_control / swarm_post / swarm_read / swarm_wait) ──
                     elif func_name == "swarm_control":
                         from .swarm_manager import swarm_manager
@@ -5154,6 +5252,34 @@ class AgentRuntime:
                         summary_snippet or "任务标记为已完成，工作记忆已归档",
                     ):
                         yield tail_ev
+                    # 阶段四：输出前自我批评与多维置信度治理 (v1.5.5)
+                    try:
+                        from ..governance.self_critique import SelfCritiqueCritic
+                        from ..governance.confidence_evaluator import ConfidenceEvaluator
+
+                        critique_res = SelfCritiqueCritic.evaluate_draft(
+                            user_query=content_prompt,
+                            retrieved_evidence=[],
+                            draft_response=clean_deliverable,
+                            has_version_conflict=False,
+                        )
+                        conf_rep = ConfidenceEvaluator.evaluate(
+                            retrieved_chunks=[],
+                            critique_res=critique_res,
+                            tools_executed=[],
+                            strict_mode=False,
+                        )
+                        yield {
+                            "type": "confidence_report",
+                            "score": conf_rep.score,
+                            "tier_level": conf_rep.tier_level,
+                            "reasons": conf_rep.reasons,
+                            "requires_confirmation": conf_rep.requires_confirmation,
+                            "evidence_sources": conf_rep.evidence_sources,
+                        }
+                    except Exception as conf_err:
+                        logger.debug(f"[AgentRuntime] 置信度治理自审跳过: {conf_err}")
+
                     stream_completed_normally = True
                     yield {
                         "type": "done",
