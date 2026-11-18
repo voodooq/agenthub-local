@@ -11,7 +11,7 @@ from collections import deque
 from datetime import datetime
 import ipaddress
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 import xml.etree.ElementTree as ET
 import httpx
 
@@ -95,10 +95,22 @@ class WebDAVProvider(CloudVFSProvider):
                 return child
         return None
 
+    def _build_url(self, raw_path: str) -> str:
+        """安全构建带中文字符与空格标准 URL 编码的 WebDAV 请求地址。"""
+        # 先 unquote 避免如 %20 被重复编码为 %2520，再标准 quote 编码保留路径斜杠
+        clean_p = "/" + unquote(raw_path.strip()).strip("/")
+        if clean_p == "/":
+            encoded_p = ""
+        else:
+            encoded_p = quote(clean_p, safe="/")
+        base = self.base_url.rstrip("/")
+        return f"{base}{encoded_p}"
+
     async def test_connection(self) -> tuple[bool, str]:
         """连通性与 HTTP Basic 鉴权验证。"""
-        req_path = self.root_path if self.root_path.startswith("/") else f"/{self.root_path}"
-        url = f"{self.base_url}{req_path}" if req_path != "/" else f"{self.base_url}/"
+        url = self._build_url(self.root_path)
+        if not url.endswith("/"):
+            url += "/"
         try:
             async with self._get_http_client(timeout=8.0) as client:
                 resp = await client.request("PROPFIND", url, headers={"Depth": "0"})
@@ -158,7 +170,7 @@ class WebDAVProvider(CloudVFSProvider):
                         continue
                     visited_dirs.add(norm_path)
 
-                    target_url = f"{self.base_url}{norm_path}" if norm_path != "/" else f"{self.base_url}/"
+                    target_url = self._build_url(norm_path)
                     if not target_url.endswith("/"):
                         target_url += "/"
 
@@ -284,9 +296,9 @@ class WebDAVProvider(CloudVFSProvider):
         return files
 
     async def download_stream(self, remote_uri: str) -> bytes:
-        """流式拉取 WebDAV 文件内容（支持 302 外部重定向）。"""
+        """流式拉取 WebDAV 文件内容（支持 302 外部重定向与中文/空格编码）。"""
         path_part = remote_uri.replace(f"webdav://{self.mount_id}", "")
-        url = f"{self.base_url}/{path_part.lstrip('/')}"
+        url = self._build_url(path_part)
 
         async with self._get_http_client(timeout=60.0) as client:
             resp = await client.get(url)
