@@ -7,7 +7,7 @@ AST 语法感知代码分块器与 Markdown 结构化切片器 (AST Chunker)
 from dataclasses import dataclass
 from pathlib import Path
 import re
-from typing import Any
+from typing import Any, cast
 
 from ..core.logging_config import logger
 
@@ -89,7 +89,7 @@ class AstChunker:
     ) -> list[CodeChunk]:
         """通过 Tree-sitter 切分类与函数。"""
         try:
-            parser = tslp.get_parser(lang)
+            parser = tslp.get_parser(cast(Any, lang))
             tree = parser.parse(raw_bytes)
         except Exception as e:
             logger.warning(f"Tree-sitter 解析失败 ({rel_path}): {e}")
