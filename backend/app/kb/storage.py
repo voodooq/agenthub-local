@@ -477,9 +477,15 @@ class KBStorageManager:
             except Exception:
                 pass
 
-            # 兼容性平滑升级：补齐 hybrid_chunks 的时空元数据三字段（v1.5.9+）
+            # 兼容性平滑升级：补齐 hybrid_chunks 的父子分层与时空元数据字段（v1.5.9+）
             for _col, _col_def in [
+                ("chunk_role",           "TEXT NOT NULL DEFAULT 'child'"),
+                ("parent_chunk_id",      "TEXT DEFAULT NULL"),
+                ("section_path",         "TEXT NOT NULL DEFAULT ''"),
                 ("doc_year",             "INTEGER NOT NULL DEFAULT 0"),
+                ("effective_date",       "TEXT NOT NULL DEFAULT ''"),
+                ("effective_ts",         "INTEGER NOT NULL DEFAULT 0"),
+                ("doc_priority_type",    "TEXT NOT NULL DEFAULT 'normal'"),
                 ("topic_cluster_id",     "TEXT NOT NULL DEFAULT ''"),
                 ("is_latest_in_cluster", "INTEGER NOT NULL DEFAULT 1"),
             ]:
@@ -488,6 +494,9 @@ class KBStorageManager:
                 except Exception:
                     pass
             try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_parent ON hybrid_chunks(parent_chunk_id);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_temporal_cluster ON hybrid_chunks(topic_cluster_id, effective_ts DESC);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_role ON hybrid_chunks(chunk_role);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_cluster ON hybrid_chunks(topic_cluster_id, doc_year);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_latest  ON hybrid_chunks(is_latest_in_cluster);")
             except Exception:

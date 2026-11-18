@@ -917,6 +917,17 @@ class DatabaseManager:
                 PRIMARY KEY (expert_id, kb_id)
             );
             CREATE INDEX IF NOT EXISTS idx_expert_kb_rank ON expert_kb_bindings(expert_id, priority_rank);
+
+            -- 5. 工作区默认知识底座关联表 (v1.5.9+)
+            CREATE TABLE IF NOT EXISTS workspace_knowledge_bases (
+                workspace_id     TEXT NOT NULL,
+                kb_id            TEXT NOT NULL,
+                auto_inject      INTEGER DEFAULT 1,
+                strict_grounding INTEGER DEFAULT 0,
+                created_at       REAL NOT NULL,
+                PRIMARY KEY (workspace_id, kb_id)
+            );
+            CREATE INDEX IF NOT EXISTS idx_wkb_ws ON workspace_knowledge_bases(workspace_id);
             """)
 
             await conn.commit()
