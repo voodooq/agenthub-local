@@ -65,6 +65,43 @@ class WeComDriveProvider(CloudVFSProvider):
                 return self._access_token
             raise RuntimeError(f"企微获取 access_token 失败: {data.get('errmsg')} (code: {data.get('errcode')})")
 
+    async def create_space(
+        self,
+        space_name: str,
+        admin_userid: str = "",
+        allow_all_departments: bool = True,
+    ) -> tuple[bool, str, str]:
+        """通过自建应用 API 快速在企业微盘中创建一个专属空间并返回 space_id。
+
+        该应用自动成为该空间的超级管理员，解决权限隔离报 640008 的问题。
+        """
+        token = await self._get_access_token()
+        url = f"{self.API_BASE}/wedrive/space_create?access_token={token}"
+        auth_info: list[dict[str, Any]] = []
+        if admin_userid:
+            auth_info.append({"type": 1, "userid": admin_userid.strip(), "auth": 7})
+        if allow_all_departments:
+            # 允许企业全员部门(departmentid: 1)访问该空间（auth: 2=可编辑可上传）
+            auth_info.append({"type": 2, "departmentid": 1, "auth": 2})
+
+        payload: dict[str, Any] = {
+            "space_name": space_name.strip() or "AgentHub-规程知识库",
+            "space_sub_type": 0,
+        }
+        if auth_info:
+            payload["auth_info"] = auth_info
+
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(url, json=payload)
+                data = resp.json()
+                if data.get("errcode") == 0:
+                    space_id = data.get("spaceid", "")
+                    return True, space_id, "空间创建成功"
+                return False, "", f"创建失败: {data.get('errmsg')} (code: {data.get('errcode')})"
+        except Exception as e:
+            return False, "", f"创建微盘空间网络异常: {str(e)}"
+
     async def test_connection(self) -> tuple[bool, str]:
         """连通性与密钥/空间权限测试。"""
         try:
