@@ -31,9 +31,21 @@ class WeComDriveProvider(CloudVFSProvider):
         super().__init__(mount_id, mount_name, authority_tier=authority_tier, config=config)
         self.corpid = corpid
         self.corpsecret = corpsecret
-        self.space_id = space_id
+        self.space_id = self._extract_space_id(space_id or (config.get("space_id", "") if config else ""))
         self._access_token: str = ""
         self._token_expires_at: float = 0.0
+
+    @staticmethod
+    def _extract_space_id(raw: str) -> str:
+        """从用户输入的纯 ID 或分享链接/URL 中提取合法 space_id。"""
+        if not raw:
+            return ""
+        raw = raw.strip()
+        import re
+        match = re.search(r"(s\.[a-zA-Z0-9_\.\-]+)", raw)
+        if match:
+            return match.group(1)
+        return raw
 
     async def _get_access_token(self) -> str:
         """获取或刷新企业微信 access_token（提前 300 秒刷新）。"""
@@ -54,15 +66,34 @@ class WeComDriveProvider(CloudVFSProvider):
             raise RuntimeError(f"企微获取 access_token 失败: {data.get('errmsg')} (code: {data.get('errcode')})")
 
     async def test_connection(self) -> tuple[bool, str]:
-        """连通性与密钥测试。"""
+        """连通性与密钥/空间权限测试。"""
         try:
             token = await self._get_access_token()
-            return True, f"企业微信连通成功，Token 有效"
+            if not self.space_id:
+                return True, "企业微信鉴权成功(Token有效)，但请填写微盘 SpaceId 才能遍历具体文件"
+
+            url = f"{self.API_BASE}/wedrive/file_list?access_token={token}"
+            payload = {"spaceid": self.space_id, "limit": 1}
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, json=payload)
+                data = resp.json()
+                errcode = data.get("errcode", 0)
+                if errcode == 0:
+                    return True, "企业微信连通成功，微盘目标空间鉴权通过"
+                elif errcode == 640001:
+                    return False, f"微盘空间不存在 (space not exist)，请检查 SpaceId ({self.space_id}) 是否正确"
+                elif errcode in (2000002, 640002, 640003, 640004):
+                    return False, "无微盘空间访问权限，请在企业微信微盘中将该自建应用添加为空间成员"
+                return False, f"微盘校验失败: {data.get('errmsg')} (code: {errcode})"
         except Exception as e:
             return False, f"企业微信鉴权失败: {str(e)}"
 
     async def list_files(self, recursive: bool = True) -> list[CloudFileMeta]:
         """遍历微盘指定空间或根目录下的文件。"""
+        if not self.space_id:
+            logger.warning("未配置微盘 space_id，企业微信 API 无法遍历空间文件")
+            return []
+
         token = await self._get_access_token()
         files: list[CloudFileMeta] = []
 
@@ -80,7 +111,14 @@ class WeComDriveProvider(CloudVFSProvider):
                 resp = await client.post(url, json=payload)
                 data = resp.json()
                 if data.get("errcode") != 0:
-                    logger.warning(f"微盘遍历失败: {data.get('errmsg')}")
+                    errcode = data.get("errcode")
+                    errmsg = data.get("errmsg", "")
+                    if errcode == 640001:
+                        logger.warning(f"微盘遍历失败: 空间不存在 (space not exist)。请检查 SpaceId ({self.space_id}) 是否准确。")
+                    elif errcode in (2000002, 640002, 640003, 640004):
+                        logger.warning("微盘遍历失败: 无空间权限。请在企微信微盘中将当前应用添加为空间成员。")
+                    else:
+                        logger.warning(f"微盘遍历失败: {errmsg} (code: {errcode})")
                     return []
 
                 file_list = data.get("file_list", {}).get("item", [])

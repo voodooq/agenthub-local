@@ -176,13 +176,18 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
     engine = HybridSearchEngine(req.workspace_root)
     sync_mgr = CloudVFSSyncManager(req.workspace_root)
     total_new_chunks = 0
+    sync_warnings: list[str] = []
 
     for m in mounts:
+        m_cfg = m.get("config", {})
+        if m["provider_type"] == "wecom" and not m_cfg.get("space_id"):
+            sync_warnings.append(f"【{m['mount_name']}】未配置微盘 SpaceId，企微无法识别目标空间。")
+
         provider = create_cloud_provider(
             mount_id=m["mount_id"],
             mount_name=m["mount_name"],
             provider_type=m["provider_type"],
-            config=m.get("config", {}),
+            config=m_cfg,
             authority_tier=m.get("authority_tier", 1),
         )
         if not provider:
@@ -190,6 +195,8 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
 
         try:
             files = await provider.list_files(recursive=True)
+            if not files and m["provider_type"] == "wecom":
+                sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请检查 SpaceId 是否正确且自建应用拥有该空间权限。")
             modified = sync_mgr.filter_modified_files(m["mount_id"], files)
             for f in modified:
                 try:
@@ -203,6 +210,14 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
                     logger.warning(f"同步单个文件失败 ({f.title}): {file_err}")
         except Exception as prov_err:
             logger.warning(f"挂载源 {m['mount_name']} 增量拉取失败: {prov_err}")
+            sync_warnings.append(f"【{m['mount_name']}】拉取异常: {prov_err}")
+
+    if total_new_chunks == 0 and sync_warnings:
+        return {
+            "success": True,
+            "message": f"增量同步完成，新写入/更新 0 个规程切片。\n提示: {'; '.join(sync_warnings)}",
+            "new_chunks": 0,
+        }
 
     return {
         "success": True,

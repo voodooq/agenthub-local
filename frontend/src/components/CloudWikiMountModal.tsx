@@ -236,13 +236,20 @@ export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: Cl
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-medium text-muted-foreground">微盘 SpaceId (可选)</label>
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-medium text-muted-foreground">微盘 SpaceId (必填)</label>
+                    <span className="text-[10px] text-amber-500 font-mono">必填</span>
+                  </div>
                   <input
                     type="text"
+                    placeholder="如 s.ww0b918f... 或粘贴空间分享链接"
                     value={wecomForm.space_id}
                     onChange={(e) => setWecomForm({ ...wecomForm, space_id: e.target.value })}
                     className="mt-1 w-full rounded border border-border bg-surface-card px-2 py-1 text-sm outline-none"
                   />
+                  <p className="mt-1 text-[11px] text-muted-foreground leading-tight">
+                    企微 API 要求必须指定目标空间。可在微盘空间右键点击分享链接复制获取，或在管理后台微盘中抓取。
+                  </p>
                 </div>
               </>
             )}
