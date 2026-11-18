@@ -212,8 +212,13 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
 
         try:
             files = await provider.list_files(recursive=True)
-            if not files and m["provider_type"] == "wecom":
-                sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请检查 SpaceId 是否正确且自建应用拥有该空间权限。")
+            if not files:
+                if m["provider_type"] == "wecom":
+                    sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请检查 SpaceId 是否正确且自建应用拥有该空间权限。")
+                elif m["provider_type"] == "webdav":
+                    sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请确认挂载根路径下是否存在支持切片的文档 (PDF/DOCX/TXT/MD)。")
+                elif m["provider_type"] == "oss":
+                    sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请检查存储桶与前缀配置。")
             modified = sync_mgr.filter_modified_files(m["mount_id"], files)
             for f in modified:
                 try:
