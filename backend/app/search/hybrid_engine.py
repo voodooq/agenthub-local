@@ -183,7 +183,9 @@ class HybridSearchEngine:
 
         if provider.is_available and provider.dimension > 0:
             try:
-                embeddings = await provider.embed_texts(texts_to_embed)
+                embeddings = await provider.encode_batch(texts_to_embed)
+                if embeddings is None:
+                    embeddings = await provider.embed_texts(texts_to_embed)
             except Exception as e:
                 logger.warning(f"切片批量向量化失败，降级为 NULL blob: {e}")
                 embeddings = None
@@ -305,13 +307,11 @@ class HybridSearchEngine:
         fts_ranks: dict[int, int] = {}  # chunk_id -> rank (1-based)
         chunk_cache: dict[int, dict[str, Any]] = {}
 
-        # 1. 向量相似度召回
+        # 1. 向量相似度召回 (在线实时查询走常驻低延迟通道)
         if w_vec > 0.0:
             try:
-                q_vec_arr = await provider.embed_texts([clean_query])
-                if len(q_vec_arr) > 0 and q_vec_arr[0].shape[0] > 0:
-                    q_vec = q_vec_arr[0]  # shape: (D,)
-
+                q_vec = await provider.encode_query(clean_query)
+                if q_vec is not None and q_vec.shape[0] > 0:
                     with closing(self._get_connection()) as conn:
                         sql = """
                         SELECT chunk_id, embedding_blob, authority_tier, effective_time, is_superseded,

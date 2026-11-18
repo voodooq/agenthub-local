@@ -25,6 +25,9 @@ class CrossPlatformHardwareProbe:
         self._snapshot_lock = threading.Lock()
         self._snapshot_cache_ts: float = 0.0
         self._snapshot_cache_data: dict[str, Any] | None = None
+        # Embedding 显存感知探针 3 秒缓存
+        self._vram_cache_ts: float = 0.0
+        self._vram_cache_data: dict[str, Any] | None = None
         # 避免每次采集重复调用 nvmlInit()，仅在进程内幂等初始化一次
         self._nvml_init_lock = threading.Lock()
         self._nvml_init_attempted: bool = False
@@ -162,6 +165,47 @@ class CrossPlatformHardwareProbe:
             "vram_total_mb": 0.0,
             "temperature_c": None,
         }
+
+    def get_vram_status(self) -> dict[str, Any]:
+        """专门为 Embedding 与本地轻量 ONNX 批处理提供的轻量显存状态探针（带 3 秒缓存）。
+
+        Returns:
+            dict[str, Any]:
+                has_gpu: bool
+                vendor: str ("NVIDIA" | "Apple Silicon" | "Integrated" | "None")
+                total_vram_mb: float
+                used_vram_mb: float
+                free_vram_mb: float
+        """
+        now = time.monotonic()
+        if self._vram_cache_data is not None and (now - self._vram_cache_ts) < 3.0:
+            return dict(self._vram_cache_data)
+
+        gpu_info = self.get_gpu_metrics()
+        has_gpu = bool(gpu_info.get("detected", False))
+        vendor = str(gpu_info.get("vendor", "None"))
+        total_mb = float(gpu_info.get("vram_total_mb") or 0.0)
+        used_mb = float(gpu_info.get("vram_used_mb") or 0.0)
+
+        if vendor == "Apple Silicon":
+            # 统一内存架构下，以当前系统真实可用内存作为安全显存池
+            vm = psutil.virtual_memory()
+            free_mb = round(vm.available / (1024**2), 1)
+        elif vendor == "NVIDIA" and total_mb > 0:
+            free_mb = max(0.0, round(total_mb - used_mb, 1))
+        else:
+            free_mb = 0.0
+
+        res = {
+            "has_gpu": has_gpu,
+            "vendor": vendor,
+            "total_vram_mb": total_mb,
+            "used_vram_mb": used_mb,
+            "free_vram_mb": free_mb,
+        }
+        self._vram_cache_ts = now
+        self._vram_cache_data = res
+        return res
 
     def get_network_metrics(self) -> dict[str, Any]:
         """采集宿主机实时网络上下行速率（KB/s）与累计收发流量（GB）。"""
