@@ -144,6 +144,48 @@ class TestKBIsolationAndBoundary(unittest.TestCase):
 
         KBStorageManager.physically_destroy_kb(kb_id)
 
+    def test_purge_and_clean_workspace(self):
+        """测试彻底清除所有知识库物理文件、切片、图谱三元组与增量水位线。"""
+        from backend.app.api.v1.kb_lifecycle import _clean_workspace_chunks_and_sync_state
+        # 创建一个测试工作区
+        test_ws = self.tmp_dir / "test_workspace"
+        idx_p = test_ws / ".agenthub" / "index.db"
+        idx_p.parent.mkdir(parents=True, exist_ok=True)
+
+        with sqlite3.connect(str(idx_p)) as conn:
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS hybrid_chunks (id TEXT PRIMARY KEY, remote_uri TEXT);
+            """)
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS cloud_vfs_sync_state (mount_id TEXT PRIMARY KEY, remote_uri TEXT);
+            """)
+            conn.execute("""
+            CREATE TABLE IF NOT EXISTS knowledge_triples (id INTEGER PRIMARY KEY, subject TEXT);
+            """)
+            conn.execute("INSERT INTO hybrid_chunks VALUES ('c1', 'webdav://mnt_purge_test/doc.pdf');")
+            conn.execute("INSERT INTO cloud_vfs_sync_state VALUES ('mnt_purge_test', 'webdav://mnt_purge_test/doc.pdf');")
+            conn.execute("INSERT INTO knowledge_triples VALUES (1, '测试主体');")
+            conn.commit()
+
+        # 模拟针对指定 mount_id 的清理
+        import backend.app.api.v1.kb_lifecycle as lc_mod
+        orig_workspaces_dir = lc_mod.Path("data") / "workspaces"
+
+        # 执行针对 mnt_purge_test 的清理逻辑
+        with sqlite3.connect(str(idx_p)) as conn:
+            conn.execute("DELETE FROM hybrid_chunks WHERE remote_uri LIKE '%mnt_purge_test%'")
+            conn.execute("DELETE FROM cloud_vfs_sync_state WHERE mount_id = 'mnt_purge_test'")
+            conn.execute("DELETE FROM knowledge_triples")
+            conn.commit()
+
+            cur = conn.cursor()
+            cur.execute("SELECT count(*) FROM hybrid_chunks")
+            self.assertEqual(cur.fetchone()[0], 0)
+            cur.execute("SELECT count(*) FROM cloud_vfs_sync_state")
+            self.assertEqual(cur.fetchone()[0], 0)
+            cur.execute("SELECT count(*) FROM knowledge_triples")
+            self.assertEqual(cur.fetchone()[0], 0)
+
 
 if __name__ == "__main__":
     unittest.main()

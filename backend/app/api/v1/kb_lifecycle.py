@@ -147,34 +147,134 @@ async def create_base(payload: KnowledgeBaseCreatePayload) -> dict[str, Any]:
     return {"success": True, "data": res}
 
 
+def _clean_workspace_chunks_and_sync_state(target_mount_id: str | None = None) -> int:
+    """清理工作区中的云端切片、图谱三元组与增量同步水位线（防止删库后被 auto_adopt 误复活）。
+
+    Args:
+        target_mount_id: 指定清理的挂载源 ID，为 None 时清空全部云端切片与水位线。
+    """
+    candidate_dbs: list[Path] = []
+    default_index = Path(".agenthub") / "index.db"
+    if default_index.exists():
+        candidate_dbs.append(default_index)
+
+    workspaces_dir = Path("data") / "workspaces"
+    if workspaces_dir.exists():
+        for ws in workspaces_dir.iterdir():
+            idx = ws / ".agenthub" / "index.db"
+            if idx.exists():
+                candidate_dbs.append(idx)
+
+    cleaned_chunks = 0
+    import sqlite3
+    for db_p in candidate_dbs:
+        try:
+            with sqlite3.connect(str(db_p)) as conn:
+                cur = conn.cursor()
+                if target_mount_id:
+                    # 单个挂载源模式：清理包含该 mount_id 的切片与水位线
+                    pattern = f"%{target_mount_id}%"
+                    cur.execute("SELECT id FROM hybrid_chunks WHERE remote_uri LIKE ?", (pattern,))
+                    bad_ids = [r[0] for r in cur.fetchall()]
+                    if bad_ids:
+                        cleaned_chunks += len(bad_ids)
+                        ph = ",".join("?" for _ in bad_ids)
+                        cur.execute(f"DELETE FROM hybrid_chunks WHERE id IN ({ph})", bad_ids)
+                        try:
+                            cur.execute(f"DELETE FROM hybrid_chunks_fts WHERE chunk_id IN ({ph})", bad_ids)
+                        except Exception:
+                            pass
+                    # 清理水位线
+                    try:
+                        cur.execute("DELETE FROM cloud_vfs_sync_state WHERE mount_id = ?", (target_mount_id,))
+                    except Exception:
+                        pass
+                else:
+                    # 全量清理模式：清除所有云端切片、图谱三元组与水位线
+                    try:
+                        cur.execute("SELECT count(*) FROM hybrid_chunks WHERE remote_uri LIKE 'webdav://%' OR remote_uri LIKE 'oss://%' OR remote_uri LIKE 'wecom://%'")
+                        cleaned_chunks += cur.fetchone()[0]
+                        cur.execute("DELETE FROM hybrid_chunks WHERE remote_uri LIKE 'webdav://%' OR remote_uri LIKE 'oss://%' OR remote_uri LIKE 'wecom://%'")
+                        cur.execute("DELETE FROM hybrid_chunks_fts WHERE remote_uri LIKE 'webdav://%' OR remote_uri LIKE 'oss://%' OR remote_uri LIKE 'wecom://%'")
+                    except Exception:
+                        pass
+                    # 清空工作区图谱三元组
+                    try:
+                        cur.execute("DELETE FROM knowledge_triples")
+                    except Exception:
+                        pass
+                    # 清空全部水位线
+                    try:
+                        cur.execute("DELETE FROM cloud_vfs_sync_state")
+                    except Exception:
+                        pass
+
+                conn.commit()
+                # VACUUM 释放工作区数据库磁盘空间
+                try:
+                    conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                    conn.execute("VACUUM;")
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.warning(f"清理工作区 [{db_p}] 切片失败: {e}")
+
+    return cleaned_chunks
+
+
 @router.delete("/bases/{kb_id}")
 async def delete_base(kb_id: str) -> dict[str, Any]:
-    """彻底物理销毁指定知识库及所有历史版本。"""
-    KBStorageManager.physically_destroy_kb(kb_id)
+    """彻底物理销毁指定知识库及所有历史版本切片、三元组与文件。"""
     from ...repository.db import db_manager
+    source_id = None
+    async with db_manager.get_connection() as conn:
+        cursor = await conn.execute("SELECT source_id FROM knowledge_bases WHERE kb_id = ?", (kb_id,))
+        row = await cursor.fetchone()
+        if row:
+            source_id = row["source_id"]
+
+    # 1. 物理删除独立存储目录与文件
+    KBStorageManager.physically_destroy_kb(kb_id)
+
+    # 2. 清理工作区切片与增量同步水位线（防止重新被 auto_adopt 误纳管复活）
+    cleaned = _clean_workspace_chunks_and_sync_state(target_mount_id=source_id)
+
+    # 3. 清理数据库元数据
     async with db_manager.get_connection() as conn:
         await conn.execute("DELETE FROM kb_versions WHERE kb_id = ?", (kb_id,))
         await conn.execute("DELETE FROM expert_kb_bindings WHERE kb_id = ?", (kb_id,))
         await conn.execute("DELETE FROM knowledge_bases WHERE kb_id = ?", (kb_id,))
         await conn.commit()
-    return {"success": True, "message": f"知识库 {kb_id} 及其所有版本已彻底物理删除"}
+
+    return {
+        "success": True,
+        "message": f"知识库 {kb_id} 及其所有版本切片、三元组与物理文件已彻底销毁（已清理 {cleaned} 个工作区切片并重置同步水位线）",
+    }
 
 
 @router.post("/bases/purge-all")
 async def purge_all_bases() -> dict[str, Any]:
-    """一键物理销毁当前系统所有独立知识库资产及所有历史版本。"""
+    """一键物理彻底销毁系统所有独立知识库物理文件、切片、图谱三元组并重置增量水位线。"""
+    # 1. 物理销毁全部独立存储目录（物理文件全部删除）
+    dir_cnt = KBStorageManager.physically_destroy_all_kbs()
+
+    # 2. 清理所有工作区中的云端切片、图谱三元组与全部增量同步水位线
+    cleaned_chunks = _clean_workspace_chunks_and_sync_state(target_mount_id=None)
+
+    # 3. 清空全局元数据表
     from ...repository.db import db_manager
     async with db_manager.get_connection() as conn:
-        cursor = await conn.execute("SELECT kb_id FROM knowledge_bases")
-        rows = await cursor.fetchall()
-        for row in rows:
-            kb_id = str(row["kb_id"])
-            KBStorageManager.physically_destroy_kb(kb_id)
+        cursor = await conn.execute("SELECT count(*) FROM knowledge_bases")
+        kb_count = (await cursor.fetchone())[0]
         await conn.execute("DELETE FROM kb_versions")
         await conn.execute("DELETE FROM expert_kb_bindings")
         await conn.execute("DELETE FROM knowledge_bases")
         await conn.commit()
-    return {"success": True, "message": f"已彻底清理销毁全部 {len(rows)} 个独立知识库资产"}
+
+    return {
+        "success": True,
+        "message": f"已彻底物理销毁全部 {kb_count} 个独立知识库物理文件（共清理 {dir_cnt} 个物理目录、{cleaned_chunks} 个工作区切片与所有图谱三元组，并已重置同步水位线）",
+    }
 
 
 @router.get("/bases/{kb_id}/versions")
@@ -516,15 +616,6 @@ async def list_kb_triples(
         return {
             "success": True,
             "kb_id": kb_id,
-            "name": target_kb["name"],
-            "version": target_ver,
-            "total_count": total_count,
-            "page": page,
-            "page_size": page_size,
-            "triples": triples_data,
-        }
-    finally:
-        conn.close()
             "name": target_kb["name"],
             "version": target_ver,
             "total_count": total_count,

@@ -625,3 +625,15 @@ class KBStorageManager:
             return True
         return False
 
+    @classmethod
+    def physically_destroy_all_kbs(cls) -> int:
+        """彻底物理销毁所有独立知识库的物理存储目录（清除所有版本的 index.db 与 manifest）。"""
+        destroyed_count = 0
+        if KB_STORE_ROOT.exists():
+            for child in list(KB_STORE_ROOT.iterdir()):
+                if child.is_dir():
+                    shutil.rmtree(child, ignore_errors=True)
+                    destroyed_count += 1
+            logger.info(f"已彻底物理销毁所有独立知识库存储目录（共 {destroyed_count} 个）: {KB_STORE_ROOT}")
+        return destroyed_count
+

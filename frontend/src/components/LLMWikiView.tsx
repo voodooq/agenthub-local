@@ -301,7 +301,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
 
   // 彻底物理删除单个独立知识库
   const handleDeleteKb = async (kbId: string, kbName: string) => {
-    if (!confirm(`确定要彻底删除独立知识库【${kbName}】吗？\n该操作将物理销毁其在磁盘上的所有版本快照与向量数据库，不可恢复。`)) return;
+    if (!confirm(`确定要彻底物理销毁独立知识库【${kbName}】吗？\n该操作将删除磁盘所有 index.db 物理文件、清空其全部切片与图谱三元组，并重置增量同步水位线，不可恢复。`)) return;
     try {
       const resp = await apiFetch(`/api/v1/kb/bases/${kbId}`, { method: 'DELETE' });
       if (resp.ok) {
@@ -323,7 +323,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   // 一键清空物理销毁全部独立知识库资产
   const handlePurgeAllKbs = async () => {
     if (kbsList.length === 0) return;
-    if (!confirm(`确定要清空并物理销毁当前系统所有独立知识库资产吗？（共 ${kbsList.length} 个）\n该操作将删除磁盘所有 index.db 并清空元数据，不可恢复！`)) return;
+    if (!confirm(`确定要清空并物理销毁当前系统所有独立知识库资产吗？（共 ${kbsList.length} 个）\n该操作将彻底物理删除磁盘所有版本的 index.db 文件、清空所有规程切片与图谱三元组，并重置增量同步水位线，不可恢复！`)) return;
     try {
       const resp = await apiFetch('/api/v1/kb/bases/purge-all', { method: 'POST' });
       const data = await resp.json();
