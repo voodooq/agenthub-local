@@ -19,18 +19,13 @@ import sqlite3
 import time
 from typing import Any
 
-try:
-    import numpy as np
-    HAS_NUMPY = True
-except ImportError:
-    HAS_NUMPY = False
-    np = None  # type: ignore
-
 from ..core.logging_config import logger
 from .embedding_provider import (
     BaseEmbeddingProvider,
     embedding_router,
     normalize_l2,
+    HAS_NUMPY,
+    np,
 )
 from .conflict_resolver import ConflictResolver
 
@@ -189,7 +184,7 @@ class HybridSearchEngine:
         texts_to_embed = [c["content_text"] for c in chunks]
         embeddings: Any | None = None
 
-        if HAS_NUMPY and np is not None and provider.is_available and provider.dimension > 0:
+        if provider.is_available and provider.dimension > 0:
             try:
                 embeddings = await provider.encode_batch(texts_to_embed)
                 if embeddings is None:
@@ -220,8 +215,13 @@ class HybridSearchEngine:
                     is_sup = c.get("is_superseded", 0)
 
                     blob_data = None
-                    if HAS_NUMPY and np is not None and embeddings is not None and idx < len(embeddings):
-                        blob_data = embeddings[idx].astype(np.float32).tobytes()
+                    if embeddings is not None and idx < len(embeddings):
+                        vec = embeddings[idx]
+                        if HAS_NUMPY and np is not None and hasattr(vec, "astype"):
+                            blob_data = vec.astype(np.float32).tobytes()
+                        else:
+                            import array
+                            blob_data = array.array("f", (float(x) for x in vec)).tobytes()
 
                     conn.execute("""
                     INSERT INTO hybrid_chunks (
@@ -306,7 +306,7 @@ class HybridSearchEngine:
         provider = await embedding_router.get_provider()
         w_fts, w_vec = self.route_query_intent(clean_query)
 
-        if not HAS_NUMPY or not provider.is_available or provider.dimension == 0:
+        if not provider.is_available or provider.dimension == 0:
             w_fts = 1.0
             w_vec = 0.0
 
@@ -315,11 +315,12 @@ class HybridSearchEngine:
         fts_ranks: dict[int, int] = {}  # chunk_id -> rank (1-based)
         chunk_cache: dict[int, dict[str, Any]] = {}
 
-        # 1. 向量相似度召回 (在线实时查询走常驻低延迟通道)
-        if HAS_NUMPY and np is not None and w_vec > 0.0:
+        # 1. 向量相似度召回 (优先 NumPy 矩阵加速，无 NumPy 自动走原生零依赖点积)
+        if w_vec > 0.0:
             try:
                 q_vec = await provider.encode_query(clean_query)
-                if q_vec is not None and q_vec.shape[0] > 0:
+                q_len = len(q_vec) if q_vec is not None else 0
+                if q_vec is not None and q_len > 0:
                     with closing(self._get_connection()) as conn:
                         sql = """
                         SELECT chunk_id, embedding_blob, authority_tier, effective_time, is_superseded,
@@ -337,28 +338,54 @@ class HybridSearchEngine:
                         rows = conn.execute(sql, params).fetchall()
 
                     if rows:
+                        import array
+                        import heapq
+
                         chunk_ids: list[int] = []
-                        valid_blobs: list[Any] = []
+                        valid_vectors: list[Any] = []
+                        q_list: list[float] = [float(x) for x in q_vec]
 
                         for r in rows:
                             cid = r["chunk_id"]
                             chunk_cache[cid] = dict(r)
                             blob = r["embedding_blob"]
                             if blob:
-                                arr = np.frombuffer(blob, dtype=np.float32)
-                                if arr.shape[0] == q_vec.shape[0]:
+                                arr = array.array("f")
+                                arr.frombytes(blob)
+                                if len(arr) == q_len:
                                     chunk_ids.append(cid)
-                                    valid_blobs.append(arr)
+                                    valid_vectors.append(arr)
 
-                        if valid_blobs:
-                            matrix = np.stack(valid_blobs, axis=0)  # shape: (N, D)
-                            scores = matrix @ q_vec  # 余弦相似度 (N,)
-                            top_indices = np.argsort(-scores)[: top_k * 3]
+                        if valid_vectors:
+                            # 1.1 若存在 NumPy，优先尝试进行矩阵加速计算
+                            if HAS_NUMPY and np is not None:
+                                try:
+                                    matrix = np.array(valid_vectors, dtype=np.float32)
+                                    scores = matrix @ np.array(q_list, dtype=np.float32)
+                                    top_indices = np.argsort(-scores)[: top_k * 3]
+                                    for rank_idx, idx_val in enumerate(top_indices):
+                                        cid = chunk_ids[idx_val]
+                                        vec_ranks[cid] = rank_idx + 1
+                                        vec_scores[cid] = float(scores[idx_val])
+                                except Exception:
+                                    vec_ranks.clear()
+                                    vec_scores.clear()
 
-                            for rank_idx, idx_val in enumerate(top_indices):
-                                cid = chunk_ids[idx_val]
-                                vec_ranks[cid] = rank_idx + 1
-                                vec_scores[cid] = float(scores[idx_val])
+                            # 1.2 若无 NumPy 或 NumPy 计算异常，使用 Python 原生点积与堆排序
+                            if not vec_ranks:
+                                scores_list = [
+                                    sum(a * b for a, b in zip(v, q_list))
+                                    for v in valid_vectors
+                                ]
+                                top_indices_heap = heapq.nlargest(
+                                    min(top_k * 3, len(scores_list)),
+                                    range(len(scores_list)),
+                                    key=lambda i: scores_list[i],
+                                )
+                                for rank_idx, idx_val in enumerate(top_indices_heap):
+                                    cid = chunk_ids[idx_val]
+                                    vec_ranks[cid] = rank_idx + 1
+                                    vec_scores[cid] = float(scores_list[idx_val])
             except Exception as e:
                 logger.warning(f"向量召回异常，自动降级为全词法: {e}")
                 w_fts = 1.0

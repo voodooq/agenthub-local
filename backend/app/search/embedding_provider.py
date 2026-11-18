@@ -30,12 +30,48 @@ from typing import Any, Literal
 
 import httpx
 
+class _DummyNumPy:
+    """无 numpy 环境下的类型占位与静态分析安全桩。"""
+    ndarray: Any = Any
+    float32: Any = float
+    int64: Any = int
+
+    @staticmethod
+    def zeros(*args: Any, **kwargs: Any) -> Any:
+        return []
+
+    @staticmethod
+    def array(*args: Any, **kwargs: Any) -> Any:
+        return []
+
+    @staticmethod
+    def expand_dims(*args: Any, **kwargs: Any) -> Any:
+        return None
+
+    @staticmethod
+    def sum(*args: Any, **kwargs: Any) -> Any:
+        return 0.0
+
+    @staticmethod
+    def clip(*args: Any, **kwargs: Any) -> Any:
+        return None
+
+    @staticmethod
+    def concatenate(*args: Any, **kwargs: Any) -> Any:
+        return []
+
+    class linalg:
+        @staticmethod
+        def norm(*args: Any, **kwargs: Any) -> float:
+            return 1.0
+
+
 try:
     import numpy as np
     HAS_NUMPY = True
 except ImportError:
     HAS_NUMPY = False
-    np = None  # type: ignore
+    np = _DummyNumPy()  # type: ignore
 
 from ..core.logging_config import logger
 
@@ -45,26 +81,47 @@ DevicePolicy = Literal["auto", "cpu", "gpu", "directml"]
 def normalize_l2(vectors: Any) -> Any:
     """对嵌入向量进行 L2 归一化，确保点积等价于余弦相似度。
 
-    Args:
-        vectors: 形状为 (N, D) 或 (D,) 的二维/一维 float 矩阵或列表。
-
-    Returns:
-        L2 归一化后的数据（如果 numpy 可用则返回 float32 np.ndarray，否则返回原对象）。
+    支持 np.ndarray、list[float]、list[list[float]] 及 array.array，
+    在无 numpy 环境下完全由 Python 标准库 math 提供原生无损精度计算。
     """
-    if not HAS_NUMPY or np is None or vectors is None:
-        return vectors
-    if hasattr(vectors, "size") and vectors.size == 0:
-        return vectors.astype(np.float32)
-    if hasattr(vectors, "ndim") and vectors.ndim == 1:
-        norm = float(np.linalg.norm(vectors))
-        if norm < 1e-9:
+    if vectors is None:
+        return None
+
+    # 1. 若为 numpy ndarray 且 numpy 库可用，采用向量化加速
+    if HAS_NUMPY and np is not None and isinstance(vectors, np.ndarray):
+        if vectors.size == 0:
             return vectors.astype(np.float32)
-        return (vectors / norm).astype(np.float32)
-    if hasattr(vectors, "ndim"):
+        if vectors.ndim == 1:
+            norm = float(np.linalg.norm(vectors))
+            if norm < 1e-9:
+                return vectors.astype(np.float32)
+            return (vectors / norm).astype(np.float32)
         norms = np.linalg.norm(vectors, axis=-1, keepdims=True)
         norms = np.maximum(norms, 1e-9)
         return (vectors / norms).astype(np.float32)
-    return vectors
+
+    # 2. 纯 Python 原生无损处理二维嵌套列表 / 矩阵
+    import math
+
+    if isinstance(vectors, (list, tuple)) and vectors and isinstance(vectors[0], (list, tuple)):
+        result = []
+        for row in vectors:
+            sq_sum = sum(float(x) * float(x) for x in row)
+            norm = math.sqrt(sq_sum)
+            if norm < 1e-9:
+                result.append([float(x) for x in row])
+            else:
+                inv = 1.0 / norm
+                result.append([float(x) * inv for x in row])
+        return result
+
+    # 3. 纯 Python 原生无损处理单条一维向量
+    sq_sum = sum(float(x) * float(x) for x in vectors)
+    norm = math.sqrt(sq_sum)
+    if norm < 1e-9:
+        return [float(x) for x in vectors]
+    inv = 1.0 / norm
+    return [float(x) * inv for x in vectors]
 
 
 @dataclass(frozen=True)
@@ -103,23 +160,27 @@ class BaseEmbeddingProvider(abc.ABC):
         pass
 
     @abc.abstractmethod
-    async def encode_query(self, text: str) -> np.ndarray | None:
-        """单条实时查询编码（要求 < 10ms，L2 归一化 float32 一维向量）。"""
+    async def encode_query(self, text: str) -> Any | None:
+        """单条实时查询编码（要求 < 10ms，L2 归一化 float32 一维向量或浮点列表）。"""
         pass
 
     @abc.abstractmethod
-    async def encode_batch(self, texts: list[str], batch_size: int = 32) -> np.ndarray | None:
-        """批量建索引编码（支持显存门控加速，返回 L2 归一化 float32 二维矩阵 [N, D]）。"""
+    async def encode_batch(self, texts: list[str], batch_size: int = 32) -> Any | None:
+        """批量建索引编码（支持显存门控加速，返回 L2 归一化 float32 二维矩阵或浮点二维列表 [N, D]）。"""
         pass
 
-    async def embed_texts(self, texts: list[str]) -> np.ndarray:
+    async def embed_texts(self, texts: list[str]) -> Any:
         """向下兼容历史批量接口。"""
         if not texts:
-            return np.zeros((0, self.dimension), dtype=np.float32)
+            if HAS_NUMPY and np is not None:
+                return np.zeros((0, self.dimension), dtype=np.float32)
+            return []
         res = await self.encode_batch(texts)
         if res is not None:
             return res
-        return np.zeros((len(texts), self.dimension), dtype=np.float32)
+        if HAS_NUMPY and np is not None:
+            return np.zeros((len(texts), self.dimension), dtype=np.float32)
+        return [[0.0] * self.dimension for _ in range(len(texts))]
 
     @abc.abstractmethod
     def get_status(self) -> EmbeddingRuntimeStatus:
@@ -197,7 +258,7 @@ class LocalServerEmbeddingProvider(BaseEmbeddingProvider):
 
     @property
     def is_available(self) -> bool:
-        return HAS_NUMPY and self._available
+        return self._available
 
     async def probe_and_activate(self) -> bool:
         """探活本地推理端点并校验 Embedding 能力。"""
@@ -267,19 +328,23 @@ class LocalServerEmbeddingProvider(BaseEmbeddingProvider):
         self._available = False
         return False
 
-    async def encode_query(self, text: str) -> np.ndarray | None:
+    async def encode_query(self, text: str) -> Any | None:
         """实时查询编码。"""
         t0 = time.perf_counter()
         mat = await self.encode_batch([text], batch_size=1)
         self._last_latency_ms = (time.perf_counter() - t0) * 1000.0
         if mat is not None and len(mat) > 0:
             return mat[0]
-        return np.zeros(self.dimension, dtype=np.float32)
+        if HAS_NUMPY and np is not None:
+            return np.zeros(self.dimension, dtype=np.float32)
+        return [0.0] * self.dimension
 
-    async def encode_batch(self, texts: list[str], batch_size: int = 32) -> np.ndarray | None:
+    async def encode_batch(self, texts: list[str], batch_size: int = 32) -> Any | None:
         """批量编码。"""
         if not texts:
-            return np.zeros((0, self.dimension), dtype=np.float32)
+            if HAS_NUMPY and np is not None:
+                return np.zeros((0, self.dimension), dtype=np.float32)
+            return []
 
         t0 = time.perf_counter()
         vectors: list[list[float]] = []
@@ -317,9 +382,13 @@ class LocalServerEmbeddingProvider(BaseEmbeddingProvider):
         self._last_latency_ms = (time.perf_counter() - t0) * 1000.0
         if vectors and len(vectors[0]) > 0:
             self._dimension = len(vectors[0])
-            mat = np.array(vectors, dtype=np.float32)
-            return normalize_l2(mat)
-        return np.zeros((len(texts), self.dimension), dtype=np.float32)
+            if HAS_NUMPY and np is not None:
+                mat = np.array(vectors, dtype=np.float32)
+                return normalize_l2(mat)
+            return normalize_l2(vectors)
+        if HAS_NUMPY and np is not None:
+            return np.zeros((len(texts), self.dimension), dtype=np.float32)
+        return [[0.0] * self.dimension for _ in range(len(texts))]
 
     def get_status(self) -> EmbeddingRuntimeStatus:
         return EmbeddingRuntimeStatus(
@@ -609,7 +678,7 @@ class VramAwareOnnxProvider(BaseEmbeddingProvider):
             gc.collect()
             logger.info("已释放临时 ONNX GPU 批处理会话，显存彻底归还。")
 
-    async def encode_query(self, text: str) -> np.ndarray | None:
+    async def encode_query(self, text: str) -> Any | None:
         """单条实时在线查询编码（常驻 CPU 会话，保证 < 10ms 且零 GPU 抢占）。"""
         if not text.strip():
             return np.zeros(self.dimension, dtype=np.float32)
@@ -648,7 +717,7 @@ class VramAwareOnnxProvider(BaseEmbeddingProvider):
             logger.warning(f"CPU 单条编码异常: {e}")
             return np.zeros(self.dimension, dtype=np.float32)
 
-    async def encode_batch(self, texts: list[str], batch_size: int = 32) -> np.ndarray | None:
+    async def encode_batch(self, texts: list[str], batch_size: int = 32) -> Any | None:
         """批量编码（按需启动 GPU 硬件加速并带异常自愈回退）。"""
         if not texts:
             return np.zeros((0, self.dimension), dtype=np.float32)
@@ -668,7 +737,7 @@ class VramAwareOnnxProvider(BaseEmbeddingProvider):
             return np.zeros((len(texts), self.dimension), dtype=np.float32)
 
         tokenizer = self._ensure_tokenizer()
-        all_embeddings: list[np.ndarray] = []
+        all_embeddings: list[Any] = []
 
         try:
             for i in range(0, len(texts), batch_size):
@@ -725,9 +794,9 @@ class VramAwareOnnxProvider(BaseEmbeddingProvider):
 
     async def _run_cpu_batch_fallback(
         self, texts: list[str], batch_size: int, tokenizer: SimpleBertTokenizer, session: Any
-    ) -> np.ndarray:
+    ) -> Any:
         """CPU 兜底批量运算。"""
-        all_embeddings: list[np.ndarray] = []
+        all_embeddings: list[Any] = []
         model_inputs = {inp.name for inp in session.get_inputs()}
 
         for i in range(0, len(texts), batch_size):
