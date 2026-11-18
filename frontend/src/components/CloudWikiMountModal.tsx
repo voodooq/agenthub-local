@@ -1,23 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import {
-  X,
-  Cloud,
-  HardDrive,
-  Database,
-  Check,
-  AlertCircle,
-  RefreshCw,
-  Trash2,
-  PlugZap,
-  Sparkles,
-  Copy,
-  Share2,
-  ShieldCheck,
-  Users,
-  CheckCircle2,
-} from 'lucide-react';
+import { X, Cloud, HardDrive, Database, Check, AlertCircle, RefreshCw, Trash2, PlugZap } from 'lucide-react';
 import { apiFetch } from '@/utils/apiClient';
 
 interface CloudWikiMountModalProps {
@@ -34,16 +18,6 @@ export interface CloudMountItem {
   config: Record<string, any>;
 }
 
-export interface SharedWeComSpace {
-  space_id: string;
-  space_name: string;
-  corpid?: string;
-  has_secret?: boolean;
-  created_at?: number;
-  admin_userid?: string;
-  share_token?: string;
-}
-
 export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: CloudWikiMountModalProps) {
   const [activeTab, setActiveTab] = useState<'wecom' | 'webdav' | 'oss'>('wecom');
   const [mountName, setMountName] = useState('');
@@ -54,13 +28,6 @@ export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: Cl
   const [syncing, setSyncing] = useState(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
 
-  // 微盘权限与共享模式
-  const [wecomMode, setWecomMode] = useState<'shared_list' | 'admin_create'>('shared_list');
-  const [sharedSpaces, setSharedSpaces] = useState<SharedWeComSpace[]>([]);
-  const [creatingSpace, setCreatingSpace] = useState(false);
-  const [adminUserId, setAdminUserId] = useState('');
-  const [copiedId, setCopiedId] = useState<string | null>(null);
-
   // 表单状态
   const [wecomForm, setWecomForm] = useState({ corpid: '', corpsecret: '', space_id: '' });
   const [webdavForm, setWebdavForm] = useState({ base_url: '', username: '', password: '', root_path: '/' });
@@ -69,7 +36,6 @@ export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: Cl
   useEffect(() => {
     if (isOpen) {
       loadMounts();
-      loadSharedSpaces();
       setTestResult(null);
     }
   }, [isOpen]);
@@ -83,18 +49,6 @@ export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: Cl
       }
     } catch (e) {
       console.error('加载云盘挂载失败:', e);
-    }
-  };
-
-  const loadSharedSpaces = async () => {
-    try {
-      const resp = await apiFetch('/api/v1/knowledge/wecom/shared_spaces');
-      if (resp.ok) {
-        const json = await resp.json();
-        setSharedSpaces(json.data || []);
-      }
-    } catch (e) {
-      console.error('加载共享微盘空间失败:', e);
     }
   };
 
@@ -188,77 +142,9 @@ export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: Cl
     }
   };
 
-  // 管理员一键创建专属微盘空间
-  const handleCreateSpace = async () => {
-    if (!wecomForm.corpid.trim() || !wecomForm.corpsecret.trim()) {
-      alert('创建空间需填写 CorpId 与 CorpSecret（自建应用密钥）');
-      return;
-    }
-    setCreatingSpace(true);
-    try {
-      const resp = await apiFetch('/api/v1/knowledge/wecom/create_space', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          corpid: wecomForm.corpid.trim(),
-          corpsecret: wecomForm.corpsecret.trim(),
-          space_name: mountName.trim() || 'AgentHub-规程知识库',
-          admin_userid: adminUserId.trim(),
-          operator_role: 'admin',
-          allow_all_departments: true,
-        }),
-      });
-      const data = await resp.json();
-      if (data.success) {
-        setWecomForm((prev) => ({ ...prev, space_id: data.space_id }));
-        if (!mountName.trim()) setMountName(data.space_name);
-        alert(`🎉 微盘空间创建成功！\nSpaceId: ${data.space_id}\n\n该空间已自动对自建应用开放全部权限，且全公司同事在微盘中均可见。已自动加入下方共享列表！`);
-        await loadSharedSpaces();
-        setWecomMode('shared_list');
-      } else {
-        alert('创建微盘空间失败: ' + data.message);
-      }
-    } catch (e: any) {
-      alert('调用异常: ' + e.message);
-    } finally {
-      setCreatingSpace(false);
-    }
-  };
-
-  // 普通成员免配一键直接挂载共享空间
-  const handleMountSharedSpace = async (space: SharedWeComSpace) => {
-    try {
-      const resp = await apiFetch('/api/v1/knowledge/wecom/mount_shared', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          space_id: space.space_id,
-          mount_name: space.space_name,
-          authority_tier: authorityTier,
-        }),
-      });
-      const data = await resp.json();
-      if (data.success) {
-        alert(data.message);
-        await loadMounts();
-      } else {
-        alert('挂载失败: ' + (data.message || data.detail));
-      }
-    } catch (e: any) {
-      alert('挂载请求异常: ' + e.message);
-    }
-  };
-
-  // 复制 SpaceId 与分享信息
-  const handleCopy = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
-  };
-
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
-      <div className="relative w-full max-w-3xl rounded-xl border border-border bg-surface-card p-6 shadow-2xl text-foreground max-h-[90vh] overflow-y-auto">
+      <div className="relative w-full max-w-3xl rounded-xl border border-border bg-surface-card p-6 shadow-2xl text-foreground">
         {/* 顶部标题栏 */}
         <div className="flex items-center justify-between border-b border-border pb-4">
           <div className="flex items-center gap-2">
@@ -301,131 +187,7 @@ export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: Cl
           </button>
         </div>
 
-        {/* 企业微信微盘特有：模式切换与共享空间展示 */}
-        {activeTab === 'wecom' && (
-          <div className="mt-3 flex items-center justify-between rounded-lg border border-border bg-background px-3 py-2">
-            <div className="flex items-center gap-2">
-              <span className="text-xs text-muted-foreground">当前微盘模式:</span>
-              <button
-                type="button"
-                onClick={() => setWecomMode('shared_list')}
-                className={`flex items-center gap-1 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-                  wecomMode === 'shared_list'
-                    ? 'bg-primary/20 text-primary border border-primary/30'
-                    : 'text-muted-foreground hover:bg-muted'
-                }`}
-              >
-                <Users className="h-3.5 w-3.5" /> 已有共享空间 (免密导入)
-              </button>
-              <button
-                type="button"
-                onClick={() => setWecomMode('admin_create')}
-                className={`flex items-center gap-1 rounded px-2.5 py-1 text-xs font-medium transition-colors ${
-                  wecomMode === 'admin_create'
-                    ? 'bg-primary/20 text-primary border border-primary/30'
-                    : 'text-muted-foreground hover:bg-muted'
-                }`}
-              >
-                <ShieldCheck className="h-3.5 w-3.5" /> 管理员 API 建库与配置
-              </button>
-            </div>
-            <span className="text-[11px] text-muted-foreground">
-              {wecomMode === 'shared_list' ? '全员免配置直接导入' : '仅管理员可调用 API 创建'}
-            </span>
-          </div>
-        )}
-
-        {/* 区域 A: 已共享微盘空间列表（供普通用户一键使用） */}
-        {activeTab === 'wecom' && wecomMode === 'shared_list' && (
-          <div className="mt-3 rounded-lg border border-border bg-background p-3">
-            <div className="flex items-center justify-between mb-2">
-              <h4 className="text-xs font-semibold text-foreground flex items-center gap-1.5">
-                <Share2 className="h-3.5 w-3.5 text-primary" />
-                团队微盘共享空间库 ({sharedSpaces.length})
-              </h4>
-              <button
-                type="button"
-                onClick={loadSharedSpaces}
-                className="text-[11px] text-muted-foreground hover:text-foreground flex items-center gap-1"
-              >
-                <RefreshCw className="h-3 w-3" /> 刷新
-              </button>
-            </div>
-
-            {sharedSpaces.length === 0 ? (
-              <div className="rounded border border-dashed border-border py-4 text-center text-xs text-muted-foreground">
-                <p>暂无由管理员创建或共享的微盘空间</p>
-                <button
-                  type="button"
-                  onClick={() => setWecomMode('admin_create')}
-                  className="mt-2 text-primary hover:underline text-xs"
-                >
-                  点击切换至「管理员 API 建库与配置」创建第一个空间
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-2 max-h-48 overflow-y-auto">
-                {sharedSpaces.map((s) => (
-                  <div
-                    key={s.space_id}
-                    className="flex items-center justify-between rounded border border-border bg-surface-card p-2 text-xs"
-                  >
-                    <div>
-                      <div className="flex items-center gap-2 font-medium">
-                        <span>{s.space_name}</span>
-                        <span className="text-[10px] text-muted-foreground">由 {s.admin_userid || '管理员'} 创建</span>
-                      </div>
-                      <div className="flex items-center gap-2 mt-1 font-mono text-[11px] text-muted-foreground">
-                        <span>ID: {s.space_id}</span>
-                        <button
-                          type="button"
-                          onClick={() => handleCopy(s.space_id, s.space_id)}
-                          className="hover:text-foreground flex items-center gap-0.5"
-                          title="复制 SpaceId"
-                        >
-                          {copiedId === s.space_id ? (
-                            <CheckCircle2 className="h-3 w-3 text-green-500" />
-                          ) : (
-                            <Copy className="h-3 w-3" />
-                          )}
-                          {copiedId === s.space_id ? '已复制' : '复制ID'}
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            handleCopy(
-                              `【微盘共享规程库】${s.space_name}\nSpaceId: ${s.space_id}\n请在 AgentHub 中直接挂载使用。`,
-                              `share_${s.space_id}`
-                            )
-                          }
-                          className="hover:text-foreground flex items-center gap-0.5 text-primary"
-                          title="复制完整分享卡片"
-                        >
-                          {copiedId === `share_${s.space_id}` ? (
-                            <CheckCircle2 className="h-3 w-3 text-green-500" />
-                          ) : (
-                            <Share2 className="h-3 w-3" />
-                          )}
-                          {copiedId === `share_${s.space_id}` ? '已复制' : '分享'}
-                        </button>
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => handleMountSharedSpace(s)}
-                      className="rounded bg-primary px-3 py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90 transition-colors"
-                    >
-                      📥 免配一键挂载
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* 区域 B: 表单输入区 */}
+        {/* 表单输入区 */}
         <div className="mt-4 grid grid-cols-2 gap-4">
           <div className="space-y-3">
             <div>
@@ -473,39 +235,6 @@ export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: Cl
                     className="mt-1 w-full rounded border border-border bg-surface-card px-2 py-1 text-sm outline-none"
                   />
                 </div>
-
-                {wecomMode === 'admin_create' && (
-                  <div className="rounded border border-primary/30 bg-primary/5 p-2 text-xs space-y-2">
-                    <div className="flex items-center justify-between">
-                      <span className="font-semibold text-primary flex items-center gap-1">
-                        <Sparkles className="h-3.5 w-3.5" /> API 自动建库 (绕过 640008 权限拦截)
-                      </span>
-                    </div>
-                    <div>
-                      <label className="text-[11px] text-muted-foreground">管理员企业微信 UserID (可选)</label>
-                      <input
-                        type="text"
-                        placeholder="如 ZhangSan (不填则默认为应用自身)"
-                        value={adminUserId}
-                        onChange={(e) => setAdminUserId(e.target.value)}
-                        className="mt-0.5 w-full rounded border border-border bg-surface-card px-2 py-1 text-xs outline-none"
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={handleCreateSpace}
-                      disabled={creatingSpace}
-                      className="w-full flex items-center justify-center gap-1 rounded bg-primary py-1 text-xs font-medium text-primary-foreground hover:bg-primary/90"
-                    >
-                      <Sparkles className="h-3 w-3" />
-                      {creatingSpace ? '正在通过企微 API 创建空间...' : '立即在企业微信微盘中新建空间'}
-                    </button>
-                    <p className="text-[10px] text-muted-foreground leading-tight">
-                      由应用 API 创建的空间将赋予应用完全管理员权限，且自动授权全公司可见，一键即可同步！
-                    </p>
-                  </div>
-                )}
-
                 <div>
                   <div className="flex items-center justify-between">
                     <label className="text-xs font-medium text-muted-foreground">微盘 SpaceId (必填)</label>
@@ -513,11 +242,14 @@ export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: Cl
                   </div>
                   <input
                     type="text"
-                    placeholder="如 s.1970... 或直接粘贴分享链接"
+                    placeholder="如 s.ww0b918f... 或粘贴空间分享链接"
                     value={wecomForm.space_id}
                     onChange={(e) => setWecomForm({ ...wecomForm, space_id: e.target.value })}
                     className="mt-1 w-full rounded border border-border bg-surface-card px-2 py-1 text-sm outline-none"
                   />
+                  <p className="mt-1 text-[11px] text-muted-foreground leading-tight">
+                    企微 API 要求必须指定目标空间。可在微盘空间右键点击分享链接复制获取，或在管理后台微盘中抓取。
+                  </p>
                 </div>
               </>
             )}
@@ -689,3 +421,4 @@ export function CloudWikiMountModal({ isOpen, onClose, workspaceRoot = '.' }: Cl
     </div>
   );
 }
+

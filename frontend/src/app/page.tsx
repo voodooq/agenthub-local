@@ -3122,6 +3122,7 @@ export default function WorkbenchPage() {
         statusPill={statusPill}
         pendingProposalCount={pendingActionCount}
         onSelectNavHub={(hub) => setActiveNavHub(hub)}
+        onOpenCloudWiki={() => setIsCloudWikiModalOpen(true)}
         onSelectWorkspace={(wsId) => {
           if (activeConvIdRef.current) {
             convMessagesCacheRef.current.set(activeConvIdRef.current, messages);
@@ -3320,17 +3321,6 @@ export default function WorkbenchPage() {
                 </span>
               </button>
             )}
-
-            {/* 云端 Wiki 挂载入口 (v1.5.5) */}
-            <button
-              type="button"
-              onClick={() => setIsCloudWikiModalOpen(true)}
-              className="flex items-center space-x-1 px-2.5 py-1 rounded-lg text-xs text-muted-foreground hover:text-foreground hover:bg-surface-200/70 transition-all"
-              title="挂载企业微信微盘、WebDAV 或 OSS 虚拟知识库"
-            >
-              <Cloud className="w-3.5 h-3.5 text-sky-500 shrink-0" />
-              <span className="text-[12px]">云端 Wiki</span>
-            </button>
 
             {/* Canvas 画布极简入口 */}
             <button

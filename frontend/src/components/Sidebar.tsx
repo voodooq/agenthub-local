@@ -21,6 +21,7 @@ import {
   FolderGit2,
   FolderPlus,
   Box,
+  Cloud,
   ChevronRight,
   ChevronDown,
   GitBranch,
@@ -59,6 +60,7 @@ interface SidebarProps {
   onOpenSearch: () => void;
   onOpenMemoryHub?: () => void;
   onOpenAccounts: () => void;
+  onOpenCloudWiki?: () => void;
   onOpenSync: () => void;
   onOpenSettings: () => void;
   onOpenTokenStats?: () => void;
@@ -118,6 +120,7 @@ export function Sidebar({
   onOpenSearch,
   onOpenMemoryHub,
   onOpenAccounts,
+  onOpenCloudWiki,
   onOpenSync,
   onOpenSettings,
   onOpenTokenStats,
@@ -368,12 +371,13 @@ export function Sidebar({
 
   // 快捷导航网格配置（统一克制语义色调）
   const secondaryHubs: {
-    id: MainNavHub;
+    id: MainNavHub | 'llmwiki';
     label: string;
     title: string;
     icon: React.ReactNode;
     hasIndicator?: boolean;
     spanFull?: boolean;
+    onClick?: () => void;
   }[] = [
     {
       id: 'agents',
@@ -400,12 +404,18 @@ export function Sidebar({
       icon: <Library className="w-3.5 h-3.5 shrink-0" />,
     },
     {
+      id: 'llmwiki',
+      label: 'LLMwiki',
+      title: 'LLMwiki (挂载企业微信微盘、WebDAV 或 OSS 虚拟知识库)',
+      icon: <Cloud className="w-3.5 h-3.5 shrink-0 text-sky-500" />,
+      onClick: onOpenCloudWiki,
+    },
+    {
       id: 'scheduled',
       label: '已安排调度',
       title: '已安排调度 (Triggers · 计划任务)',
       icon: <Clock className="w-3.5 h-3.5 shrink-0" />,
       hasIndicator: true,
-      spanFull: true,
     },
   ];
 
@@ -529,7 +539,13 @@ export function Sidebar({
               return (
                 <button
                   key={hub.id}
-                  onClick={() => onSelectNavHub?.(hub.id)}
+                  onClick={() => {
+                    if (hub.onClick) {
+                      hub.onClick();
+                    } else {
+                      onSelectNavHub?.(hub.id as MainNavHub);
+                    }
+                  }}
                   className={`relative w-9 h-9 rounded-xl flex items-center justify-center transition-colors ${
                     isActive
                       ? 'bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)]'
@@ -552,7 +568,13 @@ export function Sidebar({
               return (
                 <button
                   key={hub.id}
-                  onClick={() => onSelectNavHub?.(hub.id)}
+                  onClick={() => {
+                    if (hub.onClick) {
+                      hub.onClick();
+                    } else {
+                      onSelectNavHub?.(hub.id as MainNavHub);
+                    }
+                  }}
                   className={`flex items-center justify-between px-2 py-1.5 rounded-lg text-[11px] transition-colors ${
                     hub.spanFull ? 'col-span-2' : ''
                   } ${
