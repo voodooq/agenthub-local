@@ -786,3 +786,4 @@ export function LLMWikiDrawer({ isOpen, onClose, workspaceRoot = '.' }: LLMWikiD
     </aside>
   );
 }
+

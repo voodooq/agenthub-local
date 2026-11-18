@@ -40,7 +40,7 @@ import {
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
 import { AgentsView, AgentItem } from '@/components/AgentsView';
 import { LibraryView } from '@/components/LibraryView';
-import { LLMWikiDrawer } from '@/components/LLMWikiDrawer';
+import { LLMWikiView } from '@/components/LLMWikiView';
 import { ScheduledView } from '@/components/ScheduledView';
 import { SkillsView } from '@/components/SkillsView';
 import { StatusPill } from '@/components/StatusPill';
@@ -187,7 +187,6 @@ export default function WorkbenchPage() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [settingsInitialTab, setSettingsInitialTab] = useState<'models' | 'appearance' | 'personality'>('models');
   const [thinkingLevel, setThinkingLevel] = useState<ThinkingLevel>('high');
-  const [isCloudWikiModalOpen, setIsCloudWikiModalOpen] = useState(false);
 
   // 工作模式与系统治理
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
@@ -3122,7 +3121,7 @@ export default function WorkbenchPage() {
         statusPill={statusPill}
         pendingProposalCount={pendingActionCount}
         onSelectNavHub={(hub) => setActiveNavHub(hub)}
-        onOpenCloudWiki={() => setIsCloudWikiModalOpen(true)}
+        onOpenCloudWiki={() => setActiveNavHub('llmwiki')}
         onSelectWorkspace={(wsId) => {
           if (activeConvIdRef.current) {
             convMessagesCacheRef.current.set(activeConvIdRef.current, messages);
@@ -3357,6 +3356,7 @@ export default function WorkbenchPage() {
           <LibraryView
             workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
             onOpenCanvas={(title, content, type) => handleOpenCanvas(content, type, title)}
+            onOpenCloudWiki={() => setActiveNavHub('llmwiki')}
           />
         )}
 
@@ -3375,6 +3375,13 @@ export default function WorkbenchPage() {
         {activeNavHub === 'memory' && (
           <MemoryHubView
             workspaceId={activeWorkspaceId}
+          />
+        )}
+
+        {activeNavHub === 'llmwiki' && (
+          <LLMWikiView
+            workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
+            onOpenChat={() => setActiveNavHub('chat')}
           />
         )}
 
@@ -4771,13 +4778,6 @@ export default function WorkbenchPage() {
         liveTurnMetrics={messages
           .filter((m) => m.role === 'model' && m.token_stats)
           .map((m) => m.token_stats as TurnTokenMetrics)}
-      />
-
-      {/* 右侧 LLMWiki 知识中枢抽屉面板 (知识库挂载与训练) */}
-      <LLMWikiDrawer
-        isOpen={isCloudWikiModalOpen}
-        onClose={() => setIsCloudWikiModalOpen(false)}
-        workspaceRoot={workspaces.find((w) => w.id === activeWorkspaceId)?.root_path || '.'}
       />
     </div>
   );

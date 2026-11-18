@@ -32,6 +32,7 @@ import { LLMWikiDrawer } from './LLMWikiDrawer';
 interface LibraryViewProps {
   workspace: Workspace | undefined;
   onOpenCanvas?: (title: string, content: string, type: 'html' | 'mermaid' | 'code' | 'image') => void;
+  onOpenCloudWiki?: () => void;
 }
 
 interface FolderItem {
@@ -40,7 +41,7 @@ interface FolderItem {
   itemCount: number;
 }
 
-export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
+export function LibraryView({ workspace, onOpenCanvas, onOpenCloudWiki }: LibraryViewProps) {
   const { t } = useLanguage();
   const [filterType, setFilterType] = useState<'all' | 'docs' | 'media'>('all');
   const [searchQuery, setSearchQuery] = useState('');
@@ -417,7 +418,13 @@ export function LibraryView({ workspace, onOpenCanvas }: LibraryViewProps) {
                 <span>{t('在本地打开')}</span>
               </button>
               <button
-                onClick={() => setIsCloudWikiOpen(true)}
+                onClick={() => {
+                  if (onOpenCloudWiki) {
+                    onOpenCloudWiki();
+                  } else {
+                    setIsCloudWikiOpen(true);
+                  }
+                }}
                 className="px-2.5 py-1.5 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 transition text-xs flex items-center space-x-1.5 border border-emerald-500/30 font-medium"
                 title={t('挂载企业微信微盘、WebDAV 或 OSS 虚拟知识库')}
               >

@@ -38,7 +38,7 @@ import { useAppVersion } from '@/config/version';
 import { apiFetch } from '@/utils/apiClient';
 import { ServerFolderBrowser } from './ServerFolderBrowser';
 
-export type MainNavHub = 'chat' | 'agents' | 'library' | 'scheduled' | 'skills' | 'memory';
+export type MainNavHub = 'chat' | 'agents' | 'library' | 'scheduled' | 'skills' | 'memory' | 'llmwiki';
 
 interface SidebarProps {
   conversations: Conversation[];
@@ -371,7 +371,7 @@ export function Sidebar({
 
   // 快捷导航网格配置（统一克制语义色调）
   const secondaryHubs: {
-    id: MainNavHub | 'llmwiki';
+    id: MainNavHub;
     label: string;
     title: string;
     icon: React.ReactNode;
@@ -406,9 +406,8 @@ export function Sidebar({
     {
       id: 'llmwiki',
       label: 'LLMwiki',
-      title: 'LLMwiki (挂载企业微信微盘、WebDAV 或 OSS 虚拟知识库)',
+      title: 'LLMwiki (知识库挂载与训练中枢 · 企业微信微盘 / WebDAV / OSS)',
       icon: <Cloud className="w-3.5 h-3.5 shrink-0 text-sky-500" />,
-      onClick: onOpenCloudWiki,
     },
     {
       id: 'scheduled',
