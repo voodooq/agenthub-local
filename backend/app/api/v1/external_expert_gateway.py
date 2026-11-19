@@ -444,13 +444,14 @@ async def update_agent_knowledge_bases(
 
         # 2. 覆盖绑定关系
         await conn.execute("DELETE FROM expert_knowledge_bases WHERE expert_id = ?", (agent_id,))
+        now_ts = time.time()
         for item in payload.knowledge_bases:
             await conn.execute(
                 """
-                INSERT INTO expert_knowledge_bases (expert_id, kb_id, priority_weight, top_k_override)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO expert_knowledge_bases (expert_id, kb_id, priority_weight, top_k_override, created_at)
+                VALUES (?, ?, ?, ?, ?)
                 """,
-                (agent_id, item.kb_id, item.priority_weight, item.top_k_override),
+                (agent_id, item.kb_id, item.priority_weight, item.top_k_override, now_ts),
             )
         await conn.commit()
 
