@@ -190,27 +190,17 @@ export function Sidebar({
     return () => document.removeEventListener('mousedown', handleOutside);
   }, [menuOpenId]);
 
-  // 划分项目工作区（非 default）与独立对话（default），并支持快捷过滤与置顶优先排序
+  // 划分项目工作区（非 default）与独立对话（default），保持沙盒原位固定，点击对话或切换激活沙盒时不移动位置
   const normalizedFilter = filterQuery.trim().toLowerCase();
 
   const { projectWorkspaces, filteredProjectWorkspaces, pinnedStandalone, regularStandalone, standaloneConvs } =
     useMemo(() => {
       const allProjects = workspaces.filter((w) => w.id !== 'default');
 
-      // 优先置顶当前激活工作区、以及包含置顶对话的工作区
-      const pinnedWsIds = new Set(
-        conversations.filter((c) => c.is_pinned && c.workspace_id && c.workspace_id !== 'default').map((c) => c.workspace_id)
-      );
-
-      const sortedProjects = [...allProjects].sort((a, b) => {
-        const aScore = (a.id === activeWorkspaceId ? 2 : 0) + (pinnedWsIds.has(a.id) ? 1 : 0);
-        const bScore = (b.id === activeWorkspaceId ? 2 : 0) + (pinnedWsIds.has(b.id) ? 1 : 0);
-        return bScore - aScore;
-      });
-
+      // 保持沙盒列表原位固定顺序，点击对话或切换激活沙盒时绝不重新排序跳动
       const filteredProjects = normalizedFilter
-        ? sortedProjects.filter((w) => (w.name || '').toLowerCase().includes(normalizedFilter))
-        : sortedProjects;
+        ? allProjects.filter((w) => (w.name || '').toLowerCase().includes(normalizedFilter))
+        : allProjects;
 
       const allStandalone = conversations.filter((c) => !c.workspace_id || c.workspace_id === 'default');
       const filteredStandalone = normalizedFilter
@@ -224,7 +214,7 @@ export function Sidebar({
         pinnedStandalone: filteredStandalone.filter((c) => c.is_pinned),
         regularStandalone: filteredStandalone.filter((c) => !c.is_pinned),
       };
-    }, [workspaces, conversations, activeWorkspaceId, normalizedFilter]);
+    }, [workspaces, conversations, normalizedFilter]);
 
   const handleStartRename = (conv: Conversation) => {
     setEditingId(conv.id);
