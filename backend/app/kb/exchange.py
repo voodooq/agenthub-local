@@ -487,6 +487,19 @@ class KBExchangeEngine:
             )
             await conn.commit()
 
+        # 确保结构化规则表初始化并导入 structured_rules.jsonl
+        KBStorageManager.init_version_db_schema(target_db)
+        with zipfile.ZipFile(bundle_path, "r") as zf:
+            if "structured_rules.jsonl" in zf.namelist():
+                try:
+                    rule_lines = zf.read("structured_rules.jsonl").decode("utf-8").splitlines()
+                    rules_to_restore = [json.loads(line) for line in rule_lines if line.strip()]
+                    if rules_to_restore:
+                        from ..search.rule_extractor import StructuredRuleExtractor
+                        StructuredRuleExtractor.batch_save_rules(target_db, rules_to_restore)
+                except Exception as r_err:
+                    logger.debug(f"[KBExchange] 恢复 structured_rules.jsonl 异常: {r_err}")
+
         # 向量维度适配检查
         provider = await embedding_router.get_provider()
         if provider.is_available and provider.dimension > 0 and provider.dimension != embed_dim:

@@ -123,6 +123,12 @@ class TemporalMetadataExtractor:
             topic_cluster_id=topic_cluster_id,
         )
 
+    @classmethod
+    def extract_effective_date_and_ts(cls, text: str, filename: str) -> tuple[str, int]:
+        """从正文与文件名中提取落款生效日期与时间戳。"""
+        meta = cls.extract_metadata(filename=filename, content_prefix=text)
+        return meta.effective_date, meta.effective_ts
+
     @staticmethod
     def extract_topic_cluster_id(filename: str) -> str:
         """剥离年份、月份、版本、补充通知修饰词，生成主题族归一化指纹。"""
@@ -212,6 +218,7 @@ class TemporalReranker:
             item["base_score"] = base_score
             item["final_score"] = round(final_score, 4)
             item["freshness_factor"] = round(freshness_factor, 2)
+            item["temporal_decay_factor"] = round(freshness_factor, 2)
             item["cluster_boost"] = round(cluster_boost, 2)
             reranked.append(item)
 

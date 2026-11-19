@@ -18,6 +18,7 @@ from ...repository.swarm_repository import SwarmRepository
 from ...repository.workspace_repository import WorkspaceRepository
 from ...core.config import settings
 from ...core.logging_config import logger
+from ...search.hype_worker import ForegroundChatTracker
 from ...service.attachment_service import attachment_service, AttachmentValidationError
 
 router = APIRouter(prefix="/chat", tags=["Chat"])
@@ -151,6 +152,7 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
     发起 SSE 流式对话端点（由微内核 AgentRuntime 驱动：支持三层记忆、ReAct 工具闭环与多账号 429 自动故障转移）
     """
     async def event_generator():
+        ForegroundChatTracker.enter()
         completed = False
         active_conv_id = req.conversation_id
         queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
@@ -372,6 +374,7 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                     active_conv_id = str(event["conversation_id"])
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         finally:
+            ForegroundChatTracker.exit()
             if not producer_task.done():
                 producer_task.cancel()
                 try:

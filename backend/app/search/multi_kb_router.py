@@ -19,6 +19,7 @@ from ..kb.storage import KBStorageManager
 from .embedding_provider import embedding_router, HAS_NUMPY, np
 from .temporal_reranker import TemporalReranker
 from .hybrid_engine import HybridSearchEngine
+from .rule_extractor import StructuredRuleExtractor
 
 
 class MultiKBRetrievalRouter:
@@ -136,7 +137,8 @@ class MultiKBRetrievalRouter:
         seen_parents: set[str] = set()
 
         for c in reranked_candidates:
-            pid = c.get("parent_chunk_id")
+            # 兼容性回溯兜底：若 parent_chunk_id 为空，回退为自身 id (Small-to-Big Fallback)
+            pid = c.get("parent_chunk_id") or c.get("id")
             kb_id = c.get("kb_id")
             ver = c.get("version")
             db_path = KBStorageManager.get_version_db_path(kb_id, ver)
@@ -157,7 +159,7 @@ class MultiKBRetrievalRouter:
                         c_copy = dict(c)
                         c_copy["content"] = parent_row["content"]
                         c_copy["title"] = parent_row["title"]
-                        c_copy["is_expanded_parent"] = True
+                        c_copy["is_expanded_parent"] = (pid != c.get("id"))
                         seen_parents.add(pid)
                         final_top.append(c_copy)
                         if len(final_top) >= top_k:
@@ -166,7 +168,7 @@ class MultiKBRetrievalRouter:
                 except Exception as p_err:
                     logger.debug(f"[Small-to-Big] 读取父切片失败，保留原切片: {p_err}")
 
-            # 无父切片或未开启 Small-to-Big
+            # 无父切片或未开启 Small-to-Big / 回溯失败时原样返回自身切片，零漏召回
             chunk_hash = c.get("id") or c.get("title")
             if chunk_hash not in seen_parents:
                 seen_parents.add(chunk_hash)
@@ -174,12 +176,39 @@ class MultiKBRetrievalRouter:
                 if len(final_top) >= top_k:
                     break
 
-        # 格式化输出供 LLM 证据链参考（动态注入当前系统真实时间）
+        # 格式化输出供 LLM 证据链参考（动态注入当前系统真实时间与权威规则卡）
         current_date_str = datetime.now().strftime("%Y年%m月%d日")
         lines = [
             f"> 💡 **[系统时效环境声明]**：当前系统运行时间为 **{current_date_str}**。如命中文档存在历史年份版本更迭，系统已根据最新生效日期完成优先级仲裁，请严格以最新规程为准。\n",
-            f"### 已挂载知识库证据检索结果 (关键词: {query}, 命中文档数: {len(final_top)}):",
         ]
+
+        # 阶段三：刚性业务规则卡片匹配与置顶注入 (T-159-23)
+        if StructuredRuleExtractor.should_trigger_rule_search(query):
+            matched_rules: list[dict[str, Any]] = []
+            for target in targets:
+                kid = target["kb_id"]
+                ver = target["version"]
+                dbp = KBStorageManager.get_version_db_path(kid, ver)
+                if dbp.exists():
+                    r_list = StructuredRuleExtractor.query_matching_rules(
+                        db_path=dbp,
+                        kb_id=kid,
+                        query=query,
+                        limit=3,
+                    )
+                    matched_rules.extend(r_list)
+
+            if matched_rules:
+                # 按生效日期与年份排序取前 3 条最新规则
+                matched_rules.sort(
+                    key=lambda x: (x.get("effective_date") or "", x.get("doc_year") or 0),
+                    reverse=True,
+                )
+                rule_card_text = StructuredRuleExtractor.format_rules_for_prompt(matched_rules[:3])
+                if rule_card_text:
+                    lines.append(rule_card_text)
+
+        lines.append(f"### 已挂载知识库证据检索结果 (关键词: {query}, 命中文档数: {len(final_top)}):")
         for idx, c in enumerate(final_top, start=1):
             tier_label = "正式规程(Tier 1)" if c.get("authority_tier") == 1 else "常规资料(Tier 2)"
             eff_str = f", 生效日期: {c.get('effective_date')}" if c.get('effective_date') else ""
@@ -259,7 +288,8 @@ class MultiKBRetrievalRouter:
                         fts_sql = """
                         SELECT c.id, c.remote_uri, c.title, c.content, c.authority_tier, c.mtime,
                                c.doc_year, c.effective_date, c.effective_ts, c.doc_priority_type,
-                               c.topic_cluster_id, c.is_latest_in_cluster, c.chunk_role, c.parent_chunk_id,
+                               c.topic_cluster_id, c.is_latest_in_cluster, c.chunk_role,
+                               COALESCE(NULLIF(c.parent_chunk_id, ''), c.id) AS parent_chunk_id,
                                c.embedding_blob, rank as fts_rank
                         FROM hybrid_chunks_fts f
                         JOIN hybrid_chunks c ON f.rowid = c.rowid
@@ -281,7 +311,8 @@ class MultiKBRetrievalRouter:
                     like_sql = f"""
                     SELECT id, remote_uri, title, content, authority_tier, mtime,
                            doc_year, effective_date, effective_ts, doc_priority_type,
-                           topic_cluster_id, is_latest_in_cluster, chunk_role, c.parent_chunk_id,
+                           topic_cluster_id, is_latest_in_cluster, chunk_role,
+                           COALESCE(NULLIF(parent_chunk_id, ''), id) AS parent_chunk_id,
                            embedding_blob, NULL as fts_rank
                     FROM hybrid_chunks
                     WHERE ({" OR ".join(where_clauses)})

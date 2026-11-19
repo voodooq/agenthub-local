@@ -128,6 +128,13 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [isImporting, setIsImporting] = useState(false);
   const [exportingKbId, setExportingKbId] = useState<string | null>(null);
 
+  // ── v1.5.9 收口补丁：分层索引与后台口语化增强状态 ──
+  const [kbStatusMap, setKbStatusMap] = useState<Record<string, {
+    hierarchy?: { needs_upgrade: boolean; total_chunks: number; parent_chunks: number; hype_questions: number };
+    enhancement?: { total_parents: number; hype_completed: number; rules_extracted: number; status: string };
+  }>>({});
+  const [upgradingKbId, setUpgradingKbId] = useState<string | null>(null);
+
   const handleExportBundle = async (kb: KnowledgeBaseItem) => {
     setExportingKbId(kb.kb_id);
     try {
@@ -218,6 +225,26 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     }
   };
 
+  const fetchKbExtraStatus = async (kbList: KnowledgeBaseItem[]) => {
+    const newMap: Record<string, any> = {};
+    await Promise.all(
+      kbList.map(async (kb) => {
+        try {
+          const [hRes, eRes] = await Promise.all([
+            apiFetch(`/api/v1/kb/${kb.kb_id}/hierarchy-status?version=${encodeURIComponent(kb.active_version || 'v1.0.0')}`),
+            apiFetch(`/api/v1/kb/${kb.kb_id}/enhancement-status?version=${encodeURIComponent(kb.active_version || 'v1.0.0')}`),
+          ]);
+          const hData = hRes.ok ? (await hRes.json()).data : null;
+          const eData = eRes.ok ? (await eRes.json()).data : null;
+          newMap[kb.kb_id] = { hierarchy: hData, enhancement: eData };
+        } catch {
+          // ignore
+        }
+      })
+    );
+    setKbStatusMap((prev) => ({ ...prev, ...newMap }));
+  };
+
   const loadKBs = async () => {
     setLoadingKbs(true);
     try {
@@ -229,11 +256,35 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
         if (list.length > 0 && !selectedKbId) {
           setSelectedKbId(list[0].kb_id);
         }
+        fetchKbExtraStatus(list);
       }
     } catch (e) {
       console.error('加载知识库资产失败:', e);
     } finally {
       setLoadingKbs(false);
+    }
+  };
+
+  const handleUpgradeHierarchy = async (kb: KnowledgeBaseItem) => {
+    if (!confirm(`确定要将知识库【${kb.name}】一键重构为父子分层结构吗？\n升级前系统将自动生成 auto_backup 快照备份，可随时无损回滚。`)) {
+      return;
+    }
+    setUpgradingKbId(kb.kb_id);
+    try {
+      const res = await apiFetch(`/api/v1/kb/${kb.kb_id}/upgrade-to-parent-child?version=${encodeURIComponent(kb.active_version || 'v1.0.0')}`, {
+        method: 'POST',
+      });
+      if (res.ok) {
+        alert(`知识库【${kb.name}】已成功重塑为父子分层结构，口语化问答正于后台异步提炼中！`);
+        await loadKBs();
+      } else {
+        const err = await res.json();
+        alert(`升级失败: ${err.detail || '未知错误'}`);
+      }
+    } catch (e: any) {
+      alert(`升级失败: ${e.message}`);
+    } finally {
+      setUpgradingKbId(null);
     }
   };
 
@@ -1223,6 +1274,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                   ) : (
                     kbsList.map((kb) => {
                       const isSelected = selectedKbId === kb.kb_id;
+                      const extra = kbStatusMap[kb.kb_id];
                       return (
                         <div
                           key={kb.kb_id}
@@ -1234,7 +1286,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                           }`}
                         >
                           <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2 min-w-0 flex-1">
+                            <div className="flex items-center gap-2 min-w-0 flex-1 flex-wrap">
                               <span className="font-semibold text-sm text-foreground truncate" title={kb.name}>{kb.name}</span>
                               <button
                                 type="button"
@@ -1263,9 +1315,52 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                   ? '🔒 离线安全快照'
                                   : '本地可编辑'}
                               </span>
+
+                              {extra?.hierarchy?.needs_upgrade && (
+                                <span
+                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0"
+                                  title="检测到存量切片缺少父子分层结构，建议一键升级"
+                                >
+                                  ⚠️ 待升级分层索引
+                                </span>
+                              )}
+
+                              {extra?.enhancement?.status === 'running' && (
+                                <span
+                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0 animate-pulse flex items-center gap-1"
+                                  title={`后台口语化问答已完成 ${extra.enhancement.hype_completed}/${extra.enhancement.total_parents} 条，抽取 ${extra.enhancement.rules_extracted} 条规则`}
+                                >
+                                  ✨ 口语增强 {extra.enhancement.hype_completed}/{extra.enhancement.total_parents}
+                                </span>
+                              )}
+
+                              {extra?.enhancement?.status === 'completed' && (
+                                <span
+                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shrink-0 flex items-center gap-1"
+                                  title="父子切片分层与口语问答检索均已就绪"
+                                >
+                                  ✨ 口语化就绪
+                                </span>
+                              )}
                             </div>
 
                             <div className="flex items-center gap-1.5 shrink-0">
+                              {extra?.hierarchy?.needs_upgrade && (
+                                <button
+                                  type="button"
+                                  disabled={upgradingKbId === kb.kb_id}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleUpgradeHierarchy(kb);
+                                  }}
+                                  className="flex items-center gap-1 px-2.5 py-1 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700 bg-amber-500/10 hover:bg-amber-500/15 rounded-lg border border-amber-500/20 transition-all font-medium whitespace-nowrap"
+                                  title="升级前将自动创建 auto_backup 快照，安全无损重构分层索引"
+                                >
+                                  <Sparkles className={`w-3.5 h-3.5 text-amber-500 ${upgradingKbId === kb.kb_id ? 'animate-spin' : ''}`} />
+                                  <span>{upgradingKbId === kb.kb_id ? '升级中...' : '重塑分层'}</span>
+                                </button>
+                              )}
+
                               <button
                                 type="button"
                                 disabled={exportingKbId === kb.kb_id}

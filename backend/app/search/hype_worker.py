@@ -20,6 +20,25 @@ from typing import Any
 from ..core.logging_config import logger
 from ..kb.storage import KBStorageManager
 from .embedding_provider import embedding_router, HAS_NUMPY, np
+from .rule_extractor import StructuredRuleExtractor
+
+
+class ForegroundChatTracker:
+    """前台活跃对话追踪器（用于后台增强任务让路限流）。"""
+
+    _active_count: int = 0
+
+    @classmethod
+    def enter(cls) -> None:
+        cls._active_count += 1
+
+    @classmethod
+    def exit(cls) -> None:
+        cls._active_count = max(0, cls._active_count - 1)
+
+    @classmethod
+    def is_active(cls) -> bool:
+        return cls._active_count > 0
 
 
 HYPE_SYSTEM_PROMPT = "你是一个专业规程问答提炼专家，只输出纯文本问题列表，严禁寒暄与废话。"
@@ -162,13 +181,30 @@ class HyPEQuestionWorker:
 
         provider = await embedding_router.get_provider()
         hype_chunks_to_insert: list[dict[str, Any]] = []
+        rules_to_insert: list[dict[str, Any]] = []
 
         for parent in parents_to_process:
+            # 前台优先让路退避调度：感知到前台活跃对话时休眠 1.5s
+            while ForegroundChatTracker.is_active():
+                logger.debug("[HyPE] 检测到前台活跃对话，后台索引增强自动让路休眠 1.5s...")
+                await asyncio.sleep(1.5)
+
             pid = parent["id"]
             title = parent.get("title", "")
             content = parent.get("content", "")
 
-            # 提炼 3~4 个口语化提问
+            # 1. 结构化刚性业务规则同步抽取 (T-159-23)
+            try:
+                extracted = StructuredRuleExtractor.extract_rules_from_parent_chunk(
+                    chunk=parent,
+                    kb_id=kb_id,
+                )
+                if extracted:
+                    rules_to_insert.extend(extracted)
+            except Exception as r_err:
+                logger.debug(f"[HyPE] 抽取结构化规则卡片异常: {r_err}")
+
+            # 2. 提炼 3~4 个口语化提问
             questions = await cls.extract_questions_from_llm(content=content, title=title)
             for idx, q in enumerate(questions, start=1):
                 chunk_id = f"hype_{pid}_{idx}"
@@ -190,6 +226,11 @@ class HyPEQuestionWorker:
                     "parent_chunk_id": pid,
                     "section_path": parent.get("section_path", ""),
                 })
+
+        # 3. 批量持久化结构化规则
+        if rules_to_insert:
+            saved_r_count = StructuredRuleExtractor.batch_save_rules(db_path=db_path, rules=rules_to_insert)
+            logger.info(f"[HyPE] 成功抽取并写入 {saved_r_count} 条刚性业务规则卡片 (kb_id={kb_id})")
 
         if not hype_chunks_to_insert:
             return 0
@@ -284,4 +325,61 @@ class HyPEQuestionWorker:
             loop.create_task(_runner())
         except RuntimeError:
             pass
+
+    @classmethod
+    async def get_enhancement_status(cls, kb_id: str, version: str = "v1.0.0") -> dict[str, Any]:
+        """获取知识库的后台口语化问答与刚性规则抽取进度。"""
+        db_path = KBStorageManager.get_version_db_path(kb_id, version)
+        if not db_path.exists():
+            return {
+                "kb_id": kb_id,
+                "version": version,
+                "total_parents": 0,
+                "hype_completed": 0,
+                "rules_extracted": 0,
+                "status": "idle",
+            }
+
+        def _query():
+            conn = sqlite3.connect(str(db_path))
+            cur = conn.cursor()
+            try:
+                cur.execute("SELECT count(*) FROM hybrid_chunks WHERE chunk_role = 'parent'")
+                total_parents = cur.fetchone()[0]
+
+                cur.execute(
+                    "SELECT count(DISTINCT parent_chunk_id) FROM hybrid_chunks WHERE chunk_role = 'hype_question' AND parent_chunk_id IS NOT NULL"
+                )
+                hype_completed = cur.fetchone()[0]
+
+                rules_count = 0
+                try:
+                    cur.execute("SELECT count(*) FROM kb_structured_rules WHERE kb_id = ?", (kb_id,))
+                    rules_count = cur.fetchone()[0]
+                except Exception:
+                    pass
+
+                return total_parents, hype_completed, rules_count
+            except Exception:
+                return 0, 0, 0
+            finally:
+                conn.close()
+
+        total, completed, rules = await asyncio.to_thread(_query)
+        task_key = f"{kb_id}:{version}"
+        if task_key in cls._running_tasks:
+            status = "running"
+        elif total > 0 and completed >= total:
+            status = "completed"
+        else:
+            status = "idle"
+
+        return {
+            "kb_id": kb_id,
+            "version": version,
+            "total_parents": total,
+            "hype_completed": completed,
+            "rules_extracted": rules,
+            "status": status,
+        }
 

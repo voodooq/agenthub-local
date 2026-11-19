@@ -369,6 +369,14 @@ class HierarchicalChunk:
     is_latest_in_cluster: int = 1
     mtime: float = 0.0
 
+    @property
+    def content(self) -> str:
+        return self.content_text
+
+    @content.setter
+    def content(self, val: str) -> None:
+        self.content_text = val
+
 
 class ParentChildASTChunker:
     """父子分层结构化切分器 (ParentChildASTChunker)。
@@ -399,8 +407,8 @@ class ParentChildASTChunker:
     def chunk_document(
         cls,
         text: str,
-        filename: str,
-        remote_uri: str,
+        filename: str = "",
+        remote_uri: str = "",
         authority_tier: int = 2,
         doc_year: int = 0,
         effective_date: str = "",
@@ -409,8 +417,11 @@ class ParentChildASTChunker:
         topic_cluster_id: str = "",
         is_latest_in_cluster: int = 1,
         mtime: float = 0.0,
+        title: str = "",
     ) -> list[HierarchicalChunk]:
         """将规程或文档切分为父子两级切片。"""
+        if not filename and title:
+            filename = title
         if not text.strip():
             return []
 

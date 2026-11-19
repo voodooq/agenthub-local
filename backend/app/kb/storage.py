@@ -472,6 +472,22 @@ class KBStorageManager:
             CREATE INDEX IF NOT EXISTS idx_kt_sub ON knowledge_triples(subject);
             CREATE INDEX IF NOT EXISTS idx_kt_obj ON knowledge_triples(object);
             CREATE INDEX IF NOT EXISTS idx_kt_chunk ON knowledge_triples(chunk_id);
+
+            CREATE TABLE IF NOT EXISTS kb_structured_rules (
+                id                  TEXT PRIMARY KEY,
+                kb_id               TEXT NOT NULL,
+                doc_id              TEXT NOT NULL,
+                doc_year            INTEGER DEFAULT 0,
+                effective_date      TEXT DEFAULT '',
+                rule_category       TEXT NOT NULL,
+                condition_tags      TEXT NOT NULL,
+                rule_summary        TEXT NOT NULL,
+                structured_payload  TEXT NOT NULL,
+                source_chunk_id     TEXT,
+                created_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_rules_kb_effective ON kb_structured_rules(kb_id, effective_date DESC, rule_category);
             """)
 
             # 兼容性平滑升级：补齐 graph_extracted 列

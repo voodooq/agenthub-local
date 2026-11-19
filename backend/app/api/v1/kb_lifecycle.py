@@ -21,6 +21,8 @@ from ...kb.manager import KBLifecycleManager
 from ...kb.package import KBPackageEngine
 from ...kb.storage import KBStorageManager
 from ...kb.exchange import KBExchangeEngine
+from ...kb.upgrade_service import KBUpgradeService
+from ...search.hype_worker import HyPEQuestionWorker
 from ...search.multi_kb_router import MultiKBRetrievalRouter
 
 router = APIRouter(prefix="/kb", tags=["kb-lifecycle"])
@@ -735,5 +737,39 @@ async def rollback_kb_snapshot(kb_id: str, snapshot_id: str) -> dict[str, Any]:
     except Exception as e:
         logger.error(f"知识库回滚失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"回滚失败: {str(e)}")
+
+
+@router.get("/{kb_id}/hierarchy-status")
+async def get_kb_hierarchy_status(kb_id: str, version: str = "v1.0.0") -> dict[str, Any]:
+    """检查知识库切片的分层索引状态（是否为老旧扁平切片）。"""
+    try:
+        data = await KBUpgradeService.check_hierarchy_status(kb_id, version)
+        return {"success": True, "data": data}
+    except Exception as e:
+        logger.error(f"检查知识库分层索引状态失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/{kb_id}/upgrade-to-parent-child")
+async def upgrade_kb_to_parent_child(kb_id: str, version: str = "v1.0.0") -> dict[str, Any]:
+    """一键将老旧扁平知识库升级为父子分层结构并调度 HyPE 口语增强。"""
+    try:
+        res = await KBUpgradeService.upgrade_kb_to_parent_child(kb_id, version)
+        return {"success": True, "data": res}
+    except Exception as e:
+        logger.error(f"升级知识库为分层索引失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/{kb_id}/enhancement-status")
+async def get_kb_enhancement_status(kb_id: str, version: str = "v1.0.0") -> dict[str, Any]:
+    """获取指定知识库后台口语化问答与规则抽取的进度状态。"""
+    try:
+        data = await HyPEQuestionWorker.get_enhancement_status(kb_id, version)
+        return {"success": True, "data": data}
+    except Exception as e:
+        logger.error(f"查询知识库增强进度失败: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 
