@@ -1514,6 +1514,20 @@ export default function WorkbenchPage() {
       }
     }
 
+    // 若当前工作区为某个专家的专属沙盒（如 [沙盒] 公司财务），自动映射为该专家
+    if (targetAgentIds.length === 0 && knownAgents.length > 0) {
+      const currentWs = workspaces.find((w) => w.id === activeWorkspaceId);
+      if (currentWs) {
+        const wsCleanName = (currentWs.name || '').replace('[沙盒]', '').trim();
+        const matchedSandboxAgent = knownAgents.find(
+          (ag) => ag.name === wsCleanName || currentWs.name === `[沙盒] ${ag.name}`
+        );
+        if (matchedSandboxAgent) {
+          targetAgentIds.push(matchedSandboxAgent.id);
+        }
+      }
+    }
+
     let effectiveConvId = activeConvId;
     if (!customPrompt) {
       setInputPrompt('');
@@ -1776,6 +1790,7 @@ export default function WorkbenchPage() {
           inquiry_action: options?.inquiryAction || null,
           swarm_mode: effectiveSwarmMode,
           target_agent_ids: targetAgentIds.length > 0 ? targetAgentIds : undefined,
+          agent_id: targetAgentIds.length > 0 ? targetAgentIds[0] : undefined,
           swarm_id: activeSwarmId || null,
           attachments: currentAttachments.map((a) => ({
             name: a.name,

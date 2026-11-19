@@ -182,7 +182,7 @@ class TemporalReranker:
 
         reranked = []
         for c in candidates:
-            base_score = float(c.get("score") or c.get("rrf_score") or 0.0)
+            base_score = float(c.get("final_score") or c.get("score") or c.get("rrf_score") or 0.0)
             eff_ts = int(c.get("effective_ts") or 0)
             is_latest = int(c.get("is_latest_in_cluster") if c.get("is_latest_in_cluster") is not None else 1)
             p_type = c.get("doc_priority_type") or "normal"

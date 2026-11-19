@@ -983,7 +983,23 @@ class AgentRuntime:
         active_incognito = bool(conv_obj.incognito) if conv_obj else bool(incognito)
         ws_id = (getattr(conv_obj, "workspace_id", None) if conv_obj else None) or ws_id
 
-        # ── 解析专家绑定配置与防幻觉参数 ──
+        # ── 解析专家绑定配置与防幻觉参数 (若未显式指定 agent_id 则根据专家沙盒工作区智能反查) ──
+        if not agent_id and ws_id:
+            try:
+                from ..repository.agent_repository import AgentProfileRepository
+                from ..repository.workspace_repository import WorkspaceRepository
+                ws_rec = await WorkspaceRepository.get_by_id(ws_id)
+                if ws_rec:
+                    ws_name = str(ws_rec.get("name") or "")
+                    clean_name = ws_name.replace("[沙盒]", "").strip()
+                    agents = await AgentProfileRepository.list_agents()
+                    for ag in agents:
+                        if ag.get("name") and (ag["name"] == clean_name or ag["name"] == ws_name):
+                            agent_id = ag["id"]
+                            break
+            except Exception as e:
+                logger.debug(f"[AgentRuntime] 沙盒工作区反查专家 ID 跳过: {e}")
+
         effective_grounding = grounding_config
         if not effective_grounding and agent_id:
             try:
@@ -2007,6 +2023,70 @@ class AgentRuntime:
             executed_tools_record: list[dict[str, Any]] = []
             retrieved_evidence_chunks: list[dict[str, Any]] = []
             critique_retry_count: int = 0
+
+            # ── v1.5.9+ 专家知识底座前置检索与证据链注入 (Grounding Engine) ──
+            if agent_id and effective_user_message:
+                try:
+                    from ..search.expert_kb_router import ExpertKnowledgeRouter
+                    has_kb, kb_prompt, citations, is_blocked = await ExpertKnowledgeRouter.search_for_expert(
+                        expert_id=agent_id,
+                        query=effective_user_message,
+                        default_top_k=6,
+                    )
+                    if has_kb:
+                        if is_blocked:
+                            # 触发严格防虚构拒答熔断：直接如实拒答，阻断大模型虚构
+                            yield {
+                                "type": "conv_init",
+                                "conversation_id": conv_id,
+                                "is_new": is_new_conv,
+                                "title": short_title,
+                                "turn_id": current_turn_id,
+                                "scene_mode": active_scene,
+                                "incognito": active_incognito,
+                            }
+                            yield {
+                                "type": "content",
+                                "text": kb_prompt,
+                            }
+                            yield {
+                                "type": "done",
+                                "conversation_id": conv_id,
+                                "model_name": model_name,
+                                "grounding_status": "blocked",
+                            }
+                            await MessageRepository.create({
+                                "id": str(uuid.uuid4()),
+                                "conversation_id": conv_id,
+                                "role": "user",
+                                "content": user_message,
+                                "turn_id": current_turn_id,
+                            })
+                            await MessageRepository.create({
+                                "id": str(uuid.uuid4()),
+                                "conversation_id": conv_id,
+                                "role": "assistant",
+                                "content": kb_prompt,
+                                "turn_id": current_turn_id,
+                            })
+                            return
+                        elif kb_prompt:
+                            system_override = (
+                                (system_override or "")
+                                + "\n\n"
+                                + kb_prompt
+                            ).strip()
+                            for c in citations:
+                                retrieved_evidence_chunks.append({
+                                    "source_uri": c.get("title") or c.get("remote_uri", "kb://expert"),
+                                    "content_text": c.get("content", "")[:1200],
+                                    "authority_tier": c.get("authority_tier", 1),
+                                    "score": round(float(c.get("final_score") or 0.9), 3),
+                                })
+                            logger.info(f"[AgentRuntime] 已为专家 {agent_id} 成功前置注入 {len(citations)} 条真实知识底座证据切片")
+                except Exception as e:
+                    logger.error(f"[AgentRuntime] 专家知识底座检索注入异常: {e}", exc_info=True)
+
             while step_idx < current_max_steps:
                 if await _check_cancelled():
                     was_cancelled = True
