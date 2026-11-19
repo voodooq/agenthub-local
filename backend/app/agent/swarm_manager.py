@@ -333,6 +333,7 @@ class SwarmManager:
             scene_mode="agent",
             allowed_tools=eff_tools,
             allowed_write_dirs=member.get("allowed_write_dirs"),
+            agent_id=member.get("agent_id") or (name if name.startswith("agent_") else None),
             swarm_mode=True,
             swarm_id=swarm_id,
             swarm_member_name=name,

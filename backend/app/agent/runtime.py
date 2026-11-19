@@ -2028,9 +2028,17 @@ class AgentRuntime:
             if agent_id and effective_user_message:
                 try:
                     from ..search.expert_kb_router import ExpertKnowledgeRouter
+                    # 提取纯粹的用户业务提问 (剥离蜂群点名与系统外包装饰词，确保检索召回精准度)
+                    search_query = effective_user_message
+                    if "点名消息" in search_query or "[#" in search_query or "@" in search_query:
+                        m_query = re.findall(r"\[#\d+\s+[^\]]+\]:\s*(.+)", search_query)
+                        if m_query:
+                            search_query = "\n".join(m_query)
+                        search_query = re.sub(r"@[a-zA-Z0-9_\-\u4e00-\u9fff]+", "", search_query).strip()
+
                     has_kb, kb_prompt, citations, is_blocked = await ExpertKnowledgeRouter.search_for_expert(
                         expert_id=agent_id,
-                        query=effective_user_message,
+                        query=search_query or effective_user_message,
                         default_top_k=6,
                     )
                     if has_kb:
@@ -2075,6 +2083,7 @@ class AgentRuntime:
                                 (system_override or "")
                                 + "\n\n"
                                 + kb_prompt
+                                + "\n\n【核心行动约束】: 系统已为您前置精准调取并挂载关联专家知识库真实事实切片。请优先基于上述事实证据直接给出严谨、准确、完整的答复或报告，无需且严禁在工作区执行无关的目录扫描或盲目探测命令！"
                             ).strip()
                             for c in citations:
                                 retrieved_evidence_chunks.append({

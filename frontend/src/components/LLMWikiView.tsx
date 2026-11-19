@@ -144,6 +144,28 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     enhancement?: { total_parents: number; hype_completed: number; rules_extracted: number; status: string };
   }>>({});
   const [upgradingKbId, setUpgradingKbId] = useState<string | null>(null);
+  const [exportedModalInfo, setExportedModalInfo] = useState<{ kbName: string; filePath: string } | null>(null);
+  const [isRevealing, setIsRevealing] = useState(false);
+  const [isPathCopied, setIsPathCopied] = useState(false);
+
+  const handleRevealLocalFile = async (filePath: string) => {
+    setIsRevealing(true);
+    try {
+      const res = await apiFetch('/api/v1/kb/reveal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file_path: filePath }),
+      });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => '');
+        throw new Error(detail || '打开系统文件管理器失败');
+      }
+    } catch (err: any) {
+      alert(`定位文件失败: ${err.message || err}`);
+    } finally {
+      setIsRevealing(false);
+    }
+  };
 
   const handleExportBundle = async (kb: KnowledgeBaseItem) => {
     setExportingKbId(kb.kb_id);
@@ -154,15 +176,59 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
         throw new Error(`导出失败: ${response.statusText}${errorDetail ? ` (${errorDetail})` : ''}`);
       }
       const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
       const safeName = kb.name.replace(/[\\/*?:"<>|]/g, '_');
-      a.download = `${safeName}_${kb.active_version || 'v1.0.0'}.ahkb`;
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
+      const defaultFilename = `${safeName}_${kb.active_version || 'v1.0.0'}.ahkb`;
+
+      let encodedPath = response.headers.get('X-Local-File-Path') || '';
+      let localPath = '';
+      try {
+        localPath = encodedPath ? decodeURIComponent(encodedPath) : '';
+      } catch {
+        localPath = encodedPath;
+      }
+
+      // 优先检测现代浏览器原生 showSaveFilePicker API (支持用户自由选择任意盘符与目录)
+      if (typeof (window as any).showSaveFilePicker === 'function') {
+        try {
+          const fileHandle = await (window as any).showSaveFilePicker({
+            suggestedName: defaultFilename,
+            types: [{
+              description: 'AgentHub 知识库资产包 (*.ahkb)',
+              accept: { 'application/zip': ['.ahkb'] },
+            }],
+          });
+          const writable = await fileHandle.createWritable();
+          await writable.write(blob);
+          await writable.close();
+          return;
+        } catch (pickerErr: any) {
+          if (pickerErr.name === 'AbortError') {
+            // 用户在文件选择器中点击了“取消”，正常静默退出
+            return;
+          }
+          // 其他环境错误则平稳降级
+        }
+      }
+
+      // 降级执行原生 DOM a 标签下载 (兼容标准浏览器 Downloads 目录触发)
+      try {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = defaultFilename;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      } catch {}
+
+      // 无论是否弹出浏览器下载，只要拿到磁盘物理生成路径，均弹出明确交互卡片引导在资源管理器中直接定位
+      if (localPath) {
+        setExportedModalInfo({
+          kbName: kb.name,
+          filePath: localPath,
+        });
+      }
     } catch (err: any) {
       alert(`导出知识包失败: ${err.message || err}`);
     } finally {
@@ -2565,6 +2631,84 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                   className="px-3 py-1.5 rounded-lg bg-surface-200 hover:bg-surface-300 text-xs text-foreground font-medium transition"
                 >
                   关闭
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* v1.5.9 知识库导出成功与路径交互弹窗 */}
+      {exportedModalInfo && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-4 animate-in fade-in duration-200">
+          <div className="bg-surface-100 border border-border rounded-xl shadow-2xl max-w-lg w-full overflow-hidden">
+            <div className="px-5 py-4 border-b border-border flex items-center justify-between bg-surface-200/50">
+              <div className="flex items-center gap-2">
+                <div className="w-8 h-8 rounded-lg bg-emerald-500/10 text-emerald-500 flex items-center justify-center font-bold">
+                  ✓
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold text-foreground">知识库资产包已生成</h3>
+                  <p className="text-[11px] text-muted-foreground">可直接在系统文件管理器中查看或复制路径</p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setExportedModalInfo(null);
+                  setIsPathCopied(false);
+                }}
+                className="text-muted-foreground hover:text-foreground text-sm p-1 rounded-md hover:bg-surface-300 transition"
+              >
+                ✕
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div>
+                <label className="text-xs text-muted-foreground block mb-1">知识库名称</label>
+                <div className="text-sm font-medium text-foreground">{exportedModalInfo.kbName}</div>
+              </div>
+
+              <div>
+                <label className="text-xs text-muted-foreground block mb-1">本地落盘路径</label>
+                <div className="p-2.5 rounded-lg bg-surface-200/80 border border-border text-xs text-foreground font-mono break-all select-all">
+                  {exportedModalInfo.filePath}
+                </div>
+              </div>
+
+              <div className="text-[11px] text-muted-foreground bg-primary/5 p-3 rounded-lg border border-primary/10">
+                💡 资产包包含完整的自包含规程分块、向量与口语化 QA 索引，支持随时在其他工作区或 AgentHub 节点中一键无损导入恢复。
+              </div>
+            </div>
+
+            <div className="px-5 py-3.5 bg-surface-200/30 border-t border-border flex items-center justify-between gap-2">
+              <button
+                onClick={() => {
+                  navigator.clipboard.writeText(exportedModalInfo.filePath);
+                  setIsPathCopied(true);
+                  setTimeout(() => setIsPathCopied(false), 2000);
+                }}
+                className="px-3 py-1.5 rounded-lg border border-border text-xs text-foreground hover:bg-surface-200 transition flex items-center gap-1.5"
+              >
+                {isPathCopied ? '已复制路径 ✓' : '复制完整路径'}
+              </button>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => handleRevealLocalFile(exportedModalInfo.filePath)}
+                  disabled={isRevealing}
+                  className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition shadow-sm flex items-center gap-1.5 disabled:opacity-50"
+                >
+                  {isRevealing ? '正在定位...' : '在文件夹中打开 📂'}
+                </button>
+                <button
+                  onClick={() => {
+                    setExportedModalInfo(null);
+                    setIsPathCopied(false);
+                  }}
+                  className="px-3 py-1.5 rounded-lg bg-surface-300 hover:bg-surface-400 text-xs text-foreground transition font-medium"
+                >
+                  完成
                 </button>
               </div>
             </div>

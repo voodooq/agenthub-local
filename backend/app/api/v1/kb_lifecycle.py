@@ -666,6 +666,7 @@ async def export_kb_bundle(
     version: str | None = Query(default=None, description="版本号，缺省为当前激活版本"),
     author: str = Query(default="AgentHub User", description="导出人"),
     change_summary: str = Query(default="", description="版本变更说明"),
+    reveal: bool = Query(default=False, description="是否在系统文件管理器中直接高亮选中导出的资产包"),
 ):
     """将指定版本的知识库打包导出为标准 .ahkb 归档文件。"""
     kbs = await KBLifecycleManager.list_knowledge_bases()
@@ -681,6 +682,15 @@ async def export_kb_bundle(
             author=author,
             change_summary=change_summary,
         )
+        if reveal:
+            try:
+                from .artifacts import _reveal_in_file_manager
+                _reveal_in_file_manager(pkg_path)
+            except Exception as rev_err:
+                logger.warning(f"导出后定位文件夹跳过: {rev_err}")
+
+        from urllib.parse import quote
+        safe_local_path = quote(str(pkg_path))
         return FileResponse(
             path=str(pkg_path),
             filename=pkg_path.name,
@@ -688,12 +698,34 @@ async def export_kb_bundle(
             headers={
                 "X-Content-MD5": md5_val,
                 "X-KB-Version": target_ver,
-                "Access-Control-Expose-Headers": "X-Content-MD5, X-KB-Version",
+                "X-Local-File-Path": safe_local_path,
+                "Access-Control-Expose-Headers": "X-Content-MD5, X-KB-Version, X-Local-File-Path",
             },
         )
     except Exception as e:
         logger.error(f"导出 .ahkb 失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"导出知识库包失败: {str(e)}")
+
+
+class RevealKbFilePayload(BaseModel):
+    file_path: str
+
+
+@router.post("/reveal")
+async def reveal_kb_file(payload: RevealKbFilePayload) -> dict[str, Any]:
+    """在宿主操作系统的文件资源管理器中打开并高亮定位指定物理路径的文件。"""
+    from urllib.parse import unquote
+    raw_path = unquote(payload.file_path).strip()
+    target = Path(raw_path)
+    if not target.exists():
+        raise HTTPException(status_code=404, detail=f"目标物理文件不存在: {raw_path}")
+    try:
+        from .artifacts import _reveal_in_file_manager
+        _reveal_in_file_manager(target)
+        return {"success": True, "path": str(target)}
+    except Exception as e:
+        logger.error(f"打开资源管理器失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"打开文件管理器失败: {str(e)}")
 
 
 @router.post("/import")

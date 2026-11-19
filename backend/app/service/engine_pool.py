@@ -1066,9 +1066,18 @@ class EnginePoolService:
                             return
 
                         elif etype == "error":
+                            err_msg = str(event.get("message") or "未知错误")
+                            if ("empty conversation id" in err_msg.lower() or "failed to start conversation" in err_msg.lower()) and retries_left > 1:
+                                logger.warning(
+                                    f"[EnginePool] 捕获 CLI 上游临时会话初始化抖动 ({err_msg})，自动触发无感快速重试 (剩余 {retries_left - 1} 次)"
+                                )
+                                retries_left -= 1
+                                await asyncio.sleep(0.6)
+                                break
+
                             err_payload: dict[str, Any] = {
                                 "type": "error",
-                                "content": event.get("message", "未知错误"),
+                                "content": err_msg,
                             }
                             if event.get("error_code"):
                                 err_payload["error_code"] = event["error_code"]
