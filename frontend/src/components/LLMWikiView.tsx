@@ -31,6 +31,7 @@ import {
   Upload,
   Download,
   History,
+  FlaskConical,
 } from 'lucide-react';
 import { Workspace } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
@@ -75,8 +76,14 @@ const DOMAIN_OPTIONS = [
 ];
 
 export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
-  // 两大主分段：'mount' = 知识库挂载, 'train' = 知识库训练
-  const [activeSection, setActiveSection] = useState<'mount' | 'train'>('mount');
+  // 三大主功能区：'test' = 1、知识库测试 (默认), 'train' = 2、知识库的训练, 'mount' = 3、知识库云盘挂载
+  const [activeSection, setActiveSection] = useState<'test' | 'train' | 'mount'>('test');
+
+  // ── 知识库测试 (Playground) 与版本发布管理状态 ──
+  const [selectedVersion, setSelectedVersion] = useState<string>('');
+  const [kbVersionsList, setKbVersionsList] = useState<any[]>([]);
+  const [loadingVersions, setLoadingVersions] = useState(false);
+  const [isPublishingVersion, setIsPublishingVersion] = useState(false);
 
   // ── 挂载部分状态 ──
   const [providerTab, setProviderTab] = useState<'wecom' | 'webdav' | 'oss'>('wecom');
@@ -500,7 +507,65 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     }
   };
 
-  // 命中率实时评测台
+  // 拉取选定知识库的所有历史与草稿版本列表
+  const loadKbVersions = async (kbId: string) => {
+    if (!kbId) {
+      setKbVersionsList([]);
+      return;
+    }
+    setLoadingVersions(true);
+    try {
+      const res = await apiFetch(`/api/v1/kb/bases/${kbId}/versions`);
+      if (res.ok) {
+        const data = await res.json();
+        const vers = Array.isArray(data?.data) ? data.data : [];
+        setKbVersionsList(vers);
+        const targetKb = kbsList.find((k) => k.kb_id === kbId);
+        setSelectedVersion((prev) => {
+          if (prev && vers.some((v: any) => v.version === prev)) return prev;
+          return targetKb?.active_version || vers[0]?.version || 'v1.0.0';
+        });
+      }
+    } catch (e) {
+      console.error('拉取知识库版本列表失败:', e);
+    } finally {
+      setLoadingVersions(false);
+    }
+  };
+
+  useEffect(() => {
+    if (selectedKbId) {
+      loadKbVersions(selectedKbId);
+    }
+  }, [selectedKbId]);
+
+  // 将测试版本发布为正式生效版本 (对外专家正式采纳)
+  const handlePublishVersion = async (kbId: string, versionToPublish: string) => {
+    if (!confirm(`确定将版本【${versionToPublish}】发布为正式生效版本吗？\n发布后，所有绑定该知识库的智能体专家将立即以此版本的规程事实对外提供问答与审查。`)) {
+      return;
+    }
+    setIsPublishingVersion(true);
+    try {
+      const resp = await apiFetch(`/api/v1/kb/bases/${kbId}/rollback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ target_version: versionToPublish }),
+      });
+      const data = await resp.json();
+      if (!resp.ok || !data.success) {
+        throw new Error(data.detail || data.message || '发布版本失败');
+      }
+      alert(`版本【${versionToPublish}】已成功发布为正式生效版本！`);
+      await loadKBs();
+      await loadKbVersions(kbId);
+    } catch (err: any) {
+      alert(`发布失败: ${err.message || err}`);
+    } finally {
+      setIsPublishingVersion(false);
+    }
+  };
+
+  // 命中率实时评测台 (支持按特定测试版本进行切片验货)
   const handleTestPlayground = async () => {
     if (!playgroundQuery.trim()) return;
     if (!selectedKbId && kbsList.length === 0) {
@@ -517,6 +582,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
         body: JSON.stringify({
           query: playgroundQuery.trim(),
           top_k: 5,
+          version: selectedVersion || undefined,
         }),
       });
       const data = await resp.json();
@@ -729,19 +795,19 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
           </span>
         </div>
 
-        {/* 功能区切换居右对齐 */}
+        {/* 功能区切换居右对齐：1、知识库测试(默认) | 2、知识库的训练 | 3、知识库云盘挂载 */}
         <div className="flex items-center space-x-1 p-1 rounded-lg bg-surface-200 border border-border text-xs">
           <button
             type="button"
-            onClick={() => setActiveSection('mount')}
-            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${activeSection === 'mount'
+            onClick={() => setActiveSection('test')}
+            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${activeSection === 'test'
                 ? 'bg-surface-card text-foreground font-semibold shadow-sm'
                 : 'text-muted-foreground hover:text-foreground'
               }`}
           >
-            <HardDrive className="w-3.5 h-3.5 text-sky-500" />
-            <span>1、知识库挂载</span>
-            <span className="ml-1 text-[10px] font-mono opacity-80">({mountsList.length})</span>
+            <FlaskConical className="w-3.5 h-3.5 text-sky-500" />
+            <span>1、知识库测试</span>
+            <span className="ml-1 text-[10px] font-mono opacity-80">({kbsList.length})</span>
           </button>
 
           <button
@@ -753,8 +819,21 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
               }`}
           >
             <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-            <span>2、知识库训练</span>
+            <span>2、知识库的训练</span>
             <span className="ml-1 text-[10px] font-mono opacity-80">({kbsList.length})</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveSection('mount')}
+            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${activeSection === 'mount'
+                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
+                : 'text-muted-foreground hover:text-foreground'
+              }`}
+          >
+            <HardDrive className="w-3.5 h-3.5 text-emerald-500" />
+            <span>3、知识库云盘挂载</span>
+            <span className="ml-1 text-[10px] font-mono opacity-80">({mountsList.length})</span>
           </button>
         </div>
       </div>
@@ -763,10 +842,261 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
       <div className="flex-1 overflow-y-auto p-6 space-y-6 select-text">
 
         {/* ========================================================= */}
-        {/* 第一部分：1、知识库挂载                                   */}
+        {/* 第一部分：1、知识库测试 (默认)                            */}
+        {/* ========================================================= */}
+        {activeSection === 'test' && (
+          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
+            {/* 左侧：知识库选择、版本切换与发布控制台 (4 列) */}
+            <div className="lg:col-span-4 space-y-5">
+              <div className="rounded-2xl border border-border bg-surface-card p-5 shadow-sm space-y-4">
+                <div className="flex items-center justify-between border-b border-border pb-3">
+                  <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                    <FlaskConical className="w-4 h-4 text-sky-500" />
+                    知识库与版本选择
+                  </h3>
+                  <span className="text-[10px] text-muted-foreground font-mono">
+                    {kbsList.length} 个知识库
+                  </span>
+                </div>
+
+                <div>
+                  <label className="text-xs font-medium text-muted-foreground block mb-1">
+                    选择待测试的知识库
+                  </label>
+                  <select
+                    value={selectedKbId}
+                    onChange={(e) => setSelectedKbId(e.target.value)}
+                    className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                  >
+                    {kbsList.map((kb) => (
+                      <option key={kb.kb_id} value={kb.kb_id}>
+                        {kb.name} (当前发布: {kb.active_version})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                {/* 版本选择器 */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label className="text-xs font-medium text-muted-foreground">
+                      选择测试版本
+                    </label>
+                    {loadingVersions && (
+                      <span className="text-[10px] text-muted-foreground animate-pulse">
+                        加载版本中...
+                      </span>
+                    )}
+                  </div>
+                  <select
+                    value={selectedVersion}
+                    onChange={(e) => setSelectedVersion(e.target.value)}
+                    className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500 font-mono"
+                  >
+                    {kbVersionsList.map((v) => {
+                      const curKb = kbsList.find((k) => k.kb_id === selectedKbId);
+                      const isAct = v.version === curKb?.active_version;
+                      return (
+                        <option key={v.version} value={v.version}>
+                          {v.version} {isAct ? '★ [当前正式发布版]' : '· [测试/维护版]'} (切片: {v.chunk_count})
+                        </option>
+                      );
+                    })}
+                  </select>
+                </div>
+
+                {/* 当前版本的发布状态卡片 */}
+                {(() => {
+                  const curKb = kbsList.find((k) => k.kb_id === selectedKbId);
+                  const isCurrentRelease = Boolean(
+                    curKb && (selectedVersion === curKb.active_version || (!selectedVersion && curKb.active_version))
+                  );
+                  const matchedVerInfo = kbVersionsList.find((v) => v.version === selectedVersion);
+                  const chunkCount = matchedVerInfo?.chunk_count ?? curKb?.chunk_count ?? 0;
+                  const tripleCount = matchedVerInfo?.triple_count ?? curKb?.triple_count ?? 0;
+                  const diskMb = ((matchedVerInfo?.disk_size_bytes ?? curKb?.disk_size_bytes ?? 0) / (1024 * 1024)).toFixed(2);
+
+                  return (
+                    <div className="p-3.5 rounded-xl border border-border bg-surface-100/60 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs text-muted-foreground">版本生效状态:</span>
+                        {isCurrentRelease ? (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 flex items-center gap-1">
+                            <CheckCircle2 className="w-3 h-3" />
+                            正式发布版本 (对外生效中)
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20 flex items-center gap-1">
+                            <Zap className="w-3 h-3" />
+                            测试/维护版本 (未发布·仅在此测试台验货)
+                          </span>
+                        )}
+                      </div>
+
+                      {/* 若不是发布版本，提供转正发布按钮 */}
+                      {!isCurrentRelease && (
+                        <button
+                          type="button"
+                          disabled={isPublishingVersion || !selectedVersion}
+                          onClick={() => handlePublishVersion(selectedKbId, selectedVersion)}
+                          className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm transition disabled:opacity-50"
+                          title="测试无误后，将此版本转正为对外生效的正式发布版本"
+                        >
+                          <ShieldCheck className="w-4 h-4" />
+                          <span>{isPublishingVersion ? '正在发布...' : '测试没问题，发布此版本为正式版 ★'}</span>
+                        </button>
+                      )}
+
+                      <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border/60 text-center">
+                        <div className="p-1 rounded bg-surface-200/50">
+                          <span className="text-[10px] text-muted-foreground block">规程切片</span>
+                          <span className="text-xs font-bold font-mono text-foreground">{chunkCount}</span>
+                        </div>
+                        <div className="p-1 rounded bg-surface-200/50">
+                          <span className="text-[10px] text-muted-foreground block">图谱三元组</span>
+                          <span className="text-xs font-bold font-mono text-foreground">{tripleCount}</span>
+                        </div>
+                        <div className="p-1 rounded bg-surface-200/50">
+                          <span className="text-[10px] text-muted-foreground block">库体积</span>
+                          <span className="text-xs font-bold font-mono text-foreground">{diskMb} MB</span>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })()}
+
+                <div className="text-[11px] text-muted-foreground bg-primary/5 p-3 rounded-xl border border-primary/10 leading-relaxed">
+                  💡 <strong>版本准出规范</strong>：知识库新训练或更新后，处于维护测试状态。请在此测试台中充分测试切片召回质量，验证无误后点击【发布此版本为正式版】，绑定的智能体专家方可采纳使用。
+                </div>
+              </div>
+            </div>
+
+            {/* 右侧：实测验货与提问评测台 (8 列) */}
+            <div className="lg:col-span-8 space-y-5">
+              <div className="rounded-2xl border border-border bg-surface-card p-5 shadow-sm space-y-4">
+                <div className="flex items-center justify-between border-b border-border pb-3">
+                  <div>
+                    <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                      <Search className="w-4 h-4 text-sky-500" />
+                      检索命中率即测验货台 (Playground)
+                    </h3>
+                    <p className="text-xs text-muted-foreground mt-0.5">
+                      向指定版本的规程切片发起语义向量与 BM25 混合检索，测试置信召回精度
+                    </p>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-surface-200 text-muted-foreground">
+                    目标版本: {selectedVersion || '默认'}
+                  </span>
+                </div>
+
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    placeholder="输入测试问题，如: 比赛报名费或押金退还标准、2024年开票记录..."
+                    value={playgroundQuery}
+                    onChange={(e) => setPlaygroundQuery(e.target.value)}
+                    onKeyDown={(e) => e.key === 'Enter' && handleTestPlayground()}
+                    className="flex-1 rounded-xl border border-border bg-surface-100 px-3.5 py-2.5 text-xs outline-none focus:border-sky-500 focus:bg-surface-card transition-all"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleTestPlayground}
+                    disabled={playgroundTesting}
+                    className="px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shrink-0 disabled:opacity-50 transition-all shadow-sm flex items-center gap-1.5"
+                  >
+                    <Search className={`w-3.5 h-3.5 ${playgroundTesting ? 'animate-spin' : ''}`} />
+                    <span>{playgroundTesting ? '检索中...' : '测试命中'}</span>
+                  </button>
+                </div>
+
+                {playgroundHits && (
+                  <div className="space-y-3 pt-3 border-t border-border">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-foreground flex items-center gap-1.5">
+                        <FileText className="w-3.5 h-3.5 text-sky-500" />
+                        召回证据切片 ({playgroundHits.length})
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">按综合置信度得分降序</span>
+                    </div>
+
+                    {playgroundHits.length === 0 ? (
+                      <div className="py-12 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl">
+                        未检索到与查询匹配的相关规程切片，建议调整测试提问或检查该版本是否切片就绪
+                      </div>
+                    ) : (
+                      <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
+                        {playgroundHits.map((h, i) => {
+                          const isExpanded = expandedHitIdx === i;
+                          return (
+                            <div
+                              key={i}
+                              className="p-3.5 rounded-xl bg-surface-100/60 border border-border text-xs space-y-2 hover:border-sky-500/40 transition-all"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="font-semibold text-foreground truncate max-w-md" title={h.title}>
+                                  [{i + 1}] {h.title}
+                                </span>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-500 font-semibold border border-emerald-500/20">
+                                    得分: {Number(h.final_score || h.score || 0).toFixed(3)}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCopyChunkText(`hit_${i}`, h.content)}
+                                    className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-surface-200 transition"
+                                    title="复制此切片原文"
+                                  >
+                                    {copiedChunkId === `hit_${i}` ? (
+                                      <Check className="w-3.5 h-3.5 text-emerald-500" />
+                                    ) : (
+                                      <Copy className="w-3.5 h-3.5" />
+                                    )}
+                                  </button>
+                                </div>
+                              </div>
+                              <p
+                                className={`text-muted-foreground text-[11px] leading-relaxed whitespace-pre-wrap ${
+                                  isExpanded ? '' : 'line-clamp-4'
+                                }`}
+                              >
+                                {h.content}
+                              </p>
+                              {h.content.length > 140 && (
+                                <button
+                                  type="button"
+                                  onClick={() => setExpandedHitIdx(isExpanded ? null : i)}
+                                  className="text-[10px] text-sky-500 hover:text-sky-600 font-medium"
+                                >
+                                  {isExpanded ? '收起原文 ↑' : '展开查看切片全文 ↓'}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* ========================================================= */}
+        {/* 第三部分：3、知识库云盘挂载                               */}
         {/* ========================================================= */}
         {activeSection === 'mount' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
+            {/* 顶部横幅提示：后期对接 Ontology 与外部抓取 */}
+            <div className="lg:col-span-12 p-3.5 rounded-xl border border-sky-500/20 bg-sky-500/5 text-xs text-sky-700 dark:text-sky-300 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <HardDrive className="w-4 h-4 text-sky-500 shrink-0" />
+                <span>
+                  <strong>CloudVFS 存储接入层</strong>：当前已支持企业微信微盘、WebDAV 私有云与 S3/OSS 对象存储挂载；后期将全面对接 <strong>Ontology 本体知识图谱体系</strong> 及 <strong>外部自动化抓取数据源</strong>。
+                </span>
+              </div>
+            </div>
+
             {/* 左侧：添加挂载源配置表单 (7 列) */}
             <div className="lg:col-span-7 space-y-5">
               <div className="rounded-2xl border border-border bg-surface-card p-5 md:p-6 shadow-sm space-y-5">
@@ -1242,12 +1572,12 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
         )}
 
         {/* ========================================================= */}
-        {/* 第二部分：2、知识库训练                                   */}
+        {/* 第二部分：2、知识库的训练与维护                           */}
         {/* ========================================================= */}
         {activeSection === 'train' && (
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
-            {/* 左侧：训练调度与知识库资产清单 (7 列) */}
-            <div className="lg:col-span-7 space-y-5">
+            {/* 全宽：训练调度与知识库资产维护中心 (12 列) */}
+            <div className="lg:col-span-12 space-y-6">
               {/* 训练操作面板 */}
               <div className="rounded-2xl border border-border bg-surface-card p-5 md:p-6 shadow-sm space-y-5">
                 <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-border pb-4">
@@ -1595,126 +1925,6 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                     })
                   )}
                 </div>
-              </div>
-            </div>
-
-            {/* 右侧：检索命中率实时测试台 (Playground, 5 列) */}
-            <div className="lg:col-span-5 space-y-5">
-              <div className="rounded-2xl border border-border bg-surface-card p-5 shadow-sm space-y-4">
-                <div className="flex items-center justify-between border-b border-border pb-3">
-                  <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-                    <Search className="w-4 h-4 text-sky-500" />
-                    检索命中率即测验货台 (Playground)
-                  </h3>
-                  <span className="text-[10px] text-muted-foreground">权威权重重排</span>
-                </div>
-
-                <p className="text-xs text-muted-foreground">
-                  直接向训练好的知识库提问，实时测试语义向量与 BM25 混合召回精度、权威等级仲裁得分及前 5 条切片证据。
-                </p>
-
-                <div>
-                  <label className="text-xs font-medium text-muted-foreground block mb-1">
-                    当前测试的知识库
-                  </label>
-                  <select
-                    value={selectedKbId}
-                    onChange={(e) => setSelectedKbId(e.target.value)}
-                    className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500"
-                  >
-                    {kbsList.map((kb) => (
-                      <option key={kb.kb_id} value={kb.kb_id}>
-                        {kb.name} ({kb.active_version})
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    placeholder="输入测试问题，如: 比赛报名费或押金退还标准..."
-                    value={playgroundQuery}
-                    onChange={(e) => setPlaygroundQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleTestPlayground()}
-                    className="flex-1 rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500 focus:bg-surface-card transition-all"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleTestPlayground}
-                    disabled={playgroundTesting}
-                    className="px-4 py-2 rounded-xl bg-sky-600 hover:bg-sky-700 text-white text-xs font-medium shrink-0 disabled:opacity-50 transition-all shadow-sm"
-                  >
-                    {playgroundTesting ? '检索中...' : '测试命中'}
-                  </button>
-                </div>
-
-                {playgroundHits && (
-                  <div className="space-y-3 pt-3 border-t border-border">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-foreground">
-                        召回证据切片 ({playgroundHits.length})
-                      </span>
-                      <span className="text-[10px] text-muted-foreground">按最终置信得分降序</span>
-                    </div>
-
-                    {playgroundHits.length === 0 ? (
-                      <div className="py-8 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl">
-                        未检索到与查询匹配的相关规程切片
-                      </div>
-                    ) : (
-                      <div className="space-y-2.5 max-h-[460px] overflow-y-auto pr-1">
-                        {playgroundHits.map((h, i) => {
-                          const isExpanded = expandedHitIdx === i;
-                          return (
-                            <div
-                              key={i}
-                              className="p-3 rounded-xl bg-surface-100/60 border border-border text-xs space-y-2 hover:border-border/80 transition-all"
-                            >
-                              <div className="flex items-center justify-between">
-                                <span className="font-semibold text-foreground truncate max-w-[210px]" title={h.title}>
-                                  {h.title}
-                                </span>
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-500 font-semibold">
-                                    得分: {h.final_score.toFixed(3)}
-                                  </span>
-                                  <button
-                                    type="button"
-                                    onClick={() => handleCopyChunkText(`hit_${i}`, h.content)}
-                                    className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-surface-200 transition"
-                                    title="复制此切片原文"
-                                  >
-                                    {copiedChunkId === `hit_${i}` ? (
-                                      <Check className="w-3 h-3 text-emerald-500" />
-                                    ) : (
-                                      <Copy className="w-3 h-3" />
-                                    )}
-                                  </button>
-                                </div>
-                              </div>
-                              <p
-                                className={`text-muted-foreground text-[11px] leading-relaxed whitespace-pre-wrap ${isExpanded ? '' : 'line-clamp-4'
-                                  }`}
-                              >
-                                {h.content}
-                              </p>
-                              {h.content.length > 140 && (
-                                <button
-                                  type="button"
-                                  onClick={() => setExpandedHitIdx(isExpanded ? null : i)}
-                                  className="text-[10px] text-sky-500 hover:text-sky-600 font-medium"
-                                >
-                                  {isExpanded ? '收起原文' : '展开查看切片全文...'}
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
               </div>
             </div>
           </div>
