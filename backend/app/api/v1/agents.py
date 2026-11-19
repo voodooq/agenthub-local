@@ -109,7 +109,7 @@ async def generate_agent_from_prompt(req: AgentNaturalGenerateRequest) -> dict[s
     matched_skills: list[str] = []
     try:
         from ...extensions.skill_loader import SkillLoader
-        installed_skills = SkillLoader().list_skills(workspace_id=req.workspace_id)
+        installed_skills = SkillLoader().list_skills()
         for sk in installed_skills:
             sid = str(sk.get("id") or "")
             sname = str(sk.get("name") or "").lower()
@@ -258,25 +258,6 @@ async def update_agent(agent_id: str, req: AgentUpdateRequest) -> dict:
         return {"success": True, "agent": updated}
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
-
-
-# ==========================================
-# 专家知识库绑定与对外 API 密钥路由绑定 (v1.5.9)
-# ==========================================
-from .external_expert_gateway import (
-    get_agent_knowledge_bases,
-    update_agent_knowledge_bases,
-    list_agent_api_keys,
-    create_agent_api_key,
-    revoke_agent_api_key,
-)
-
-router.add_api_route("/{agent_id}/knowledge-bases", get_agent_knowledge_bases, methods=["GET"])
-router.add_api_route("/{agent_id}/knowledge-bases", update_agent_knowledge_bases, methods=["PUT"])
-router.add_api_route("/{agent_id}/api-keys", list_agent_api_keys, methods=["GET"])
-router.add_api_route("/{agent_id}/api-keys", create_agent_api_key, methods=["POST"])
-router.add_api_route("/{agent_id}/api-keys/{key_id}", revoke_agent_api_key, methods=["DELETE"])
-
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
