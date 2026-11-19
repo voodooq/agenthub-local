@@ -75,6 +75,21 @@ class MessageRepository:
                 row = await cursor.fetchone()
                 return int(row["max_turn"]) if row and row["max_turn"] is not None else 0
 
+    @classmethod
+    async def create(cls, data: dict[str, Any]) -> int:
+        """兼容字典入参的消息保存适配方法"""
+        return await cls.save_message(
+            conversation_id=data.get("conversation_id", ""),
+            role=data.get("role", "user"),
+            content=data.get("content", ""),
+            turn_id=int(data.get("turn_id", 1)),
+            executed_by_account=data.get("executed_by_account"),
+            token_count=int(data.get("token_count", 0)),
+            compressed_content=data.get("compressed_content"),
+            tool_calls_json=data.get("tool_calls_json"),
+            tool_call_id=data.get("tool_call_id"),
+        )
+
     @staticmethod
     async def save_message(
         conversation_id: str,

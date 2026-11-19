@@ -2063,20 +2063,18 @@ class AgentRuntime:
                                 "model_name": model_name,
                                 "grounding_status": "blocked",
                             }
-                            await MessageRepository.create({
-                                "id": str(uuid.uuid4()),
-                                "conversation_id": conv_id,
-                                "role": "user",
-                                "content": user_message,
-                                "turn_id": current_turn_id,
-                            })
-                            await MessageRepository.create({
-                                "id": str(uuid.uuid4()),
-                                "conversation_id": conv_id,
-                                "role": "assistant",
-                                "content": kb_prompt,
-                                "turn_id": current_turn_id,
-                            })
+                            await MessageRepository.save_message(
+                                conversation_id=conv_id,
+                                role="user",
+                                content=user_message,
+                                turn_id=current_turn_id,
+                            )
+                            await MessageRepository.save_message(
+                                conversation_id=conv_id,
+                                role="assistant",
+                                content=kb_prompt,
+                                turn_id=current_turn_id,
+                            )
                             return
                         elif kb_prompt:
                             system_override = (
