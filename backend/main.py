@@ -228,6 +228,7 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["*", "X-Content-MD5", "X-KB-Version", "X-Local-File-Path"],
 )
 
 # 本机访问安全守卫中间件

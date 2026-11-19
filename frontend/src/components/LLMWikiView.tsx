@@ -151,7 +151,12 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     enhancement?: { total_parents: number; hype_completed: number; rules_extracted: number; status: string };
   }>>({});
   const [upgradingKbId, setUpgradingKbId] = useState<string | null>(null);
-  const [exportedModalInfo, setExportedModalInfo] = useState<{ kbName: string; filePath: string } | null>(null);
+  const [exportedModalInfo, setExportedModalInfo] = useState<{
+    kbName: string;
+    filePath: string;
+    filename: string;
+    downloadUrl?: string;
+  } | null>(null);
   const [isRevealing, setIsRevealing] = useState(false);
   const [isPathCopied, setIsPathCopied] = useState(false);
 
@@ -194,7 +199,11 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
         localPath = encodedPath;
       }
 
-      // 优先检测现代浏览器原生 showSaveFilePicker API (支持用户自由选择任意盘符与目录)
+      // 创建持久的 Blob URL，供自动下载与弹窗手动重复下载
+      const blobUrl = window.URL.createObjectURL(blob);
+
+      // 1. 优先尝试现代浏览器原生 showSaveFilePicker API (支持用户自由选择任意盘符与保存目录)
+      let savedViaPicker = false;
       if (typeof (window as any).showSaveFilePicker === 'function') {
         try {
           const fileHandle = await (window as any).showSaveFilePicker({
@@ -207,35 +216,43 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
           const writable = await fileHandle.createWritable();
           await writable.write(blob);
           await writable.close();
-          return;
+          savedViaPicker = true;
         } catch (pickerErr: any) {
           if (pickerErr.name === 'AbortError') {
-            // 用户在文件选择器中点击了“取消”，正常静默退出
+            // 用户在文件选择器中点击了“取消”
+            window.URL.revokeObjectURL(blobUrl);
             return;
           }
-          // 其他环境错误则平稳降级
+          // 其他环境错误（如权限或异步激活锁过期）则平稳降级至 DOM 下载
         }
       }
 
-      // 降级执行原生 DOM a 标签下载 (兼容标准浏览器 Downloads 目录触发)
-      try {
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = defaultFilename;
-        document.body.appendChild(a);
-        a.click();
-        window.URL.revokeObjectURL(url);
-        document.body.removeChild(a);
-      } catch {}
-
-      // 无论是否弹出浏览器下载，只要拿到磁盘物理生成路径，均弹出明确交互卡片引导在资源管理器中直接定位
-      if (localPath) {
-        setExportedModalInfo({
-          kbName: kb.name,
-          filePath: localPath,
-        });
+      // 2. 若未通过文件选择器保存，执行标准 DOM a 标签下载 (触发浏览器默认 Downloads 保存)
+      if (!savedViaPicker) {
+        try {
+          const a = document.createElement('a');
+          a.style.display = 'none';
+          a.href = blobUrl;
+          a.download = defaultFilename;
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            try {
+              a.remove();
+            } catch {}
+          }, 30000);
+        } catch (domErr) {
+          console.warn('[LLMWiki] DOM 下载触发异常:', domErr);
+        }
       }
+
+      // 3. 始终弹出清晰的落盘与下载交互卡片，提供完整路径、定位文件夹与重新下载入口
+      setExportedModalInfo({
+        kbName: kb.name,
+        filePath: localPath || `${defaultFilename}（已触发下载至本地下载目录）`,
+        filename: defaultFilename,
+        downloadUrl: blobUrl,
+      });
     } catch (err: any) {
       alert(`导出知识包失败: ${err.message || err}`);
     } finally {
@@ -2892,27 +2909,47 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
             </div>
 
             <div className="px-5 py-3.5 bg-surface-200/30 border-t border-border flex items-center justify-between gap-2">
-              <button
-                onClick={() => {
-                  navigator.clipboard.writeText(exportedModalInfo.filePath);
-                  setIsPathCopied(true);
-                  setTimeout(() => setIsPathCopied(false), 2000);
-                }}
-                className="px-3 py-1.5 rounded-lg border border-border text-xs text-foreground hover:bg-surface-200 transition flex items-center gap-1.5"
-              >
-                {isPathCopied ? '已复制路径 ✓' : '复制完整路径'}
-              </button>
-
               <div className="flex items-center gap-2">
                 <button
-                  onClick={() => handleRevealLocalFile(exportedModalInfo.filePath)}
-                  disabled={isRevealing}
-                  className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition shadow-sm flex items-center gap-1.5 disabled:opacity-50"
+                  onClick={() => {
+                    navigator.clipboard.writeText(exportedModalInfo.filePath);
+                    setIsPathCopied(true);
+                    setTimeout(() => setIsPathCopied(false), 2000);
+                  }}
+                  className="px-3 py-1.5 rounded-lg border border-border text-xs text-foreground hover:bg-surface-200 transition flex items-center gap-1.5"
                 >
-                  {isRevealing ? '正在定位...' : '在文件夹中打开 📂'}
+                  {isPathCopied ? '已复制路径 ✓' : '复制完整路径'}
                 </button>
+
+                {exportedModalInfo.downloadUrl && (
+                  <a
+                    href={exportedModalInfo.downloadUrl}
+                    download={exportedModalInfo.filename}
+                    className="px-3 py-1.5 rounded-lg border border-blue-500/30 text-xs text-blue-600 dark:text-blue-400 bg-blue-500/10 hover:bg-blue-500/20 transition flex items-center gap-1.5 font-medium"
+                    title="在浏览器中重新触发下载并保存"
+                  >
+                    重新下载 ⬇️
+                  </a>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                {exportedModalInfo.filePath && !exportedModalInfo.filePath.includes('已触发下载') && (
+                  <button
+                    onClick={() => handleRevealLocalFile(exportedModalInfo.filePath)}
+                    disabled={isRevealing}
+                    className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium transition shadow-sm flex items-center gap-1.5 disabled:opacity-50"
+                  >
+                    {isRevealing ? '正在定位...' : '在文件夹中打开 📂'}
+                  </button>
+                )}
                 <button
                   onClick={() => {
+                    if (exportedModalInfo.downloadUrl) {
+                      try {
+                        window.URL.revokeObjectURL(exportedModalInfo.downloadUrl);
+                      } catch {}
+                    }
                     setExportedModalInfo(null);
                     setIsPathCopied(false);
                   }}

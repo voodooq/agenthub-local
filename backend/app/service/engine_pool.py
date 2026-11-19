@@ -110,7 +110,7 @@ class EnginePoolService:
         """
         带零感知热故障转移、三区尾注动态注入与全通道真实 Token/KV Cache 采集的流式生成执行器。
         """
-        retries_left = max_retries or settings.auto_failover_retry
+        retries_left = max_retries or max(4, getattr(settings, "auto_failover_retry", 3))
         effective_agent_role = agent_role or ("scrubber" if task_role == "light" else "primary")
 
         if pre_built_history is not None:

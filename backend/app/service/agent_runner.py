@@ -332,16 +332,13 @@ _CLI_MODEL_METADATA_PRESETS: dict[str, dict[str, str]] = {
     },
 }
 
-# 已知支持思考档位聚合的基础前缀（即使 CLI 只返回其中 1 个档位也按基础 ID 聚合）
+# 已知支持思考档位聚合的基础前缀（仅针对历史通过后缀区分档位的旧系列）
 _KNOWN_MULTI_THINKING_PREFIXES: set[str] = {
     "gemini-4-argon",
     "gemini-4-hydrogen",
     "gemini-4-carbon",
-    "gemini-3.8-flash",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
-    "claude-sonnet-4-6",
-    "claude-opus-4-6",
 }
 
 _THINKING_SUFFIX_RE = re.compile(r"^(.+?)-(xhigh|high|medium|low)$", re.IGNORECASE)
@@ -351,6 +348,7 @@ _VALID_CLI_MODEL_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]+$")
 _CLI_MODELS_CACHE_TTL_SECONDS = 60.0
 _CLI_MODELS_CACHE: dict[str, dict[str, Any]] = {}
 _DISCOVER_CLI_LOCKS: dict[str, asyncio.Lock] = {}
+_CLI_START_LOCKS: dict[str, asyncio.Lock] = {}
 _DYNAMIC_VARIANT_MAP: dict[str, list[str]] = {}
 _DYNAMIC_RAW_IDS: dict[str, str] = {}
 
@@ -573,7 +571,7 @@ def resolve_agy_model_flag(model: str | None, thinking_level: str | None = None)
         level = "high"
 
     if not model:
-        return f"gemini-3.8-flash-{level}"
+        return "gemini-3.8-flash"
 
     m_raw = model.strip()
     m_lower = m_raw.lower()
@@ -603,7 +601,9 @@ def resolve_agy_model_flag(model: str | None, thinking_level: str | None = None)
         if variants:
             return variants[0]
 
-    # 2. 优先查动态识别的无思考档位模型原始 ID（如 gemini-pro-orchestrator-g1-pro、gpt-oss-120b-medium）
+    # 2. 优先查动态识别的真实模型原始 ID（如 gemini-3.8-flash, claude-sonnet-4-6, gpt-oss-120b-medium）
+    if base_candidate in _DYNAMIC_RAW_IDS:
+        return _DYNAMIC_RAW_IDS[base_candidate]
     if m_lower in _DYNAMIC_RAW_IDS:
         return _DYNAMIC_RAW_IDS[m_lower]
 
@@ -612,6 +612,10 @@ def resolve_agy_model_flag(model: str | None, thinking_level: str | None = None)
         return "gpt-oss-120b-medium"
     if "orchestrator" in m_lower or "g1-pro" in m_lower:
         return "gemini-pro-orchestrator-g1-pro"
+    if "sonnet-4-6" in m_lower or "sonnet-4.6" in m_lower or "sonnet-4" in m_lower:
+        return "claude-sonnet-4-6"
+    if "opus-4-6" in m_lower or "opus-4.6" in m_lower or "opus-4" in m_lower:
+        return "claude-opus-4-6-thinking"
     if "hydrogen" in m_lower:
         return f"gemini-4-hydrogen-{effective_level}"
     if "carbon" in m_lower:
@@ -623,7 +627,7 @@ def resolve_agy_model_flag(model: str | None, thinking_level: str | None = None)
     if "sonnet" in m_lower:
         return f"claude-sonnet-5-5-{effective_level}"
     if "3.8-flash" in m_lower or "flash" in m_lower:
-        return f"gemini-3.8-flash-{effective_level}"
+        return "gemini-3.8-flash"
 
     return m_raw
 
@@ -837,41 +841,49 @@ async def run_cli_stream(
         f"model={model or 'default'} cwd={cwd} prompt_chars={len(prompt)} stdin_mode={stdin_payload_bytes is not None} pid=pending"
     )
 
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE if stdin_payload_bytes is not None else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=SUBPROCESS_STREAM_LIMIT,
-            env=env,
-            cwd=cwd,
-            **get_silent_subprocess_kwargs(),
-        )
-    except NotImplementedError:
-        logger.info("当前环境不支持 asyncio 原生子进程传输，自动切换至 Windows 线程兼容适配器")
-        proc = _CompatSubprocess(cmd, env, cwd, stdin_bytes=stdin_payload_bytes)
+    start_lock_key = _normalize_cli_home_key(cli_home_dir)
+    start_lock = _CLI_START_LOCKS.setdefault(start_lock_key, asyncio.Lock())
 
-    # 向异步子进程 stdin 写入载荷并发送 EOF，通知 CLI 单轮输入结束
-    if stdin_payload_bytes is not None and not isinstance(proc, _CompatSubprocess):
-        proc_stdin = proc.stdin
-        if proc_stdin is not None:
-            try:
-                proc_stdin.write(stdin_payload_bytes)
-                drain_fn = getattr(proc_stdin, "drain", None)
-                if callable(drain_fn):
-                    drain_res = drain_fn()
-                    if inspect.isawaitable(drain_res):
-                        await drain_res
-                write_eof_fn = getattr(proc_stdin, "write_eof", None)
-                can_eof_fn = getattr(proc_stdin, "can_write_eof", None)
-                if callable(write_eof_fn) and (not callable(can_eof_fn) or can_eof_fn()):
-                    write_eof_fn()
-                close_fn = getattr(proc_stdin, "close", None)
-                if callable(close_fn):
-                    close_fn()
-            except Exception as stdin_err:
-                logger.warning(f"向 {cli_type.upper()} CLI 写入 stdin 载荷异常: {stdin_err}")
+    # NOTE: 使用会话启动门控锁错开高并发握手，防止多智能体/自主领航舱并发拉起时触碰 Google 端点并发限制 (empty conversation id)
+    async with start_lock:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE if stdin_payload_bytes is not None else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=SUBPROCESS_STREAM_LIMIT,
+                env=env,
+                cwd=cwd,
+                **get_silent_subprocess_kwargs(),
+            )
+        except NotImplementedError:
+            logger.info("当前环境不支持 asyncio 原生子进程传输，自动切换至 Windows 线程兼容适配器")
+            proc = _CompatSubprocess(cmd, env, cwd, stdin_bytes=stdin_payload_bytes)
+
+        # 向异步子进程 stdin 写入载荷并发送 EOF，通知 CLI 单轮输入结束
+        if stdin_payload_bytes is not None and not isinstance(proc, _CompatSubprocess):
+            proc_stdin = proc.stdin
+            if proc_stdin is not None:
+                try:
+                    proc_stdin.write(stdin_payload_bytes)
+                    drain_fn = getattr(proc_stdin, "drain", None)
+                    if callable(drain_fn):
+                        drain_res = drain_fn()
+                        if inspect.isawaitable(drain_res):
+                            await drain_res
+                    write_eof_fn = getattr(proc_stdin, "write_eof", None)
+                    can_eof_fn = getattr(proc_stdin, "can_write_eof", None)
+                    if callable(write_eof_fn) and (not callable(can_eof_fn) or can_eof_fn()):
+                        write_eof_fn()
+                    close_fn = getattr(proc_stdin, "close", None)
+                    if callable(close_fn):
+                        close_fn()
+                except Exception as stdin_err:
+                    logger.warning(f"向 {cli_type.upper()} CLI 写入 stdin 载荷异常: {stdin_err}")
+
+        # 会话初始握手微量排队间隔 (150ms)，确保上游后端会话状态原子落定
+        await asyncio.sleep(0.15)
 
     logger.info(f"{cli_type.upper()} CLI 子进程已启动 PID={proc.pid}")
     if conversation_id:
