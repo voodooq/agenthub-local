@@ -439,12 +439,14 @@ export function AgentsView({
           const json = await res.json();
           if (json.bound_knowledge_bases) {
             setFormBoundKbs(
-              json.bound_knowledge_bases.map((b: any) => ({
-                kb_id: b.kb_id,
-                name: b.name,
-                priority_weight: b.priority_weight ?? 1.0,
-                top_k_override: b.top_k_override ?? 5,
-              }))
+              json.bound_knowledge_bases
+                .filter((b: any) => Boolean(b.is_published))
+                .map((b: any) => ({
+                  kb_id: b.kb_id,
+                  name: b.name,
+                  priority_weight: b.priority_weight ?? 1.0,
+                  top_k_override: b.top_k_override ?? 5,
+                }))
             );
           }
         }
@@ -640,7 +642,7 @@ export function AgentsView({
       // 同步保存专家的知识底座与对外 API 策略
       if (savedTargetId) {
         try {
-          await apiFetch(`/api/v1/agents/${encodeURIComponent(savedTargetId)}/knowledge-bases`, {
+          const kbRes = await apiFetch(`/api/v1/agents/${encodeURIComponent(savedTargetId)}/knowledge-bases`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -656,6 +658,10 @@ export function AgentsView({
               api_model_slug: formApiModelSlug.trim() || undefined,
             }),
           });
+          if (!kbRes.ok) {
+            const errJson = await kbRes.json().catch(() => ({}));
+            setBannerNotice(errJson?.detail || '同步专家知识底座配置失败：所选知识库可能尚未发布');
+          }
         } catch (kbSyncErr) {
           console.error('同步专家知识底座配置失败:', kbSyncErr);
         }

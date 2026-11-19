@@ -209,3 +209,68 @@ async def test_expert_binding_and_search_gate():
 
     KBStorageManager.physically_destroy_kb(kb_id)
 
+
+@pytest.mark.asyncio
+async def test_unpublished_kb_hidden_and_blocked_for_expert():
+    """验证未发布知识库在专家筛选接口中隐藏，且在专家绑定接口中被严格阻断。"""
+    from fastapi import HTTPException
+    from backend.app.api.v1.external_expert_gateway import (
+        ExpertKBItem,
+        UpdateExpertKBsPayload,
+        update_agent_knowledge_bases,
+    )
+
+    await db_manager.init_db()
+    kb_id = f"kb_unpub_{int(time.time() * 1000)}"
+    expert_id = f"exp_unpub_{int(time.time() * 1000)}"
+
+    await KBLifecycleManager.create_knowledge_base(
+        kb_id=kb_id,
+        name="未发布草稿知识库",
+        initial_version="v1.0.0",
+    )
+    try:
+        # 1. 未发布时：published_only=True 不可见，published_only=False 可见
+        pub_kbs = await KBLifecycleManager.list_knowledge_bases(published_only=True)
+        all_kbs = await KBLifecycleManager.list_knowledge_bases(published_only=False)
+        assert all(k["kb_id"] != kb_id for k in pub_kbs)
+        assert any(k["kb_id"] == kb_id for k in all_kbs)
+
+        # 2. 旧版绑定接口 bind_expert_kbs 必须抛出 ValueError
+        with pytest.raises(ValueError, match="尚未发布正式版本"):
+            await KBLifecycleManager.bind_expert_kbs(
+                expert_id=expert_id,
+                bindings=[{"kb_id": kb_id, "priority_rank": 1, "pinned_version": "latest"}],
+            )
+
+        # 3. 专家网关接口 update_agent_knowledge_bases 必须抛出 HTTPException(400)
+        payload = UpdateExpertKBsPayload(
+            knowledge_bases=[ExpertKBItem(kb_id=kb_id, priority_weight=1.0, top_k_override=5)]
+        )
+        with pytest.raises(HTTPException) as exc_info:
+            await update_agent_knowledge_bases(expert_id, payload)
+        assert exc_info.value.status_code == 400
+        assert "尚未发布正式版本" in str(exc_info.value.detail)
+
+        # 4. 发布版本后，published_only=True 可见且两种绑定接口均放行成功
+        await KBLifecycleManager.set_version_publish_status(kb_id=kb_id, version="v1.0.0", publish=True)
+        pub_kbs_after = await KBLifecycleManager.list_knowledge_bases(published_only=True)
+        assert any(k["kb_id"] == kb_id for k in pub_kbs_after)
+
+        bound = await KBLifecycleManager.bind_expert_kbs(
+            expert_id=expert_id,
+            bindings=[{"kb_id": kb_id, "priority_rank": 1, "pinned_version": "latest"}],
+        )
+        assert len(bound) == 1
+
+        res = await update_agent_knowledge_bases(expert_id, payload)
+        assert res["success"] is True
+    finally:
+        async with db_manager.get_connection() as conn:
+            await conn.execute("DELETE FROM expert_knowledge_bases WHERE expert_id = ?", (expert_id,))
+            await conn.execute("DELETE FROM expert_kb_bindings WHERE expert_id = ?", (expert_id,))
+            await conn.execute("DELETE FROM kb_versions WHERE kb_id = ?", (kb_id,))
+            await conn.execute("DELETE FROM knowledge_bases WHERE kb_id = ?", (kb_id,))
+            await conn.commit()
+        KBStorageManager.physically_destroy_kb(kb_id)
+

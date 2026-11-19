@@ -148,9 +148,11 @@ async def delete_source(
 # ==========================================
 
 @router.get("/bases")
-async def list_bases() -> dict[str, Any]:
-    """获取所有知识库资产列表（含物理磁盘占用与切片统计）。"""
-    kbs = await KBLifecycleManager.list_knowledge_bases()
+async def list_bases(
+    published_only: bool = Query(default=False, description="是否仅返回已发布正式版本的知识库"),
+) -> dict[str, Any]:
+    """获取知识库资产列表（含物理磁盘占用与切片统计）。"""
+    kbs = await KBLifecycleManager.list_knowledge_bases(published_only=published_only)
     return {"success": True, "data": kbs}
 
 
@@ -432,7 +434,10 @@ async def get_expert_bindings(expert_id: str) -> dict[str, Any]:
 async def save_expert_bindings(expert_id: str, payload: ExpertBindingsPayload) -> dict[str, Any]:
     """保存专家绑定的知识库清单及优先级顺序。"""
     items = [b.model_dump() for b in payload.bindings]
-    res = await KBLifecycleManager.bind_expert_kbs(expert_id, items)
+    try:
+        res = await KBLifecycleManager.bind_expert_kbs(expert_id, items)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"success": True, "data": res, "message": f"成功为专家绑定 {len(items)} 个知识库"}
 
 

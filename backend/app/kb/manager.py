@@ -479,8 +479,12 @@ class KBLifecycleManager:
                 return res
 
     @classmethod
-    async def list_knowledge_bases(cls) -> list[dict[str, Any]]:
-        """获取所有知识库资产列表（包含物理磁盘占用与切片统计）。"""
+    async def list_knowledge_bases(cls, published_only: bool = False) -> list[dict[str, Any]]:
+        """获取知识库资产列表（包含物理磁盘占用与切片统计）。
+
+        Args:
+            published_only: 为 True 时仅返回已发布正式版本的知识库（供专家挂载筛选使用）。
+        """
         await cls.auto_adopt_mounted_kbs()
         async with db_manager.get_connection() as conn:
             async with conn.execute("""
@@ -492,6 +496,9 @@ class KBLifecycleManager:
                 rows = await cursor.fetchall()
                 kbs = []
                 for r in rows:
+                    is_pub = bool(r["is_published"]) if "is_published" in r.keys() and r["is_published"] else False
+                    if published_only and not is_pub:
+                        continue
                     kb_id = r["kb_id"]
                     real_disk = KBStorageManager.get_kb_disk_size(kb_id)
                     kbs.append({
@@ -510,7 +517,7 @@ class KBLifecycleManager:
                         "triple_count": r["triple_count"],
                         "disk_size_bytes": real_disk,
                         "share_repo_uri": r["share_repo_uri"],
-                        "is_published": bool(r["is_published"]) if "is_published" in r.keys() and r["is_published"] else False,
+                        "is_published": is_pub,
                         "created_at": r["created_at"],
                         "updated_at": r["updated_at"],
                     })
@@ -728,6 +735,41 @@ class KBLifecycleManager:
     # ==========================================
 
     @classmethod
+    async def assert_kbs_published(cls, kb_ids: list[str], conn: Any | None = None) -> None:
+        """校验给定知识库列表是否均存在且已发布正式版本，未发布则抛出 ValueError。"""
+        unique_ids = list(dict.fromkeys(kid for kid in kb_ids if kid))
+        if not unique_ids:
+            return
+
+        async def _check(active_conn: Any) -> None:
+            placeholders = ",".join(["?"] * len(unique_ids))
+            async with active_conn.execute(
+                f"SELECT kb_id, name, is_published FROM knowledge_bases WHERE kb_id IN ({placeholders})",
+                unique_ids,
+            ) as cursor:
+                rows = await cursor.fetchall()
+                row_map = {r["kb_id"]: r for r in rows}
+
+            blocked_names: list[str] = []
+            for kid in unique_ids:
+                row = row_map.get(kid)
+                if not row:
+                    blocked_names.append(kid)
+                elif not (bool(row["is_published"]) if "is_published" in row.keys() and row["is_published"] else False):
+                    blocked_names.append(row["name"] or kid)
+
+            if blocked_names:
+                raise ValueError(
+                    f"知识库【{'、'.join(blocked_names)}】尚未发布正式版本，请先在 LLMwiki 中发布后再绑定给专家"
+                )
+
+        if conn is not None:
+            await _check(conn)
+        else:
+            async with db_manager.get_connection() as own_conn:
+                await _check(own_conn)
+
+    @classmethod
     async def bind_expert_kbs(
         cls,
         expert_id: str,
@@ -736,6 +778,9 @@ class KBLifecycleManager:
         """保存专家绑定的知识库清单及优先级顺序 (Priority 1 > Priority 2 ...)。"""
         now = time.time()
         async with db_manager.get_connection() as conn:
+            if bindings:
+                await cls.assert_kbs_published([b["kb_id"] for b in bindings], conn=conn)
+
             await conn.execute("DELETE FROM expert_kb_bindings WHERE expert_id = ?", (expert_id,))
             for idx, b in enumerate(bindings):
                 rank = b.get("priority_rank", idx + 1)

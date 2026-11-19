@@ -85,10 +85,10 @@ export function ExpertKnowledgeAndApiPanel({
   const loadAllKbs = async () => {
     setLoadingKbs(true);
     try {
-      const res = await apiFetch('/api/v1/kb/bases');
+      const res = await apiFetch('/api/v1/kb/bases?published_only=true');
       if (res.ok) {
         const json = await res.json();
-        setAvailableKbs(json.data || []);
+        setAvailableKbs((json.data || []).filter((k: any) => Boolean(k.is_published)));
       }
     } catch (e) {
       console.error('加载知识库列表失败:', e);
@@ -204,7 +204,11 @@ export function ExpertKnowledgeAndApiPanel({
         {/* 可选与已绑定列表 */}
         <div className="max-h-44 overflow-y-auto space-y-2 pr-1">
           {filteredAvailableKbs.length === 0 ? (
-            <div className="text-center py-4 text-muted-foreground">未找到知识库，请先在 LLMwiki 中完成训练</div>
+            <div className="text-center py-4 text-muted-foreground">
+              {kbSearch.trim()
+                ? '未找到匹配的已发布知识库'
+                : '暂无已发布的知识库，请先在 LLMwiki 中完成训练并发布版本'}
+            </div>
           ) : (
             filteredAvailableKbs.map((kb) => {
               const bound = boundKbs.find((b) => b.kb_id === kb.kb_id);

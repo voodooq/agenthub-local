@@ -23,6 +23,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ...core.logging_config import logger
+from ...kb.manager import KBLifecycleManager
 from ...repository.db import db_manager
 from ...search.expert_kb_router import ExpertKnowledgeRouter
 from ...search.hype_worker import ForegroundChatTracker
@@ -419,6 +420,15 @@ async def update_agent_knowledge_bases(
 ) -> dict[str, Any]:
     """更新专家绑定的知识底座列表、权重与隔离策略。"""
     async with db_manager.get_connection() as conn:
+        # 0. 前置门控：仅允许绑定已发布正式版本的知识库
+        if payload.knowledge_bases:
+            try:
+                await KBLifecycleManager.assert_kbs_published(
+                    [item.kb_id for item in payload.knowledge_bases], conn=conn
+                )
+            except ValueError as e:
+                raise HTTPException(status_code=400, detail=str(e))
+
         # 1. 更新专家扩展配置
         updates = []
         params = []
