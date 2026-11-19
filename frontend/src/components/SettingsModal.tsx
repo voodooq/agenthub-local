@@ -321,12 +321,14 @@ export function SettingsModal({
 
   useEffect(() => {
     if (isOpen) {
-      if (initialTab === 'models' || initialTab === 'appearance') {
+      const isModelsTab = initialTab === 'models';
+      if (isModelsTab || initialTab === 'appearance') {
         setActiveTab(initialTab);
       } else {
         setActiveTab('appearance');
       }
-      fetchActiveModels();
+      // 打开模型标签页时自动穿透重新发现最新可用模型名称
+      fetchActiveModels(isModelsTab);
       fetchSettings();
       setFeedback(null);
       setModelFeedback(null);

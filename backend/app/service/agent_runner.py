@@ -315,6 +315,16 @@ _CLI_MODEL_METADATA_PRESETS: dict[str, dict[str, str]] = {
         "description": "通过 Antigravity 官方通道调度的 Claude 5.5 主力工程编码思考模型",
         "badge": "CLI 原生 · 跨生态",
     },
+    "claude-sonnet-4-6": {
+        "name": "Claude Sonnet 4.6 (Thinking)",
+        "description": "通过 Antigravity 官方通道调度的 Claude 4.6 旗舰工程编码与思考模型",
+        "badge": "CLI 原生 · 思考模型",
+    },
+    "claude-opus-4-6-thinking": {
+        "name": "Claude Opus 4.6 (Thinking)",
+        "description": "通过 Antigravity 官方通道调度的 Claude 4.6 顶配深思维链推理模型",
+        "badge": "CLI 顶配 · 思考模型",
+    },
     "gpt-oss-120b-medium": {
         "name": "GPT-OSS 120B",
         "description": "120B 巨量参数开源推理模型 · 多视角代码审查与技术问答",
@@ -330,13 +340,15 @@ _KNOWN_MULTI_THINKING_PREFIXES: set[str] = {
     "gemini-3.8-flash",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
+    "claude-sonnet-4-6",
+    "claude-opus-4-6",
 }
 
 _THINKING_SUFFIX_RE = re.compile(r"^(.+?)-(xhigh|high|medium|low)$", re.IGNORECASE)
 _DISPLAY_SUFFIX_RE = re.compile(r"\s*\((?:xhigh|high|medium|low)\)\s*$", re.IGNORECASE)
 _VALID_CLI_MODEL_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._:-]+$")
 
-_CLI_MODELS_CACHE_TTL_SECONDS = 300.0
+_CLI_MODELS_CACHE_TTL_SECONDS = 60.0
 _CLI_MODELS_CACHE: dict[str, dict[str, Any]] = {}
 _DISCOVER_CLI_LOCKS: dict[str, asyncio.Lock] = {}
 _DYNAMIC_VARIANT_MAP: dict[str, list[str]] = {}

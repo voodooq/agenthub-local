@@ -851,9 +851,10 @@ export default function WorkbenchPage() {
     }
   };
 
-  const fetchActiveModels = async () => {
+  const fetchActiveModels = async (forceRefresh: boolean = false) => {
     try {
-      const res = await apiFetch('/api/v1/models/active');
+      const url = forceRefresh ? '/api/v1/models/active?refresh=true' : '/api/v1/models/active';
+      const res = await apiFetch(url);
       if (res.ok) {
         const data: ActiveModelsState = await res.json();
         applyActiveModelsState(data);
@@ -1145,7 +1146,8 @@ export default function WorkbenchPage() {
 
   useEffect(() => {
     if (statusPill?.active_account_name) {
-      fetchActiveModels();
+      const isCli = statusPill.auth_type === 'gemini_cli';
+      fetchActiveModels(isCli);
     }
   }, [statusPill?.active_account_name, statusPill?.auth_type]);
 

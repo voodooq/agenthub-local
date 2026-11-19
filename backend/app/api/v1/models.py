@@ -137,6 +137,26 @@ CLI_MODELS: List[ModelMeta] = [
         supported_auth_types=["gemini_cli"],
     ),
     ModelMeta(
+        id="claude-sonnet-4-6",
+        name="Claude Sonnet 4.6 (Thinking)",
+        provider="Antigravity CLI",
+        description="通过 Antigravity 官方通道调度的 Claude 4.6 旗舰工程编码与思考模型",
+        badge="CLI 原生 · 思考模型",
+        has_thinking=True,
+        is_default=False,
+        supported_auth_types=["gemini_cli"],
+    ),
+    ModelMeta(
+        id="claude-opus-4-6-thinking",
+        name="Claude Opus 4.6 (Thinking)",
+        provider="Antigravity CLI",
+        description="通过 Antigravity 官方通道调度的 Claude 4.6 顶配深思维链推理模型",
+        badge="CLI 顶配 · 思考模型",
+        has_thinking=True,
+        is_default=False,
+        supported_auth_types=["gemini_cli"],
+    ),
+    ModelMeta(
         id="claude-sonnet-5-5",
         name="Claude Sonnet 5.5",
         provider="Antigravity CLI",
@@ -307,7 +327,11 @@ async def _get_candidates_for_account(
     cli_home_dir: Optional[str] = None,
     force_refresh: bool = False,
 ) -> List[ModelMeta]:
-    """根据账号认证属性获取候选模型列表；CLI 账号优先动态调用 `agy models` 嗅探最新解锁模型。"""
+    """根据账号认证属性获取候选模型列表；CLI 账号优先动态调用 `agy models` 嗅探最新解锁模型。
+    
+    当 force_refresh=False 时，若缓存为空或 CLI 账号首次使用（即 known_candidate_ids 为空），
+    自动触发一次 force_refresh 以确保模型列表不落后于实际已解锁的权限。
+    """
     norm_type = (auth_type or "").strip().lower()
     if norm_type in ("api_key", "oauth_google_one", "oauth_personal") and not cli_home_dir:
         return [m.model_copy(deep=True) for m in OFFICIAL_API_MODELS]
@@ -315,6 +339,7 @@ async def _get_candidates_for_account(
     discovered = await discover_cli_models(cli_home_dir, force_refresh=force_refresh)
     if discovered:
         return [ModelMeta(**item) for item in discovered]
+    # NOTE: 若 discover 返回空列表（agy 未安装/超时），以静态内置基准列表兜底
     return [m.model_copy(deep=True) for m in CLI_MODELS]
 
 
@@ -356,13 +381,23 @@ async def _build_active_models_response(force_refresh: bool = False) -> ActiveMo
         cli_home_dir = account.cli_home_dir
         auth_label = _get_auth_label(auth_type)
 
-        candidates = await _get_candidates_for_account(auth_type, cli_home_dir, force_refresh=force_refresh)
         accounts_dict = store.setdefault("accounts", {})
         acc_record = accounts_dict.get(account_name, {})
 
         # 校验存储记录的 auth_type 是否与当前账号一致
         if acc_record.get("auth_type") and acc_record.get("auth_type") != auth_type:
             acc_record = {}
+
+        known_candidate_ids: List[str] = acc_record.get("known_candidate_ids", [])
+
+        # CLI 账号首次使用（无历史记录）时自动触发一次强制发现，确保立即拉取最新模型列表
+        norm_auth = (auth_type or "").strip().lower()
+        is_cli_account = norm_auth == "gemini_cli" or bool(cli_home_dir)
+        if is_cli_account and not known_candidate_ids and not force_refresh:
+            force_refresh = True
+            logger.info(f"[ModelDiscovery] 账号 [{account_name}] 首次加载，自动触发 CLI 模型重新发现")
+
+        candidates = await _get_candidates_for_account(auth_type, cli_home_dir, force_refresh=force_refresh)
 
         test_results_map = acc_record.get("test_results", {})
         saved_verified_ids: List[str] = acc_record.get("verified_model_ids", [])
@@ -387,10 +422,15 @@ async def _build_active_models_response(force_refresh: bool = False) -> ActiveMo
         # 1) 兼容老快照中仅含旧版模型的情况，保证最新旗舰代际可自动置顶浮现；
         # 2) 动态识别新增模型时（未出现在 known_candidate_ids 且未曾在 test_results 中测为不可用），自动并入输入框列表并同步记录已知快照。
         latest_flagship_ids = [
+            "claude-sonnet-4-6",
+            "claude-opus-4-6-thinking",
+            "gemini-3.8-flash",
             "gemini-4-argon",
             "gemini-4-hydrogen",
             "gemini-pro-orchestrator-g1-pro",
-            "gemini-3.8-flash",
+            "claude-opus-5-5",
+            "claude-sonnet-5-5",
+            "gpt-oss-120b-medium",
             "gemini-3.5-flash-lite",
         ]
         available_new_ids = [
@@ -803,3 +843,12 @@ async def update_verified_models(req: UpdateVerifiedModelsRequest):
     _save_verified_store(store)
 
     return await _build_active_models_response()
+
+
+@router.post("/discover", response_model=ActiveModelsResponse)
+async def discover_cli_models_now():
+    """
+    主动触发当前活跃 CLI 账号的模型重新发现（强制穿透缓存执行 `agy models`），
+    自动将新模型并入可用列表。适用于 Gemini CLI 模型版本调整后的即时同步场景。
+    """
+    return await _build_active_models_response(force_refresh=True)

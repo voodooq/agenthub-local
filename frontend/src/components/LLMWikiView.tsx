@@ -148,16 +148,17 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const handleExportBundle = async (kb: KnowledgeBaseItem) => {
     setExportingKbId(kb.kb_id);
     try {
-      const response = await fetch(`/api/v1/kb/${kb.kb_id}/export`);
+      const response = await apiFetch(`/api/v1/kb/${kb.kb_id}/export?version=${encodeURIComponent(kb.active_version || 'v1.0.0')}`);
       if (!response.ok) {
-        throw new Error(`导出失败: ${response.statusText}`);
+        const errorDetail = await response.text().catch(() => '');
+        throw new Error(`导出失败: ${response.statusText}${errorDetail ? ` (${errorDetail})` : ''}`);
       }
       const blob = await response.blob();
       const url = window.URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
       const safeName = kb.name.replace(/[\\/*?:"<>|]/g, '_');
-      a.download = `${safeName}_${kb.active_version}.ahkb`;
+      a.download = `${safeName}_${kb.active_version || 'v1.0.0'}.ahkb`;
       document.body.appendChild(a);
       a.click();
       window.URL.revokeObjectURL(url);
@@ -184,7 +185,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     formData.append('conflict_strategy', strategy);
 
     try {
-      const res = await fetch('/api/v1/kb/import', {
+      const res = await apiFetch('/api/v1/kb/import', {
         method: 'POST',
         body: formData,
       });
