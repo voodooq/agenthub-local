@@ -156,3 +156,4 @@ class KBUpgradeService:
             "new_total_chunks": total_count,
             "message": "已成功重塑为父子分层结构，口语化问答正于后台异步提炼中。",
         }
+

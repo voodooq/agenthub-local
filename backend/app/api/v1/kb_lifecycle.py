@@ -293,7 +293,8 @@ async def purge_all_bases() -> dict[str, Any]:
     from ...repository.db import db_manager
     async with db_manager.get_connection() as conn:
         cursor = await conn.execute("SELECT count(*) FROM knowledge_bases")
-        kb_count = (await cursor.fetchone())[0]
+        row = await cursor.fetchone()
+        kb_count = int(row[0]) if row else 0
         await conn.execute("DELETE FROM kb_versions")
         await conn.execute("DELETE FROM expert_kb_bindings")
         await conn.execute("DELETE FROM knowledge_bases")

@@ -617,6 +617,9 @@ class KBStorageManager:
         except Exception:
             return None
 
+    # 向后兼容别名
+    load_manifest = read_manifest
+
     @classmethod
     def copy_version_snapshot(
         cls,

@@ -17,6 +17,7 @@ import io
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import time
@@ -154,7 +155,7 @@ class KBExchangeEngine:
         content_md5 = cls.calculate_deterministic_md5(documents, chunks, structured_rules)
 
         # 读取已有知识库元数据
-        kb_meta = KBStorageManager.load_manifest(kb_id, version)
+        kb_meta = KBStorageManager.read_manifest(kb_id, version) or {}
         kb_uuid = kb_meta.get("kb_uuid") or f"kb_{kb_id}_{uuid.uuid4().hex[:8]}"
         embed_model = kb_meta.get("embedding_model") or "bge-m3"
         embed_dim = kb_meta.get("embedding_dim") or 1024

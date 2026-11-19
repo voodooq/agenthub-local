@@ -650,11 +650,10 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
           <button
             type="button"
             onClick={() => setActiveSection('mount')}
-            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${
-              activeSection === 'mount'
+            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${activeSection === 'mount'
                 ? 'bg-surface-card text-foreground font-semibold shadow-sm'
                 : 'text-muted-foreground hover:text-foreground'
-            }`}
+              }`}
           >
             <HardDrive className="w-3.5 h-3.5 text-sky-500" />
             <span>1、知识库挂载</span>
@@ -664,11 +663,10 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
           <button
             type="button"
             onClick={() => setActiveSection('train')}
-            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${
-              activeSection === 'train'
+            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${activeSection === 'train'
                 ? 'bg-surface-card text-foreground font-semibold shadow-sm'
                 : 'text-muted-foreground hover:text-foreground'
-            }`}
+              }`}
           >
             <Sparkles className="w-3.5 h-3.5 text-amber-500" />
             <span>2、知识库训练</span>
@@ -712,11 +710,10 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                         setProviderTab('wecom');
                         setTestResult(null);
                       }}
-                      className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${
-                        providerTab === 'wecom'
+                      className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${providerTab === 'wecom'
                           ? 'border-sky-500 bg-sky-500/5 font-semibold text-foreground shadow-sm'
                           : 'border-border bg-surface-100/60 text-muted-foreground hover:text-foreground hover:border-border/80'
-                      }`}
+                        }`}
                     >
                       <Cloud className="w-5 h-5 text-sky-500 mb-1" />
                       <span>企业微信微盘</span>
@@ -729,11 +726,10 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                         setProviderTab('webdav');
                         setTestResult(null);
                       }}
-                      className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${
-                        providerTab === 'webdav'
+                      className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${providerTab === 'webdav'
                           ? 'border-emerald-500 bg-emerald-500/5 font-semibold text-foreground shadow-sm'
                           : 'border-border bg-surface-100/60 text-muted-foreground hover:text-foreground hover:border-border/80'
-                      }`}
+                        }`}
                     >
                       <HardDrive className="w-5 h-5 text-emerald-500 mb-1" />
                       <span>WebDAV</span>
@@ -746,11 +742,10 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                         setProviderTab('oss');
                         setTestResult(null);
                       }}
-                      className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${
-                        providerTab === 'oss'
+                      className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${providerTab === 'oss'
                           ? 'border-amber-500 bg-amber-500/5 font-semibold text-foreground shadow-sm'
                           : 'border-border bg-surface-100/60 text-muted-foreground hover:text-foreground hover:border-border/80'
-                      }`}
+                        }`}
                     >
                       <Database className="w-5 h-5 text-amber-500 mb-1" />
                       <span>对象存储</span>
@@ -858,11 +853,10 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                         placeholder="http://127.0.0.1:5244/dav 或 https://nas.local:5006"
                         value={webdavForm.base_url}
                         onChange={(e) => setWebdavForm({ ...webdavForm, base_url: e.target.value })}
-                        className={`w-full rounded-lg border bg-surface-card px-2.5 py-1.5 text-xs outline-none transition-colors ${
-                          webdavForm.base_url.includes('/dev')
+                        className={`w-full rounded-lg border bg-surface-card px-2.5 py-1.5 text-xs outline-none transition-colors ${webdavForm.base_url.includes('/dev')
                             ? 'border-amber-500 focus:border-amber-500'
                             : 'border-border focus:border-emerald-500'
-                        }`}
+                          }`}
                       />
                       {webdavForm.base_url.includes('/dev') && (
                         <div className="mt-1.5 flex items-center justify-between p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-[11px] animate-fade-in">
@@ -979,11 +973,10 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                 {/* 连通性测试结果面板 */}
                 {testResult && (
                   <div
-                    className={`flex items-start gap-2.5 rounded-xl p-3 text-xs leading-relaxed transition-all ${
-                      testResult.success
+                    className={`flex items-start gap-2.5 rounded-xl p-3 text-xs leading-relaxed transition-all ${testResult.success
                         ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
                         : 'bg-red-500/10 text-red-500 border border-red-500/20'
-                    }`}
+                      }`}
                   >
                     {testResult.success ? (
                       <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
@@ -1085,13 +1078,12 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                   {m.provider_type}
                                 </span>
                                 <span
-                                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
-                                    m.authority_tier === 1
+                                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${m.authority_tier === 1
                                       ? 'bg-sky-500/10 text-sky-500'
                                       : m.authority_tier === 2
-                                      ? 'bg-surface-200 text-foreground'
-                                      : 'bg-amber-500/10 text-amber-500'
-                                  }`}
+                                        ? 'bg-surface-200 text-foreground'
+                                        : 'bg-amber-500/10 text-amber-500'
+                                    }`}
                                 >
                                   Tier {m.authority_tier}
                                 </span>
@@ -1248,9 +1240,6 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                       <Database className="w-4 h-4 text-emerald-500" />
                       独立知识库资产清单 ({kbsList.length})
                     </h3>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      v1.5.8 独立自包含 SQLite index.db，支持快照复制、版本回滚、磁盘瘦身与物理清理
-                    </p>
                   </div>
                   <div className="flex items-center gap-2">
                     {kbsList.length > 0 && (
@@ -1265,9 +1254,8 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                       </button>
                     )}
                     <label
-                      className={`flex items-center gap-1 px-2.5 py-1 text-xs text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg border border-blue-200 dark:border-blue-900/60 transition-colors cursor-pointer ${
-                        isImporting ? 'opacity-50 pointer-events-none' : ''
-                      }`}
+                      className={`flex items-center gap-1 px-2.5 py-1 text-xs text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg border border-blue-200 dark:border-blue-900/60 transition-colors cursor-pointer ${isImporting ? 'opacity-50 pointer-events-none' : ''
+                        }`}
                       title="导入免重新训练的 .ahkb 离线知识包"
                     >
                       <Upload className="w-3.5 h-3.5" />
@@ -1307,11 +1295,10 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                         <div
                           key={kb.kb_id}
                           onClick={() => setSelectedKbId(kb.kb_id)}
-                          className={`rounded-xl border p-4 text-xs transition-all cursor-pointer space-y-3 ${
-                            isSelected
+                          className={`rounded-xl border p-4 text-xs transition-all cursor-pointer space-y-3 ${isSelected
                               ? 'border-sky-500 bg-sky-500/5 shadow-sm'
                               : 'border-border bg-surface-100/50 hover:border-border/80'
-                          }`}
+                            }`}
                         >
                           <div className="flex items-center justify-between gap-3">
                             <div className="flex items-center gap-2 min-w-0 flex-1 flex-wrap">
@@ -1329,19 +1316,18 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                 <span>{kb.active_version}</span>
                               </button>
                               <span
-                                className={`px-2 py-0.5 rounded text-[10px] font-medium shrink-0 ${
-                                  kb.ownership_type === 'subscribed_ro'
+                                className={`px-2 py-0.5 rounded text-[10px] font-medium shrink-0 ${kb.ownership_type === 'subscribed_ro'
                                     ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20'
                                     : kb.ownership_type === 'frozen_snapshot'
-                                    ? 'bg-muted text-muted-foreground border border-border'
-                                    : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
-                                }`}
+                                      ? 'bg-muted text-muted-foreground border border-border'
+                                      : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
+                                  }`}
                               >
                                 {kb.ownership_type === 'subscribed_ro'
                                   ? '🔒 团队订阅只读'
                                   : kb.ownership_type === 'frozen_snapshot'
-                                  ? '🔒 离线安全快照'
-                                  : '本地可编辑'}
+                                    ? '🔒 离线安全快照'
+                                    : '本地可编辑'}
                               </span>
 
                               {/* v1.6.0 通用业务领域规则模板选择器 */}
@@ -1361,6 +1347,33 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                   </option>
                                 ))}
                               </select>
+
+                              {extra?.hierarchy?.needs_upgrade && (
+                                <span
+                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0"
+                                  title="检测到存量切片缺少父子分层结构，建议一键升级"
+                                >
+                                  ⚠️ 待升级分层索引
+                                </span>
+                              )}
+
+                              {extra?.enhancement?.status === 'running' && (
+                                <span
+                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0 animate-pulse flex items-center gap-1"
+                                  title={`后台口语化问答已完成 ${extra.enhancement.hype_completed}/${extra.enhancement.total_parents} 条，抽取 ${extra.enhancement.rules_extracted} 条规则`}
+                                >
+                                  ✨ 口语增强 {extra.enhancement.hype_completed}/{extra.enhancement.total_parents}
+                                </span>
+                              )}
+
+                              {extra?.enhancement?.status === 'completed' && (
+                                <span
+                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shrink-0 flex items-center gap-1"
+                                  title="父子切片分层与口语问答检索均已就绪"
+                                >
+                                  ✨ 口语化就绪
+                                </span>
+                              )}
 
                               {extra?.hierarchy?.needs_upgrade && (
                                 <span
@@ -1622,9 +1635,8 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                 </div>
                               </div>
                               <p
-                                className={`text-muted-foreground text-[11px] leading-relaxed whitespace-pre-wrap ${
-                                  isExpanded ? '' : 'line-clamp-4'
-                                }`}
+                                className={`text-muted-foreground text-[11px] leading-relaxed whitespace-pre-wrap ${isExpanded ? '' : 'line-clamp-4'
+                                  }`}
                               >
                                 {h.content}
                               </p>

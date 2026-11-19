@@ -377,6 +377,27 @@ class HierarchicalChunk:
     def content(self, val: str) -> None:
         self.content_text = val
 
+    def to_dict(self) -> dict[str, Any]:
+        """序列化为字典对象。"""
+        return {
+            "id": self.id,
+            "chunk_role": self.chunk_role,
+            "parent_chunk_id": self.parent_chunk_id,
+            "section_path": self.section_path,
+            "content": self.content_text,
+            "content_text": self.content_text,
+            "title": self.title,
+            "remote_uri": self.remote_uri,
+            "authority_tier": self.authority_tier,
+            "doc_year": self.doc_year,
+            "effective_date": self.effective_date,
+            "effective_ts": self.effective_ts,
+            "doc_priority_type": self.doc_priority_type,
+            "topic_cluster_id": self.topic_cluster_id,
+            "is_latest_in_cluster": self.is_latest_in_cluster,
+            "mtime": self.mtime,
+        }
+
 
 class ParentChildASTChunker:
     """父子分层结构化切分器 (ParentChildASTChunker)。

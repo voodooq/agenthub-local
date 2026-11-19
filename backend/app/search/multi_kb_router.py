@@ -142,39 +142,40 @@ class MultiKBRetrievalRouter:
 
         for c in reranked_candidates:
             # 兼容性回溯兜底：若 parent_chunk_id 为空，回退为自身 id (Small-to-Big Fallback)
-            pid = c.get("parent_chunk_id") or c.get("id")
-            kb_id = c.get("kb_id")
-            ver = c.get("version")
-            db_path = KBStorageManager.get_version_db_path(kb_id, ver)
+            pid = str(c.get("parent_chunk_id") or c.get("id") or "")
+            kb_id = str(c.get("kb_id") or "")
+            ver = str(c.get("version") or "v1.0.0")
 
             # 若有关联的父切片且未展示过，尝试提取完整父切片
-            if pid and pid not in seen_parents and db_path.exists():
-                try:
-                    conn = sqlite3.connect(str(db_path))
-                    conn.row_factory = sqlite3.Row
-                    cur = conn.cursor()
-                    cur.execute(
-                        "SELECT id, title, content, section_path, doc_year, effective_date FROM hybrid_chunks WHERE id = ?",
-                        (pid,)
-                    )
-                    parent_row = cur.fetchone()
-                    conn.close()
-                    if parent_row:
-                        c_copy = dict(c)
-                        c_copy["content"] = parent_row["content"]
-                        c_copy["title"] = parent_row["title"]
-                        c_copy["is_expanded_parent"] = (pid != c.get("id"))
-                        seen_parents.add(pid)
-                        final_top.append(c_copy)
-                        if len(final_top) >= top_k:
-                            break
-                        continue
-                except Exception as p_err:
-                    logger.debug(f"[Small-to-Big] 读取父切片失败，保留原切片: {p_err}")
+            if pid and pid not in seen_parents and kb_id:
+                db_path = KBStorageManager.get_version_db_path(kb_id, ver)
+                if db_path.exists():
+                    try:
+                        conn = sqlite3.connect(str(db_path))
+                        conn.row_factory = sqlite3.Row
+                        cur = conn.cursor()
+                        cur.execute(
+                            "SELECT id, title, content, section_path, doc_year, effective_date FROM hybrid_chunks WHERE id = ?",
+                            (pid,)
+                        )
+                        parent_row = cur.fetchone()
+                        conn.close()
+                        if parent_row:
+                            c_copy = dict(c)
+                            c_copy["content"] = parent_row["content"]
+                            c_copy["title"] = parent_row["title"]
+                            c_copy["is_expanded_parent"] = (pid != c.get("id"))
+                            seen_parents.add(pid)
+                            final_top.append(c_copy)
+                            if len(final_top) >= top_k:
+                                break
+                            continue
+                    except Exception as p_err:
+                        logger.debug(f"[Small-to-Big] 读取父切片失败，保留原切片: {p_err}")
 
             # 无父切片或未开启 Small-to-Big / 回溯失败时原样返回自身切片，零漏召回
-            chunk_hash = c.get("id") or c.get("title")
-            if chunk_hash not in seen_parents:
+            chunk_hash = str(c.get("id") or c.get("title") or "")
+            if chunk_hash and chunk_hash not in seen_parents:
                 seen_parents.add(chunk_hash)
                 final_top.append(c)
                 if len(final_top) >= top_k:
