@@ -150,6 +150,8 @@ class KBLifecycleManager:
         embedding_dim: int = 768,
         initial_version: str = "v1.0.0",
         ownership_type: str = "local",
+        domain_type: str = "general",
+        rule_profile_json: str = "",
     ) -> dict[str, Any]:
         """创建新知识库资产并初始化 v1.0.0 独立存储。"""
         now = time.time()
@@ -174,10 +176,14 @@ class KBLifecycleManager:
                 INSERT OR REPLACE INTO knowledge_bases (
                     kb_id, name, description, ownership_type, source_id,
                     active_version, staging_version, embedding_model, embedding_dim,
-                    chunk_count, triple_count, disk_size_bytes, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, 0, 0, ?, ?, ?)
+                    chunk_count, triple_count, disk_size_bytes, domain_type, rule_profile_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, '', ?, ?, 0, 0, ?, ?, ?, ?, ?)
                 """,
-                (kb_id, name, description, ownership_type, source_id, initial_version, embedding_model, embedding_dim, disk_size, now, now),
+                (
+                    kb_id, name, description, ownership_type, source_id, initial_version,
+                    embedding_model, embedding_dim, disk_size, domain_type, rule_profile_json, now, now
+                ),
             )
             await conn.execute(
                 """
@@ -190,14 +196,33 @@ class KBLifecycleManager:
             )
             await conn.commit()
 
-        logger.info(f"成功创建知识库资产: {name} (ID: {kb_id}, 版本: {initial_version})")
+        logger.info(f"成功创建知识库资产: {name} (ID: {kb_id}, 版本: {initial_version}, 领域: {domain_type})")
         return {
             "kb_id": kb_id,
             "name": name,
             "active_version": initial_version,
             "ownership_type": ownership_type,
+            "domain_type": domain_type,
             "disk_size_bytes": disk_size,
         }
+
+    @classmethod
+    async def update_knowledge_base_domain(
+        cls, kb_id: str, domain_type: str, rule_profile_json: str = ""
+    ) -> bool:
+        """更新知识库的所属业务领域及自定义规则模板 JSON。"""
+        now = time.time()
+        async with db_manager.get_connection() as conn:
+            cur = await conn.execute(
+                """
+                UPDATE knowledge_bases
+                SET domain_type = ?, rule_profile_json = ?, updated_at = ?
+                WHERE kb_id = ?
+                """,
+                (domain_type, rule_profile_json, now, kb_id),
+            )
+            await conn.commit()
+            return cur.rowcount > 0
 
     @classmethod
     async def auto_adopt_mounted_kbs(cls) -> None:
@@ -577,7 +602,8 @@ class KBLifecycleManager:
         """获取指定专家绑定的知识库列表（按优先级升序）。"""
         async with db_manager.get_connection() as conn:
             async with conn.execute("""
-                SELECT b.kb_id, b.pinned_version, b.priority_rank, kb.name, kb.active_version, kb.chunk_count
+                SELECT b.kb_id, b.pinned_version, b.priority_rank, kb.name, kb.active_version, kb.chunk_count,
+                       kb.domain_type, kb.rule_profile_json
                 FROM expert_kb_bindings b
                 JOIN knowledge_bases kb ON b.kb_id = kb.kb_id
                 WHERE b.expert_id = ?
@@ -592,6 +618,8 @@ class KBLifecycleManager:
                         "effective_version": r["active_version"] if r["pinned_version"] == "latest" else r["pinned_version"],
                         "priority_rank": r["priority_rank"],
                         "chunk_count": r["chunk_count"],
+                        "domain_type": r["domain_type"] if "domain_type" in r.keys() else "general",
+                        "rule_profile_json": r["rule_profile_json"] if "rule_profile_json" in r.keys() else "",
                     }
                     for r in rows
                 ]

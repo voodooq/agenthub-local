@@ -1,11 +1,11 @@
 """
-AgentHub Local v1.5.9 结构化业务规则卡片抽取与在线置顶过滤引擎 (Structured Rule Extractor)
-规范参考: SPEC-1.5.9-HARDENING-ADDENDUM
+AgentHub Local v1.6.0 通用业务规则引擎 (Universal Domain-Agnostic Rule Engine)
+规范参考: SPEC-1.6.0-UNIVERSAL-RULE-ENGINE
 核心功能:
-1. 从规程 parent 切片中抽取多维刚性规则（组别、剑种、器材规格、护具牛数、费用政策、申诉仲裁）；
-2. 存入独立知识库 index.db 的 kb_structured_rules 表；
-3. 支持导出打入 structured_rules.jsonl，导入还原入库；
-4. 检索阶段按多维条件与最新 effective_date 置顶注入【权威结构化规则卡】。
+1. 彻底解耦硬编码，基于 RuleDomainProfile 模板适配击剑、马术、橄榄球及企业通用规章;
+2. Markdown 表格首列跨行合并单元格自动向下继承（专治马术多级别/多高度跨行表）;
+3. 复合条件命中重合度加权排序 (match_score 实体 2 分 + 触发词 1 分) + 最新生效日期双重仲裁;
+4. 100% 向后兼容 StructuredRuleExtractor 别名与历史数据库。
 """
 from __future__ import annotations
 
@@ -14,75 +14,123 @@ import json
 from pathlib import Path
 import re
 import sqlite3
-import time
 from typing import Any
 
 from ..core.logging_config import logger
+from .rule_profiles import BUILTIN_RULE_PROFILES, RuleProfileManager
 
 
-# 规则特征触发词
-RULE_TRIGGER_KEYWORDS = {
-    # 组别与年龄
-    "u10", "u12", "u14", "u16", "u17", "u20", "公开组", "老将组", "出生", "年龄", "组别",
-    # 剑种与器材
-    "重剑", "花剑", "佩剑", "儿童剑", "成人剑", "0号", "5号", "剑条", "剑长", "护具", "防护服", "牛", "350n", "800n", "护胸",
-    # 费用与政策
-    "报名费", "参赛费", "退费", "退款", "服务费", "保证金",
-    # 申诉与规则
-    "申诉", "仲裁", "申诉费", "异议", "判罚", "检录",
-}
-
-
-class StructuredRuleExtractor:
-    """多维条件结构化业务规则卡片抽取与检索器。"""
+class UniversalRuleExtractor:
+    """领域无关的多维条件结构化业务规则卡片抽取与检索引擎。"""
 
     @classmethod
-    def should_trigger_rule_search(cls, query: str) -> bool:
-        """检查用户提问是否命中多维刚性业务规则特征。"""
+    def resolve_profile(cls, domain_type: str = "general", rule_profile_json: str = "") -> dict[str, Any]:
+        """解析知识库对应的领域规则模板。"""
+        if rule_profile_json and rule_profile_json.strip():
+            try:
+                parsed = json.loads(rule_profile_json)
+                if isinstance(parsed, dict) and "trigger_keywords" in parsed:
+                    return parsed
+            except Exception:
+                pass
+        return BUILTIN_RULE_PROFILES.get(domain_type, BUILTIN_RULE_PROFILES["general"])
+
+    @classmethod
+    def should_trigger_rule_search(cls, query: str, profile: dict[str, Any] | None = None) -> bool:
+        """检查用户提问是否命中业务规则特征词。若未指定 profile，则检查所有领域特征。"""
         lower_q = query.lower()
-        return any(kw in lower_q for kw in RULE_TRIGGER_KEYWORDS)
+        if profile:
+            keywords = profile.get("trigger_keywords", [])
+            return any(kw.lower() in lower_q for kw in keywords)
+
+        # 兜底：聚合所有内置领域触发词
+        for p in BUILTIN_RULE_PROFILES.values():
+            if any(kw.lower() in lower_q for kw in p.get("trigger_keywords", [])):
+                return True
+        return False
+
+    @classmethod
+    def get_fallback_merged_profile(cls) -> dict[str, Any]:
+        """合并所有内置领域的触发词、锚点、实体与正则，用于未显式指定领域时的向后兼容兜底。"""
+        all_keywords: list[str] = []
+        all_anchors: list[str] = []
+        all_entities: list[str] = []
+        all_patterns: list[dict[str, Any]] = []
+
+        for p in BUILTIN_RULE_PROFILES.values():
+            for kw in p.get("trigger_keywords", []):
+                if kw not in all_keywords:
+                    all_keywords.append(kw)
+            for anc in p.get("table_header_anchors", []):
+                if anc not in all_anchors:
+                    all_anchors.append(anc)
+            for ent in p.get("condition_tag_entities", []):
+                if ent not in all_entities:
+                    all_entities.append(ent)
+            for pat in p.get("regex_patterns", []):
+                all_patterns.append(pat)
+
+        return {
+            "domain_id": "merged_fallback",
+            "domain_name": "全域融合规则模板",
+            "trigger_keywords": all_keywords,
+            "table_header_anchors": all_anchors,
+            "condition_tag_entities": all_entities,
+            "regex_patterns": all_patterns,
+        }
 
     @classmethod
     def extract_rules_from_parent_chunk(
         cls,
         chunk: dict[str, Any],
         kb_id: str,
+        profile: dict[str, Any] | None = None,
     ) -> list[dict[str, Any]]:
-        """从父切片文本中提取结构化刚性规则卡片。"""
+        """基于领域模板从父切片文本中提取结构化规则卡片。"""
         content = chunk.get("content", "")
         if not content:
             return []
+
+        if not profile:
+            lower_kbid = kb_id.lower()
+            if "fencing" in lower_kbid:
+                profile = BUILTIN_RULE_PROFILES["fencing"]
+            elif "equestrian" in lower_kbid or "horse" in lower_kbid:
+                profile = BUILTIN_RULE_PROFILES["equestrian"]
+            elif "rugby" in lower_kbid:
+                profile = BUILTIN_RULE_PROFILES["rugby"]
+            else:
+                profile = cls.get_fallback_merged_profile()
 
         doc_year = chunk.get("doc_year", 0)
         effective_date = chunk.get("effective_date", "")
         source_chunk_id = chunk.get("id", "")
         doc_id = chunk.get("remote_uri", "") or chunk.get("section_path", "")
 
-        extracted_rules: list[dict[str, Any]] = []
-
-        # 1. 尝试解析 Markdown 表格中的规则行
-        table_rules = cls._extract_from_markdown_tables(
-            content=content,
-            kb_id=kb_id,
-            doc_id=doc_id,
-            doc_year=doc_year,
-            effective_date=effective_date,
-            source_chunk_id=source_chunk_id,
+        extracted: list[dict[str, Any]] = []
+        extracted.extend(
+            cls._extract_from_markdown_tables(
+                content=content,
+                kb_id=kb_id,
+                doc_id=doc_id,
+                doc_year=doc_year,
+                effective_date=effective_date,
+                source_chunk_id=source_chunk_id,
+                profile=profile,
+            )
         )
-        extracted_rules.extend(table_rules)
-
-        # 2. 尝试从正文段落中通过启发式正则模式抽取
-        text_rules = cls._extract_from_text_patterns(
-            content=content,
-            kb_id=kb_id,
-            doc_id=doc_id,
-            doc_year=doc_year,
-            effective_date=effective_date,
-            source_chunk_id=source_chunk_id,
+        extracted.extend(
+            cls._extract_from_text_patterns(
+                content=content,
+                kb_id=kb_id,
+                doc_id=doc_id,
+                doc_year=doc_year,
+                effective_date=effective_date,
+                source_chunk_id=source_chunk_id,
+                profile=profile,
+            )
         )
-        extracted_rules.extend(text_rules)
-
-        return extracted_rules
+        return extracted
 
     @classmethod
     def _extract_from_markdown_tables(
@@ -93,59 +141,72 @@ class StructuredRuleExtractor:
         doc_year: int,
         effective_date: str,
         source_chunk_id: str,
+        profile: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """解析 Markdown 表格中包含组别/剑种/器材规格的结构化数据。"""
-        rules = []
+        """解析 Markdown 表格规则，支持首列跨行合并单元格自动向下继承。"""
+        rules: list[dict[str, Any]] = []
         lines = [ln.strip() for ln in content.splitlines() if ln.strip()]
+
+        header_anchors = profile.get("table_header_anchors", [])
+        tag_entities = profile.get("condition_tag_entities", [])
 
         in_table = False
         headers: list[str] = []
+        last_non_empty_first_col = ""
 
         for line in lines:
             if line.startswith("|") and line.endswith("|"):
                 cells = [c.strip() for c in line.split("|")[1:-1]]
+                if not cells:
+                    continue
+
                 if not in_table:
-                    # 表头行
-                    if any(k in "".join(cells) for k in ["组别", "年龄", "出生", "项目", "剑种", "器材", "护具", "标准"]):
+                    # 识别表头行
+                    if any(k in "".join(cells) for k in header_anchors):
                         headers = cells
                         in_table = True
-                        continue
-                else:
-                    # 分隔线
-                    if all(set(c).issubset({"-", ":", " "}) for c in cells):
-                        continue
+                        last_non_empty_first_col = ""
+                    continue
 
-                    # 表格内容行
-                    row_dict = dict(zip(headers, cells))
-                    row_text = " | ".join(cells)
+                # 跳过表头分隔线 (|:---|:---|)
+                if all(set(c).issubset({"-", ":", " "}) for c in cells):
+                    continue
 
-                    # 判断行内特征
-                    tags: list[str] = []
-                    category = "equipment_standard"
-                    for val in cells:
-                        for kw in ["U10", "U12", "U14", "U16", "U17", "U20", "公开组", "老将组", "重剑", "花剑", "佩剑"]:
-                            if kw.lower() in val.lower() and kw not in tags:
-                                tags.append(kw)
+                # 处理跨行合并单元格：首列为空时继承上一行首列（如马术“场地障碍”跨多行不同高度）
+                if cells[0]:
+                    last_non_empty_first_col = cells[0]
+                elif last_non_empty_first_col:
+                    cells[0] = last_non_empty_first_col
 
-                    if any("费" in c for c in headers) or any("元" in c for c in cells):
-                        category = "fee_policy"
+                row_dict = dict(zip(headers, cells))
+                row_text = " | ".join(cells)
 
-                    if tags or category == "fee_policy":
-                        rule_id = hashlib.md5(f"{kb_id}_{doc_id}_{row_text}_{source_chunk_id}".encode()).hexdigest()[:16]
-                        rules.append({
-                            "id": f"rule_tbl_{rule_id}",
-                            "kb_id": kb_id,
-                            "doc_id": doc_id,
-                            "doc_year": doc_year,
-                            "effective_date": effective_date,
-                            "rule_category": category,
-                            "condition_tags": json.dumps(tags, ensure_ascii=False),
-                            "rule_summary": f"表格规程标准: {row_text}",
-                            "structured_payload": json.dumps(row_dict, ensure_ascii=False),
-                            "source_chunk_id": source_chunk_id,
-                        })
+                # 提取行内匹配的条件标签
+                tags: list[str] = []
+                for val in cells:
+                    for kw in tag_entities:
+                        if kw.lower() in val.lower() and kw not in tags:
+                            tags.append(kw)
+
+                category = "fee_policy" if (any("费" in c for c in headers) or any("元" in c for c in cells)) else "domain_standard"
+
+                if tags or category == "fee_policy":
+                    rule_id = hashlib.md5(f"{kb_id}_{doc_id}_{row_text}_{source_chunk_id}".encode()).hexdigest()[:16]
+                    rules.append({
+                        "id": f"rule_tbl_{rule_id}",
+                        "kb_id": kb_id,
+                        "doc_id": doc_id,
+                        "doc_year": doc_year,
+                        "effective_date": effective_date,
+                        "rule_category": category,
+                        "condition_tags": json.dumps(tags, ensure_ascii=False),
+                        "rule_summary": f"表格规程标准: {row_text}",
+                        "structured_payload": json.dumps(row_dict, ensure_ascii=False),
+                        "source_chunk_id": source_chunk_id,
+                    })
             else:
                 in_table = False
+                last_non_empty_first_col = ""
 
         return rules
 
@@ -158,53 +219,45 @@ class StructuredRuleExtractor:
         doc_year: int,
         effective_date: str,
         source_chunk_id: str,
+        profile: dict[str, Any],
     ) -> list[dict[str, Any]]:
-        """从正文句子中识别刚性费用、年龄对应、护具及申诉规则。"""
-        rules = []
+        """按领域模板正则抽取正文刚性规则，并自动关联段落内出现的条件实体标签。"""
+        rules: list[dict[str, Any]] = []
+        regex_patterns = profile.get("regex_patterns", [])
+        tag_entities = profile.get("condition_tag_entities", [])
 
-        # 费用模式匹配：例如 "报名费为每人每项 450 元"、"退费需在赛前...退还 80%"
-        fee_matches = re.finditer(
-            r"([^\n。；]*?(?:报名费|参赛费|服务费|退费|退款)[^\n。；]*?(?:\d+元|\d+%)?[^\n。；]*?)(?:[。；\n]|$)",
-            content
-        )
-        for m in fee_matches:
-            match_text = m.group(1).strip()
-            if len(match_text) >= 8 and any(char.isdigit() for char in match_text):
-                rid = hashlib.md5(f"fee_{kb_id}_{match_text[:30]}".encode()).hexdigest()[:16]
-                rules.append({
-                    "id": f"rule_fee_{rid}",
-                    "kb_id": kb_id,
-                    "doc_id": doc_id,
-                    "doc_year": doc_year,
-                    "effective_date": effective_date,
-                    "rule_category": "fee_policy",
-                    "condition_tags": json.dumps(["费用政策", "报名退费"], ensure_ascii=False),
-                    "rule_summary": match_text,
-                    "structured_payload": json.dumps({"raw_rule": match_text}, ensure_ascii=False),
-                    "source_chunk_id": source_chunk_id,
-                })
+        # 切分候选分句（以句号、分号、换行分句）
+        sentences = [s.strip() for s in re.split(r"[。\n；;]+", content) if len(s.strip()) >= 8]
 
-        # 申诉仲裁模式：例如 "需在比赛结束后15分钟内缴纳1000元申诉费"
-        appeal_matches = re.finditer(
-            r"([^\n。；]*?(?:申诉|仲裁|异议)[^\n。；]*?(?:\d+分钟|\d+元|书面)[^\n。；]*?)(?:[。；\n]|$)",
-            content
-        )
-        for m in appeal_matches:
-            match_text = m.group(1).strip()
-            if len(match_text) >= 10:
-                rid = hashlib.md5(f"appeal_{kb_id}_{match_text[:30]}".encode()).hexdigest()[:16]
-                rules.append({
-                    "id": f"rule_appeal_{rid}",
-                    "kb_id": kb_id,
-                    "doc_id": doc_id,
-                    "doc_year": doc_year,
-                    "effective_date": effective_date,
-                    "rule_category": "appeal_matrix",
-                    "condition_tags": json.dumps(["仲裁申诉", "违规处罚"], ensure_ascii=False),
-                    "rule_summary": match_text,
-                    "structured_payload": json.dumps({"raw_rule": match_text}, ensure_ascii=False),
-                    "source_chunk_id": source_chunk_id,
-                })
+        for sentence in sentences:
+            for spec in regex_patterns:
+                pattern_str = spec.get("pattern", "")
+                category = spec.get("category", "general_rule")
+                base_tags = list(spec.get("tags", []))
+                if not pattern_str:
+                    continue
+
+                if re.search(pattern_str, sentence):
+                    # 叠加句内命中的条件实体标签（如“盛装舞步”、“中二级”、“U12”、“7人制”）
+                    tags = list(base_tags)
+                    for kw in tag_entities:
+                        if kw.lower() in sentence.lower() and kw not in tags:
+                            tags.append(kw)
+
+                    rid = hashlib.md5(f"{category}_{kb_id}_{sentence[:40]}".encode()).hexdigest()[:16]
+                    rules.append({
+                        "id": f"rule_{category}_{rid}",
+                        "kb_id": kb_id,
+                        "doc_id": doc_id,
+                        "doc_year": doc_year,
+                        "effective_date": effective_date,
+                        "rule_category": category,
+                        "condition_tags": json.dumps(tags, ensure_ascii=False),
+                        "rule_summary": sentence,
+                        "structured_payload": json.dumps({"raw_rule": sentence}, ensure_ascii=False),
+                        "source_chunk_id": source_chunk_id,
+                    })
+                    break  # 该分句已抽入规则卡，避免同句多重规则重复
 
         return rules
 
@@ -246,7 +299,7 @@ class StructuredRuleExtractor:
         try:
             return _insert()
         except Exception as e:
-            logger.warning(f"[RuleExtractor] 写入规则卡片失败: {e}")
+            logger.warning(f"[UniversalRuleExtractor] 写入规则卡片失败: {e}")
             return 0
 
     @classmethod
@@ -255,49 +308,81 @@ class StructuredRuleExtractor:
         db_path: Path,
         kb_id: str,
         query: str,
+        profile: dict[str, Any] | None = None,
         limit: int = 3,
     ) -> list[dict[str, Any]]:
-        """在知识库的 kb_structured_rules 中检索匹配当前提问条件的最新规则。"""
+        """按【多条件标签命中重合度 match_score 降序 + 最新生效日期 effective_date 降序】检索规则。"""
         if not db_path.exists():
             return []
 
+        if not profile:
+            lower_kbid = kb_id.lower()
+            if "fencing" in lower_kbid:
+                profile = BUILTIN_RULE_PROFILES["fencing"]
+            elif "equestrian" in lower_kbid or "horse" in lower_kbid:
+                profile = BUILTIN_RULE_PROFILES["equestrian"]
+            elif "rugby" in lower_kbid:
+                profile = BUILTIN_RULE_PROFILES["rugby"]
+            else:
+                profile = cls.get_fallback_merged_profile()
+
         clean_q = query.lower()
-        # 提取用户提问中的匹配标签
-        matched_tags: list[str] = []
-        for kw in ["u10", "u12", "u14", "u16", "u17", "u20", "公开组", "老将组", "重剑", "花剑", "佩剑", "退款", "退费", "申诉", "报名费"]:
-            if kw in clean_q:
-                matched_tags.append(kw.upper())
+        tag_entities = profile.get("condition_tag_entities", [])
+        trigger_kws = profile.get("trigger_keywords", [])
+
+        # 1. 提取查询中的条件实体标签（高权重：2分）与业务触发词（基础权重：1分）
+        scored_terms: list[tuple[str, int]] = []
+        for ent in tag_entities:
+            if ent.lower() in clean_q:
+                scored_terms.append((ent, 2))
+        for kw in trigger_kws:
+            if kw.lower() in clean_q and not any(kw.lower() == t[0].lower() for t in scored_terms):
+                scored_terms.append((kw, 1))
 
         def _do_query() -> list[dict[str, Any]]:
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
             try:
-                # 优先按条件标签 LIKE 检索，其次模糊匹配 rule_summary，按 effective_date DESC 降序
-                where_clauses = []
-                params: list[Any] = [kb_id]
+                if not scored_terms:
+                    sql = """
+                    SELECT id, kb_id, doc_id, doc_year, effective_date, rule_category,
+                           condition_tags, rule_summary, structured_payload, source_chunk_id, created_at,
+                           1 AS match_score
+                    FROM kb_structured_rules
+                    WHERE kb_id = ? AND rule_summary LIKE ?
+                    ORDER BY effective_date DESC, doc_year DESC, created_at DESC
+                    LIMIT ?
+                    """
+                    rows = conn.execute(sql, [kb_id, f"%{query[:12]}%", limit]).fetchall()
+                    return [dict(r) for r in rows]
 
-                for tag in matched_tags:
-                    where_clauses.append("(condition_tags LIKE ? OR rule_summary LIKE ?)")
-                    params.extend([f"%{tag}%", f"%{tag}%"])
+                score_exprs: list[str] = []
+                score_params: list[Any] = []
+                for term, weight in scored_terms:
+                    score_exprs.append(
+                        f"(CASE WHEN condition_tags LIKE ? OR rule_summary LIKE ? THEN {weight} ELSE 0 END)"
+                    )
+                    score_params.extend([f"%{term}%", f"%{term}%"])
 
-                if not where_clauses:
-                    # 若未捕获显式标签，按全词模糊匹配
-                    where_clauses.append("rule_summary LIKE ?")
-                    params.append(f"%{query[:12]}%")
-
+                score_sql = " + ".join(score_exprs)
+                # 使用子查询避免重复绑定参数，并严格按 match_score 降序与 effective_date 降序复合排序
                 sql = f"""
-                SELECT id, kb_id, doc_id, doc_year, effective_date, rule_category,
-                       condition_tags, rule_summary, structured_payload, source_chunk_id
-                FROM kb_structured_rules
-                WHERE kb_id = ? AND ({" OR ".join(where_clauses)})
-                ORDER BY effective_date DESC, doc_year DESC, created_at DESC
+                SELECT * FROM (
+                    SELECT id, kb_id, doc_id, doc_year, effective_date, rule_category,
+                           condition_tags, rule_summary, structured_payload, source_chunk_id, created_at,
+                           ({score_sql}) AS match_score
+                    FROM kb_structured_rules
+                    WHERE kb_id = ?
+                ) sub
+                WHERE sub.match_score > 0
+                ORDER BY sub.match_score DESC, sub.effective_date DESC, sub.doc_year DESC, sub.created_at DESC
                 LIMIT ?
                 """
-                params.append(limit)
-                rows = conn.execute(sql, params).fetchall()
+                all_params = [*score_params, kb_id, limit]
+                rows = conn.execute(sql, all_params).fetchall()
                 return [dict(r) for r in rows]
             except Exception as e:
-                logger.debug(f"[RuleExtractor] 查询结构化规则卡异常: {e}")
+                logger.debug(f"[UniversalRuleExtractor] 检索规则失败: {e}")
                 return []
             finally:
                 conn.close()
@@ -318,7 +403,12 @@ class StructuredRuleExtractor:
             eff = r.get("effective_date") or f"{r.get('doc_year', '')}年"
             category = r.get("rule_category", "rule")
             summary = r.get("rule_summary", "")
-            lines.append(f"• [规则卡 {idx}] [{category}] (生效版本/日期: {eff}): {summary}")
+            score_badge = f" [匹配度:{r.get('match_score')}]" if "match_score" in r else ""
+            lines.append(f"• [规则卡 {idx}] [{category}]{score_badge} (生效版本/日期: {eff}): {summary}")
 
         lines.append("=======================================================\n")
         return "\n".join(lines)
+
+
+# 向后兼容别名：保留既有引用不报错
+StructuredRuleExtractor = UniversalRuleExtractor

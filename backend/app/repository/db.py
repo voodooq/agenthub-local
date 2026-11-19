@@ -888,6 +888,8 @@ class DatabaseManager:
                 triple_count     INTEGER NOT NULL DEFAULT 0,
                 disk_size_bytes  INTEGER NOT NULL DEFAULT 0,
                 share_repo_uri   TEXT DEFAULT '',
+                domain_type      TEXT DEFAULT 'general',
+                rule_profile_json TEXT DEFAULT '',
                 created_at       REAL NOT NULL,
                 updated_at       REAL NOT NULL
             );
@@ -975,11 +977,13 @@ class DatabaseManager:
             CREATE INDEX IF NOT EXISTS idx_kb_snapshots_kb_time ON kb_version_snapshots(kb_id, created_at DESC);
             """)
 
-            # 兼容性平滑升级：knowledge_bases 扩展跨端 UUID、当前版本与内容 MD5
+            # 兼容性平滑升级：knowledge_bases 扩展跨端 UUID、当前版本、内容 MD5 与领域规则模板
             for col, col_def in [
                 ("kb_uuid", "TEXT DEFAULT ''"),
                 ("current_version", "TEXT DEFAULT 'v1.0.0'"),
                 ("content_md5", "TEXT DEFAULT ''"),
+                ("domain_type", "TEXT DEFAULT 'general'"),
+                ("rule_profile_json", "TEXT DEFAULT ''"),
             ]:
                 try:
                     await conn.execute(f"ALTER TABLE knowledge_bases ADD COLUMN {col} {col_def};")

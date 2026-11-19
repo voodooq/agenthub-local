@@ -62,7 +62,17 @@ export interface KnowledgeBaseItem {
   triple_count: number;
   disk_size_bytes: number;
   updated_at: number;
+  domain_type?: string;
+  rule_profile_json?: string;
 }
+
+const DOMAIN_OPTIONS = [
+  { id: 'general', label: '📋 通用规章', desc: '企业财务报销与综合制度' },
+  { id: 'fencing', label: '🤺 击剑赛事', desc: '击剑联赛/组别/器材/350N/800N' },
+  { id: 'equestrian', label: '🐎 马术赛事', desc: '场地障碍/盛装舞步/通级/马匹检疫' },
+  { id: 'rugby', label: '🏉 橄榄球规程', desc: '7人/15人制/触式/达阵/红黄牌' },
+  { id: 'custom', label: '⚙️ 自定义行业', desc: 'AI自动提取首份文档规则' },
+];
 
 export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   // 两大主分段：'mount' = 知识库挂载, 'train' = 知识库训练
@@ -285,6 +295,24 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
       alert(`升级失败: ${e.message}`);
     } finally {
       setUpgradingKbId(null);
+    }
+  };
+
+  const handleUpdateDomain = async (kbId: string, domainType: string) => {
+    try {
+      const resp = await apiFetch(`/api/v1/kb/bases/${kbId}/domain`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ domain_type: domainType }),
+      });
+      if (resp.ok) {
+        await loadKBs();
+      } else {
+        const err = await resp.json();
+        alert('更新领域模板失败: ' + (err.detail || '未知错误'));
+      }
+    } catch (e: any) {
+      alert('更新领域模板失败: ' + e.message);
     }
   };
 
@@ -1315,6 +1343,24 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                   ? '🔒 离线安全快照'
                                   : '本地可编辑'}
                               </span>
+
+                              {/* v1.6.0 通用业务领域规则模板选择器 */}
+                              <select
+                                value={kb.domain_type || 'general'}
+                                onClick={(e) => e.stopPropagation()}
+                                onChange={(e) => {
+                                  e.stopPropagation();
+                                  handleUpdateDomain(kb.kb_id, e.target.value);
+                                }}
+                                className="px-2 py-0.5 rounded text-[10px] font-medium shrink-0 bg-surface-200 border border-border text-foreground outline-none cursor-pointer hover:border-sky-500"
+                                title="切换此知识库关联的业务领域规则模板 (击剑/马术/橄榄球/通用制度)"
+                              >
+                                {DOMAIN_OPTIONS.map((opt) => (
+                                  <option key={opt.id} value={opt.id}>
+                                    {opt.label}
+                                  </option>
+                                ))}
+                              </select>
 
                               {extra?.hierarchy?.needs_upgrade && (
                                 <span

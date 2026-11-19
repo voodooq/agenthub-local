@@ -20,7 +20,8 @@ from typing import Any
 from ..core.logging_config import logger
 from ..kb.storage import KBStorageManager
 from .embedding_provider import embedding_router, HAS_NUMPY, np
-from .rule_extractor import StructuredRuleExtractor
+from .rule_extractor import UniversalRuleExtractor, StructuredRuleExtractor
+from .rule_profiles import RuleProfileManager
 
 
 class ForegroundChatTracker:
@@ -179,6 +180,41 @@ class HyPEQuestionWorker:
 
         logger.info(f"[HyPE] 发现 {len(parents_to_process)} 个父切片待生成口语化问答 (kb_id={kb_id}, ver={version})")
 
+        # 解析知识库所属领域及规则模板
+        domain_type = "general"
+        rule_profile_json = ""
+        try:
+            from ..repository.db import db_manager
+            async with db_manager.get_connection() as conn:
+                async with conn.execute(
+                    "SELECT domain_type, rule_profile_json FROM knowledge_bases WHERE kb_id = ?",
+                    (kb_id,),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if row:
+                        domain_type = row["domain_type"] if "domain_type" in row.keys() and row["domain_type"] else "general"
+                        rule_profile_json = row["rule_profile_json"] if "rule_profile_json" in row.keys() and row["rule_profile_json"] else ""
+        except Exception:
+            pass
+
+        # 若为 custom 自定义行业且尚未生成模板，首次冷启动生成模板
+        if domain_type == "custom" and not rule_profile_json and parents_to_process:
+            sample_texts = [p.get("content", "") for p in parents_to_process[:3]]
+            custom_profile = await RuleProfileManager.generate_custom_profile_from_llm(sample_texts)
+            rule_profile_json = json.dumps(custom_profile, ensure_ascii=False)
+            try:
+                from ..repository.db import db_manager
+                async with db_manager.get_connection() as conn:
+                    await conn.execute(
+                        "UPDATE knowledge_bases SET rule_profile_json = ? WHERE kb_id = ?",
+                        (rule_profile_json, kb_id),
+                    )
+                    await conn.commit()
+            except Exception:
+                pass
+
+        profile = UniversalRuleExtractor.resolve_profile(domain_type, rule_profile_json)
+
         provider = await embedding_router.get_provider()
         hype_chunks_to_insert: list[dict[str, Any]] = []
         rules_to_insert: list[dict[str, Any]] = []
@@ -193,11 +229,12 @@ class HyPEQuestionWorker:
             title = parent.get("title", "")
             content = parent.get("content", "")
 
-            # 1. 结构化刚性业务规则同步抽取 (T-159-23)
+            # 1. 结构化刚性业务规则同步抽取 (Universal Rule Engine)
             try:
-                extracted = StructuredRuleExtractor.extract_rules_from_parent_chunk(
+                extracted = UniversalRuleExtractor.extract_rules_from_parent_chunk(
                     chunk=parent,
                     kb_id=kb_id,
+                    profile=profile,
                 )
                 if extracted:
                     rules_to_insert.extend(extracted)

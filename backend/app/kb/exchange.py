@@ -170,10 +170,12 @@ class KBExchangeEngine:
 
         # 构造 manifest.json 字典
         manifest = {
-            "bundle_format_version": "1.5.9",
+            "bundle_format_version": "1.6.0",
             "kb_id": kb_id,
             "kb_uuid": kb_uuid,
             "kb_name": kb_meta.get("name") or kb_id,
+            "domain_type": kb_meta.get("domain_type") or "general",
+            "rule_profile_json": kb_meta.get("rule_profile_json") or "",
             "version_tag": version,
             "parent_version_tag": kb_meta.get("parent_version_tag", ""),
             "exported_at": datetime.now().isoformat(),
@@ -430,6 +432,9 @@ class KBExchangeEngine:
         content_md5 = manifest.get("content_md5", "")
         kb_uuid = manifest.get("kb_uuid") or f"kb_{target_kb_id}"
 
+        domain_type = manifest.get("domain_type") or "general"
+        rule_profile_json = manifest.get("rule_profile_json") or ""
+
         # 写入或更新 knowledge_bases 表
         async with db_manager.get_connection() as conn:
             await conn.execute(
@@ -438,9 +443,9 @@ class KBExchangeEngine:
                     kb_id, name, description, ownership_type, source_id,
                     active_version, staging_version, embedding_model, embedding_dim,
                     chunk_count, triple_count, disk_size_bytes, share_repo_uri,
-                    kb_uuid, current_version, content_md5,
+                    kb_uuid, current_version, content_md5, domain_type, rule_profile_json,
                     created_at, updated_at
-                ) VALUES (?, ?, ?, 'local', NULL, ?, '', ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, 'local', NULL, ?, '', ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     target_kb_id,
@@ -455,6 +460,8 @@ class KBExchangeEngine:
                     kb_uuid,
                     version,
                     content_md5,
+                    domain_type,
+                    rule_profile_json,
                     now,
                     now,
                 ),

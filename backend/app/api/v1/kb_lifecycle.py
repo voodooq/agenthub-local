@@ -50,6 +50,13 @@ class KnowledgeBaseCreatePayload(BaseModel):
     embedding_model: str = Field(default="null_offline_lexical", description="使用的向量模型ID")
     embedding_dim: int = Field(default=768, description="向量维度")
     initial_version: str = Field(default="v1.0.0", description="首发版本号")
+    domain_type: str = Field(default="general", description="业务领域: fencing | equestrian | rugby | general | custom")
+    rule_profile_json: str = Field(default="", description="自定义规则模板 JSON 字符串")
+
+
+class DomainUpdatePayload(BaseModel):
+    domain_type: str = Field(default="general", description="业务领域类型")
+    rule_profile_json: str = Field(default="", description="自定义规则模板配置 JSON")
 
 
 class RollbackPayload(BaseModel):
@@ -149,8 +156,23 @@ async def create_base(payload: KnowledgeBaseCreatePayload) -> dict[str, Any]:
         embedding_model=payload.embedding_model,
         embedding_dim=payload.embedding_dim,
         initial_version=payload.initial_version,
+        domain_type=payload.domain_type,
+        rule_profile_json=payload.rule_profile_json,
     )
     return {"success": True, "data": res}
+
+
+@router.put("/bases/{kb_id}/domain")
+async def update_base_domain(kb_id: str, payload: DomainUpdatePayload) -> dict[str, Any]:
+    """更新知识库的所属业务领域及规则模板配置。"""
+    ok = await KBLifecycleManager.update_knowledge_base_domain(
+        kb_id=kb_id,
+        domain_type=payload.domain_type,
+        rule_profile_json=payload.rule_profile_json,
+    )
+    if not ok:
+        raise HTTPException(status_code=404, detail="未找到目标知识库")
+    return {"success": True, "message": f"知识库 [{kb_id}] 领域模板已更新为 {payload.domain_type}"}
 
 
 def _clean_workspace_chunks_and_sync_state(target_mount_id: str | None = None) -> int:

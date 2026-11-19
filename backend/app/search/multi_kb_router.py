@@ -19,7 +19,7 @@ from ..kb.storage import KBStorageManager
 from .embedding_provider import embedding_router, HAS_NUMPY, np
 from .temporal_reranker import TemporalReranker
 from .hybrid_engine import HybridSearchEngine
-from .rule_extractor import StructuredRuleExtractor
+from .rule_extractor import UniversalRuleExtractor, StructuredRuleExtractor
 
 
 class MultiKBRetrievalRouter:
@@ -45,6 +45,8 @@ class MultiKBRetrievalRouter:
                         "name": k["name"],
                         "version": k["active_version"],
                         "priority_rank": idx + 1,
+                        "domain_type": k.get("domain_type") or "general",
+                        "rule_profile_json": k.get("rule_profile_json") or "",
                     })
             if targets:
                 return targets
@@ -59,6 +61,8 @@ class MultiKBRetrievalRouter:
                         "name": b["name"],
                         "version": b["effective_version"],
                         "priority_rank": b["priority_rank"],
+                        "domain_type": b.get("domain_type") or "general",
+                        "rule_profile_json": b.get("rule_profile_json") or "",
                     }
                     for b in bound
                 ]
@@ -182,31 +186,40 @@ class MultiKBRetrievalRouter:
             f"> 💡 **[系统时效环境声明]**：当前系统运行时间为 **{current_date_str}**。如命中文档存在历史年份版本更迭，系统已根据最新生效日期完成优先级仲裁，请严格以最新规程为准。\n",
         ]
 
-        # 阶段三：刚性业务规则卡片匹配与置顶注入 (T-159-23)
-        if StructuredRuleExtractor.should_trigger_rule_search(query):
-            matched_rules: list[dict[str, Any]] = []
-            for target in targets:
-                kid = target["kb_id"]
-                ver = target["version"]
+        # 阶段三：多维条件通用业务规则卡片匹配与置顶注入 (v1.6.0 Universal)
+        matched_rules: list[dict[str, Any]] = []
+        for target in targets:
+            kid = target["kb_id"]
+            ver = target["version"]
+            domain = target.get("domain_type") or "general"
+            profile_json = target.get("rule_profile_json") or ""
+            profile = UniversalRuleExtractor.resolve_profile(domain, profile_json)
+
+            if UniversalRuleExtractor.should_trigger_rule_search(query, profile):
                 dbp = KBStorageManager.get_version_db_path(kid, ver)
                 if dbp.exists():
-                    r_list = StructuredRuleExtractor.query_matching_rules(
+                    r_list = UniversalRuleExtractor.query_matching_rules(
                         db_path=dbp,
                         kb_id=kid,
                         query=query,
+                        profile=profile,
                         limit=3,
                     )
                     matched_rules.extend(r_list)
 
-            if matched_rules:
-                # 按生效日期与年份排序取前 3 条最新规则
-                matched_rules.sort(
-                    key=lambda x: (x.get("effective_date") or "", x.get("doc_year") or 0),
-                    reverse=True,
-                )
-                rule_card_text = StructuredRuleExtractor.format_rules_for_prompt(matched_rules[:3])
-                if rule_card_text:
-                    lines.append(rule_card_text)
+        if matched_rules:
+            # 复合排序：多条件重合度得分 match_score 降序 + 生效日期降序 + 年份降序
+            matched_rules.sort(
+                key=lambda x: (
+                    x.get("match_score", 0),
+                    x.get("effective_date") or "",
+                    x.get("doc_year") or 0,
+                ),
+                reverse=True,
+            )
+            rule_card_text = UniversalRuleExtractor.format_rules_for_prompt(matched_rules[:3])
+            if rule_card_text:
+                lines.append(rule_card_text)
 
         lines.append(f"### 已挂载知识库证据检索结果 (关键词: {query}, 命中文档数: {len(final_top)}):")
         for idx, c in enumerate(final_top, start=1):
