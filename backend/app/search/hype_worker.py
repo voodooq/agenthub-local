@@ -20,6 +20,7 @@ from typing import Any
 
 from ..core.logging_config import logger
 from ..kb.storage import KBStorageManager
+from ..providers.light_llm_router import light_llm_router
 from .embedding_provider import embedding_router, HAS_NUMPY, np
 from .rule_extractor import UniversalRuleExtractor, StructuredRuleExtractor
 from .rule_profiles import RuleProfileManager
@@ -43,105 +44,181 @@ class ForegroundChatTracker:
         return cls._active_count > 0
 
 
-HYPE_SYSTEM_PROMPT = "你是一个专业规程问答提炼专家，只输出纯文本问题列表，严禁寒暄与废话。"
-
-HYPE_EXTRACT_PROMPT = """请仔细阅读以下规程或技术文档段落，设想 3~4 个真实用户在日常工作中可能提问的大白话/口语问题（例如：“出差伙食补贴一天多少”、“加班可以申请调休还是必须发加班费”、“怎么办理注销”）。
-
-要求：
-1. 每行仅输出一个问题，不要带任何序号（如 1. 2. - *）、标号或解释说明；
-2. 提问要像普通员工日常口语大白话，直奔核心规则、金额或流程；
-3. 输出 3 到 4 个问题，每行一个。
-
-文档段落：
-{content}
-"""
+HYPE_SYSTEM_PROMPT = (
+    "你是知识库问答提炼助手。请根据给定的文档段落或表格数据，"
+    "提炼 3 到 4 个用户平时会随口问的大白话短问题。"
+    "要求：\n"
+    "1. 每条问题控制在 6~18 个字，口语自然，不要出现文件全称；\n"
+    "2. 无论是规程、制度还是财务数据表，都必须提炼出可提问的问题，不要输出空数组；\n"
+    "3. 每行直接输出一条问题，不要编号、不要引号、不要多余解释。"
+)
 
 
 class HyPEQuestionWorker:
     """HyPE 口语问答后台提炼生成工作器。"""
 
     _running_tasks: set[str] = set()
+    # 记录 (kb_id, version, parent_id) -> 连续失败/空返回次数
+    _failed_attempts: dict[tuple[str, str, str], int] = {}
+    _max_attempts: int = 2
+    # 与 llama-server 的 -np 4 吞吐对齐，按 event loop 绑定 4 路并发信号量
+    _concurrency_limit: int = 4
+    _concurrency_sems: dict[int, asyncio.Semaphore] = {}
+
+    # 严禁生成的套话黑名单关键词
+    FORBIDDEN_HYPE_PATTERNS = (
+        ".doc", ".docx", ".pdf", ".txt", ".xlsx",
+        "的具体要求和规定是什么", "的具体要求是什么", "的具体规定是什么",
+        "如何执行", "怎么理解", "相关规定是什么", "请问如何",
+    )
 
     @classmethod
-    async def extract_questions_from_llm(cls, content: str, title: str = "") -> list[str]:
-        """调用后台轻量大语言模型提炼 3~4 个真实用户口语化问题。
+    def _get_concurrency_sem(cls) -> asyncio.Semaphore:
+        """获取当前事件循环对应的 4 路并发信号量。"""
+        loop_id = id(asyncio.get_running_loop())
+        sem = cls._concurrency_sems.get(loop_id)
+        if sem is None:
+            sem = asyncio.Semaphore(cls._concurrency_limit)
+            cls._concurrency_sems[loop_id] = sem
+        return sem
+
+    @classmethod
+    def reset_failed_cache(cls, kb_id: str | None = None) -> None:
+        """清空指定知识库（或全部）的熔断记录，重置提炼计数。"""
+        if not kb_id:
+            cls._failed_attempts.clear()
+        else:
+            to_del = [k for k in cls._failed_attempts if k[0] == kb_id]
+            for k in to_del:
+                cls._failed_attempts.pop(k, None)
+        logger.info(f"[HyPE] 熔断记录已重置 (kb_id={kb_id or 'all'})")
+
+    @classmethod
+    def _parse_questions(cls, raw: str) -> list[str]:
+        """解析轻量模型输出，同时兼容 JSON 数组与逐行纯文本格式。"""
+        text = (raw or "").strip()
+        if not text:
+            return []
+
+        # 剥离已闭合与未闭合的 <think> 标签
+        text = re.sub(r"<think>.*?(</think>|$)", "", text, flags=re.DOTALL | re.IGNORECASE).strip()
+        # 剥离 ```json ... ``` 代码块包裹
+        json_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text)
+        if json_match:
+            text = json_match.group(1).strip()
+
+        if not text:
+            return []
+
+        candidates: list[str]
+        if text.startswith("["):
+            try:
+                parsed = json.loads(text)
+                if isinstance(parsed, list):
+                    candidates = [str(x or "").strip() for x in parsed]
+                else:
+                    candidates = text.splitlines()
+            except Exception:
+                candidates = text.splitlines()
+        else:
+            candidates = text.splitlines()
+
+        questions: list[str] = []
+        for line in candidates:
+            q = line.strip().lstrip("0123456789.-、•*\"'[] ").rstrip("\"',]")
+            if 3 <= len(q) <= 40 and q not in ("[]", "无", "暂无"):
+                if not any(bad in q for bad in cls.FORBIDDEN_HYPE_PATTERNS):
+                    if q not in questions:
+                        questions.append(q)
+                        if len(questions) >= 4:
+                            break
+        return questions[:4]
+
+    @classmethod
+    async def _generate_colloquial_questions(
+        cls,
+        content: str,
+        accounts: list[dict[str, Any]] | None = None,
+    ) -> tuple[list[str], str]:
+        """调用轻量模型提炼大白话短问题，返回 (解析后的问题列表, 模型原始文本)。"""
+        # 预先剥离元数据头审查正文
+        clean_content = re.sub(r"^【[^】]+】[^\n]*\n?", "", content or "").strip()
+        if len(clean_content) < 10:
+            return [], ""
+
+        raw = await light_llm_router.complete(
+            prompt=f"参考内容如下：\n{clean_content[:1800]}",
+            accounts=accounts,
+            system_prompt=HYPE_SYSTEM_PROMPT,
+            temperature=0.3,
+            max_tokens=512,
+        )
+        if not raw or not raw.strip():
+            return [], ""
+
+        return cls._parse_questions(raw), raw
+
+    @classmethod
+    async def extract_questions_from_llm(
+        cls,
+        content: str,
+        title: str = "",
+        accounts: list[dict[str, Any]] | None = None,
+    ) -> list[str]:
+        """调用后台轻量大语言模型提炼 3~4 个真实用户大白话短问题（纯连接池驱动）。
 
         Args:
             content: 父切片正文。
-            title: 文档标题。
+            title: 文档标题（预留兼容参数）。
+            accounts: 可选的算力池账号列表（若为 None 则自动从数据库读取）。
 
         Returns:
-            list[str]: 提炼出的口语问题列表。
+            list[str]: 提炼出的高质量短口语列表；若无可用 Light 节点或未提取成功则返回空列表。
         """
-        prompt = HYPE_EXTRACT_PROMPT.format(content=content[:1800])
-        raw_output = ""
+        questions, _ = await cls._generate_colloquial_questions(
+            content=content,
+            accounts=accounts,
+        )
+        return questions
 
-        try:
-            from ..service.engine_pool import engine_pool
+    @classmethod
+    async def _mark_chunks_skip_hype(cls, db_path: Path, parent_ids: list[str]) -> None:
+        """批量标记连续熔断的父切片为 skip_hype=1，避免无效空转。"""
+        if not parent_ids:
+            return
 
-            async def _consume_stream() -> str:
-                collected = ""
-                async for evt in engine_pool.execute_stream_with_failover(
-                    conversation_id="hype_worker_bg",
-                    user_prompt=prompt,
-                    model_name="",
-                    thinking_level="low",
-                    system_override=HYPE_SYSTEM_PROMPT,
-                    temperature=0.3,
-                    pre_built_history=[],
-                    task_role="light",
-                ):
-                    etype = evt.get("type")
-                    if etype == "chunk":
-                        collected += evt.get("content", "")
-                    elif etype == "done":
-                        collected = evt.get("full_content", collected)
-                        break
-                    elif etype == "error":
-                        return ""
-                return collected
+        def _update() -> None:
+            conn = sqlite3.connect(str(db_path))
+            try:
+                with conn:
+                    for i in range(0, len(parent_ids), 400):
+                        batch = parent_ids[i : i + 400]
+                        q_marks = ",".join(["?"] * len(batch))
+                        conn.execute(
+                            f"UPDATE hybrid_chunks SET skip_hype = 1 WHERE id IN ({q_marks})",
+                            batch,
+                        )
+            except Exception as err:
+                logger.warning(f"[HyPE] 写入 skip_hype 熔断标记失败: {err}")
+            finally:
+                conn.close()
 
-            raw_output = await asyncio.wait_for(_consume_stream(), timeout=20.0)
-        except Exception as e:
-            logger.debug(f"[HyPE] 轻量大模型生成口语问题跳过或超时: {e}")
-
-        # 解析与清洗结果
-        questions: list[str] = []
-        if raw_output and raw_output.strip():
-            for line in raw_output.splitlines():
-                cleaned = re.sub(r"^[\d\.\-\*\s一二三四、]+", "", line).strip()
-                cleaned = cleaned.rstrip("？? ") + "？" if cleaned else ""
-                if len(cleaned) >= 4 and cleaned not in questions:
-                    questions.append(cleaned)
-                    if len(questions) >= 4:
-                        break
-
-        # 启发式规则兜底：如果 LLM 未能返回足够问题，利用标题与段落首句生成
-        if len(questions) < 2:
-            clean_title = re.sub(r"[\.pdf|\.docx|\.md|\.txt]", "", title).strip()
-            if clean_title:
-                questions.append(f"{clean_title}的具体要求和规定是什么？")
-                questions.append(f"如何执行{clean_title}？")
-            else:
-                first_sentence = content.split("。")[0].strip()
-                if first_sentence:
-                    questions.append(f"{first_sentence[:30]}怎么理解？")
-
-        return questions[:4]
+        await asyncio.to_thread(_update)
+        logger.info(f"[HyPE] 已在库中熔断标记 {len(parent_ids)} 个连续失败切片 (skip_hype=1)")
 
     @classmethod
     async def process_kb_hype(
         cls,
         kb_id: str,
         version: str = "v1.0.0",
-        batch_limit: int = 15,
+        batch_limit: int = 12,
     ) -> int:
         """为指定知识库版本中未处理的 parent 切片提炼口语问答并向量化入库。
 
         Args:
             kb_id: 知识库 ID。
             version: 版本号。
-            batch_limit: 每次处理上限。
+            batch_limit: 每次处理上限（默认 12，与 4 路并发对齐）。
 
         Returns:
             int: 成功生成的口语问题切片数。
@@ -151,8 +228,6 @@ class HyPEQuestionWorker:
             return 0
 
         # 查询未处理 HyPE 的 parent 切片
-        parents_to_process: list[dict[str, Any]] = []
-
         def _fetch_parents() -> list[dict[str, Any]]:
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
@@ -163,6 +238,7 @@ class HyPEQuestionWorker:
                        topic_cluster_id, is_latest_in_cluster, section_path
                 FROM hybrid_chunks
                 WHERE chunk_role = 'parent'
+                  AND (skip_hype IS NULL OR skip_hype = 0)
                   AND id NOT IN (
                       SELECT DISTINCT parent_chunk_id
                       FROM hybrid_chunks
@@ -179,7 +255,27 @@ class HyPEQuestionWorker:
         if not parents_to_process:
             return 0
 
-        logger.info(f"[HyPE] 发现 {len(parents_to_process)} 个父切片待生成口语化问答 (kb_id={kb_id}, ver={version})")
+        # 拉取连接池并检查是否有可用轻量模型；无节点时严禁触发失败计数与熔断
+        pool_accounts = await light_llm_router.fetch_pool_accounts()
+        if light_llm_router.resolve_target(pool_accounts) is None:
+            logger.debug("[HyPE] 当前算力池无可用轻量模型节点，本轮静默挂起等待")
+            return 0
+
+        # 过滤出未熔断切片，并将内存中已熔断切片落库标记
+        already_fused_ids = [
+            p["id"] for p in parents_to_process
+            if cls._failed_attempts.get((kb_id, version, p["id"]), 0) >= cls._max_attempts
+        ]
+        active_parents = [
+            p for p in parents_to_process
+            if cls._failed_attempts.get((kb_id, version, p["id"]), 0) < cls._max_attempts
+        ]
+        if not active_parents:
+            if already_fused_ids:
+                await cls._mark_chunks_skip_hype(db_path, already_fused_ids)
+            return 0
+
+        logger.info(f"[HyPE] 发现 {len(active_parents)} 个父切片待 4 路并发生成口语问答 (kb_id={kb_id}, ver={version})")
 
         # 解析知识库所属领域及规则模板
         domain_type = "general"
@@ -199,8 +295,8 @@ class HyPEQuestionWorker:
             pass
 
         # 若为 custom 自定义行业且尚未生成模板，首次冷启动生成模板
-        if domain_type == "custom" and not rule_profile_json and parents_to_process:
-            sample_texts = [p.get("content", "") for p in parents_to_process[:3]]
+        if domain_type == "custom" and not rule_profile_json and active_parents:
+            sample_texts = [p.get("content", "") for p in active_parents[:3]]
             custom_profile = await RuleProfileManager.generate_custom_profile_from_llm(sample_texts)
             rule_profile_json = json.dumps(custom_profile, ensure_ascii=False)
             try:
@@ -215,55 +311,87 @@ class HyPEQuestionWorker:
                 pass
 
         profile = UniversalRuleExtractor.resolve_profile(domain_type, rule_profile_json)
-
         provider = await embedding_router.get_provider()
-        hype_chunks_to_insert: list[dict[str, Any]] = []
-        rules_to_insert: list[dict[str, Any]] = []
 
-        for parent in parents_to_process:
-            # 前台优先让路退避调度：感知到前台活跃对话时休眠 1.5s
+        async def _handle_one(
+            parent: dict[str, Any],
+        ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
+            # 前台优先让路退避调度：进入并发槽前休眠，避免空占 4 路槽位
             while ForegroundChatTracker.is_active():
                 logger.debug("[HyPE] 检测到前台活跃对话，后台索引增强自动让路休眠 1.5s...")
                 await asyncio.sleep(1.5)
 
             pid = parent["id"]
-            title = parent.get("title", "")
             content = parent.get("content", "")
+            fuse_key = (kb_id, version, pid)
 
-            # 1. 结构化刚性业务规则同步抽取 (Universal Rule Engine)
-            try:
-                extracted = UniversalRuleExtractor.extract_rules_from_parent_chunk(
-                    chunk=parent,
-                    kb_id=kb_id,
-                    profile=profile,
+            async with cls._get_concurrency_sem():
+                # 1. 结构化刚性业务规则同步抽取 (Universal Rule Engine)
+                local_rules: list[dict[str, Any]] = []
+                try:
+                    extracted = UniversalRuleExtractor.extract_rules_from_parent_chunk(
+                        chunk=parent,
+                        kb_id=kb_id,
+                        profile=profile,
+                    )
+                    if extracted:
+                        local_rules.extend(extracted)
+                except Exception as r_err:
+                    logger.debug(f"[HyPE] 抽取结构化规则卡片异常: {r_err}")
+
+                # 2. 提炼 3~4 个口语化提问
+                questions, raw = await cls._generate_colloquial_questions(
+                    content=content,
+                    accounts=pool_accounts,
                 )
-                if extracted:
-                    rules_to_insert.extend(extracted)
-            except Exception as r_err:
-                logger.debug(f"[HyPE] 抽取结构化规则卡片异常: {r_err}")
+                if not questions:
+                    count = cls._failed_attempts.get(fuse_key, 0) + 1
+                    cls._failed_attempts[fuse_key] = count
+                    logger.warning(
+                        f"[HyPE] parent_id={pid} 解析出 0 条问题 "
+                        f"(第 {count}/{cls._max_attempts} 次)，原始返回: {repr((raw or '')[:200])}"
+                    )
+                    fused_id = pid if count >= cls._max_attempts else None
+                    return [], local_rules, fused_id
 
-            # 2. 提炼 3~4 个口语化提问
-            questions = await cls.extract_questions_from_llm(content=content, title=title)
-            for idx, q in enumerate(questions, start=1):
-                chunk_id = f"hype_{pid}_{idx}"
-                hype_chunks_to_insert.append({
-                    "id": chunk_id,
-                    "remote_uri": parent.get("remote_uri", ""),
-                    "title": f"【口语问答】{q}",
-                    "content": q,
-                    "authority_tier": parent.get("authority_tier", 2),
-                    "mtime": parent.get("mtime", time.time()),
-                    "etag": parent.get("etag", ""),
-                    "doc_year": parent.get("doc_year", 0),
-                    "effective_date": parent.get("effective_date", ""),
-                    "effective_ts": parent.get("effective_ts", 0),
-                    "doc_priority_type": parent.get("doc_priority_type", "normal"),
-                    "topic_cluster_id": parent.get("topic_cluster_id", ""),
-                    "is_latest_in_cluster": parent.get("is_latest_in_cluster", 1),
-                    "chunk_role": "hype_question",
-                    "parent_chunk_id": pid,
-                    "section_path": parent.get("section_path", ""),
-                })
+                # 提取成功：清除历史失败计数并构建口语切片
+                cls._failed_attempts.pop(fuse_key, None)
+                local_hypes: list[dict[str, Any]] = []
+                for idx, q in enumerate(questions, start=1):
+                    local_hypes.append({
+                        "id": f"hype_{pid}_{idx}",
+                        "remote_uri": parent.get("remote_uri", ""),
+                        "title": f"【口语问答】{q}",
+                        "content": q,
+                        "authority_tier": parent.get("authority_tier", 2),
+                        "mtime": parent.get("mtime", time.time()),
+                        "etag": parent.get("etag", ""),
+                        "doc_year": parent.get("doc_year", 0),
+                        "effective_date": parent.get("effective_date", ""),
+                        "effective_ts": parent.get("effective_ts", 0),
+                        "doc_priority_type": parent.get("doc_priority_type", "normal"),
+                        "topic_cluster_id": parent.get("topic_cluster_id", ""),
+                        "is_latest_in_cluster": parent.get("is_latest_in_cluster", 1),
+                        "chunk_role": "hype_question",
+                        "parent_chunk_id": pid,
+                        "section_path": parent.get("section_path", ""),
+                    })
+                return local_hypes, local_rules, None
+
+        results = await asyncio.gather(*[_handle_one(p) for p in active_parents])
+
+        hype_chunks_to_insert: list[dict[str, Any]] = []
+        rules_to_insert: list[dict[str, Any]] = []
+        fused_parent_ids = list(already_fused_ids)
+
+        for local_hypes, local_rules, fused_id in results:
+            hype_chunks_to_insert.extend(local_hypes)
+            rules_to_insert.extend(local_rules)
+            if fused_id:
+                fused_parent_ids.append(fused_id)
+
+        if fused_parent_ids:
+            await cls._mark_chunks_skip_hype(db_path, fused_parent_ids)
 
         # 3. 批量持久化结构化规则
         if rules_to_insert:
@@ -347,9 +475,9 @@ class HyPEQuestionWorker:
         async def _runner():
             cls._running_tasks.add(task_key)
             try:
-                # 持续循环处理直到全部 parent 完成
+                # 持续循环处理直到全部 parent 完成或熔断
                 while True:
-                    count = await cls.process_kb_hype(kb_id, version, batch_limit=10)
+                    count = await cls.process_kb_hype(kb_id, version, batch_limit=12)
                     if count == 0:
                         break
                     await asyncio.sleep(0.5)
@@ -378,7 +506,7 @@ class HyPEQuestionWorker:
                 "status": "idle",
             }
 
-        def _query():
+        def _query() -> tuple[int, int, int, list[str]]:
             conn = sqlite3.connect(str(db_path))
             cur = conn.cursor()
             try:
@@ -397,20 +525,42 @@ class HyPEQuestionWorker:
                 except Exception:
                     pass
 
-                return total_parents, hype_completed, rules_count
+                pending_ids: list[str] = []
+                try:
+                    cur.execute(
+                        """
+                        SELECT id FROM hybrid_chunks
+                        WHERE chunk_role = 'parent'
+                          AND (skip_hype IS NULL OR skip_hype = 0)
+                          AND id NOT IN (
+                              SELECT DISTINCT parent_chunk_id
+                              FROM hybrid_chunks
+                              WHERE chunk_role = 'hype_question' AND parent_chunk_id IS NOT NULL
+                          )
+                        """
+                    )
+                    pending_ids = [r[0] for r in cur.fetchall()]
+                except Exception:
+                    pending_ids = []
+
+                return total_parents, hype_completed, rules_count, pending_ids
             except Exception:
-                return 0, 0, 0
+                return 0, 0, 0, []
             finally:
                 conn.close()
 
-        total, completed, rules = await asyncio.to_thread(_query)
+        total, completed, rules, pending_ids = await asyncio.to_thread(_query)
+        active_pending = [
+            pid for pid in pending_ids
+            if cls._failed_attempts.get((kb_id, version, pid), 0) < cls._max_attempts
+        ]
         task_key = f"{kb_id}:{version}"
         if task_key in cls._running_tasks:
             status = "running"
-        elif total > 0 and completed >= total:
+        elif total > 0 and len(active_pending) == 0:
             status = "completed"
-        elif total > 0:
-            # 存在未完成的父切片且未在运行，自动接续调度后台增强
+        elif len(active_pending) > 0:
+            # 存在未完成且未熔断的父切片，自动接续调度后台增强
             cls.schedule_background_hype(kb_id, version)
             status = "running"
         else:

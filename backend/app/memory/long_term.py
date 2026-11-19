@@ -456,33 +456,17 @@ class LongTermMemoryManager:
 ]
 若无可提炼的长期事实，请直接输出 []。"""
 
-        async def _consume_extract() -> tuple[str, bool]:
-            collected = ""
-            async for evt in engine_pool.execute_stream_with_failover(
-                conversation_id=conv_id,
-                user_prompt=prompt,
-                model_name="",
-                thinking_level="low",
-                system_override="你是一个专门提取用户画像的极简信息抽取引擎，必须仅输出 JSON 数组格式。",
-                temperature=0.2,
-                pre_built_history=[],
-                task_role="light",
-            ):
-                etype = evt.get("type")
-                if etype == "chunk":
-                    collected += evt.get("content", "")
-                elif etype == "done":
-                    collected = evt.get("full_content", collected)
-                    return collected, True
-                elif etype == "error":
-                    logger.info(f"会话 {conv_id} 长期记忆提炼跳过: {evt.get('content', '')}")
-                    return "", False
-            return collected, bool(collected.strip())
+        from ..providers.light_llm_router import light_llm_router
 
         try:
-            full_response, stream_ok = await asyncio.wait_for(_consume_extract(), timeout=25.0)
-            if not stream_ok:
-                # 通道不可用或中途异常时推进水位线，防止通道冷却期间每分钟无限空转重试
+            full_response = await light_llm_router.complete(
+                prompt=prompt,
+                system_prompt="你是一个专门提取用户画像的极简信息抽取引擎，必须仅输出 JSON 数组格式。",
+                temperature=0.2,
+                max_tokens=512,
+            )
+            if not full_response or not full_response.strip():
+                # 连接池暂无可用轻量节点或调用失败，静默推进水位线
                 await ConversationRepository.update_last_extracted_turn_id(conv_id, max_turn)
                 return 0
 

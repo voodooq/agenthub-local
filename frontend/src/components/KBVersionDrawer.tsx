@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { History, X, RotateCcw, GitCompare, Shield, CheckCircle2, FileText, ArrowRight } from 'lucide-react';
+import { History, X, RotateCcw, GitCompare, Shield, CheckCircle2, FileText, ArrowRight, Trash2 } from 'lucide-react';
 import { apiFetch } from '@/utils/apiClient';
 
 interface KBSnapshotItem {
@@ -16,6 +16,7 @@ interface KBSnapshotItem {
   bundle_archive_path: string;
   doc_manifest: any[];
   created_at: string;
+  is_active?: boolean;
 }
 
 interface KBVersionDrawerProps {
@@ -38,6 +39,7 @@ export function KBVersionDrawer({
   const [snapshots, setSnapshots] = useState<KBSnapshotItem[]>([]);
   const [loading, setLoading] = useState(false);
   const [rollingBackId, setRollingBackId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
 
   // 比对状态
   const [selectedForDiff, setSelectedForDiff] = useState<string[]>([]);
@@ -92,6 +94,34 @@ export function KBVersionDrawer({
       alert(`回滚失败: ${err.message || err}`);
     } finally {
       setRollingBackId(null);
+    }
+  };
+
+  const handleDeleteSnapshot = async (snap: KBSnapshotItem) => {
+    if (snap.is_active) {
+      alert(`版本【${snap.version_tag}】当前正在生效使用中，不可删除！`);
+      return;
+    }
+    const confirmed = window.confirm(
+      `确定要彻底删除历史快照【${snap.version_tag}】吗？\n该快照的归档包文件将被永久清除，不可恢复。`
+    );
+    if (!confirmed) return;
+
+    setDeletingId(snap.snapshot_id);
+    try {
+      const res = await apiFetch(`/api/v1/kb/${kbId}/versions/${snap.snapshot_id}`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        await loadVersions();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`删除失败: ${err.detail || res.statusText}`);
+      }
+    } catch (err: any) {
+      alert(`删除异常: ${err.message || err}`);
+    } finally {
+      setDeletingId(null);
     }
   };
 
@@ -237,7 +267,7 @@ export function KBVersionDrawer({
           ) : (
             snapshots.map((snap) => {
               const isSelected = selectedForDiff.includes(snap.snapshot_id);
-              const isCurrent = snap.version_tag === currentVersion;
+              const isCurrent = Boolean(snap.is_active);
 
               return (
                 <div
@@ -286,15 +316,32 @@ export function KBVersionDrawer({
                         <span>比对</span>
                       </label>
 
-                      {!isCurrent && (
-                        <button
-                          onClick={() => handleRollback(snap)}
-                          disabled={rollingBackId === snap.snapshot_id}
-                          className="px-2.5 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg border border-blue-200 dark:border-blue-900/60 transition flex items-center gap-1"
-                        >
-                          <RotateCcw className="w-3.5 h-3.5" />
-                          {rollingBackId === snap.snapshot_id ? '回滚中...' : '回滚到此版'}
-                        </button>
+                      {!isCurrent ? (
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => handleRollback(snap)}
+                            disabled={rollingBackId === snap.snapshot_id || deletingId === snap.snapshot_id}
+                            className="px-2.5 py-1 text-xs font-medium text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg border border-blue-200 dark:border-blue-900/60 transition flex items-center gap-1 disabled:opacity-50"
+                            title="将知识库回滚至此版本快照"
+                          >
+                            <RotateCcw className="w-3.5 h-3.5" />
+                            {rollingBackId === snap.snapshot_id ? '回滚中...' : '回滚'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteSnapshot(snap)}
+                            disabled={deletingId === snap.snapshot_id || rollingBackId === snap.snapshot_id}
+                            className="p-1 text-zinc-400 hover:text-rose-600 dark:hover:text-rose-400 hover:bg-rose-50 dark:hover:bg-rose-950/40 rounded-lg border border-transparent hover:border-rose-200 dark:hover:border-rose-900/40 transition disabled:opacity-50"
+                            title="永久删除清除此历史快照"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ) : (
+                        <span className="text-[11px] text-zinc-400 font-mono">
+                          当前生效
+                        </span>
                       )}
                     </div>
                   </div>

@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   Cloud,
   HardDrive,
@@ -32,6 +32,15 @@ import {
   Download,
   History,
   FlaskConical,
+  MessageSquare,
+  ChevronDown,
+  ChevronUp,
+  ChevronLeft,
+  ChevronRight,
+  HelpCircle,
+  Edit2,
+  ShieldAlert,
+  MoreHorizontal,
 } from 'lucide-react';
 import { Workspace } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
@@ -65,6 +74,7 @@ export interface KnowledgeBaseItem {
   updated_at: number;
   domain_type?: string;
   rule_profile_json?: string;
+  is_published?: boolean;
 }
 
 const DOMAIN_OPTIONS = [
@@ -76,8 +86,15 @@ const DOMAIN_OPTIONS = [
 ];
 
 export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
-  // 三大主功能区：'test' = 1、知识库测试 (默认), 'train' = 2、知识库的训练, 'mount' = 3、知识库云盘挂载
-  const [activeSection, setActiveSection] = useState<'test' | 'train' | 'mount'>('test');
+  // 三大主功能区：'train' = 资产清单 (默认), 'mount' = 数据源挂载, 'test' = 召回测试
+  const [activeSection, setActiveSection] = useState<'test' | 'train' | 'mount'>('train');
+  const [actionMenuKbId, setActionMenuKbId] = useState<string | null>(null);
+
+  useEffect(() => {
+    const handleGlobalClick = () => setActionMenuKbId(null);
+    window.addEventListener('click', handleGlobalClick);
+    return () => window.removeEventListener('click', handleGlobalClick);
+  }, []);
 
   // ── 知识库测试 (Playground) 与版本发布管理状态 ──
   const [selectedVersion, setSelectedVersion] = useState<string>('');
@@ -111,6 +128,9 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [playgroundHits, setPlaygroundHits] = useState<any[] | null>(null);
   const [selectedKbId, setSelectedKbId] = useState<string>('');
   const [expandedHitIdx, setExpandedHitIdx] = useState<number | null>(null);
+  const [playgroundSimulatedAnswer, setPlaygroundSimulatedAnswer] = useState<string | null>(null);
+  const [playgroundGroundingStatus, setPlaygroundGroundingStatus] = useState<any | null>(null);
+  const [togglingPublishKbId, setTogglingPublishKbId] = useState<string | null>(null);
 
   // ── 查看空间文件状态 ──
   const [viewingMount, setViewingMount] = useState<CloudMountItem | null>(null);
@@ -159,6 +179,76 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   } | null>(null);
   const [isRevealing, setIsRevealing] = useState(false);
   const [isPathCopied, setIsPathCopied] = useState(false);
+
+  // ── 口语化提炼结果弹窗状态 ──
+  const [oralModalKb, setOralModalKb] = useState<KnowledgeBaseItem | null>(null);
+  const [oralModalOpen, setOralModalOpen] = useState(false);
+  const [cleaningGarbledKbId, setCleaningGarbledKbId] = useState<string | null>(null);
+  const [rebuildingHypeKbId, setRebuildingHypeKbId] = useState<string | null>(null);
+  const [renamingKbId, setRenamingKbId] = useState<string | null>(null);
+  const [renamingValue, setRenamingValue] = useState<string>('');
+  const [oralResultsData, setOralResultsData] = useState<{
+    kb_id: string;
+    kb_name: string;
+    version: string;
+    total_parents: number;
+    matched_parents: number;
+    total_questions: number;
+    rules_extracted: number;
+    status: string;
+    hype_completed: number;
+    items: Array<{
+      parent_chunk_id: string;
+      title: string;
+      section_path: string;
+      remote_uri: string;
+      snippet: string;
+      full_content: string;
+      oral_questions: string[];
+      rules: Array<{
+        rule_name: string;
+        rule_type: string;
+        condition: string;
+        action: string;
+      }>;
+    }>;
+    page: number;
+    page_size: number;
+  } | null>(null);
+  const [oralLoading, setOralLoading] = useState(false);
+  const [oralPage, setOralPage] = useState(1);
+  const [oralKeyword, setOralKeyword] = useState('');
+  const [expandedParentIds, setExpandedParentIds] = useState<Record<string, boolean>>({});
+
+  const fetchOralResults = useCallback(async (kb: KnowledgeBaseItem, page = 1, keyword = '') => {
+    setOralLoading(true);
+    try {
+      const ver = kb.active_version || 'v1.0.0';
+      const q = keyword.trim() ? `&keyword=${encodeURIComponent(keyword.trim())}` : '';
+      const res = await apiFetch(`/api/v1/kb/bases/${kb.kb_id}/oralized-results?version=${encodeURIComponent(ver)}&page=${page}&page_size=10${q}`);
+      if (res.ok) {
+        const json = await res.json();
+        setOralResultsData(json);
+        setOralPage(page);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`加载口语化结果失败: ${err.detail || res.statusText}`);
+      }
+    } catch (e: any) {
+      console.error('加载口语化结果异常:', e);
+    } finally {
+      setOralLoading(false);
+    }
+  }, []);
+
+  const handleOpenOralResults = (kb: KnowledgeBaseItem) => {
+    setOralModalKb(kb);
+    setOralKeyword('');
+    setOralPage(1);
+    setExpandedParentIds({});
+    setOralModalOpen(true);
+    fetchOralResults(kb, 1, '');
+  };
 
   const handleRevealLocalFile = async (filePath: string) => {
     setIsRevealing(true);
@@ -424,6 +514,89 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     }
   };
 
+  const handleCleanupGarbled = async (kb: KnowledgeBaseItem) => {
+    const confirmed = window.confirm(
+      `确定要对知识库【${kb.name}】进行乱码切片清理吗？\n系统将自动检测并移除二进制乱码、损坏解析切片及孤立无意义碎片，并同步重建全文检索索引。`
+    );
+    if (!confirmed) return;
+    setCleaningGarbledKbId(kb.kb_id);
+    try {
+      const res = await apiFetch(
+        `/api/v1/kb/${kb.kb_id}/cleanup-garbled?version=${encodeURIComponent(kb.active_version || 'v1.0.0')}`,
+        { method: 'POST' }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        const cleaned = data.cleaned_count ?? ((data.removed_parents || 0) + (data.removed_children || 0) + (data.removed_hype || 0));
+        alert(data.message || `成功清理 ${cleaned} 个乱码切片！`);
+        await loadKBs();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`清理乱码失败: ${err.detail || res.statusText}`);
+      }
+    } catch (err: any) {
+      alert(`清理异常: ${err.message || err}`);
+    } finally {
+      setCleaningGarbledKbId(null);
+    }
+  };
+
+  const handleRebuildHype = async (kb: KnowledgeBaseItem) => {
+    const confirmed = window.confirm(
+      `确定要清空知识库【${kb.name}】的已有口语切片并重新提炼吗？\n系统将彻底清空历史旧口语问答，换装 6~16 字微信大白话生成模型在后台重新索引。`
+    );
+    if (!confirmed) return;
+    setRebuildingHypeKbId(kb.kb_id);
+    try {
+      const res = await apiFetch(
+        `/api/v1/kb/${kb.kb_id}/rebuild-hype?version=${encodeURIComponent(kb.active_version || 'v1.0.0')}`,
+        { method: 'POST' }
+      );
+      if (res.ok) {
+        const data = await res.json();
+        alert(data.message || '已清空旧口语索引，新口语化提炼已在后台启动！');
+        await loadKBs();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`重构口语失败: ${err.detail || res.statusText}`);
+      }
+    } catch (err: any) {
+      alert(`操作异常: ${err.message || err}`);
+    } finally {
+      setRebuildingHypeKbId(null);
+    }
+  };
+
+  const handleRenameKb = async (kbId: string, newName: string) => {
+    const trimmed = newName.trim();
+    if (!trimmed) {
+      setRenamingKbId(null);
+      return;
+    }
+    // 立即乐观更新本地列表显示，彻底防止网络延迟期间名称跳回
+    setKbsList((prev) =>
+      prev.map((item) => (item.kb_id === kbId ? { ...item, name: trimmed } : item))
+    );
+    setRenamingKbId(null);
+    try {
+      const res = await apiFetch(`/api/v1/kb/${kbId}/rename`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: trimmed }),
+      });
+      if (res.ok) {
+        await loadKBs();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`重命名失败: ${err.detail || res.statusText}`);
+        await loadKBs();
+      }
+    } catch (err: any) {
+      alert(`重命名异常: ${err.message || err}`);
+      await loadKBs();
+    }
+  };
+
   const getCurrentConfig = () => {
     if (providerTab === 'wecom') return wecomForm;
     if (providerTab === 'webdav') return webdavForm;
@@ -582,7 +755,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     }
   };
 
-  // 命中率实时评测台 (支持按特定测试版本进行切片验货)
+  // 命中率实时评测台 (支持按特定测试版本进行切片验货与自然语言专家问答模拟)
   const handleTestPlayground = async () => {
     if (!playgroundQuery.trim()) return;
     if (!selectedKbId && kbsList.length === 0) {
@@ -592,6 +765,8 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     const kbId = selectedKbId || (kbsList[0]?.kb_id ?? '');
     setPlaygroundTesting(true);
     setPlaygroundHits(null);
+    setPlaygroundSimulatedAnswer(null);
+    setPlaygroundGroundingStatus(null);
     try {
       const resp = await apiFetch(`/api/v1/kb/bases/${kbId}/playground`, {
         method: 'POST',
@@ -600,14 +775,52 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
           query: playgroundQuery.trim(),
           top_k: 5,
           version: selectedVersion || undefined,
+          simulate_chat: true,
         }),
       });
       const data = await resp.json();
       setPlaygroundHits(data.chunks || []);
+      setPlaygroundSimulatedAnswer(data.simulated_answer || null);
+      setPlaygroundGroundingStatus(data.grounding_status || null);
     } catch (e: any) {
       console.error('Playground 测试异常:', e);
     } finally {
       setPlaygroundTesting(false);
+    }
+  };
+
+  // 切换知识库版本的发布状态（只有发布的版本才能被外部专家调用，未发布仅限测试检测）
+  const handleTogglePublish = async (kb: KnowledgeBaseItem, targetVersion?: string, publish = true) => {
+    const ver = targetVersion || kb.active_version || 'v1.0.0';
+    const actionText = publish ? '发布为此知识库的正式对外版本' : '取消发布（设为测试维护状态）';
+    if (!confirm(`确定要将知识库【${kb.name}】(${ver}) ${actionText}吗？\n${publish ? '发布后绑定的智能体专家即可正式检索调用。' : '取消发布后外部专家将暂停调用，仅限在测试环节检测。'}`)) {
+      return;
+    }
+    setTogglingPublishKbId(kb.kb_id);
+    try {
+      const resp = await apiFetch(`/api/v1/kb/bases/${kb.kb_id}/publish-toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          version: ver,
+          publish: publish,
+        }),
+      });
+      if (resp.ok) {
+        const data = await resp.json();
+        alert(data.message || '操作成功');
+        await loadKBs();
+        if (selectedKbId === kb.kb_id) {
+          await loadKbVersions(kb.kb_id);
+        }
+      } else {
+        const err = await resp.json().catch(() => ({}));
+        alert(`操作失败: ${err.detail || '网络错误'}`);
+      }
+    } catch (e: any) {
+      alert(`操作异常: ${e.message}`);
+    } finally {
+      setTogglingPublishKbId(null);
     }
   };
 
@@ -802,56 +1015,68 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
         </div>
       </div>
 
-      {/* 第二层：功能区切换居右对齐 */}
-      <div className="px-6 py-3 border-b border-border bg-surface-100/40 flex items-center justify-between shrink-0">
-        <div className="flex items-center space-x-2 text-xs text-muted-foreground">
-          <span className="font-medium text-foreground">CloudVFS 虚拟文件系统</span>
-          <span>·</span>
-          <span>
-            {workspace?.name ? `当前工作区：${workspace.name}` : '全系统范围'}
-          </span>
-        </div>
-
-        {/* 功能区切换居右对齐：1、知识库测试(默认) | 2、知识库的训练 | 3、知识库云盘挂载 */}
-        <div className="flex items-center space-x-1 p-1 rounded-lg bg-surface-200 border border-border text-xs">
-          <button
-            type="button"
-            onClick={() => setActiveSection('test')}
-            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${activeSection === 'test'
-                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
-              }`}
-          >
-            <FlaskConical className="w-3.5 h-3.5 text-sky-500" />
-            <span>1、知识库测试</span>
-            <span className="ml-1 text-[10px] font-mono opacity-80">({kbsList.length})</span>
-          </button>
-
+      {/* 第二层：平级线性工具风 Tab 导航栏 */}
+      <div className="px-6 border-b border-border bg-surface-100/40 flex items-center justify-between shrink-0">
+        <div className="flex items-center space-x-6 text-xs sm:text-sm">
           <button
             type="button"
             onClick={() => setActiveSection('train')}
-            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${activeSection === 'train'
-                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
-              }`}
+            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${
+              activeSection === 'train'
+                ? 'border-emerald-500 text-foreground font-semibold'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
           >
-            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-            <span>2、知识库的训练</span>
-            <span className="ml-1 text-[10px] font-mono opacity-80">({kbsList.length})</span>
+            <span>资产清单</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-200 text-muted-foreground font-mono">
+              {kbsList.length}
+            </span>
           </button>
 
           <button
             type="button"
             onClick={() => setActiveSection('mount')}
-            className={`flex items-center space-x-1.5 px-3.5 py-1 rounded-md transition-all ${activeSection === 'mount'
-                ? 'bg-surface-card text-foreground font-semibold shadow-sm'
-                : 'text-muted-foreground hover:text-foreground'
-              }`}
+            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${
+              activeSection === 'mount'
+                ? 'border-emerald-500 text-foreground font-semibold'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
           >
-            <HardDrive className="w-3.5 h-3.5 text-emerald-500" />
-            <span>3、知识库云盘挂载</span>
-            <span className="ml-1 text-[10px] font-mono opacity-80">({mountsList.length})</span>
+            <span>数据源挂载</span>
+            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-200 text-muted-foreground font-mono">
+              {mountsList.length}
+            </span>
           </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveSection('test')}
+            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${
+              activeSection === 'test'
+                ? 'border-emerald-500 text-foreground font-semibold'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <span>召回测试</span>
+          </button>
+        </div>
+
+        <div className="flex items-center gap-2 py-2">
+          <label
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-foreground text-xs font-medium cursor-pointer transition-all ${
+              isImporting ? 'opacity-50 pointer-events-none' : ''
+            }`}
+            title="导入免重新训练的 .ahkb 离线归档知识包"
+          >
+            <Upload className="w-3.5 h-3.5 text-muted-foreground" />
+            <span>{isImporting ? '导入中...' : '导入 .ahkb'}</span>
+            <input
+              type="file"
+              accept=".ahkb,.zip"
+              onChange={handleImportFileSelect}
+              className="hidden"
+            />
+          </label>
         </div>
       </div>
 
@@ -887,7 +1112,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                   >
                     {kbsList.map((kb) => (
                       <option key={kb.kb_id} value={kb.kb_id}>
-                        {kb.name} (当前发布: {kb.active_version})
+                        {kb.name} {kb.is_published ? `(已发布: ${kb.active_version})` : `(未发布·当前: ${kb.active_version})`}
                       </option>
                     ))}
                   </select>
@@ -913,9 +1138,10 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                     {kbVersionsList.map((v) => {
                       const curKb = kbsList.find((k) => k.kb_id === selectedKbId);
                       const isAct = v.version === curKb?.active_version;
+                      const isPublishedRelease = Boolean(curKb?.is_published && isAct);
                       return (
                         <option key={v.version} value={v.version}>
-                          {v.version} {isAct ? '★ [当前正式发布版]' : '· [测试/维护版]'} (切片: {v.chunk_count})
+                          {v.version} {isPublishedRelease ? '★ [当前正式发布版]' : isAct ? '· [测试维护版 (未发布)]' : '· [历史测试版]'} (切片: {v.chunk_count})
                         </option>
                       );
                     })}
@@ -925,9 +1151,11 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                 {/* 当前版本的发布状态卡片 */}
                 {(() => {
                   const curKb = kbsList.find((k) => k.kb_id === selectedKbId);
-                  const isCurrentRelease = Boolean(
+                  const isTargetVersionActive = Boolean(
                     curKb && (selectedVersion === curKb.active_version || (!selectedVersion && curKb.active_version))
                   );
+                  // 只有当知识库已开启发布，且当前选中的是 active_version，才算作对外生效的正式发布版本！
+                  const isCurrentRelease = Boolean(curKb?.is_published && isTargetVersionActive);
                   const matchedVerInfo = kbVersionsList.find((v) => v.version === selectedVersion);
                   const chunkCount = matchedVerInfo?.chunk_count ?? curKb?.chunk_count ?? 0;
                   const tripleCount = matchedVerInfo?.triple_count ?? curKb?.triple_count ?? 0;
@@ -938,29 +1166,43 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                       <div className="flex items-center justify-between">
                         <span className="text-xs text-muted-foreground">版本生效状态:</span>
                         {isCurrentRelease ? (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-500 border border-emerald-500/20 flex items-center gap-1">
-                            <CheckCircle2 className="w-3 h-3" />
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center gap-1 font-semibold">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-500" />
                             正式发布版本 (对外生效中)
                           </span>
                         ) : (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-500 border border-amber-500/20 flex items-center gap-1">
-                            <Zap className="w-3 h-3" />
-                            测试/维护版本 (未发布·仅在此测试台验货)
+                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/25 flex items-center gap-1 font-semibold">
+                            <AlertCircle className="w-3 h-3 text-amber-500" />
+                            测试维护版本 (未发布 · 外部专家不可调用)
                           </span>
                         )}
                       </div>
 
-                      {/* 若不是发布版本，提供转正发布按钮 */}
-                      {!isCurrentRelease && (
+                      {/* 若当前版本未发布，提供正式发布按钮 */}
+                      {!isCurrentRelease && curKb && (
                         <button
                           type="button"
-                          disabled={isPublishingVersion || !selectedVersion}
-                          onClick={() => handlePublishVersion(selectedKbId, selectedVersion)}
+                          disabled={togglingPublishKbId === curKb.kb_id || !selectedVersion}
+                          onClick={() => handleTogglePublish(curKb, selectedVersion, true)}
                           className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm transition disabled:opacity-50"
-                          title="测试无误后，将此版本转正为对外生效的正式发布版本"
+                          title="在此测试台充分测试验收无误后，点击将此版本发布对外正式生效，绑定的智能体专家方可检索调用"
                         >
                           <ShieldCheck className="w-4 h-4" />
-                          <span>{isPublishingVersion ? '正在发布...' : '测试没问题，发布此版本为正式版 ★'}</span>
+                          <span>{togglingPublishKbId === curKb.kb_id ? '发布中...' : '测试验收通过，发布此版本为正式版 ★'}</span>
+                        </button>
+                      )}
+
+                      {/* 若当前版本已发布，提供取消发布按钮 */}
+                      {isCurrentRelease && curKb && (
+                        <button
+                          type="button"
+                          disabled={togglingPublishKbId === curKb.kb_id || !selectedVersion}
+                          onClick={() => handleTogglePublish(curKb, selectedVersion, false)}
+                          className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30 text-xs font-medium shadow-sm transition disabled:opacity-50"
+                          title="将当前版本转为未发布测试维护状态，外部专家将暂停调用"
+                        >
+                          <AlertCircle className="w-4 h-4 text-amber-500" />
+                          <span>{togglingPublishKbId === curKb.kb_id ? '处理中...' : '暂停外部专家调用，转为测试维护中'}</span>
                         </button>
                       )}
 
@@ -982,8 +1224,11 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                   );
                 })()}
 
-                <div className="text-[11px] text-muted-foreground bg-primary/5 p-3 rounded-xl border border-primary/10 leading-relaxed">
-                  💡 <strong>版本准出规范</strong>：知识库新训练或更新后，处于维护测试状态。请在此测试台中充分测试切片召回质量，验证无误后点击【发布此版本为正式版】，绑定的智能体专家方可采纳使用。
+                <div className="text-[11px] text-muted-foreground bg-primary/5 p-3 rounded-xl border border-primary/10 leading-relaxed flex items-start gap-2">
+                  <HelpCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                  <div>
+                    <strong>版本准出硬性规范</strong>：未经测试验收的版本严禁发布对外调用。新训练或更新的知识库默认处于【测试维护中（未发布）】状态；请先在右侧验货台中充分发起自然语言提问，验证切片召回质量。验收无误后点击上方【测试验收通过，发布此版本为正式版】，绑定的智能体专家方可采纳使用。
+                  </div>
                 </div>
               </div>
             </div>
@@ -1001,9 +1246,24 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                       向指定版本的规程切片发起语义向量与 BM25 混合检索，测试置信召回精度
                     </p>
                   </div>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-surface-200 text-muted-foreground">
-                    目标版本: {selectedVersion || '默认'}
-                  </span>
+                  {(() => {
+                    const curKb = kbsList.find((k) => k.kb_id === selectedKbId);
+                    const isTargetVersionActive = Boolean(
+                      curKb && (selectedVersion === curKb.active_version || (!selectedVersion && curKb.active_version))
+                    );
+                    const isCurrentRelease = Boolean(curKb?.is_published && isTargetVersionActive);
+                    return isCurrentRelease ? (
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center gap-1 font-semibold">
+                        <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                        已发布正式版: {selectedVersion || '默认'}
+                      </span>
+                    ) : (
+                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/25 flex items-center gap-1 font-semibold">
+                        <AlertCircle className="w-3 h-3 text-amber-500" />
+                        测试维护版 (未发布): {selectedVersion || '默认'}
+                      </span>
+                    );
+                  })()}
                 </div>
 
                 <div className="flex gap-2">
@@ -1025,6 +1285,62 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                     <span>{playgroundTesting ? '检索中...' : '测试命中'}</span>
                   </button>
                 </div>
+
+                {/* 自然语言模拟检测回答与 Grounding 评估区 */}
+                {playgroundTesting && (
+                  <div className="p-4 rounded-xl border border-sky-500/30 bg-sky-500/5 text-xs text-sky-600 dark:text-sky-400 flex items-center gap-2.5 animate-pulse">
+                    <Sparkles className="w-4 h-4 animate-spin text-sky-500" />
+                    <span>正在检索当前版本切片，并调用大模型模拟专家生成自然语言回答...</span>
+                  </div>
+                )}
+
+                {playgroundSimulatedAnswer && !playgroundTesting && (
+                  <div className="rounded-xl border border-primary/25 bg-surface-100/70 p-4 space-y-2.5 shadow-sm">
+                    <div className="flex items-center justify-between border-b border-border/60 pb-2">
+                      <div className="flex items-center gap-1.5">
+                        <MessageSquare className="w-4 h-4 text-primary" />
+                        <span className="text-xs font-semibold text-foreground">
+                          智能体专家模拟答复 (自然语言检测)
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2">
+                        {playgroundGroundingStatus && (
+                          <span
+                            className={`px-2 py-0.5 rounded text-[10px] font-medium border ${
+                              playgroundGroundingStatus.is_grounded
+                                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                                : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
+                            }`}
+                          >
+                            {playgroundGroundingStatus.is_grounded
+                              ? `事实依据充分 (召回 ${playgroundGroundingStatus.used_chunks_count ?? playgroundHits?.length ?? 0} 条切片)`
+                              : '缺少明确依据 (知识库未充分覆盖)'}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleCopyChunkText('simulated_answer', playgroundSimulatedAnswer)}
+                          className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-surface-200 transition"
+                          title="复制模拟回答"
+                        >
+                          {copiedChunkId === 'simulated_answer' ? (
+                            <Check className="w-3.5 h-3.5 text-emerald-500" />
+                          ) : (
+                            <Copy className="w-3.5 h-3.5" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+                    <div className="text-xs text-foreground/90 leading-relaxed whitespace-pre-wrap bg-surface-card p-3 rounded-lg border border-border/50 select-text font-sans">
+                      {playgroundSimulatedAnswer}
+                    </div>
+                    <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-1">
+                      <span>
+                        🎯 提示：检测结果满意后，请发布此版本；只有发布的知识库版本才能被外部专家正常调用。
+                      </span>
+                    </div>
+                  </div>
+                )}
 
                 {playgroundHits && (
                   <div className="space-y-3 pt-3 border-t border-border">
@@ -1664,284 +1980,404 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
               </div>
 
               {/* 独立知识库资产清单 (KB Assets) */}
-              <div className="rounded-2xl border border-border bg-surface-card p-5 md:p-6 shadow-sm space-y-4">
-                <div className="flex items-center justify-between border-b border-border pb-3">
-                  <div>
-                    <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-                      <Database className="w-4 h-4 text-emerald-500" />
-                      独立知识库资产清单 ({kbsList.length})
-                    </h3>
+              <div className="space-y-3">
+                {kbsList.length === 0 ? (
+                  <div className="py-12 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl space-y-2 bg-surface-card">
+                    <Database className="w-8 h-8 text-muted-foreground/40 mx-auto" />
+                    <div>暂无已训练的知识库资产</div>
+                    <p className="text-[11px] text-muted-foreground/80 max-w-[240px] mx-auto">
+                      请在上方点击“启动增量训练”生成第一个知识库，或直接点击上方“导入 .ahkb”
+                    </p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {kbsList.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={handlePurgeAllKbs}
-                        className="flex items-center gap-1 px-2.5 py-1 text-xs text-rose-500 hover:text-rose-600 hover:bg-rose-500/10 rounded-lg border border-rose-500/20 transition-colors"
-                        title="清空并彻底物理销毁所有独立知识库资产"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                        <span>清空全部</span>
-                      </button>
-                    )}
-                    <label
-                      className={`flex items-center gap-1 px-2.5 py-1 text-xs text-blue-600 dark:text-blue-400 hover:bg-blue-50 dark:hover:bg-blue-950/40 rounded-lg border border-blue-200 dark:border-blue-900/60 transition-colors cursor-pointer ${isImporting ? 'opacity-50 pointer-events-none' : ''
+                ) : (
+                  kbsList.map((kb) => {
+                    const isSelected = selectedKbId === kb.kb_id;
+                    const extra = kbStatusMap[kb.kb_id];
+                    return (
+                      <div
+                        key={kb.kb_id}
+                        onClick={() => setSelectedKbId(kb.kb_id)}
+                        className={`rounded-xl border p-4 text-xs transition-all cursor-pointer space-y-3 relative ${
+                          isSelected
+                            ? 'border-emerald-500/50 bg-surface-card shadow-sm ring-1 ring-emerald-500/20'
+                            : 'border-border bg-surface-card hover:border-border/90'
                         }`}
-                      title="导入免重新训练的 .ahkb 离线知识包"
-                    >
-                      <Upload className="w-3.5 h-3.5" />
-                      <span>{isImporting ? '导入中...' : '导入知识包 (.ahkb)'}</span>
-                      <input
-                        type="file"
-                        accept=".ahkb,.zip"
-                        onChange={handleImportFileSelect}
-                        className="hidden"
-                      />
-                    </label>
-                    <button
-                      onClick={loadKBs}
-                      disabled={loadingKbs}
-                      className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
-                      title="刷新知识库资产"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${loadingKbs ? 'animate-spin' : ''}`} />
-                    </button>
-                  </div>
-                </div>
-
-                <div className="space-y-3">
-                  {kbsList.length === 0 ? (
-                    <div className="py-12 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl space-y-2">
-                      <Database className="w-8 h-8 text-muted-foreground/40 mx-auto" />
-                      <div>暂无已训练的知识库资产</div>
-                      <p className="text-[11px] text-muted-foreground/80 max-w-[240px] mx-auto">
-                        请在上方点击“一键启动知识库增量训练与切片”生成第一个知识库，或直接导入 .ahkb 知识包
-                      </p>
-                    </div>
-                  ) : (
-                    kbsList.map((kb) => {
-                      const isSelected = selectedKbId === kb.kb_id;
-                      const extra = kbStatusMap[kb.kb_id];
-                      return (
-                        <div
-                          key={kb.kb_id}
-                          onClick={() => setSelectedKbId(kb.kb_id)}
-                          className={`rounded-xl border p-4 text-xs transition-all cursor-pointer space-y-3 ${isSelected
-                              ? 'border-sky-500 bg-sky-500/5 shadow-sm'
-                              : 'border-border bg-surface-100/50 hover:border-border/80'
-                            }`}
-                        >
-                          <div className="flex items-center justify-between gap-3">
-                            <div className="flex items-center gap-2 min-w-0 flex-1 flex-wrap">
-                              <span className="font-semibold text-sm text-foreground truncate" title={kb.name}>{kb.name}</span>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setVersionDrawerKb(kb);
-                                }}
-                                className="px-2 py-0.5 rounded font-mono text-[10px] bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20 shrink-0 hover:bg-blue-500/20 transition flex items-center gap-1"
-                                title="点击打开版本管理与回滚抽屉"
-                              >
-                                <History className="w-3 h-3" />
-                                <span>{kb.active_version}</span>
-                              </button>
-                              <span
-                                className={`px-2 py-0.5 rounded text-[10px] font-medium shrink-0 ${kb.ownership_type === 'subscribed_ro'
-                                    ? 'bg-amber-500/10 text-amber-500 border border-amber-500/20'
-                                    : kb.ownership_type === 'frozen_snapshot'
-                                      ? 'bg-muted text-muted-foreground border border-border'
-                                      : 'bg-emerald-500/10 text-emerald-500 border border-emerald-500/20'
-                                  }`}
-                              >
-                                {kb.ownership_type === 'subscribed_ro'
-                                  ? '🔒 团队订阅只读'
-                                  : kb.ownership_type === 'frozen_snapshot'
-                                    ? '🔒 离线安全快照'
-                                    : '本地可编辑'}
-                              </span>
-
-                              {/* v1.6.0 通用业务领域规则模板选择器 */}
-                              <select
-                                value={kb.domain_type || 'general'}
-                                onClick={(e) => e.stopPropagation()}
-                                onChange={(e) => {
-                                  e.stopPropagation();
-                                  handleUpdateDomain(kb.kb_id, e.target.value);
-                                }}
-                                className="px-2 py-0.5 rounded text-[10px] font-medium shrink-0 bg-surface-200 border border-border text-foreground outline-none cursor-pointer hover:border-sky-500"
-                                title="切换此知识库关联的业务领域规则模板 (击剑/马术/橄榄球/通用制度)"
-                              >
-                                {DOMAIN_OPTIONS.map((opt) => (
-                                  <option key={opt.id} value={opt.id}>
-                                    {opt.label}
-                                  </option>
-                                ))}
-                              </select>
-
-                              {extra?.hierarchy?.needs_upgrade && (
-                                <span
-                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0"
-                                  title="检测到存量切片缺少父子分层结构，建议一键升级"
-                                >
-                                  ⚠️ 待升级分层索引
-                                </span>
-                              )}
-
-                              {extra?.enhancement && extra.enhancement.total_parents > 0 && (
-                                (extra.enhancement.hype_completed >= extra.enhancement.total_parents || extra.enhancement.status === 'completed') ? (
-                                  <span
-                                    className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shrink-0 flex items-center gap-1"
-                                    title="父子切片分层与口语问答检索均已就绪"
-                                  >
-                                    ✨ 口语化就绪
-                                  </span>
-                                ) : (
-                                  <span
-                                    className={`px-2 py-0.5 rounded text-[10px] font-medium bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0 flex items-center gap-1 ${
-                                      extra.enhancement.status === 'running' ? 'animate-pulse' : ''
-                                    }`}
-                                    title={`后台口语化问答已完成 ${extra.enhancement.hype_completed}/${extra.enhancement.total_parents} 条，抽取 ${extra.enhancement.rules_extracted} 条规则`}
-                                  >
-                                    ✨ 口语增强 {extra.enhancement.hype_completed}/{extra.enhancement.total_parents}
-                                  </span>
-                                )
-                              )}
-                            </div>
-
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              {extra?.hierarchy?.needs_upgrade && (
+                      >
+                        {/* 顶栏：信息与操作收口 */}
+                        <div className="flex items-center justify-between gap-3 flex-wrap">
+                          {/* 左侧：名称 + 版本号 + 状态点 + 规则模板 */}
+                          <div className="flex items-center gap-3 flex-wrap min-w-0">
+                            {renamingKbId === kb.kb_id ? (
+                              <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                                <input
+                                  type="text"
+                                  autoFocus
+                                  value={renamingValue}
+                                  onChange={(e) => setRenamingValue(e.target.value)}
+                                  onKeyDown={(e) => {
+                                    if (e.key === 'Enter') handleRenameKb(kb.kb_id, renamingValue);
+                                    if (e.key === 'Escape') setRenamingKbId(null);
+                                  }}
+                                  className="font-bold text-sm px-2 py-0.5 rounded border border-blue-500 bg-surface-100 text-foreground outline-none min-w-[200px]"
+                                />
                                 <button
                                   type="button"
-                                  disabled={upgradingKbId === kb.kb_id}
+                                  onClick={() => handleRenameKb(kb.kb_id, renamingValue)}
+                                  className="p-1 rounded text-emerald-500 hover:bg-emerald-500/15 transition-colors border border-emerald-500/30"
+                                  title="保存新名称 (Enter)"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setRenamingKbId(null)}
+                                  className="p-1 rounded text-muted-foreground hover:bg-surface-200 transition-colors border border-border"
+                                  title="取消 (Esc)"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
+                            ) : (
+                              <div className="flex items-center gap-1.5 group/title">
+                                <span className="font-bold text-sm text-foreground tracking-tight select-text" title={kb.name}>
+                                  {kb.name}
+                                </span>
+                                <button
+                                  type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    handleUpgradeHierarchy(kb);
+                                    setRenamingKbId(kb.kb_id);
+                                    setRenamingValue(kb.name);
                                   }}
-                                  className="flex items-center gap-1 px-2.5 py-1 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700 bg-amber-500/10 hover:bg-amber-500/15 rounded-lg border border-amber-500/20 transition-all font-medium whitespace-nowrap"
-                                  title="升级前将自动创建 auto_backup 快照，安全无损重构分层索引"
+                                  className="p-0.5 rounded text-muted-foreground/40 hover:text-foreground transition-colors opacity-0 group-hover/title:opacity-100"
+                                  title="修改知识库名称"
                                 >
-                                  <Sparkles className={`w-3.5 h-3.5 text-amber-500 ${upgradingKbId === kb.kb_id ? 'animate-spin' : ''}`} />
-                                  <span>{upgradingKbId === kb.kb_id ? '升级中...' : '重塑分层'}</span>
+                                  <Edit2 className="w-3 h-3" />
                                 </button>
-                              )}
+                              </div>
+                            )}
 
-                              <button
-                                type="button"
-                                disabled={exportingKbId === kb.kb_id}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleExportBundle(kb);
-                                }}
-                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-blue-600 dark:text-blue-400 hover:text-blue-700 bg-blue-500/10 hover:bg-blue-500/15 rounded-lg border border-blue-500/20 transition-all font-medium whitespace-nowrap"
-                                title="导出为免重新训练的 .ahkb 离线归档包"
-                              >
-                                <Download className="w-3.5 h-3.5 text-blue-500" />
-                                <span>{exportingKbId === kb.kb_id ? '导出中...' : '导出包'}</span>
-                              </button>
+                            {/* v1.0.0 纯等宽浅灰小字，点击呼出版本抽屉 */}
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setVersionDrawerKb(kb);
+                              }}
+                              className="font-mono text-xs text-muted-foreground hover:text-foreground hover:underline transition-colors flex items-center gap-0.5 cursor-pointer"
+                              title="点击打开版本管理与回滚抽屉"
+                            >
+                              <span>{kb.active_version || 'v1.0.0'}</span>
+                            </button>
 
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleViewKbChunks(kb, 1, '');
-                                }}
-                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-sky-600 dark:text-sky-400 hover:text-sky-700 bg-sky-500/10 hover:bg-sky-500/15 rounded-lg border border-sky-500/20 transition-all font-medium whitespace-nowrap"
-                                title="查看此知识库中已训练切分的规程分块详情"
-                              >
-                                <FileText className="w-3.5 h-3.5 text-sky-500" />
-                                <span>查看切片</span>
-                              </button>
+                            {/* 状态圆点 + 轻量文本 */}
+                            {kb.is_published ? (
+                              <span className="flex items-center gap-1.5 text-xs text-emerald-500 font-medium" title="已发布正式版：绑定的智能体专家即可检索调用">
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                <span>已发布</span>
+                              </span>
+                            ) : (
+                              <span className="flex items-center gap-1.5 text-xs text-amber-500 font-medium" title="未发布：仅限在召回测试中检测，外部专家暂停调用">
+                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                                <span>未发布</span>
+                              </span>
+                            )}
 
-                              <button
-                                type="button"
-                                disabled={extractingGraphKbId === kb.kb_id}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleExtractGraph(kb.kb_id);
-                                }}
-                                className="flex items-center gap-1 px-2.5 py-1 text-xs text-amber-600 dark:text-amber-400 hover:text-amber-700 bg-amber-500/10 hover:bg-amber-500/15 rounded-lg border border-amber-500/20 transition-all font-medium disabled:opacity-50 whitespace-nowrap"
-                                title="对已有切片批量提取知识图谱三元组"
-                              >
-                                <Zap className={`w-3.5 h-3.5 text-amber-500 ${extractingGraphKbId === kb.kb_id ? 'animate-bounce' : ''}`} />
-                                <span>{extractingGraphKbId === kb.kb_id ? '提取中...' : '提取图谱'}</span>
-                              </button>
+                            {/* 只读锁定态轻量提示 */}
+                            {(kb.ownership_type === 'subscribed_ro' || kb.ownership_type === 'frozen_snapshot') && (
+                              <span className="text-[11px] text-muted-foreground bg-surface-200 px-1.5 py-0.5 rounded">
+                                🔒 {kb.ownership_type === 'subscribed_ro' ? '订阅只读' : '离线快照'}
+                              </span>
+                            )}
 
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handlePruneKb(kb.kb_id);
-                                }}
-                                className="flex items-center gap-1 px-2 py-1 text-xs text-muted-foreground hover:text-foreground hover:bg-surface-200 rounded-lg border border-border transition-colors whitespace-nowrap"
-                                title="清理旧历史版本快照，执行 VACUUM 释放磁盘"
-                              >
-                                <Scissors className="w-3 h-3" />
-                                <span>瘦身</span>
-                              </button>
-
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleDeleteKb(kb.kb_id, kb.name);
-                                }}
-                                className="flex items-center gap-1 px-2 py-1 text-xs text-rose-500 hover:text-rose-600 hover:bg-rose-500/10 rounded-lg border border-rose-500/20 transition-colors whitespace-nowrap"
-                                title="彻底物理销毁此知识库及历史快照"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                                <span>清理</span>
-                              </button>
-                            </div>
+                            {/* 领域规程模板下拉框 */}
+                            <select
+                              value={kb.domain_type || 'general'}
+                              onClick={(e) => e.stopPropagation()}
+                              onChange={(e) => {
+                                e.stopPropagation();
+                                handleUpdateDomain(kb.kb_id, e.target.value);
+                              }}
+                              className="px-2 py-0.5 rounded text-[11px] bg-surface-100 border border-border/80 text-muted-foreground hover:text-foreground hover:border-border outline-none cursor-pointer transition-colors"
+                              title="切换此知识库关联的业务领域规则模板 (击剑/马术/橄榄球/通用规章)"
+                            >
+                              {DOMAIN_OPTIONS.map((opt) => (
+                                <option key={opt.id} value={opt.id}>
+                                  {opt.label}
+                                </option>
+                              ))}
+                            </select>
                           </div>
 
-                          <div className="grid grid-cols-3 gap-2 py-2 px-3 rounded-lg bg-surface-card border border-border/60 text-[11px]">
-                            <div
+                          {/* 右侧：动作严格分级收口（2 显性 + 1 折叠菜单） */}
+                          <div className="flex items-center gap-2 shrink-0 ml-auto relative">
+                            {/* 1. 高频查看：管理内容 */}
+                            <button
+                              type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
                                 handleViewKbChunks(kb, 1, '');
                               }}
-                              className="cursor-pointer hover:bg-surface-200/50 p-1 rounded-md transition-colors"
-                              title="点击查看所有规程切片明细"
+                              className="px-2.5 py-1 text-xs rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-foreground font-medium transition-colors shadow-xs"
+                              title="管理规程切片明细与分块"
                             >
-                              <span className="text-muted-foreground flex items-center gap-1">
-                                <span>规程切片数</span>
-                                <FileText className="w-3 h-3 text-sky-500" />
-                              </span>
-                              <strong className="text-foreground text-xs hover:text-sky-500 underline underline-offset-2">
-                                {kb.chunk_count}
-                              </strong>
-                            </div>
+                              管理内容
+                            </button>
 
-                            <div
+                            {/* 2. 主操作：发布 / 取消发布（全卡片唯一主高亮色） */}
+                            {kb.is_published ? (
+                              <button
+                                type="button"
+                                disabled={togglingPublishKbId === kb.kb_id}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleTogglePublish(kb, kb.active_version, false);
+                                }}
+                                className="px-2.5 py-1 text-xs rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-muted-foreground hover:text-amber-500 font-medium transition-colors disabled:opacity-50"
+                                title="取消发布：转为未发布测试状态"
+                              >
+                                {togglingPublishKbId === kb.kb_id ? '处理中...' : '取消发布'}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                disabled={togglingPublishKbId === kb.kb_id}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleTogglePublish(kb, kb.active_version, true);
+                                }}
+                                className="px-3 py-1 text-xs rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-xs transition-colors disabled:opacity-50"
+                                title="正式发布上线对外开放"
+                              >
+                                {togglingPublishKbId === kb.kb_id ? '发布中...' : '发布'}
+                              </button>
+                            )}
+
+                            {/* 3. 低频维护收口：[ ⋯ ] 折叠菜单 */}
+                            <button
+                              type="button"
                               onClick={(e) => {
                                 e.stopPropagation();
-                                handleViewKbTriples(kb, 1, '');
+                                setActionMenuKbId(actionMenuKbId === kb.kb_id ? null : kb.kb_id);
                               }}
-                              className="cursor-pointer hover:bg-surface-200/50 p-1 rounded-md transition-colors"
-                              title="点击查看知识图谱三元组资产明细"
+                              className={`p-1.5 rounded-lg border text-muted-foreground hover:text-foreground transition-colors ${
+                                actionMenuKbId === kb.kb_id
+                                  ? 'border-border bg-surface-200 text-foreground'
+                                  : 'border-border/80 bg-surface-100 hover:bg-surface-200'
+                              }`}
+                              title="更多维护操作"
                             >
-                              <span className="text-muted-foreground flex items-center gap-1">
-                                <span>图谱三元组</span>
-                                <Network className="w-3 h-3 text-amber-500" />
-                              </span>
-                              <strong className="text-foreground text-xs hover:text-amber-500 underline underline-offset-2">
-                                {kb.triple_count}
-                              </strong>
-                            </div>
+                              <MoreHorizontal className="w-3.5 h-3.5" />
+                            </button>
 
-                            <div className="p-1">
-                              <span className="text-muted-foreground block">独立数据库大小</span>
-                              <strong className="text-foreground text-xs font-mono">
-                                {(kb.disk_size_bytes / (1024 * 1024)).toFixed(2)} MB
-                              </strong>
-                            </div>
+                            {/* 下拉折叠菜单 Popup */}
+                            {actionMenuKbId === kb.kb_id && (
+                              <div
+                                onClick={(e) => e.stopPropagation()}
+                                className="absolute right-0 top-full mt-1.5 w-48 rounded-xl border border-border bg-surface-100 p-1 shadow-xl z-30 text-xs animate-fade-in"
+                              >
+                                <button
+                                  type="button"
+                                  disabled={exportingKbId === kb.kb_id}
+                                  onClick={() => {
+                                    setActionMenuKbId(null);
+                                    handleExportBundle(kb);
+                                  }}
+                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                >
+                                  <Download className="w-3.5 h-3.5 text-muted-foreground" />
+                                  <span>{exportingKbId === kb.kb_id ? '导出中...' : '导出知识包 (.ahkb)'}</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  disabled={extractingGraphKbId === kb.kb_id}
+                                  onClick={() => {
+                                    setActionMenuKbId(null);
+                                    handleExtractGraph(kb.kb_id);
+                                  }}
+                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                >
+                                  <Zap className="w-3.5 h-3.5 text-muted-foreground" />
+                                  <span>{extractingGraphKbId === kb.kb_id ? '提取中...' : '提取图谱三元组'}</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  disabled={rebuildingHypeKbId === kb.kb_id}
+                                  onClick={() => {
+                                    setActionMenuKbId(null);
+                                    handleRebuildHype(kb);
+                                  }}
+                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                >
+                                  <Sparkles className="w-3.5 h-3.5 text-muted-foreground" />
+                                  <span>{rebuildingHypeKbId === kb.kb_id ? '提炼中...' : '重构短口语'}</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  disabled={cleaningGarbledKbId === kb.kb_id}
+                                  onClick={() => {
+                                    setActionMenuKbId(null);
+                                    handleCleanupGarbled(kb);
+                                  }}
+                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                >
+                                  <ShieldAlert className="w-3.5 h-3.5 text-muted-foreground" />
+                                  <span>{cleaningGarbledKbId === kb.kb_id ? '清理中...' : '清理乱码切片'}</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActionMenuKbId(null);
+                                    handlePruneKb(kb.kb_id);
+                                  }}
+                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                >
+                                  <Scissors className="w-3.5 h-3.5 text-muted-foreground" />
+                                  <span>数据库瘦身 (VACUUM)</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActionMenuKbId(null);
+                                    setVersionDrawerKb(kb);
+                                  }}
+                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                >
+                                  <History className="w-3.5 h-3.5 text-muted-foreground" />
+                                  <span>版本历史与回滚</span>
+                                </button>
+
+                                {extra?.hierarchy?.needs_upgrade && (
+                                  <button
+                                    type="button"
+                                    disabled={upgradingKbId === kb.kb_id}
+                                    onClick={() => {
+                                      setActionMenuKbId(null);
+                                      handleUpgradeHierarchy(kb);
+                                    }}
+                                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-amber-500 hover:bg-surface-200 transition-colors text-left"
+                                  >
+                                    <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                                    <span>重塑分层索引</span>
+                                  </button>
+                                )}
+
+                                <div className="my-1 border-t border-border" />
+
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    setActionMenuKbId(null);
+                                    handleDeleteKb(kb.kb_id, kb.name);
+                                  }}
+                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-rose-500 hover:bg-rose-500/10 transition-colors text-left"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>彻底销毁知识库</span>
+                                </button>
+                              </div>
+                            )}
                           </div>
                         </div>
-                      );
-                    })
-                  )}
-                </div>
+
+                        {/* 底栏：细分割线下的 4 列等宽统计条 */}
+                        <div className="pt-2.5 border-t border-border/40 grid grid-cols-4 gap-2 text-xs">
+                          {/* 切片数 */}
+                          <div
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleViewKbChunks(kb, 1, '');
+                            }}
+                            className="cursor-pointer group/stat"
+                            title="点击查看所有规程切片明细"
+                          >
+                            <span className="text-muted-foreground text-[11px] block">切片数</span>
+                            <span className="font-bold text-foreground font-mono group-hover/stat:text-sky-400 group-hover/stat:underline tabular-nums transition-colors">
+                              {kb.chunk_count.toLocaleString()}
+                            </span>
+                          </div>
+
+                          {/* 图谱三元组 */}
+                          <div
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleViewKbTriples(kb, 1, '');
+                            }}
+                            className="cursor-pointer group/stat"
+                            title="点击查看知识图谱实体与三元组资产"
+                          >
+                            <span className="text-muted-foreground text-[11px] block">图谱三元组</span>
+                            <span className="font-bold text-foreground font-mono group-hover/stat:text-amber-400 group-hover/stat:underline tabular-nums transition-colors">
+                              {kb.triple_count.toLocaleString()}
+                            </span>
+                          </div>
+
+                          {/* 口语增强进度 */}
+                          <div
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleOpenOralResults(kb);
+                            }}
+                            className="cursor-pointer group/stat"
+                            title="点击查看口语化问答与规则映射结果"
+                          >
+                            <span className="text-muted-foreground text-[11px] block">口语增强</span>
+                            {extra?.enhancement && extra.enhancement.total_parents > 0 ? (
+                              (extra.enhancement.hype_completed >= extra.enhancement.total_parents || extra.enhancement.status === 'completed') ? (
+                                <span className="text-emerald-500 font-semibold group-hover/stat:underline transition-colors">
+                                  就绪
+                                </span>
+                              ) : (
+                                <span className="text-purple-400 font-mono group-hover/stat:underline tabular-nums transition-colors">
+                                  {extra.enhancement.hype_completed}/{extra.enhancement.total_parents}
+                                </span>
+                              )
+                            ) : (
+                              <span className="text-muted-foreground/60 group-hover/stat:underline transition-colors">
+                                未提炼
+                              </span>
+                            )}
+                          </div>
+
+                          {/* 数据库体积 */}
+                          <div
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handlePruneKb(kb.kb_id);
+                            }}
+                            className="cursor-pointer group/stat"
+                            title="点击执行数据库 VACUUM 瘦身清理"
+                          >
+                            <span className="text-muted-foreground text-[11px] block">体积</span>
+                            <span className="font-bold text-foreground font-mono group-hover/stat:text-purple-400 group-hover/stat:underline tabular-nums transition-colors">
+                              {(kb.disk_size_bytes / (1024 * 1024)).toFixed(2)} MB
+                            </span>
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })
+                )}
+
+                {/* 底部弱化批量清空 */}
+                {kbsList.length > 0 && (
+                  <div className="flex justify-end pt-3">
+                    <button
+                      type="button"
+                      onClick={handlePurgeAllKbs}
+                      className="text-xs text-muted-foreground/40 hover:text-rose-500 transition-colors flex items-center gap-1.5"
+                      title="清空并彻底物理销毁所有独立知识库资产"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      <span>批量清空全部知识库</span>
+                    </button>
+                  </div>
+                )}
               </div>
             </div>
           </div>
@@ -2998,6 +3434,307 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
             loadKBs();
           }}
         />
+      )}
+
+      {/* 口语化问答与刚性规则提炼结果弹窗 */}
+      {oralModalOpen && oralModalKb && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-fade-in">
+          <div className="bg-surface-100 border border-border rounded-2xl shadow-2xl max-w-4xl w-full flex flex-col max-h-[88vh] overflow-hidden">
+            {/* Header */}
+            <div className="px-6 py-4 border-b border-border flex items-center justify-between bg-surface-200/50">
+              <div className="flex items-center gap-3">
+                <div className="p-2 rounded-xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                  <Sparkles className="w-5 h-5" />
+                </div>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-base font-semibold text-foreground">
+                      【{oralModalKb.name}】口语化提炼与规程映射
+                    </h3>
+                    <span className="px-2 py-0.5 rounded text-[11px] font-mono bg-surface-300 text-muted-foreground border border-border">
+                      {oralModalKb.active_version || 'v1.0.0'}
+                    </span>
+                    {oralResultsData?.status === 'completed' ? (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/15 text-emerald-600 dark:text-emerald-400 border border-emerald-500/30 flex items-center gap-1">
+                        <CheckCircle2 className="w-3 h-3" /> 口语化就绪
+                      </span>
+                    ) : (
+                      <span className="px-2 py-0.5 rounded text-[10px] font-medium bg-purple-500/15 text-purple-600 dark:text-purple-400 border border-purple-500/30 animate-pulse flex items-center gap-1">
+                        <RefreshCw className="w-3 h-3 animate-spin" /> 后台提炼中 ({oralResultsData?.hype_completed ?? 0}/{oralResultsData?.total_parents ?? 0})
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground mt-0.5">
+                    将生硬公文段落自动重塑为员工大白话口语提问，直接击穿专业词汇与日常习惯的表达断层
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setOralModalOpen(false)}
+                className="p-1.5 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-300 transition-colors"
+                title="关闭"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* 指标栏 */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 p-5 bg-surface-100 border-b border-border text-xs">
+              <div className="p-3 rounded-xl bg-surface-200/60 border border-border/80">
+                <div className="text-muted-foreground flex items-center gap-1.5 mb-1">
+                  <MessageSquare className="w-3.5 h-3.5 text-emerald-500" />
+                  <span>口语问答总数</span>
+                </div>
+                <div className="text-xl font-bold text-foreground">
+                  {oralResultsData?.total_questions ?? 0}
+                  <span className="text-xs font-normal text-muted-foreground ml-1">条问法</span>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-surface-200/60 border border-border/80">
+                <div className="text-muted-foreground flex items-center gap-1.5 mb-1">
+                  <Layers className="w-3.5 h-3.5 text-blue-500" />
+                  <span>覆盖规程段落</span>
+                </div>
+                <div className="text-xl font-bold text-foreground">
+                  {oralResultsData?.total_parents ?? 0}
+                  <span className="text-xs font-normal text-muted-foreground ml-1">个父切片</span>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-surface-200/60 border border-border/80">
+                <div className="text-muted-foreground flex items-center gap-1.5 mb-1">
+                  <ShieldCheck className="w-3.5 h-3.5 text-purple-500" />
+                  <span>抽取刚性规则</span>
+                </div>
+                <div className="text-xl font-bold text-foreground">
+                  {oralResultsData?.rules_extracted ?? 0}
+                  <span className="text-xs font-normal text-muted-foreground ml-1">条</span>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-surface-200/60 border border-border/80">
+                <div className="text-muted-foreground flex items-center gap-1.5 mb-1">
+                  <Activity className="w-3.5 h-3.5 text-amber-500" />
+                  <span>提炼完成率</span>
+                </div>
+                <div className="text-xl font-bold text-foreground">
+                  {oralResultsData && oralResultsData.total_parents > 0
+                    ? `${Math.min(100, Math.round(((oralResultsData.hype_completed || 0) / oralResultsData.total_parents) * 100))}%`
+                    : '100%'}
+                </div>
+              </div>
+            </div>
+
+            {/* 搜索与筛选工具栏 */}
+            <div className="px-5 py-3 border-b border-border bg-surface-200/40 flex items-center justify-between gap-3">
+              <div className="relative flex-1 max-w-md">
+                <Search className="w-4 h-4 absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground" />
+                <input
+                  type="text"
+                  placeholder="搜索口语问题、公文标题或段落正文..."
+                  value={oralKeyword}
+                  onChange={(e) => setOralKeyword(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') {
+                      fetchOralResults(oralModalKb, 1, oralKeyword);
+                    }
+                  }}
+                  className="w-full pl-9 pr-3 py-1.5 text-xs rounded-xl bg-surface-100 border border-border text-foreground placeholder-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
+                />
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => fetchOralResults(oralModalKb, 1, oralKeyword)}
+                  className="px-3 py-1.5 rounded-xl bg-primary hover:bg-primary/90 text-primary-foreground text-xs font-medium transition-colors shadow-sm"
+                >
+                  搜索
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setOralKeyword('');
+                    fetchOralResults(oralModalKb, 1, '');
+                  }}
+                  className="px-2.5 py-1.5 rounded-xl border border-border hover:bg-surface-300 text-muted-foreground text-xs transition-colors"
+                  title="刷新"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${oralLoading ? 'animate-spin' : ''}`} />
+                </button>
+              </div>
+            </div>
+
+            {/* 内容列表区 */}
+            <div className="flex-1 overflow-y-auto p-5 space-y-4">
+              {oralLoading ? (
+                <div className="py-16 text-center text-muted-foreground text-xs flex flex-col items-center justify-center gap-2">
+                  <RefreshCw className="w-6 h-6 animate-spin text-primary" />
+                  <span>正在调取口语化问答与规则映射...</span>
+                </div>
+              ) : !oralResultsData || oralResultsData.items.length === 0 ? (
+                <div className="py-16 text-center text-muted-foreground text-xs space-y-2">
+                  <HelpCircle className="w-8 h-8 mx-auto text-muted-foreground/50" />
+                  <div className="font-medium text-foreground">暂无符合条件的口语化问答</div>
+                  <p className="text-[11px] text-muted-foreground">
+                    若知识库刚完成训练，后台正基于大模型异步分析规程并提炼日常问题，稍后刷新即可展现。
+                  </p>
+                </div>
+              ) : (
+                oralResultsData.items.map((item, idx) => {
+                  const isExpanded = Boolean(expandedParentIds[item.parent_chunk_id]);
+                  return (
+                    <div
+                      key={item.parent_chunk_id || idx}
+                      className="p-4 rounded-xl bg-surface-200/50 border border-border hover:border-border/80 transition-all space-y-3"
+                    >
+                      {/* 父段落标题与路径 */}
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="space-y-0.5">
+                          <div className="text-sm font-semibold text-foreground flex items-center gap-2">
+                            <FileText className="w-4 h-4 text-emerald-500 shrink-0" />
+                            <span>{item.title}</span>
+                          </div>
+                          {item.section_path && (
+                            <div className="text-[11px] text-muted-foreground font-mono">
+                              {item.section_path}
+                            </div>
+                          )}
+                        </div>
+                        <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-surface-300 text-muted-foreground border border-border shrink-0">
+                          {item.parent_chunk_id}
+                        </span>
+                      </div>
+
+                      {/* 口语化提炼问法（核心亮点） */}
+                      <div className="p-3 rounded-lg bg-surface-100 border border-emerald-500/25 space-y-2">
+                        <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
+                          <MessageSquare className="w-3.5 h-3.5 text-emerald-500" />
+                          <span>已提炼的大白话日常提问（{item.oral_questions.length}）</span>
+                        </div>
+                        {item.oral_questions.length > 0 ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            {item.oral_questions.map((q, qIdx) => (
+                              <div
+                                key={qIdx}
+                                className="px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-800 dark:text-emerald-200 font-medium flex items-center gap-1.5"
+                              >
+                                <span className="text-emerald-500">💬</span>
+                                <span>{q}</span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : (
+                          <div className="text-xs text-muted-foreground italic">
+                            后台正在为该段落提炼大白话问法中...
+                          </div>
+                        )}
+                      </div>
+
+                      {/* 刚性规则（若有） */}
+                      {item.rules && item.rules.length > 0 && (
+                        <div className="p-3 rounded-lg bg-purple-500/5 border border-purple-500/20 space-y-2">
+                          <div className="text-xs font-semibold text-purple-700 dark:text-purple-300 flex items-center gap-1.5">
+                            <ShieldCheck className="w-3.5 h-3.5 text-purple-500" />
+                            <span>抽取规程刚性判定规则（{item.rules.length}）</span>
+                          </div>
+                          <div className="space-y-1.5">
+                            {item.rules.map((r, rIdx) => (
+                              <div
+                                key={rIdx}
+                                className="p-2 rounded bg-surface-100 border border-purple-500/20 text-xs space-y-1"
+                              >
+                                <div className="font-semibold text-foreground flex items-center gap-2">
+                                  <span>{r.rule_name}</span>
+                                  <span className="px-1.5 py-0.5 rounded text-[10px] bg-purple-500/10 text-purple-600 dark:text-purple-400">
+                                    {r.rule_type}
+                                  </span>
+                                </div>
+                                {r.condition && (
+                                  <div className="text-[11px] text-muted-foreground">
+                                    <strong>触发条件:</strong> {r.condition}
+                                  </div>
+                                )}
+                                {r.action && (
+                                  <div className="text-[11px] text-foreground font-medium">
+                                    <strong>裁定标准:</strong> {r.action}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
+                      {/* 规程原始段落（可折叠） */}
+                      <div className="text-xs bg-surface-100/60 p-2.5 rounded-lg border border-border">
+                        <div className="flex items-center justify-between text-muted-foreground mb-1 text-[11px]">
+                          <span>对应规程原文段落：</span>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setExpandedParentIds((prev) => ({
+                                ...prev,
+                                [item.parent_chunk_id]: !prev[item.parent_chunk_id],
+                              }))
+                            }
+                            className="text-primary hover:underline flex items-center gap-0.5"
+                          >
+                            <span>{isExpanded ? '收起段落' : '展开全文'}</span>
+                            {isExpanded ? (
+                              <ChevronUp className="w-3 h-3" />
+                            ) : (
+                              <ChevronDown className="w-3 h-3" />
+                            )}
+                          </button>
+                        </div>
+                        <p className="text-muted-foreground leading-relaxed whitespace-pre-wrap select-text">
+                          {isExpanded ? item.full_content : item.snippet}
+                        </p>
+                      </div>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {/* 分页栏 */}
+            <div className="px-6 py-3 border-t border-border bg-surface-200/50 flex items-center justify-between text-xs text-muted-foreground">
+              <div>
+                共 {oralResultsData?.matched_parents ?? 0} 个段落
+                {oralResultsData && oralResultsData.matched_parents > 0 && (
+                  <span>
+                    ，当前第 {oralPage} / {Math.max(1, Math.ceil((oralResultsData.matched_parents || 1) / (oralResultsData.page_size || 10)))} 页
+                  </span>
+                )}
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  disabled={oralPage <= 1 || oralLoading}
+                  onClick={() => fetchOralResults(oralModalKb, oralPage - 1, oralKeyword)}
+                  className="px-3 py-1.5 rounded-lg border border-border hover:bg-surface-300 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 transition-colors"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" /> 上一页
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    !oralResultsData ||
+                    oralPage >= Math.max(1, Math.ceil((oralResultsData.matched_parents || 1) / (oralResultsData.page_size || 10))) ||
+                    oralLoading
+                  }
+                  onClick={() => fetchOralResults(oralModalKb, oralPage + 1, oralKeyword)}
+                  className="px-3 py-1.5 rounded-lg border border-border hover:bg-surface-300 disabled:opacity-40 disabled:cursor-not-allowed flex items-center gap-1 transition-colors"
+                >
+                  下一页 <ChevronRight className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

@@ -32,8 +32,8 @@ class CritiqueResult:
 class SelfCritiqueCritic:
     """输出前自我审查 Critic 节点。"""
 
-    # 提取数字与金额特征
-    NUMBER_PATTERN = re.compile(r"\b\d+(?:\.\d+)?(?:元|万|千|%|分|人|天|岁|届)?\b")
+    # 提取数字与金额特征（兼容中英文上下文边界）
+    NUMBER_PATTERN = re.compile(r"(?<![a-zA-Z0-9_])\d+(?:\.\d+)?(?:元|万元|亿元|万|千|%|分|人|天|岁|届)?(?![a-zA-Z0-9_])")
     # 提取日期特征
     DATE_PATTERN = re.compile(r"\d{4}[年\-_/]\d{1,2}[月\-_/]\d{1,2}日?")
 
@@ -69,9 +69,19 @@ class SelfCritiqueCritic:
                 normalized_ev.append(str(ev))
 
         if not normalized_ev:
-            # 无检索证据时，若回答中出现大量具体数字与断言，给出审慎提示
+            # 排除艺术与文学创作、代码编写与技术脚本、以及接续上文的闲聊场景
+            lower_q = (user_query or "").lower().strip()
+            creative_keywords = (
+                "歌", "曲", "词", "诗", "画", "图", "故事", "小说", "剧本", "笑话", "脑洞", "段子",
+                "创作", "作词", "作曲", "写首", "写篇", "写段", "继续", "接着", "展开",
+                "代码", "写个函数", "写个组件", "prompt", "提示词", "翻译", "润色",
+            )
+            is_creative_or_casual = any(kw in lower_q for kw in creative_keywords)
+            # 只有当用户确实在进行事实查询、数据分析或规程业务咨询（如问多少、金额、统计、规则、发票等）且未检索证据时，才进行审慎提醒
+            is_factual_query = any(k in lower_q for k in ("多少", "金额", "费用", "价格", "数据", "统计", "规则", "条款", "政策", "规定", "营收", "利润", "发票", "报销"))
+
             numbers_in_draft = cls.NUMBER_PATTERN.findall(draft_response)
-            if len(numbers_in_draft) >= 4:
+            if not is_creative_or_casual and is_factual_query and len(numbers_in_draft) >= 4:
                 issues.append("回答中包含多项具体数值，但当前会话未执行证据检索")
                 deduction += 0.20
             return CritiqueResult(

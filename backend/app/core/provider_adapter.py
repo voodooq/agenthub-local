@@ -310,6 +310,12 @@ class ProviderAdapter:
             )
             await conn.commit()
 
+        try:
+            from ..providers.light_llm_router import light_llm_router
+            light_llm_router.invalidate_cache()
+        except Exception:
+            pass
+
         if role_binding == "embedding_only":
             try:
                 from ..search.embedding_provider import embedding_router
@@ -400,6 +406,11 @@ class ProviderAdapter:
             try:
                 from ..search.embedding_provider import embedding_router
                 embedding_router.invalidate_cache()
+            except Exception:
+                pass
+            try:
+                from ..providers.light_llm_router import light_llm_router
+                light_llm_router.invalidate_cache()
             except Exception:
                 pass
             return (cur.rowcount or 0) > 0

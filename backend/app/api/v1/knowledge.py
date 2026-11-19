@@ -237,6 +237,7 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
     sync_mgr = CloudVFSSyncManager(req.workspace_root)
     total_new_chunks = 0
     sync_warnings: list[str] = []
+    affected_kb_ids: set[str] = set()
 
     for m in mounts:
         m_cfg = m.get("config", {})
@@ -293,6 +294,7 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
                 from ...kb.manager import KBLifecycleManager
                 from ...kb.storage import KBStorageManager
                 kb_id = f"kb_{m['mount_id']}"
+                affected_kb_ids.add(kb_id)
                 KBStorageManager.upsert_chunks_to_version_db(
                     kb_id=kb_id,
                     version="v1.0.0",
@@ -302,12 +304,13 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
             logger.warning(f"挂载源 {m['mount_name']} 增量拉取失败: {prov_err}")
             sync_warnings.append(f"【{m['mount_name']}】拉取异常: {prov_err}")
 
-    # 触发自动纳管与元数据同步
+    # 触发自动纳管与元数据同步，并全自动执行增强流水线（父子关系 + 图谱三元组 + 口语化与规则增强）
     try:
         from ...kb.manager import KBLifecycleManager
         await KBLifecycleManager.auto_adopt_mounted_kbs()
+        await KBLifecycleManager.auto_post_process_trained_kbs(list(affected_kb_ids) if affected_kb_ids else None)
     except Exception as e:
-        logger.debug(f"同步后自动纳管: {e}")
+        logger.debug(f"同步后自动增强流水线: {e}")
 
     if total_new_chunks == 0 and sync_warnings:
         return {

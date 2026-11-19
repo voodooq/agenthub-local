@@ -232,30 +232,15 @@ class SessionSummaryManager:
             f"新增待合并对话:\n" + "\n".join(delta_lines)
         )
 
-        async def _consume_light_stream() -> str:
-            collected = ""
-            async for evt in engine_pool.execute_stream_with_failover(
-                conversation_id=conversation_id,
-                user_prompt=prompt,
-                model_name="",
-                thinking_level="low",
-                system_override="你是高密度会话记忆压缩器，只返回严格合法的 JSON。",
-                temperature=0.2,
-                pre_built_history=[],
-                task_role="light",
-            ):
-                etype = evt.get("type")
-                if etype == "chunk":
-                    collected += evt.get("content", "")
-                elif etype == "done":
-                    collected = evt.get("full_content", collected)
-                    break
-                elif etype == "error":
-                    return ""
-            return collected
+        from ..providers.light_llm_router import light_llm_router
 
         try:
-            raw_reply = await asyncio.wait_for(_consume_light_stream(), timeout=15.0)
+            raw_reply = await light_llm_router.complete(
+                prompt=prompt,
+                system_prompt="你是高密度会话记忆压缩器，只返回严格合法的 JSON。",
+                temperature=0.2,
+                max_tokens=512,
+            )
         except Exception as e:
             logger.debug(f"[SessionSummary] 轻量模型压缩跳过，回退确定性规则摘要: {e}")
             return None

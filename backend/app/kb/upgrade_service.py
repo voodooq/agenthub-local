@@ -18,9 +18,11 @@ import time
 from typing import Any
 
 from ..core.logging_config import logger
+from ..repository.db import db_manager
 from ..kb.manager import KBLifecycleManager
 from ..kb.storage import KBStorageManager
 from ..kb.exchange import KBExchangeEngine
+from ..kb.version_helper import get_next_version
 from ..search.ast_chunker import ParentChildASTChunker
 from ..search.embedding_provider import embedding_router
 from ..search.hype_worker import HyPEQuestionWorker
@@ -74,14 +76,24 @@ class KBUpgradeService:
         if not db_path.exists():
             raise FileNotFoundError(f"知识库数据库文件不存在: {db_path}")
 
-        # Step 1: 升级前自动创建 auto_backup 快照备份
+        # 计算下一个不重复的语义递增版本号 (如 v1.0.0 -> v1.0.1)
+        existing_versions = await KBLifecycleManager.list_kb_versions(kb_id)
+        existing_snaps = await KBExchangeEngine.list_snapshots(kb_id)
+        existing_tags = list(set(
+            [v.get("version") for v in existing_versions if v.get("version")] +
+            [s.get("version_tag") for s in existing_snaps if s.get("version_tag")] +
+            [version]
+        ))
+        new_version = get_next_version(existing_tags, bump="patch")
+
+        # Step 1: 升级前自动创建 auto_backup 快照备份（快照标记原版本标签）
         backup_id = await KBExchangeEngine.create_snapshot(
             kb_id=kb_id,
             version_tag=version,
             snapshot_type="auto_backup",
-            change_summary="升级为父子分层与HyPE口语索引前自动备份",
+            change_summary=f"升级为父子分层前自动备份原版本（新版本提升至 {new_version}）",
         )
-        logger.info(f"[KBUpgrade] 已完成升级前自动快照备份: {backup_id}")
+        logger.info(f"[KBUpgrade] 已完成升级前自动快照备份: {backup_id}, 原版本={version}, 提升新版本={new_version}")
 
         # Step 2: 读取存量切片，按 remote_uri 聚合出完整文档文本
         def _read_docs_from_db() -> list[dict[str, Any]]:
@@ -137,23 +149,41 @@ class KBUpgradeService:
             for hc in h_chunks:
                 new_chunks.append(hc.to_dict())
 
-        # Step 4: 清空老切片并批量写入新切片
-        total_count, _ = KBStorageManager.upsert_chunks_to_version_db(
+        # Step 4: 将重构后的切片写入新版本数据库中
+        total_count, disk_sz = KBStorageManager.upsert_chunks_to_version_db(
             kb_id=kb_id,
-            version=version,
+            version=new_version,
             chunks=new_chunks,
         )
 
-        # Step 5: 调度后台 HyPE 任务
-        HyPEQuestionWorker.schedule_background_hype(kb_id=kb_id, version=version)
+        # 原子同步主表与版本表
+        async with db_manager.get_connection() as conn:
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO kb_versions (
+                    kb_id, version, status, changelog, chunk_count, triple_count,
+                    disk_size_bytes, is_published, created_by, created_at
+                ) VALUES (?, ?, 'ready', '升级为父子分层与HyPE口语索引结构', ?, 0, ?, 1, 'system', ?)
+                """,
+                (kb_id, new_version, total_count, disk_sz, int(time.time())),
+            )
+            await conn.execute(
+                "UPDATE knowledge_bases SET active_version = ?, current_version = ?, chunk_count = ?, disk_size_bytes = ?, updated_at = CURRENT_TIMESTAMP WHERE kb_id = ?",
+                (new_version, new_version, total_count, disk_sz, kb_id),
+            )
+            await conn.commit()
 
-        logger.info(f"[KBUpgrade] 知识库 [{kb_id}] 已成功升级为分层结构，生成 {total_count} 条父子切片并调度 HyPE 增强。")
+        # Step 5: 调度后台 HyPE 任务针对新版本执行增强
+        HyPEQuestionWorker.schedule_background_hype(kb_id=kb_id, version=new_version)
+
+        logger.info(f"[KBUpgrade] 知识库 [{kb_id}] 已成功升级为分层结构新版本 [{new_version}]，生成 {total_count} 条父子切片并调度 HyPE 增强。")
         return {
             "status": "upgraded",
             "kb_id": kb_id,
-            "version": version,
+            "version": new_version,
+            "old_version": version,
             "backup_snapshot_id": backup_id,
             "new_total_chunks": total_count,
-            "message": "已成功重塑为父子分层结构，口语化问答正于后台异步提炼中。",
+            "message": f"已成功重塑为父子分层结构新版本 [{new_version}]，口语化问答正于后台异步提炼中。",
         }
 

@@ -84,6 +84,50 @@ class EnginePoolService:
         ml = (model_name or "").strip().lower()
         return (not ml) or ml == "default" or ("gemini" in ml) or ml.startswith("google")
 
+    @staticmethod
+    def _is_retryable_upstream_error(err_msg: str) -> bool:
+        """判断 CLI 或上游接口错误是否属于可自动等待重试的瞬态抖动或断流"""
+        if not err_msg:
+            return False
+        msg_lower = err_msg.lower()
+        if any(k in msg_lower for k in ("copyrighted works", "safety filter", "permission denied", "invalid api key")):
+            return False
+        patterns = (
+            "empty conversation id",
+            "failed to start conversation",
+            ": eof",
+            '"eof"',
+            " eof",
+            "unexpected eof",
+            "streamgeneratecontent",
+            "connection reset",
+            "connection closed",
+            "broken pipe",
+            "transport connection broken",
+            "http2: server sent goaway",
+            "temporary failure in name resolution",
+            "tls handshake timeout",
+            "bad gateway",
+            "502",
+            "503",
+            "service unavailable",
+        )
+        return any(p in msg_lower for p in patterns)
+
+    @staticmethod
+    def _get_friendly_retry_reason(err_msg: str) -> str:
+        """提取面向用户的友好重试原因简述"""
+        msg_lower = (err_msg or "").lower()
+        if "eof" in msg_lower or "streamgeneratecontent" in msg_lower:
+            return "网络流式断连 (EOF)"
+        if "empty conversation id" in msg_lower or "failed to start conversation" in msg_lower:
+            return "临时会话初始化抖动"
+        if "connection reset" in msg_lower or "broken pipe" in msg_lower:
+            return "网络连接被重置"
+        if "503" in msg_lower or "502" in msg_lower:
+            return "上游服务瞬时不可用 (502/503)"
+        return "网络链路瞬态抖动"
+
     @classmethod
     async def execute_stream_with_failover(
         cls,
@@ -110,7 +154,8 @@ class EnginePoolService:
         """
         带零感知热故障转移、三区尾注动态注入与全通道真实 Token/KV Cache 采集的流式生成执行器。
         """
-        retries_left = max_retries or max(4, getattr(settings, "auto_failover_retry", 3))
+        total_retries = max_retries or max(4, getattr(settings, "auto_failover_retry", 3))
+        retries_left = total_retries
         effective_agent_role = agent_role or ("scrubber" if task_role == "light" else "primary")
 
         if pre_built_history is not None:
@@ -692,7 +737,7 @@ class EnginePoolService:
                 return
 
             account = await AccountRepository.get_active_candidate()
-            # NOTE: 后台轻量旁路 (light) 严禁拉起重量级 CLI 子进程；若首选为 CLI 账号，优先改用可用 Google REST 账号，无则优雅跳过
+            # NOTE: 后台轻量旁路 (light) 优先改用可用 Google REST 账号；若系统仅有 CLI 账号，降级保留当前可用 CLI 算力账号完成任务
             if task_role == "light" and account is not None and cls._is_cli_account(account):
                 rest_fallback = None
                 try:
@@ -983,7 +1028,7 @@ class EnginePoolService:
                             pass
 
             # ──────────────────── 通道 2: Antigravity / Gemini CLI 引擎 ────────────────────
-            elif account.cli_home_dir and task_role != "light":
+            elif account.cli_home_dir:
                 cli_prov_meta = {
                     "id": f"cli_{account.id or account.name}",
                     "name": account.name,
@@ -1067,12 +1112,39 @@ class EnginePoolService:
 
                         elif etype == "error":
                             err_msg = str(event.get("message") or "未知错误")
-                            if ("empty conversation id" in err_msg.lower() or "failed to start conversation" in err_msg.lower()) and retries_left > 1:
+                            if cls._is_retryable_upstream_error(err_msg) and retries_left > 1:
+                                current_retry_attempt = total_retries - retries_left + 1
+                                delay_sec = min(6.0, 1.2 * (1.5 ** (current_retry_attempt - 1)))
+                                friendly_reason = cls._get_friendly_retry_reason(err_msg)
+
+                                # 若中途已产生部分残缺气泡，发送 stream_reset 彻底清空，确保重试交付干净
+                                if full_response_text or full_thinking_text:
+                                    cli_collector.reset_stream_buffer()
+                                    if legacy_splitter is not None:
+                                        legacy_splitter.reset()
+                                    yield {
+                                        "type": "stream_reset",
+                                        "reason": "upstream_retry",
+                                        "message": f"检测到上游{friendly_reason}，正在清空残缺气泡并重试...",
+                                    }
+                                    full_response_text = ""
+                                    full_thinking_text = ""
+
                                 logger.warning(
-                                    f"[EnginePool] 捕获 CLI 上游临时会话初始化抖动 ({err_msg})，自动触发无感快速重试 (剩余 {retries_left - 1} 次)"
+                                    f"[EnginePool] 捕获 CLI 上游抖动/EOF ({err_msg})，等待 {round(delay_sec, 1)}s 后自动触发快速重试 (第 {current_retry_attempt}/{total_retries} 次，剩余 {retries_left - 1} 次)"
                                 )
+                                # 实时通知前端重试状态（轮次与等待耗时小字展示）
+                                yield {
+                                    "type": "retry_status",
+                                    "attempt": current_retry_attempt,
+                                    "max_retries": total_retries,
+                                    "reason": err_msg,
+                                    "wait_seconds": round(delay_sec, 1),
+                                    "elapsed_seconds": round(time.time() - start_time, 1),
+                                    "message": f"检测到上游{friendly_reason}，正在等待重试（第 {current_retry_attempt}/{total_retries} 次，等待 {round(delay_sec, 1)}s）...",
+                                }
                                 retries_left -= 1
-                                await asyncio.sleep(0.6)
+                                await asyncio.sleep(delay_sec)
                                 break
 
                             err_payload: dict[str, Any] = {

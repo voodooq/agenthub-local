@@ -246,6 +246,15 @@ export interface Message {
     max_steps: number;
     message: string;
   };
+  retry_info?: {
+    attempt: number;
+    max_retries: number;
+    message?: string;
+    reason?: string;
+    wait_seconds?: number;
+    elapsed_seconds?: number;
+    is_retrying: boolean;
+  };
   tool_request?: {
     tool_name: string;
     tool_input: Record<string, any>;
@@ -262,6 +271,8 @@ export interface Message {
     member_count?: number;
     active_count?: number;
   } | null;
+  suggestedFollowups?: string[];
+  clarificationHint?: string;
 }
 
 /** 单轮聚合 Token 消耗、KV Cache 命中与推理延迟水表指标 */

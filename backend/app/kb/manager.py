@@ -394,6 +394,91 @@ class KBLifecycleManager:
             logger.warning(f"自动纳管知识库资产异常: {e}")
 
     @classmethod
+    async def auto_post_process_trained_kbs(
+        cls, kb_ids: list[str] | None = None
+    ) -> dict[str, Any]:
+        """每轮训练完知识库后自动执行后置增强流水线：
+        1. 自动重构/建立父子关系 (Parent-Child Hierarchy)
+        2. 自动抽取并持久化知识图谱三元组 (Knowledge Graph Triples)
+        3. 自动触发并调度后台口语化问答提炼与刚性规则抽取 (HyPE & Rules)
+        """
+        from .upgrade_service import KBUpgradeService
+        from .storage import KBStorageManager
+        from ..search.hype_worker import HyPEQuestionWorker
+
+        processed_summary: dict[str, Any] = {}
+
+        target_ids = list(kb_ids) if kb_ids else []
+        if not target_ids:
+            try:
+                async with db_manager.get_connection() as conn:
+                    async with conn.execute("SELECT kb_id FROM knowledge_bases") as cur:
+                        rows = await cur.fetchall()
+                        target_ids = [r["kb_id"] for r in rows]
+            except Exception as e:
+                logger.warning(f"获取知识库列表失败: {e}")
+                return processed_summary
+
+        for kid in target_ids:
+            try:
+                active_ver = "v1.0.0"
+                async with db_manager.get_connection() as conn:
+                    async with conn.execute("SELECT active_version FROM knowledge_bases WHERE kb_id = ?", (kid,)) as cur:
+                        row = await cur.fetchone()
+                        if row and row["active_version"]:
+                            active_ver = row["active_version"]
+
+                summary_item: dict[str, Any] = {"kb_id": kid, "version": active_ver}
+
+                # 1. 自动建立/重塑父子关系
+                hierarchy_status = await KBUpgradeService.check_hierarchy_status(kid, active_ver)
+                if hierarchy_status.get("needs_upgrade"):
+                    logger.info(f"[AutoPipeline] 知识库 [{kid}] 缺少父子关系，开始自动重塑分层...")
+                    await KBUpgradeService.upgrade_kb_to_parent_child(kid, active_ver)
+                    summary_item["hierarchy"] = "auto_upgraded"
+                else:
+                    summary_item["hierarchy"] = "already_hierarchical"
+
+                # 2. 自动抽取构建知识图谱三元组
+                new_triples, total_triples = KBStorageManager.extract_and_save_triples_for_kb(kid, active_ver)
+                summary_item["new_triples"] = new_triples
+                summary_item["total_triples"] = total_triples
+                logger.info(f"[AutoPipeline] 知识库 [{kid}] 自动图谱抽取完成: 新增/印证 {new_triples} 条，总计 {total_triples} 条三元组")
+
+                # 3. 自动调度后台口语化问答提炼与刚性规则抽取 (HyPE)
+                HyPEQuestionWorker.schedule_background_hype(kid, active_ver)
+                summary_item["hype"] = "scheduled"
+                logger.info(f"[AutoPipeline] 知识库 [{kid}] 已自动调度后台口语化与规则增强提炼")
+
+                processed_summary[kid] = summary_item
+            except Exception as item_err:
+                logger.warning(f"[AutoPipeline] 处理知识库 [{kid}] 自动化增强流水线异常: {item_err}")
+                processed_summary[kid] = {"error": str(item_err)}
+
+        return processed_summary
+
+    @classmethod
+    async def get_kb(cls, kb_id: str) -> dict[str, Any] | None:
+        """获取单个知识库详情（包含物理磁盘占用与切片统计）。"""
+        async with db_manager.get_connection() as conn:
+            async with conn.execute(
+                """
+                SELECT kb.*, ds.name as source_name, ds.source_type
+                FROM knowledge_bases kb
+                LEFT JOIN kb_data_sources ds ON kb.source_id = ds.source_id
+                WHERE kb.kb_id = ?
+                """,
+                (kb_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                real_disk = KBStorageManager.get_kb_disk_size(kb_id)
+                res = dict(row)
+                res["disk_size_bytes"] = real_disk
+                return res
+
+    @classmethod
     async def list_knowledge_bases(cls) -> list[dict[str, Any]]:
         """获取所有知识库资产列表（包含物理磁盘占用与切片统计）。"""
         await cls.auto_adopt_mounted_kbs()
@@ -425,6 +510,7 @@ class KBLifecycleManager:
                         "triple_count": r["triple_count"],
                         "disk_size_bytes": real_disk,
                         "share_repo_uri": r["share_repo_uri"],
+                        "is_published": bool(r["is_published"]) if "is_published" in r.keys() and r["is_published"] else False,
                         "created_at": r["created_at"],
                         "updated_at": r["updated_at"],
                     })
@@ -450,9 +536,78 @@ class KBLifecycleManager:
                         "disk_size_bytes": r["disk_size_bytes"],
                         "package_hash": r["package_hash"],
                         "created_by": r["created_by"],
+                        "is_published": bool(r["is_published"]) if "is_published" in r.keys() and r["is_published"] else (r["status"] == "published"),
                         "created_at": r["created_at"],
                     })
                 return versions
+
+    @classmethod
+    async def set_version_publish_status(
+        cls, kb_id: str, version: str, publish: bool
+    ) -> dict[str, Any]:
+        """切换指定知识库版本的发布状态。
+
+        Args:
+            kb_id: 知识库唯一标识
+            version: 版本号（如 v1.0.0）
+            publish: True=发布为正式版，False=取消发布/设为维护测试中
+        """
+        now = time.time()
+        is_pub_int = 1 if publish else 0
+        status_str = "published" if publish else "testing"
+
+        async with db_manager.get_connection() as conn:
+            await conn.execute(
+                """
+                UPDATE kb_versions
+                SET is_published = ?, status = ?
+                WHERE kb_id = ? AND version = ?
+                """,
+                (is_pub_int, status_str, kb_id, version),
+            )
+            if publish:
+                await conn.execute(
+                    """
+                    UPDATE knowledge_bases
+                    SET is_published = 1, active_version = ?, updated_at = ?
+                    WHERE kb_id = ?
+                    """,
+                    (version, now, kb_id),
+                )
+            else:
+                async with conn.execute(
+                    "SELECT version FROM kb_versions WHERE kb_id = ? AND is_published = 1 AND version != ?",
+                    (kb_id, version),
+                ) as cur:
+                    other_pub = await cur.fetchone()
+                    if other_pub:
+                        await conn.execute(
+                            """
+                            UPDATE knowledge_bases
+                            SET is_published = 1, active_version = ?, updated_at = ?
+                            WHERE kb_id = ?
+                            """,
+                            (other_pub["version"], now, kb_id),
+                        )
+                    else:
+                        await conn.execute(
+                            """
+                            UPDATE knowledge_bases
+                            SET is_published = 0, updated_at = ?
+                            WHERE kb_id = ?
+                            """,
+                            (now, kb_id),
+                        )
+            await conn.commit()
+
+        return {
+            "success": True,
+            "kb_id": kb_id,
+            "version": version,
+            "is_published": publish,
+            "status": status_str,
+            "message": f"知识库版本 [{version}] 已成功{'发布为正式版本' if publish else '转为测试维护状态（已取消对外部专家开放）'}",
+        }
 
     @classmethod
     async def rollback_version(cls, kb_id: str, target_version: str) -> dict[str, Any]:
@@ -599,11 +754,39 @@ class KBLifecycleManager:
 
     @classmethod
     async def get_expert_kbs(cls, expert_id: str) -> list[dict[str, Any]]:
-        """获取指定专家绑定的知识库列表（按优先级升序）。"""
+        """获取指定专家绑定的知识库列表（兼容 v1.5.9+ expert_knowledge_bases 与旧表）。"""
         async with db_manager.get_connection() as conn:
+            # 1. 优先查询 v1.5.9+ 专家与知识库多对多绑定表 expert_knowledge_bases
+            async with conn.execute("""
+                SELECT ekb.kb_id, ekb.priority_weight, ekb.top_k_override,
+                       kb.name, kb.active_version, kb.current_version, kb.chunk_count,
+                       kb.domain_type, kb.rule_profile_json, kb.is_published
+                FROM expert_knowledge_bases ekb
+                JOIN knowledge_bases kb ON ekb.kb_id = kb.kb_id
+                WHERE ekb.expert_id = ?
+                ORDER BY ekb.priority_weight DESC, ekb.created_at ASC
+            """, (expert_id,)) as cursor:
+                rows = await cursor.fetchall()
+                if rows:
+                    return [
+                        {
+                            "kb_id": r["kb_id"],
+                            "name": r["name"],
+                            "pinned_version": "latest",
+                            "effective_version": r["active_version"] or r["current_version"] or "v1.0.0",
+                            "priority_rank": idx + 1,
+                            "chunk_count": r["chunk_count"],
+                            "domain_type": r["domain_type"] if "domain_type" in r.keys() else "general",
+                            "rule_profile_json": r["rule_profile_json"] if "rule_profile_json" in r.keys() else "",
+                            "is_published": bool(r["is_published"]) if "is_published" in r.keys() and r["is_published"] else False,
+                        }
+                        for idx, r in enumerate(rows)
+                    ]
+
+            # 2. 回退查询旧版 expert_kb_bindings 表
             async with conn.execute("""
                 SELECT b.kb_id, b.pinned_version, b.priority_rank, kb.name, kb.active_version, kb.chunk_count,
-                       kb.domain_type, kb.rule_profile_json
+                       kb.domain_type, kb.rule_profile_json, kb.is_published
                 FROM expert_kb_bindings b
                 JOIN knowledge_bases kb ON b.kb_id = kb.kb_id
                 WHERE b.expert_id = ?
@@ -620,6 +803,7 @@ class KBLifecycleManager:
                         "chunk_count": r["chunk_count"],
                         "domain_type": r["domain_type"] if "domain_type" in r.keys() else "general",
                         "rule_profile_json": r["rule_profile_json"] if "rule_profile_json" in r.keys() else "",
+                        "is_published": bool(r["is_published"]) if "is_published" in r.keys() and r["is_published"] else False,
                     }
                     for r in rows
                 ]

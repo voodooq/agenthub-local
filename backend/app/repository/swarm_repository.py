@@ -107,13 +107,13 @@ class SwarmRepository:
 
     @classmethod
     async def get_by_session(cls, session_id: str) -> dict[str, Any] | None:
-        """按主会话 session_id 获取最新的 Swarm 实例。"""
+        """按主会话 session_id 获取最新的活跃 Swarm 实例。"""
         async with db_manager.get_connection() as conn:
             async with conn.execute(
                 """
                 SELECT * FROM swarms
-                WHERE session_id = ?
-                ORDER BY CASE WHEN status = 'active' THEN 0 ELSE 1 END, created_at DESC, rowid DESC
+                WHERE session_id = ? AND status = 'active'
+                ORDER BY created_at DESC, rowid DESC
                 LIMIT 1
                 """,
                 (session_id,),

@@ -305,6 +305,8 @@ def build_executable(mode: str, release_version: str) -> Path:
         "backend.app.api.v1.skills",
         "backend.app.api.v1.system",
         "backend.app.api.v1.loop",
+        "backend.app.api.v1.kb_lifecycle",
+        "backend.app.api.v1.external_expert_gateway",
         "backend.app.agent.runtime",
         "backend.app.agent.context_builder",
         "backend.app.agent.policy_interceptor",
@@ -337,6 +339,11 @@ def build_executable(mode: str, release_version: str) -> Path:
         "backend.app.extensions.mcp_manager",
         "backend.app.schema.chat_schema",
         "backend.app.schema.loop_schema",
+        "backend.app.providers",
+        "backend.app.providers.light_llm_router",
+        "backend.app.kb.version_helper",
+        "backend.app.search.query_rewriter",
+        "backend.app.search.text_quality_gate",
     ]
     for hi in hidden_imports:
         pyinstaller_cmd.extend(["--hidden-import", hi])

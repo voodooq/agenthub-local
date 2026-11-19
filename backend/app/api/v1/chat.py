@@ -164,7 +164,9 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
             effective_msg = "请统筹协调蜂群成员完成当前任务。"
 
         has_target_agents = bool(req.target_agent_ids and len(req.target_agent_ids) > 0)
-        use_swarm = bool(req.swarm_mode or is_slash_swarm or req.swarm_id or has_target_agents)
+        # 严格门控：仅在显式开启 swarm_mode 或输入 /swarm 指令时才进入多智能体蜂群协作编排
+        # 常规单专家问答（无论是在沙盒发问还是使用 @专家名）一律以目标专家身份在当前会话直连推理，确保答复始终在发问正下方
+        use_swarm = bool(req.swarm_mode or is_slash_swarm)
 
         async def _producer() -> None:
             swarm_sub_task: asyncio.Task[None] | None = None
@@ -189,8 +191,9 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                         inquiry_confirmed=req.inquiry_confirmed,
                         inquiry_action=req.inquiry_action,
                         is_disconnected=request.is_disconnected,
-                        agent_id=req.agent_id,
+                        agent_id=req.agent_id or (req.target_agent_ids[0] if req.target_agent_ids else None),
                         grounding_config=req.grounding_config,
+                        is_retry=req.is_retry,
                     ):
                         await queue.put(("event", event))
                     await queue.put(("done", None))
@@ -253,6 +256,7 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                 active_worker_names: set[str] = set()
                 finished_worker_names: set[str] = set()
                 workers_done_event = asyncio.Event()
+                worker_reply_chunks: list[str] = []
 
                 async def _forward_swarm_events() -> None:
                     sub = swarm_manager.subscribe(eff_swarm_id)
@@ -262,7 +266,13 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                             if sw_evt.get("type") == "agent_turn":
                                 inner = sw_evt.get("event") or {}
                                 m_name = str(sw_evt.get("member_name") or "")
-                                if inner.get("type") in ("done", "error") and m_name in active_worker_names:
+                                in_type = inner.get("type")
+                                # 若是点名专家直通模式，将 Worker 的思考过程与文本内容实时回传给前端主会话
+                                if not (req.swarm_mode or is_slash_swarm) and in_type in ("content", "thought", "status", "tool_call", "tool_result"):
+                                    if in_type == "content" and inner.get("text"):
+                                        worker_reply_chunks.append(inner["text"])
+                                    await queue.put(("event", inner))
+                                if in_type in ("done", "error") and m_name in active_worker_names:
                                     finished_worker_names.add(m_name)
                                     if active_worker_names and active_worker_names.issubset(finished_worker_names):
                                         workers_done_event.set()
@@ -331,6 +341,17 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                         await asyncio.wait_for(workers_done_event.wait(), timeout=300.0)
                     except asyncio.TimeoutError:
                         pass
+                    # 将 Worker 生成的完整回复保存到主会话中，确保主会话发问正下方历史可查
+                    if worker_reply_chunks:
+                        full_reply = "".join(worker_reply_chunks)
+                        max_turn = await MessageRepository.get_max_turn_id(conv_id)
+                        await MessageRepository.save_message(
+                            conversation_id=conv_id,
+                            role="assistant",
+                            content=full_reply,
+                            turn_id=max_turn,
+                            model_name=req.model_name or "swarm",
+                        )
                     await queue.put(("event", {"type": "done", "swarm_id": eff_swarm_id}))
 
                 await queue.put(("done", None))

@@ -108,14 +108,22 @@ class KBStorageManager:
                         topic_cluster_id = DocumentStreamExtractor.extract_topic_cluster_id(title)
 
                     is_latest = c.get("is_latest_in_cluster", 1)
+                    skip_hype = int(c.get("skip_hype") or 0)
+
+                    # 文本切片质量质检门控：彻底拦截残损乱码切片
+                    from ..search.text_quality_gate import TextQualityGate
+                    is_acceptable, reject_reason = TextQualityGate.is_chunk_acceptable(content)
+                    if not is_acceptable and chunk_role in ("parent", "child"):
+                        logger.debug(f"[KBStorage] 切片质量未达标 ({reject_reason})，丢弃切片: {title} | {section_p}")
+                        continue
 
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO hybrid_chunks (
                             id, remote_uri, title, content, authority_tier, mtime, etag, embedding_blob,
                             doc_year, effective_date, effective_ts, doc_priority_type, topic_cluster_id,
-                            is_latest_in_cluster, chunk_role, parent_chunk_id, section_path, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            is_latest_in_cluster, chunk_role, parent_chunk_id, section_path, skip_hype, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             chunk_id,
@@ -135,6 +143,7 @@ class KBStorageManager:
                             chunk_role,
                             parent_chunk_id,
                             section_p,
+                            skip_hype,
                             now,
                         ),
                     )
@@ -525,6 +534,7 @@ class KBStorageManager:
                 ("doc_priority_type",    "TEXT NOT NULL DEFAULT 'normal'"),
                 ("topic_cluster_id",     "TEXT NOT NULL DEFAULT ''"),
                 ("is_latest_in_cluster", "INTEGER NOT NULL DEFAULT 1"),
+                ("skip_hype",            "INTEGER NOT NULL DEFAULT 0"),
             ]:
                 try:
                     conn.execute(f"ALTER TABLE hybrid_chunks ADD COLUMN {_col} {_col_def};")

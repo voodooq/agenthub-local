@@ -316,7 +316,31 @@ class LocalServerEmbeddingProvider(BaseEmbeddingProvider):
 
     async def _probe_llama_server(self) -> bool:
         try:
-            async with httpx.AsyncClient(timeout=2.0) as client:
+            async with httpx.AsyncClient(timeout=2.5) as client:
+                # 优先调用 /v1/models 嗅探实际已挂载的模型名
+                try:
+                    models_resp = await client.get(f"{self.base_url}/v1/models")
+                    if models_resp.status_code == 200:
+                        m_json = models_resp.json()
+                        candidates = []
+                        for item in m_json.get("data", []) or m_json.get("models", []):
+                            m_id = item.get("id") or item.get("name")
+                            if m_id:
+                                candidates.append(m_id)
+                        # 优先匹配带向量特征词的模型
+                        matched = None
+                        for cand in candidates:
+                            if any(kw in cand.lower() for kw in self.EMBEDDING_MODEL_KEYWORDS):
+                                matched = cand
+                                break
+                        if not matched and candidates:
+                            matched = candidates[0]
+                        if matched:
+                            self._model_name = matched
+                except Exception:
+                    pass
+
+                # 发起探针调用测试 /v1/embeddings 是否正常返回向量
                 resp = await client.post(
                     f"{self.base_url}/v1/embeddings",
                     json={"model": self._model_name, "input": "test"},
@@ -949,18 +973,50 @@ class AdaptiveEmbeddingRouter:
             except Exception as pool_err:
                 logger.debug(f"算力池 embedding_only 节点探测跳过: {pool_err}")
 
-            # 1. 尝试 Tier 1: 本地 Ollama 探测
-            ollama = LocalServerEmbeddingProvider(server_type="ollama")
-            if await ollama.probe_and_activate():
-                logger.info(f"Embedding 路由命中 Tier 1: Ollama ({ollama.model_id})")
-                self._provider = ollama
-                return self._provider
+            # 1. 尝试 Tier 1: 本地推理服务探测 (llama-server / Ollama 多端口智能嗅探)
+            env_embed_url = (
+                os.getenv("EMBEDDING_SERVER_URL")
+                or os.getenv("LLAMA_SERVER_URL")
+                or os.getenv("LOCAL_EMBEDDING_URL")
+            )
+            llama_candidates = [
+                "http://127.0.0.1:18081",  # 本地专用 embedding 端口 (如用户启动的 llama-server)
+                "http://127.0.0.1:8080",   # llama-server 标准默认端口
+                "http://127.0.0.1:8081",   # 常用备用端口
+                "http://127.0.0.1:1234",   # LM Studio
+                "http://127.0.0.1:9997",   # Xinference
+                "http://127.0.0.1:8000",   # vLLM / FastChat
+            ]
+            if env_embed_url:
+                llama_candidates.insert(0, env_embed_url.rstrip("/"))
 
-            # 2. 尝试 Tier 1: 本地 llama-server 探测
-            llama_server = LocalServerEmbeddingProvider(server_type="llama_server")
-            if await llama_server.probe_and_activate():
-                logger.info("Embedding 路由命中 Tier 1: llama-server")
-                self._provider = llama_server
+            # 优先嗅探 llama-server / OpenAI 兼容向量服务端点
+            for cand_url in llama_candidates:
+                try:
+                    srv = LocalServerEmbeddingProvider(
+                        server_type="llama_server",
+                        base_url=cand_url,
+                        model_name="bge-m3",
+                    )
+                    if await srv.probe_and_activate():
+                        logger.info(
+                            f"Embedding 路由命中 Tier 1: llama-server ({cand_url}, model={srv._model_name}, dim={srv.dimension})"
+                        )
+                        self._provider = srv
+                        return self._provider
+                except Exception:
+                    pass
+
+            # 尝试本地 Ollama 探测
+            ollama_url = os.getenv("OLLAMA_HOST") or "http://127.0.0.1:11434"
+            ollama = LocalServerEmbeddingProvider(
+                server_type="ollama",
+                base_url=ollama_url,
+                model_name="bge-small",
+            )
+            if await ollama.probe_and_activate():
+                logger.info(f"Embedding 路由命中 Tier 1: Ollama ({ollama.model_id}, dim={ollama.dimension})")
+                self._provider = ollama
                 return self._provider
 
             # 3. 尝试 Tier 2: 本地 ONNX 推理

@@ -200,29 +200,53 @@ class TaskLoopRepository:
         """
         获取当前工作区（或指定会话严格隔离）中正在运行、等待审批、已暂停或最新已交付的任务循环
         """
-        status_filter = (
-            "('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval', 'paused', 'completed', 'failed')"
-            if include_completed
-            else "('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval')"
-        )
         clean_conv = (conversation_id or "").strip()
-        sql_where = f"WHERE workspace_id = ? AND loop_status IN {status_filter}"
-        params: tuple[Any, ...] = (workspace_id,)
-        if clean_conv:
-            sql_where += " AND conversation_id = ?"
-            params = (workspace_id, clean_conv)
+        allowed_statuses = (
+            {"planning", "executing", "verifying", "reflecting", "waiting_approval", "paused", "completed", "failed"}
+            if include_completed
+            else {"planning", "executing", "verifying", "reflecting", "waiting_approval"}
+        )
 
         async with db_manager.get_connection() as conn:
+            if clean_conv:
+                # 针对指定会话严格隔离：获取该会话最新创建的任务实例
+                async with conn.execute(
+                    """
+                    SELECT id, workspace_id, conversation_id, goal_prompt, scratchpad_md,
+                           loop_status, current_iteration, max_iterations, pending_approval_call,
+                           error_fingerprints, created_at, updated_at
+                    FROM task_loop_runs
+                    WHERE workspace_id = ? AND conversation_id = ?
+                    ORDER BY created_at DESC LIMIT 1;
+                    """,
+                    (workspace_id, clean_conv),
+                ) as cursor:
+                    row = await cursor.fetchone()
+                    if not row:
+                        return None
+                    resp = TaskLoopRepository._row_to_loop_response(row)
+                    # 若该会话最新任务状态为空闲（idle）或不在目标状态过滤器中，视为当前无活跃长程任务
+                    if resp.loop_status == "idle" or resp.loop_status not in allowed_statuses:
+                        return None
+                    if enrich_distillable:
+                        await TaskLoopRepository._enrich_distill_eligibility(resp)
+                    return resp
+
+            status_filter = (
+                "('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval', 'paused', 'completed', 'failed')"
+                if include_completed
+                else "('planning', 'executing', 'verifying', 'reflecting', 'waiting_approval')"
+            )
             async with conn.execute(
                 f"""
                 SELECT id, workspace_id, conversation_id, goal_prompt, scratchpad_md,
                        loop_status, current_iteration, max_iterations, pending_approval_call,
                        error_fingerprints, created_at, updated_at
                 FROM task_loop_runs
-                {sql_where}
+                WHERE workspace_id = ? AND loop_status IN {status_filter}
                 ORDER BY updated_at DESC LIMIT 1;
                 """,
-                params,
+                (workspace_id,),
             ) as cursor:
                 row = await cursor.fetchone()
                 if not row:

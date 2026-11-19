@@ -175,7 +175,7 @@ class AgentRuntime:
         args_parse_failed: bool = False,
     ) -> str:
         """S4 联动回补：当工具因参数格式错误或缺失失败时，自动附带该单工具的完整 JSON Schema 说明。"""
-        out_str = str(tool_output or "")
+        out_str = tool_output or ""
         out_lower = out_str.lower()
         is_arg_error = args_parse_failed or (
             out_str.startswith("Error:")
@@ -208,7 +208,7 @@ class AgentRuntime:
             return True
         resolved_target = target_file.resolve()
         for raw_dir in allowed_write_dirs:
-            d_str = str(raw_dir or "").strip()
+            d_str = (raw_dir or "").strip()
             if not d_str:
                 continue
             cand = Path(d_str)
@@ -250,7 +250,7 @@ class AgentRuntime:
         def _filter_allowed(tools_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if not allowed_tools:
                 return tools_list
-            allow_set = {str(t).strip() for t in allowed_tools if str(t).strip()}
+            allow_set = {t.strip() for t in allowed_tools if t.strip()}
             if not allow_set:
                 return tools_list
             return [t for t in tools_list if str(t.get("name", "")).strip() in allow_set]
@@ -276,7 +276,7 @@ class AgentRuntime:
         # 两段式延迟挂载：按显式请求、关键词与热区历史单调递增激活 Server
         if extra_activate_servers:
             for srv in extra_activate_servers:
-                s_clean = str(srv).strip()
+                s_clean = srv.strip()
                 if s_clean in servers_meta:
                     activated_set.add(s_clean)
 
@@ -286,7 +286,7 @@ class AgentRuntime:
                 activated_set.add(srv_name)
 
         try:
-            min_turn = max(1, int(collapse_anchor_turn_id or 0) + 1)
+            min_turn = max(1, collapse_anchor_turn_id + 1)
             hot_msgs = await MessageRepository.get_by_turn_window(conv_id, min_turn)
             for hm in hot_msgs:
                 combined = f"{hm.content or ''}\n{hm.tool_calls_json or ''}"
@@ -742,7 +742,7 @@ class AgentRuntime:
         clean_scope = (scope or "all").strip().lower()
         if clean_scope not in ("messages", "facts_history", "workspace", "all"):
             clean_scope = "all"
-        safe_limit = max(1, min(int(limit or 5), 50))
+        safe_limit = max(1, min(limit or 5, 50))
 
         sections: list[str] = []
 
@@ -917,6 +917,7 @@ class AgentRuntime:
         swarm_brief: str | None = None,
         agent_id: str | None = None,
         grounding_config: dict[str, Any] | None = None,
+        is_retry: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行双层循环流式推理与工具编排，向外输出标准化 SSE 字典事件流。
@@ -1240,13 +1241,28 @@ class AgentRuntime:
         current_turn_id = max_turn + 1
         persisted_user_content = attachment_service.append_attachments_anchor(user_message, attachments)
 
-        await MessageRepository.save_message(
-            conversation_id=conv_id,
-            role="user",
-            content=persisted_user_content,
-            turn_id=current_turn_id,
-        )
-        await ConversationRepository.touch(conv_id)
+        should_insert_user_msg = True
+        if is_retry and not is_new_conv:
+            try:
+                recent_msgs = await MessageRepository.get_by_conversation(conv_id, limit=5)
+                for m in reversed(recent_msgs):
+                    if m.role == "user" and (m.content == persisted_user_content or m.content == user_message):
+                        current_turn_id = m.turn_id or current_turn_id
+                        should_insert_user_msg = False
+                        break
+            except Exception as retry_chk_err:
+                logger.debug(f"[AgentRuntime] 重试检查上一条用户消息异常: {retry_chk_err}")
+
+        if should_insert_user_msg:
+            await MessageRepository.save_message(
+                conversation_id=conv_id,
+                role="user",
+                content=persisted_user_content,
+                turn_id=current_turn_id,
+            )
+            await ConversationRepository.touch(conv_id)
+        else:
+            logger.info(f"[AgentRuntime] 识别到模型不可用重试请求 (turn_id={current_turn_id})，复用用户输入避免重复插库")
 
         normalized_inquiry_action = (inquiry_action or "").strip().lower() or None
         explicit_execute_unlock = bool(
@@ -1344,7 +1360,7 @@ class AgentRuntime:
 
         include_swarm_tools = bool(swarm_mode or swarm_role)
         allowed_tools_set: set[str] | None = (
-            {str(t).strip() for t in allowed_tools if str(t).strip()}
+            {t.strip() for t in allowed_tools if t.strip()}
             if allowed_tools
             else None
         )
@@ -1451,7 +1467,7 @@ class AgentRuntime:
             user_message,
             has_pending_loop=bool(existing_loop),
             has_attachments=bool(attachments),
-            explicit_execute_unlock=bool(explicit_execute_unlock),
+            explicit_execute_unlock=explicit_execute_unlock,
         )
 
         policy_gate = PolicyInterceptor(
@@ -1710,7 +1726,7 @@ class AgentRuntime:
                         "iteration": completed_loop.current_iteration,
                         "max_iterations": completed_loop.max_iterations,
                         "status": "completed",
-                        "distillable": bool(completed_loop.distillable),
+                        "distillable": completed_loop.distillable,
                         "distill_reason": completed_loop.distill_reason,
                         "scratchpad_md": completed_loop.scratchpad_md,
                     }
@@ -2028,6 +2044,8 @@ class AgentRuntime:
             if agent_id and effective_user_message:
                 try:
                     from ..search.expert_kb_router import ExpertKnowledgeRouter
+                    from ..search.query_rewriter import MultiTurnQueryRewriter, ClarificationDetector
+
                     # 提取纯粹的用户业务提问 (剥离蜂群点名与系统外包装饰词，确保检索召回精准度)
                     search_query = effective_user_message
                     if "点名消息" in search_query or "[#" in search_query or "@" in search_query:
@@ -2036,46 +2054,30 @@ class AgentRuntime:
                             search_query = "\n".join(m_query)
                         search_query = re.sub(r"@[a-zA-Z0-9_\-\u4e00-\u9fff]+", "", search_query).strip()
 
+                    # 多轮短问句槽位继承重写（消除“怎么报名”、“多少钱”等指代歧义）
+                    effective_search_query = search_query or effective_user_message
+                    if conv_id:
+                        recent_history = await MessageRepository.get_by_conversation(conv_id, limit=6, from_latest=True)
+                        hist_dicts = [{"role": m.role, "content": m.content} for m in recent_history]
+                        effective_search_query = MultiTurnQueryRewriter.rewrite_query(
+                            current_query=effective_search_query,
+                            conversation_history=hist_dicts,
+                        )
+
                     has_kb, kb_prompt, citations, is_blocked = await ExpertKnowledgeRouter.search_for_expert(
                         expert_id=agent_id,
-                        query=search_query or effective_user_message,
+                        query=effective_search_query,
                         default_top_k=6,
                     )
                     if has_kb:
                         if is_blocked:
-                            # 触发严格防虚构拒答熔断：直接如实拒答，阻断大模型虚构
-                            yield {
-                                "type": "conv_init",
-                                "conversation_id": conv_id,
-                                "is_new": is_new_conv,
-                                "title": short_title,
-                                "turn_id": current_turn_id,
-                                "scene_mode": active_scene,
-                                "incognito": active_incognito,
-                            }
-                            yield {
-                                "type": "content",
-                                "text": kb_prompt,
-                            }
-                            yield {
-                                "type": "done",
-                                "conversation_id": conv_id,
-                                "model_name": model_name,
-                                "grounding_status": "blocked",
-                            }
-                            await MessageRepository.save_message(
-                                conversation_id=conv_id,
-                                role="user",
-                                content=user_message,
-                                turn_id=current_turn_id,
+                            # 触发防虚构溯源约束：注入提示引导模型严谨作答或如实说明，绝不直接中断杀死会话
+                            logger.info(f"[Runtime] 专家知识底座溯源未命中高置信切片，注入防虚构约束后继续交由大模型正常处理")
+                            system_override = (
+                                (system_override or "")
+                                + "\n\n"
+                                + (kb_prompt or "【知识底座溯源提示】：知识库中未检索到与当前提问直接匹配的专门规程依据。\n若问题属于多轮上下文总结、图表生成、代码编写或通用协助，请基于已有会话上下文正常作答；若属于规程条款咨询，请如实告知用户未检索到明确依据，严禁捏造事实。")
                             )
-                            await MessageRepository.save_message(
-                                conversation_id=conv_id,
-                                role="assistant",
-                                content=kb_prompt,
-                                turn_id=current_turn_id,
-                            )
-                            return
                         elif kb_prompt:
                             system_override = (
                                 (system_override or "")
@@ -2091,6 +2093,18 @@ class AgentRuntime:
                                     "score": round(float(c.get("final_score") or 0.9), 3),
                                 })
                             logger.info(f"[AgentRuntime] 已为专家 {agent_id} 成功前置注入 {len(citations)} 条真实知识底座证据切片")
+
+                            # 宽泛宏观提问或多年份歧义检测
+                            clarification_res = ClarificationDetector.evaluate_clarification(
+                                query=search_query or effective_user_message,
+                                retrieved_chunks=citations,
+                            )
+                            if clarification_res.needs_clarification:
+                                yield {
+                                    "type": "clarification",
+                                    "lead_hint": clarification_res.lead_hint,
+                                    "suggested_followups": clarification_res.suggested_followups,
+                                }
                 except Exception as e:
                     logger.error(f"[AgentRuntime] 专家知识底座检索注入异常: {e}", exc_info=True)
 
@@ -2341,6 +2355,10 @@ class AgentRuntime:
                         # 网络中途断流重连接力：立即清空当前步骤已累加的半截文本，与前端气泡绝对对齐
                         step_raw_text = ""
                         yield event
+                    elif etype == "retry_status":
+                        # 上游连接断连或抖动等待重试中：重置本步文本累加并透传前端展示倒计时与轮次
+                        step_raw_text = ""
+                        yield event
                     elif etype == "chunk":
                         chunk_str = event.get("content", "")
                         step_raw_text += chunk_str
@@ -2396,11 +2414,11 @@ class AgentRuntime:
                     yield {"type": "error", "content": stream_error_message}
                     # 异常中断也要保留用户可见报错并终结活跃 Loop，防止重开或切换后只剩孤零零用户消息
                     err_banner = f"⚠️ {stream_error_message or '模型响应异常，本次执行已终止。'}"
-                    partial_clean = (
-                        ToolProtocolAdapter.parse_xml_tool_calls(step_raw_text)[0].strip()
-                        if step_raw_text
-                        else ""
-                    )
+                    partial_clean = ""
+                    if len(step_raw_text) > 0:
+                        parsed_tools = ToolProtocolAdapter.parse_xml_tool_calls(step_raw_text)
+                        if parsed_tools:
+                            partial_clean = parsed_tools[0].strip()
                     unverified_partial = self._detect_unverified_write_hallucination(
                         partial_clean,
                         cwd=ctx.get("current_cwd"),
@@ -2414,7 +2432,7 @@ class AgentRuntime:
                             + "`, `".join(unverified_partial[:5])
                             + "` 尚未通过真实写盘工具生效，请以工作区目录实际文件为准。"
                         )
-                    persisted_err = f"{partial_clean}\n\n{err_banner}" if partial_clean else err_banner
+                    persisted_err = f"{partial_clean}\n\n{err_banner}" if len(partial_clean) > 0 else err_banner
                     if not active_incognito and conv_id:
                         try:
                             await MessageRepository.save_message(
@@ -2626,7 +2644,7 @@ class AgentRuntime:
                             + "`, `".join(unverified_write_claims[:5])
                             + "` 的有效落盘记录，实际产出请以工作区物理文件夹为准。"
                         )
-                    is_waiting_user_decision = bool(
+                    is_waiting_user_decision = (
                         active_scene == "agent" and (has_inquiry_card or is_planning_phase)
                     )
 
@@ -2641,25 +2659,13 @@ class AgentRuntime:
                             draft_response=final_saved_text or accumulated_visible_text,
                             has_version_conflict=False,
                         )
-                        if not critique_res.is_passed and critique_retry_count < 1:
-                            critique_retry_count += 1
-                            yield {
-                                "type": "critique_redraft",
-                                "reasons": critique_res.critique_points,
-                                "message": f"自审检出潜在缺陷: {'; '.join(critique_res.critique_points)}，正在触发一次自动纠偏重写...",
-                            }
-                            critique_prompt = (
-                                f"[系统自审质量拦截]: 前置交付草稿经自审查验发现以下缺陷:\n"
-                                + "\n".join(f"- {p}" for p in critique_res.critique_points)
-                                + "\n请严格依据真实检索到的事实依据修正上述问题，重新输出严谨准确的最终回答。"
-                            )
-                            await MessageRepository.save_message(
-                                conversation_id=conv_id,
-                                role="user",
-                                content=critique_prompt,
-                            )
-                            step_idx += 1
-                            continue
+                        if not critique_res.is_passed and critique_res.critique_points:
+                            # 遵循用户决策：系统自审提示不在用户输入气泡中呈现，而是作为回答结尾的小字标注提醒
+                            critique_notes = "；".join(critique_res.critique_points)
+                            critique_footnote = f"\n\n> 💡 *注：{critique_notes}，本回答仅供参考，请以实际核实为准。*"
+                            if final_saved_text and critique_footnote not in final_saved_text:
+                                final_saved_text += critique_footnote
+                                yield {"type": "content", "text": critique_footnote}
 
                         conf_rep = ConfidenceEvaluator.evaluate(
                             retrieved_chunks=retrieved_evidence_chunks,
@@ -2692,7 +2698,10 @@ class AgentRuntime:
                         await ConversationRepository.touch(conv_id)
                         if conv_id and not active_incognito:
                             long_term_memory.schedule_extraction(conv_id, delay_seconds=180)
-                    accumulated_visible_text += ("\n\n" + final_saved_text if accumulated_visible_text else final_saved_text)
+                    if bool(accumulated_visible_text):
+                        accumulated_visible_text += f"\n\n{final_saved_text}"
+                    else:
+                        accumulated_visible_text = final_saved_text
 
                     # ── 任务自主闭环门控与收尾统一事件推送 ──
                     rollover_task_completed = True
@@ -2738,7 +2747,11 @@ class AgentRuntime:
                         yield {"type": "chunk", "content": clean_text, "account": final_account}
                 if clean_text and "interactive_inquiry" in clean_text.lower():
                     clean_text = ToolProtocolAdapter.normalize_interactive_inquiry_markdown(clean_text)
-                accumulated_visible_text += ("\n\n" + clean_text if (accumulated_visible_text and clean_text) else clean_text)
+                if clean_text:
+                    if bool(accumulated_visible_text):
+                        accumulated_visible_text += f"\n\n{clean_text}"
+                    else:
+                        accumulated_visible_text = clean_text
                 formatted_tc_xml = "\n".join(
                     f'<tool_call name="{tc.get("function", {}).get("name", "")}">{tc.get("function", {}).get("arguments", "{}")}</tool_call>'
                     for tc in tool_calls
@@ -3406,7 +3419,7 @@ class AgentRuntime:
                         from app.tools.sub_agent import dispatch_research_subagents as sub_spawner_fn
                         ws_cwd = str(ctx.get("current_cwd") or os.getcwd())
                         # 嗅探当前模型是否为本地引擎
-                        is_local_eng = any(k in str(model_name).lower() for k in ("ollama", "local", "llama", "qwen-local"))
+                        is_local_eng = any(k in model_name.lower() for k in ("ollama", "local", "llama", "qwen-local"))
                         sub_res = await sub_spawner_fn(
                             tasks=raw_tasks,
                             workspace_root=ws_cwd,
@@ -3546,7 +3559,7 @@ class AgentRuntime:
                             workspace_root=eff_ws_root,
                         )
                         clean_sid = skill_name.lstrip("/")
-                        if clean_sid and clean_sid not in active_skill_ids and not str(tool_output).startswith("Error:"):
+                        if clean_sid and clean_sid not in active_skill_ids and not tool_output.startswith("Error:"):
                             active_skill_ids.append(clean_sid)
                         compressed = f"[已加载专业技能 `{skill_name}` 操作规程与四元组清单]"
                         yield {
@@ -3792,7 +3805,7 @@ class AgentRuntime:
                                         self._invalidate_file_read_cache(conv_id, target_file)
                                         try:
                                             st = target_file.stat()
-                                            edit_file_size = int(st.st_size)
+                                            edit_file_size = st.st_size
                                             edit_time_str = datetime.fromtimestamp(st.st_mtime).strftime("%H:%M:%S")
                                         except Exception:
                                             edit_file_size = len(file_content.encode("utf-8"))
@@ -4020,7 +4033,7 @@ class AgentRuntime:
                                 if ok and syntax_ok and target_file.exists():
                                     try:
                                         st = target_file.stat()
-                                        replace_file_size = int(st.st_size)
+                                        replace_file_size = st.st_size
                                         replace_edit_time = datetime.fromtimestamp(st.st_mtime).strftime("%H:%M:%S")
                                     except Exception:
                                         replace_file_size = 0
@@ -4175,8 +4188,8 @@ class AgentRuntime:
                                         else bool(force_refresh_raw)
                                     )
                                     stat_res = target_file.stat()
-                                    cur_mtime_ns = int(stat_res.st_mtime_ns)
-                                    cur_size = int(stat_res.st_size)
+                                    cur_mtime_ns = stat_res.st_mtime_ns
+                                    cur_size = stat_res.st_size
                                     effective_collapse_anchor = int(
                                         ctx.get("collapse_anchor_turn_id") or conv_collapse_anchor or 0
                                     )
@@ -4689,7 +4702,7 @@ class AgentRuntime:
                         # v1.5.8 优先通过多知识库隔离门控检索已挂载知识库
                         is_gated, router_text, router_chunks = await MultiKBRetrievalRouter.search_mounted_kbs(
                             query=q_str,
-                            expert_id=expert_id if "expert_id" in locals() else None,
+                            expert_id=agent_id,
                             session_mounted_kbs=getattr(self, "session_mounted_kbs", None),
                             top_k=top_k_val,
                         )
@@ -5106,7 +5119,7 @@ class AgentRuntime:
 
                         if (
                             failed_attempt_counts[attempt_sig] > 3
-                            or int(consecutive_err_fp["count"]) > 3
+                            or consecutive_err_fp["count"] > 3
                         ):
                             is_circuit_breaker = True
                             allow_step_extension = False
@@ -5357,7 +5370,7 @@ class AgentRuntime:
                             if (
                                 func_name in ("write_local_file", "replace_in_file", "mcp_download_artifact_to_workspace")
                                 and not is_step_abnormal
-                                and not str(tool_output).startswith(("Error:", "Denied:"))
+                                and not tool_output.startswith(("Error:", "Denied:"))
                             ):
                                 ledger_fp = (
                                     str(args.get("save_rel_path") or "")
@@ -5466,6 +5479,42 @@ class AgentRuntime:
                         except Exception as upd_err:
                             logger.debug(f"[AgentRuntime] 清理过程消息残留正文跳过: {upd_err}")
 
+                    # 阶段四：输出前自审查验与审慎提示标注 (小字标注置于回答末尾)
+                    conf_rep_event = None
+                    try:
+                        from ..governance.self_critique import SelfCritiqueCritic
+                        from ..governance.confidence_evaluator import ConfidenceEvaluator
+
+                        critique_res = SelfCritiqueCritic.evaluate_draft(
+                            user_query=user_message,
+                            retrieved_evidence=retrieved_evidence_chunks,
+                            draft_response=clean_deliverable,
+                            has_version_conflict=False,
+                        )
+                        if not critique_res.is_passed and critique_res.critique_points:
+                            critique_notes = "；".join(critique_res.critique_points)
+                            critique_footnote = f"\n\n> 💡 *注：{critique_notes}，本回答仅供参考，请以实际核实为准。*"
+                            if clean_deliverable and critique_footnote not in clean_deliverable:
+                                clean_deliverable += critique_footnote
+                                yield {"type": "content", "text": critique_footnote}
+
+                        conf_rep = ConfidenceEvaluator.evaluate(
+                            retrieved_chunks=retrieved_evidence_chunks,
+                            critique_res=critique_res,
+                            tools_executed=executed_tools_record,
+                            strict_mode=False,
+                        )
+                        conf_rep_event = {
+                            "type": "confidence_report",
+                            "score": conf_rep.score,
+                            "tier_level": conf_rep.tier_level,
+                            "reasons": conf_rep.reasons,
+                            "requires_confirmation": conf_rep.requires_confirmation,
+                            "evidence_sources": conf_rep.evidence_sources,
+                        }
+                    except Exception as conf_err:
+                        logger.debug(f"[AgentRuntime] 置信度治理自审跳过: {conf_err}")
+
                     await MessageRepository.save_message(
                         conversation_id=conv_id,
                         role="model",
@@ -5492,53 +5541,9 @@ class AgentRuntime:
                         summary_snippet or "任务标记为已完成，工作记忆已归档",
                     ):
                         yield tail_ev
-                    # 阶段四：输出前自我批评与多维置信度治理 (v1.5.5)
-                    try:
-                        from ..governance.self_critique import SelfCritiqueCritic
-                        from ..governance.confidence_evaluator import ConfidenceEvaluator
 
-                        critique_res = SelfCritiqueCritic.evaluate_draft(
-                            user_query=user_message,
-                            retrieved_evidence=retrieved_evidence_chunks,
-                            draft_response=clean_deliverable,
-                            has_version_conflict=False,
-                        )
-                        if not critique_res.is_passed and critique_retry_count < 1:
-                            critique_retry_count += 1
-                            yield {
-                                "type": "critique_redraft",
-                                "reasons": critique_res.critique_points,
-                                "message": f"自审检出潜在缺陷: {'; '.join(critique_res.critique_points)}，正在触发一次自动纠偏重写...",
-                            }
-                            critique_prompt = (
-                                f"[系统自审质量拦截]: 前置交付草稿经自审查验发现以下缺陷:\n"
-                                + "\n".join(f"- {p}" for p in critique_res.critique_points)
-                                + "\n请严格依据真实检索到的事实依据修正上述问题，重新输出严谨准确的最终回答。"
-                            )
-                            await MessageRepository.save_message(
-                                conversation_id=conv_id,
-                                role="user",
-                                content=critique_prompt,
-                            )
-                            step_idx += 1
-                            continue
-
-                        conf_rep = ConfidenceEvaluator.evaluate(
-                            retrieved_chunks=retrieved_evidence_chunks,
-                            critique_res=critique_res,
-                            tools_executed=executed_tools_record,
-                            strict_mode=False,
-                        )
-                        yield {
-                            "type": "confidence_report",
-                            "score": conf_rep.score,
-                            "tier_level": conf_rep.tier_level,
-                            "reasons": conf_rep.reasons,
-                            "requires_confirmation": conf_rep.requires_confirmation,
-                            "evidence_sources": conf_rep.evidence_sources,
-                        }
-                    except Exception as conf_err:
-                        logger.debug(f"[AgentRuntime] 置信度治理自审跳过: {conf_err}")
+                    if conf_rep_event:
+                        yield conf_rep_event
 
                     stream_completed_normally = True
                     yield {
@@ -5568,7 +5573,7 @@ class AgentRuntime:
                         and (latest_ctx_tokens / latest_ctx_limit) >= get_effective_rollover_ratio()
                     ):
                         rollover_pct = min(100.0, (latest_ctx_tokens / latest_ctx_limit) * 100.0)
-                        threshold_pct = int(round(get_effective_rollover_ratio() * 100))
+                        threshold_pct = round(get_effective_rollover_ratio() * 100)
                         rollover_notice = (
                             f"🔁 当前会话上下文水位已达 {rollover_pct:.1f}%（阈值 {threshold_pct}%），"
                             "已提前蒸馏关键工作上下文并在同工作区创建接力新对话继续执行。"
@@ -5602,7 +5607,7 @@ class AgentRuntime:
                 # 若已到达自适应最大步数上限（最高动态扩展至 40 步），追加独立收尾汇总气泡避免仅剩工具过程卡片
                 if step_idx >= current_max_steps:
                     clean_deliverable = ToolProtocolAdapter.strip_pseudo_transcript_prefixes(clean_text).strip()
-                    promoted_prev_text = bool(
+                    promoted_prev_text = (
                         not has_substantive_tools_in_step
                         and self._is_substantive_deliverable_text(clean_deliverable)
                     )
@@ -5655,14 +5660,14 @@ class AgentRuntime:
             if was_cancelled:
                 cancel_cli_processes(conv_id)
                 shell_executor.cancel_session_processes(conv_id)
-                partial_clean = (
-                    ToolProtocolAdapter.parse_xml_tool_calls(step_raw_text)[0].strip()
-                    if step_raw_text
-                    else ""
-                )
+                partial_clean = ""
+                if len(step_raw_text) > 0:
+                    parsed_cancels = ToolProtocolAdapter.parse_xml_tool_calls(step_raw_text)
+                    if parsed_cancels:
+                        partial_clean = parsed_cancels[0].strip()
                 stopped_notice = (
                     f"{partial_clean}\n\n（已手动停止生成）"
-                    if partial_clean
+                    if len(partial_clean) > 0
                     else "（已手动停止生成）"
                 )
                 if not active_incognito and conv_id:

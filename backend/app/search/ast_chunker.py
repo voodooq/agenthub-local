@@ -368,6 +368,7 @@ class HierarchicalChunk:
     topic_cluster_id: str = ""
     is_latest_in_cluster: int = 1
     mtime: float = 0.0
+    skip_hype: int = 0
 
     @property
     def content(self) -> str:
@@ -396,6 +397,7 @@ class HierarchicalChunk:
             "topic_cluster_id": self.topic_cluster_id,
             "is_latest_in_cluster": self.is_latest_in_cluster,
             "mtime": self.mtime,
+            "skip_hype": self.skip_hype,
         }
 
 
@@ -422,6 +424,14 @@ class ParentChildASTChunker:
         r"\d{1,2}[、.]\s*.+"  # 1. 2.
         r")$",
         re.MULTILINE,
+    )
+
+    # 纯页码行正则 (例如: - 4 - / — 12 — / 3 / 第 5 页)
+    PAGE_NUMBER_RE = re.compile(r"^\s*[-—~·_]*\s*(?:第\s*)?\d+\s*(?:页)?\s*[-—~·_]*\s*$")
+
+    # 声明与签字无业务规则切片特征
+    DECLARATION_RE = re.compile(
+        r"(?:声明人签字|监护人签字|代表队盖章|免责声明签字|法定代表人签字|签字盖章|签署日期|联系电话[：:]|身份证号[：:])"
     )
 
     @classmethod
@@ -460,6 +470,9 @@ class ParentChildASTChunker:
             p_content_hash = hashlib.md5(p_content.encode("utf-8")).hexdigest()
             parent_id = hashlib.md5(f"parent:{remote_uri}:{sec_path}:{p_content_hash}".encode("utf-8")).hexdigest()
 
+            # 判定纯签字声明块 (打上 skip_hype=1 避免送入口语提炼)
+            skip_hype_val = 1 if bool(cls.DECLARATION_RE.search(p_content)) and len(p_content) < 300 else 0
+
             # 写入父切片
             parent_chunk = HierarchicalChunk(
                 id=parent_id,
@@ -477,6 +490,7 @@ class ParentChildASTChunker:
                 topic_cluster_id=topic_cluster_id,
                 is_latest_in_cluster=is_latest_in_cluster,
                 mtime=mtime,
+                skip_hype=skip_hype_val,
             )
             all_chunks.append(parent_chunk)
 
@@ -507,6 +521,7 @@ class ParentChildASTChunker:
                     topic_cluster_id=topic_cluster_id,
                     is_latest_in_cluster=is_latest_in_cluster,
                     mtime=mtime,
+                    skip_hype=skip_hype_val,
                 )
                 all_chunks.append(child_chunk)
 
@@ -533,8 +548,11 @@ class ParentChildASTChunker:
 
     @classmethod
     def _aggregate_parent_blocks(cls, text: str, filename: str) -> list[tuple[str, str]]:
-        """按标题与段落边界聚合 1000~1500 字符的父切片。"""
-        lines = text.splitlines()
+        """按标题与段落边界聚合 1000~1500 字符的父切片，并自动向后合并孤立小标题。"""
+        raw_lines = text.splitlines()
+        # 1. 过滤孤立页码行 (例如: - 4 - / — 12 — / 3 / 第 5 页)
+        lines = [line for line in raw_lines if not cls.PAGE_NUMBER_RE.match(line.strip())]
+
         sections: list[tuple[str, list[str]]] = []
         current_title = "正文"
         current_lines: list[str] = []
@@ -577,7 +595,35 @@ class ParentChildASTChunker:
                     s_name = f"{sec_title} (分段{sub_idx})" if sub_idx > 1 else sec_title
                     parents.append((s_name, p_text))
 
-        return parents if parents else [("正文", text)]
+        # 2. 补丁二核心：孤立小标题与过短父切片 (< 40 字) 强制向后合并
+        merged_parents: list[tuple[str, str]] = []
+        pending_prefix_name: str | None = None
+        pending_prefix_text: str = ""
+
+        for s_name, p_text in parents:
+            clean_body = re.sub(r"^【[^】]+】[^\n]*\n?", "", p_text).strip()
+            if pending_prefix_text:
+                p_text = f"{pending_prefix_text}\n\n{p_text}"
+                s_name = f"{pending_prefix_name} / {s_name}" if pending_prefix_name and pending_prefix_name != s_name else s_name
+                clean_body = re.sub(r"^【[^】]+】[^\n]*\n?", "", p_text).strip()
+                pending_prefix_name = None
+                pending_prefix_text = ""
+
+            if len(clean_body) < 40:
+                pending_prefix_name = s_name
+                pending_prefix_text = p_text
+                continue
+
+            merged_parents.append((s_name, p_text))
+
+        if pending_prefix_text:
+            if merged_parents:
+                prev_name, prev_text = merged_parents.pop()
+                merged_parents.append((prev_name, f"{prev_text}\n\n{pending_prefix_text}"))
+            else:
+                merged_parents.append((pending_prefix_name or "正文", pending_prefix_text))
+
+        return merged_parents if merged_parents else [("正文", text)]
 
     @classmethod
     def _split_into_children(cls, text: str, max_chars: int, overlap: int) -> list[str]:

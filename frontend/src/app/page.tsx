@@ -30,11 +30,13 @@ import {
   ChevronRight,
   GitBranch,
   ArrowUpRight,
+  ArrowRight,
   FolderGit2,
   Box,
   Users,
   Bot,
   Cloud,
+  Loader2,
 } from 'lucide-react';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
@@ -78,6 +80,12 @@ import { EditedFilesCard } from '@/components/EditedFilesCard';
 import { DeliverablesCard } from '@/components/DeliverablesCard';
 import { useVerifiedWorkspacePaths } from '@/hooks/useVerifiedWorkspacePaths';
 import { buildActiveSystemOverride } from '@/utils/personalityHelper';
+import {
+  MAX_AUTO_RETRY_ROUNDS,
+  getRetryDelaySeconds,
+  formatRetryCountdownNotice,
+  AutoRetryState,
+} from '@/utils/retryHelper';
 import { generateScenarioThinking } from '@/utils/scenarioThinking';
 import {
   sanitizeAssistantContent,
@@ -175,6 +183,19 @@ export default function WorkbenchPage() {
   const lastActiveLoopSigRef = useRef<string>('');
   const [statusPill, setStatusPill] = useState<StatusPillData | null>(null);
 
+  // 模型未反馈中断：自动等待 9 轮阶梯加长重试状态
+  const [autoRetryState, setAutoRetryState] = useState<AutoRetryState | null>(null);
+  const autoRetryStateRef = useRef<AutoRetryState | null>(null);
+  const autoRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const autoRetryCountdownTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const lastSendArgsRef = useRef<{
+    customPrompt?: string;
+    approvedStepsForRequest?: PlanStepItem[];
+    confirmedFactsForRequest?: ConfirmedFactItem[];
+    overrideAttachments?: ParsedUserAttachment[];
+    options?: any;
+  } | null>(null);
+
   // 当前选中模型及可用模型列表
   const [currentModel, setCurrentModel] = useState<string>('');
   const hasUserSelectedModelRef = useRef(false);
@@ -193,10 +214,10 @@ export default function WorkbenchPage() {
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>('default');
   const [activeNavHub, setActiveNavHub] = useState<MainNavHub>('chat');
   const [saveFileToast, setSaveFileToast] = useState<string | null>(null);
-  const [saveFileToastType, setSaveFileToastType] = useState<'success' | 'warning' | 'error'>('success');
+  const [saveFileToastType, setSaveFileToastType] = useState<'success' | 'warning' | 'error' | 'info'>('success');
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const showFloatingToast = useCallback(
-    (msg: string, variant: 'success' | 'warning' | 'error' = 'success', durationMs = 3800) => {
+    (msg: string, variant: 'success' | 'warning' | 'error' | 'info' = 'success', durationMs = 3800) => {
       if (toastTimerRef.current) {
         clearTimeout(toastTimerRef.current);
       }
@@ -209,11 +230,63 @@ export default function WorkbenchPage() {
     },
     []
   );
+
+  const handleSendMessageRef = useRef<any>(null);
+
+  const cancelAutoRetry = useCallback((notify = true) => {
+    if (autoRetryTimerRef.current) {
+      clearTimeout(autoRetryTimerRef.current);
+      autoRetryTimerRef.current = null;
+    }
+    if (autoRetryCountdownTimerRef.current) {
+      clearInterval(autoRetryCountdownTimerRef.current);
+      autoRetryCountdownTimerRef.current = null;
+    }
+    const hadPending = Boolean(autoRetryStateRef.current);
+    setAutoRetryState(null);
+    autoRetryStateRef.current = null;
+    if (notify && hadPending) {
+      showFloatingToast('已取消自动重试', 'info', 2000);
+    }
+  }, [showFloatingToast]);
+
+  const triggerRetryNow = useCallback(() => {
+    const currentState = autoRetryStateRef.current;
+    if (!currentState || !lastSendArgsRef.current || !handleSendMessageRef.current) return;
+    if (autoRetryTimerRef.current) {
+      clearTimeout(autoRetryTimerRef.current);
+      autoRetryTimerRef.current = null;
+    }
+    if (autoRetryCountdownTimerRef.current) {
+      clearInterval(autoRetryCountdownTimerRef.current);
+      autoRetryCountdownTimerRef.current = null;
+    }
+    const currentRound = currentState.round;
+    setAutoRetryState(null);
+    autoRetryStateRef.current = null;
+
+    const args = lastSendArgsRef.current;
+    void handleSendMessageRef.current(
+      args.customPrompt,
+      args.approvedStepsForRequest,
+      args.confirmedFactsForRequest,
+      args.overrideAttachments,
+      {
+        ...args.options,
+        isRetry: true,
+        retryRound: currentRound,
+      }
+    );
+  }, []);
+
   const stopActiveStream = useCallback(
     async (reason: 'user' | 'switch' = 'user', targetConvId?: string) => {
       // 关键：切换视图或会话时绝不中断后台执行，确保生成与过程状态完整保活
       if (reason === 'switch') {
         return;
+      }
+      if (reason === 'user') {
+        cancelAutoRetry(false);
       }
       const cid = targetConvId || activeConvIdRef.current;
       const meta = (cid && activeStreamsMapRef.current.get(cid)) || activeStreamMetaRef.current;
@@ -373,7 +446,7 @@ export default function WorkbenchPage() {
         }
         const data = await res.json();
         if (cancelled) return;
-        if (data?.swarm) {
+        if (data?.swarm && data.swarm.status === 'active') {
           setActiveSwarmId(data.swarm.id || null);
           setActiveSwarmInfo(data.swarm);
           setActiveSwarmMembers(Array.isArray(data.members) ? data.members : []);
@@ -1435,8 +1508,35 @@ export default function WorkbenchPage() {
       inquiryConfirmed?: boolean;
       inquiryAction?: InquirySubmitAction;
       loopGoalOverride?: string;
+      isRetry?: boolean;
+      retryRound?: number;
     }
   ) => {
+    handleSendMessageRef.current = handleSendMessage;
+    const isRetry = Boolean(options?.isRetry);
+    const currentRetryRound = options?.retryRound || 1;
+    const currentSendArgs = {
+      customPrompt,
+      approvedStepsForRequest,
+      confirmedFactsForRequest,
+      overrideAttachments,
+      options,
+    };
+    lastSendArgsRef.current = currentSendArgs;
+
+    if (!isRetry) {
+      if (autoRetryTimerRef.current) {
+        clearTimeout(autoRetryTimerRef.current);
+        autoRetryTimerRef.current = null;
+      }
+      if (autoRetryCountdownTimerRef.current) {
+        clearInterval(autoRetryCountdownTimerRef.current);
+        autoRetryCountdownTimerRef.current = null;
+      }
+      setAutoRetryState(null);
+      autoRetryStateRef.current = null;
+    }
+
     const usingOverrideAttachments = Array.isArray(overrideAttachments);
     const currentAttachments: AttachmentItem[] = usingOverrideAttachments
       ? overrideAttachments.map((att) => ({
@@ -1641,7 +1741,26 @@ export default function WorkbenchPage() {
       executed_by_account: statusPill?.active_account_name,
     };
 
-    let currentConvMessages: Message[] = [...initialBaseMsgs, tempUserMsg, tempAssistantMsg];
+    let currentConvMessages: Message[];
+    if (isRetry && initialBaseMsgs.length > 0) {
+      const updated = [...initialBaseMsgs];
+      const last = updated[updated.length - 1];
+      if (last && last.role === 'model') {
+        updated[updated.length - 1] = {
+          ...last,
+          content: '',
+          thinking: generateScenarioThinking(rawPrompt),
+          is_placeholder_thinking: true,
+          executed_by_account: statusPill?.active_account_name,
+          tool_events: undefined,
+        };
+        currentConvMessages = updated;
+      } else {
+        currentConvMessages = [...initialBaseMsgs, tempAssistantMsg];
+      }
+    } else {
+      currentConvMessages = [...initialBaseMsgs, tempUserMsg, tempAssistantMsg];
+    }
     if (boundConvId) {
       convMessagesCacheRef.current.set(boundConvId, currentConvMessages);
     }
@@ -1744,6 +1863,106 @@ export default function WorkbenchPage() {
       }, 90000);
     };
 
+    let receivedUsefulChunk = false;
+
+    const tryScheduleRetry = (errTxt: string): boolean => {
+      if (getAbortReason() === 'user' || receivedUsefulChunk) {
+        return false;
+      }
+      if (currentRetryRound > MAX_AUTO_RETRY_ROUNDS) {
+        cancelAutoRetry(false);
+        showFloatingToast(`已连续自动重试 ${MAX_AUTO_RETRY_ROUNDS} 轮均未连通，模型服务当前异常，请稍后重试或切换模型`, 'error', 5200);
+        return false;
+      }
+
+      if (autoRetryTimerRef.current) clearTimeout(autoRetryTimerRef.current);
+      if (autoRetryCountdownTimerRef.current) clearInterval(autoRetryCountdownTimerRef.current);
+
+      const waitSeconds = getRetryDelaySeconds(currentRetryRound);
+      let remaining = waitSeconds;
+
+      const targetCid = effectiveConvId || activeConvId || '';
+      const nextState: AutoRetryState = {
+        isWaiting: true,
+        round: currentRetryRound,
+        maxRounds: MAX_AUTO_RETRY_ROUNDS,
+        countdown: remaining,
+        totalWaitSeconds: waitSeconds,
+        convId: targetCid,
+        errorMessage: errTxt,
+      };
+
+      autoRetryStateRef.current = nextState;
+      setAutoRetryState(nextState);
+
+      const initialNotice = formatRetryCountdownNotice(currentRetryRound, remaining, MAX_AUTO_RETRY_ROUNDS);
+      updateStreamMessages((prev) => {
+        const updated = [...prev];
+        const last = updated[updated.length - 1];
+        if (last && last.role === 'model') {
+          updated[updated.length - 1] = {
+            ...last,
+            content: initialNotice,
+            thinking: undefined,
+            is_placeholder_thinking: false,
+          };
+        }
+        return updated;
+      });
+
+      autoRetryCountdownTimerRef.current = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          if (autoRetryCountdownTimerRef.current) {
+            clearInterval(autoRetryCountdownTimerRef.current);
+            autoRetryCountdownTimerRef.current = null;
+          }
+        }
+        const safeRemain = Math.max(0, remaining);
+        setAutoRetryState((prev) => (prev ? { ...prev, countdown: safeRemain } : null));
+        if (autoRetryStateRef.current) {
+          autoRetryStateRef.current.countdown = safeRemain;
+        }
+        const updatedNotice = formatRetryCountdownNotice(currentRetryRound, safeRemain, MAX_AUTO_RETRY_ROUNDS);
+        updateStreamMessages((prev) => {
+          const updated = [...prev];
+          const last = updated[updated.length - 1];
+          if (last && last.role === 'model') {
+            updated[updated.length - 1] = {
+              ...last,
+              content: updatedNotice,
+            };
+          }
+          return updated;
+        });
+      }, 1000);
+
+      autoRetryTimerRef.current = setTimeout(() => {
+        if (autoRetryCountdownTimerRef.current) {
+          clearInterval(autoRetryCountdownTimerRef.current);
+          autoRetryCountdownTimerRef.current = null;
+        }
+        setAutoRetryState(null);
+        autoRetryStateRef.current = null;
+
+        if (handleSendMessageRef.current) {
+          void handleSendMessageRef.current(
+            currentSendArgs.customPrompt,
+            currentSendArgs.approvedStepsForRequest,
+            currentSendArgs.confirmedFactsForRequest,
+            currentSendArgs.overrideAttachments,
+            {
+              ...currentSendArgs.options,
+              isRetry: true,
+              retryRound: currentRetryRound + 1,
+            }
+          );
+        }
+      }, waitSeconds * 1000);
+
+      return true;
+    };
+
     try {
       if (controller.signal.aborted) {
         throw new DOMException('Aborted', 'AbortError');
@@ -1791,7 +2010,8 @@ export default function WorkbenchPage() {
           swarm_mode: effectiveSwarmMode,
           target_agent_ids: targetAgentIds.length > 0 ? targetAgentIds : undefined,
           agent_id: targetAgentIds.length > 0 ? targetAgentIds[0] : undefined,
-          swarm_id: activeSwarmId || null,
+          swarm_id: effectiveSwarmMode ? (activeSwarmId || null) : null,
+          is_retry: isRetry,
           attachments: currentAttachments.map((a) => ({
             name: a.name,
             file_path: a.filePath,
@@ -1817,6 +2037,11 @@ export default function WorkbenchPage() {
             }
           }
         } catch { }
+
+        const scheduled = tryScheduleRetry(errDetail);
+        if (scheduled) {
+          return;
+        }
         throw new Error(errDetail);
       }
 
@@ -1966,6 +2191,19 @@ export default function WorkbenchPage() {
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
                 updated[updated.length - 1] = { ...last, memory_refs: parsed.memories || [] };
+              }
+              return updated;
+            });
+          } else if (parsed.type === 'clarification') {
+            updateStreamMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                updated[updated.length - 1] = {
+                  ...last,
+                  suggestedFollowups: parsed.suggested_followups || [],
+                  clarificationHint: parsed.lead_hint || '',
+                };
               }
               return updated;
             });
@@ -2248,6 +2486,12 @@ export default function WorkbenchPage() {
               return updated;
             });
           } else if (parsed.type === 'chunk') {
+            if (parsed.content && parsed.content.trim()) {
+              receivedUsefulChunk = true;
+              if (autoRetryStateRef.current) {
+                cancelAutoRetry(false);
+              }
+            }
             partialText += parsed.content;
             executorAccount = parsed.account || executorAccount;
             const sanitized = sanitizeAssistantContent(partialText, { isStreaming: true });
@@ -2257,6 +2501,8 @@ export default function WorkbenchPage() {
               const last = updated[updated.length - 1];
               if (last && last.role === 'model') {
                 const resolvedThinking = partialThinking || inlineThinking || last.thinking;
+                const prevRetry = last.retry_info;
+                const updatedRetry = prevRetry?.is_retrying ? { ...prevRetry, is_retrying: false } : prevRetry;
                 updated[updated.length - 1] = {
                   ...last,
                   content: sanitized.cleanContent,
@@ -2265,6 +2511,7 @@ export default function WorkbenchPage() {
                   is_process_step: Boolean(last.is_process_step || sanitized.hadToolMarkup),
                   executed_by_account: executorAccount,
                   is_relayed: isRelayed,
+                  retry_info: updatedRetry,
                 };
               }
               return updated;
@@ -2331,6 +2578,32 @@ export default function WorkbenchPage() {
               }
               return updated;
             });
+          } else if (parsed.type === 'retry_status') {
+            const attempt = Number(parsed.attempt || parsed.retry_attempt || 1);
+            const maxRetries = Number(parsed.max_retries || 4);
+            const waitSec = typeof parsed.wait_seconds === 'number' ? parsed.wait_seconds : undefined;
+            const elapsedSec = typeof parsed.elapsed_seconds === 'number' ? parsed.elapsed_seconds : undefined;
+            const retryMsg = parsed.message || `上游网络抖动，正在等待重试（第 ${attempt}/${maxRetries} 次）...`;
+
+            updateStreamMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                updated[updated.length - 1] = {
+                  ...last,
+                  retry_info: {
+                    attempt,
+                    max_retries: maxRetries,
+                    message: retryMsg,
+                    reason: parsed.reason,
+                    wait_seconds: waitSec,
+                    elapsed_seconds: elapsedSec,
+                    is_retrying: true,
+                  },
+                };
+              }
+              return updated;
+            });
           } else if (parsed.type === 'token_stats' && parsed.stats) {
             const turnStats = parsed.stats as TurnTokenMetrics;
             const targetConvId = effectiveConvId || activeConvIdRef.current || '';
@@ -2352,6 +2625,10 @@ export default function WorkbenchPage() {
               continue_prompt: parsed.continue_prompt ? String(parsed.continue_prompt) : undefined,
             };
           } else if (parsed.type === 'done') {
+            receivedUsefulChunk = true;
+            if (autoRetryStateRef.current) {
+              cancelAutoRetry(false);
+            }
             const doneRawText =
               typeof parsed.final_step_content === 'string'
                 ? parsed.final_step_content
@@ -2382,6 +2659,7 @@ export default function WorkbenchPage() {
                   is_process_step: Boolean(
                     last.is_process_step || (last.tool_events && last.tool_events.length > 0)
                   ),
+                  retry_info: last.retry_info ? { ...last.retry_info, is_retrying: false } : undefined,
                 };
                 const splitPair = splitSingleProcessDeliverable(updatedLast, hasInteractiveInquiryBlock);
                 updated.splice(updated.length - 1, 1, ...splitPair);
@@ -2394,6 +2672,10 @@ export default function WorkbenchPage() {
             executorAccount = parsed.account;
           } else if (parsed.type === 'error') {
             const errTxt = String(parsed.content || '模型或算力通道返回错误，请检查配置');
+            const scheduled = tryScheduleRetry(errTxt);
+            if (scheduled) {
+              return;
+            }
             const errNotice = `⚠️ ${errTxt}`;
             if (effectiveConvId) {
               lastStreamErrorNoticeRef.current = { convId: effectiveConvId, message: errNotice };
@@ -2536,18 +2818,26 @@ export default function WorkbenchPage() {
 
       let notice = '';
       if (reason === 'user') {
+        cancelAutoRetry(false);
         notice = '（已手动停止生成）';
-      } else if (reason === 'connect_timeout') {
-        notice = '⚠️ 连接超时（45秒内未收到后端首包响应），已自动终止等待。请检查算力池节点或网络连接后重试。';
-        showFloatingToast('连接超时（45秒无响应），已自动终止', 'error', 4800);
-      } else if (reason === 'idle_timeout') {
-        notice = '⚠️ 响应超时（超过90秒未收到上游增量数据），已自动断开连接。您可以重试或切换模型节点。';
-        showFloatingToast('响应空闲超时（90秒），已自动断开', 'error', 4800);
       } else {
         const rawErrMsg = err instanceof Error ? err.message : String(err || '未知网络错误');
-        notice = `⚠️ 请求异常中断：${rawErrMsg}`;
-        showFloatingToast(rawErrMsg, 'error', 4800);
-        console.error(err);
+        const scheduled = tryScheduleRetry(rawErrMsg);
+        if (scheduled) {
+          return;
+        }
+
+        if (reason === 'connect_timeout') {
+          notice = '⚠️ 连接超时（45秒内未收到后端首包响应），已自动终止等待。请检查算力池节点或网络连接后重试。';
+          showFloatingToast('连接超时（45秒无响应），已自动终止', 'error', 4800);
+        } else if (reason === 'idle_timeout') {
+          notice = '⚠️ 响应超时（超过90秒未收到上游增量数据），已自动断开连接。您可以重试或切换模型节点。';
+          showFloatingToast('响应空闲超时（90秒），已自动断开', 'error', 4800);
+        } else {
+          notice = `⚠️ 请求异常中断：${rawErrMsg}`;
+          showFloatingToast(rawErrMsg, 'error', 4800);
+          console.error(err);
+        }
       }
 
       const targetConvId = effectiveConvId || activeConvIdRef.current;
@@ -2586,11 +2876,13 @@ export default function WorkbenchPage() {
         Boolean(finalCid && activeConvIdRef.current === finalCid) ||
         (!finalCid && !activeConvIdRef.current);
 
+      const isWaitingAutoRetry = Boolean(autoRetryStateRef.current?.isWaiting);
+
       // 仅当用户当前还在看这个会话时，才重置前台 isStreaming 并重新校准后端落库消息
       if (isViewingThisConv) {
         setIsStreaming(false);
         isStreamingRef.current = false;
-        if (finalCid) {
+        if (finalCid && !isWaitingAutoRetry) {
           await fetchMessagesAndState(finalCid);
         }
         await fetchActiveLoop();
@@ -3010,6 +3302,25 @@ export default function WorkbenchPage() {
   const handleCloseMemoryHub = useCallback(() => setIsMemoryHubOpen(false), []);
   const handleCloseSkillPicker = useCallback(() => setIsSkillPickerOpen(false), []);
   const handleCloseSopDrawer = useCallback(() => setSelectedSopSkill(null), []);
+
+  const handleDisbandSwarm = useCallback(async () => {
+    const targetSwarmId = activeSwarmId;
+    if (targetSwarmId) {
+      try {
+        await apiFetch(`/api/v1/swarms/${encodeURIComponent(targetSwarmId)}/disband`, { method: 'POST' });
+      } catch {}
+    } else if (activeConvId) {
+      try {
+        await apiFetch(`/api/v1/swarms/by-session/${encodeURIComponent(activeConvId)}/disband`, { method: 'POST' });
+      } catch {}
+    }
+    setActiveSwarmId(null);
+    setActiveSwarmInfo(null);
+    setActiveSwarmMembers([]);
+    setActiveSwarmMessages([]);
+    setSwarmMode(false);
+    setIsSwarmDrawerOpen(false);
+  }, [activeSwarmId, activeConvId]);
 
   // 稳定 Markdown AI 消息子组件回调引用，配合 React.memo 彻底隔绝外层轮询重绘
   const latestMarkdownActionsRef = useRef({
@@ -3565,25 +3876,37 @@ export default function WorkbenchPage() {
                                 </span>
                               )}
                               {(msg.swarm_id || msg.swarm_summary) && (
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    const sid = msg.swarm_summary?.swarm_id || msg.swarm_id || null;
-                                    if (sid) setActiveSwarmId(sid);
-                                    setIsSwarmDrawerOpen(true);
-                                  }}
-                                  className="inline-flex items-center space-x-1.5 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/12 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 font-medium transition-colors"
-                                  title="点击打开实时蜂群协作看板"
-                                >
-                                  <Users className="w-3 h-3 shrink-0" />
-                                  <span>
-                                    蜂群看板
-                                    {msg.swarm_summary?.status ? ` · ${msg.swarm_summary.status}` : ''}
-                                    {typeof msg.swarm_summary?.member_count === 'number'
-                                      ? ` (${msg.swarm_summary.member_count}节点)`
-                                      : ''}
-                                  </span>
-                                </button>
+                                <div className="inline-flex items-center space-x-1">
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      const sid = msg.swarm_summary?.swarm_id || msg.swarm_id || null;
+                                      if (sid) setActiveSwarmId(sid);
+                                      setIsSwarmDrawerOpen(true);
+                                    }}
+                                    className="inline-flex items-center space-x-1.5 text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/12 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 font-medium transition-colors"
+                                    title="点击打开实时蜂群协作看板"
+                                  >
+                                    <Users className="w-3 h-3 shrink-0" />
+                                    <span>
+                                      蜂群看板
+                                      {msg.swarm_summary?.status ? ` · ${msg.swarm_summary.status}` : ''}
+                                      {typeof msg.swarm_summary?.member_count === 'number'
+                                        ? ` (${msg.swarm_summary.member_count}节点)`
+                                        : ''}
+                                    </span>
+                                  </button>
+                                  {activeSwarmId && (
+                                    <button
+                                      type="button"
+                                      onClick={() => void handleDisbandSwarm()}
+                                      className="p-0.5 rounded text-muted-foreground hover:text-rose-500 hover:bg-surface-200 transition-colors"
+                                      title="一键解散当前蜂群"
+                                    >
+                                      <X className="w-3 h-3" />
+                                    </button>
+                                  )}
+                                </div>
                               )}
                             </div>
                           )}
@@ -3980,6 +4303,44 @@ export default function WorkbenchPage() {
                         />
                       )}
 
+                      {/* 上游网络抖动 / EOF 自动重试中底部小字展示 */}
+                      {!isUser && msg.retry_info && msg.retry_info.is_retrying && (
+                        <div className="flex items-center gap-1.5 py-1 px-1 text-[11px] text-amber-600 dark:text-amber-400 font-mono select-none animate-fade-in">
+                          <RefreshCw className="w-3 h-3 animate-spin text-amber-500 shrink-0" />
+                          <span>{msg.retry_info.message}</span>
+                          {typeof msg.retry_info.elapsed_seconds === 'number' && msg.retry_info.elapsed_seconds > 0 && (
+                            <span className="text-[10px] text-muted-foreground/75">
+                              (已耗时 {msg.retry_info.elapsed_seconds.toFixed(1)}s)
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {/* 主动追问与延伸方向快捷胶囊 (SPEC-1.5.9) */}
+                      {!isUser && msg.suggestedFollowups && msg.suggestedFollowups.length > 0 && (
+                        <div className="w-full max-w-[92%] md:max-w-[85%] pt-1 pb-1 space-y-1.5 animate-fade-in">
+                          {msg.clarificationHint && (
+                            <div className="text-[11px] text-zinc-500 dark:text-zinc-400 font-medium flex items-center gap-1.5">
+                              <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+                              <span>{msg.clarificationHint}</span>
+                            </div>
+                          )}
+                          <div className="flex flex-wrap gap-2">
+                            {msg.suggestedFollowups.map((item: string, fIdx: number) => (
+                              <button
+                                key={fIdx}
+                                type="button"
+                                onClick={() => handleSendMessage(item)}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium bg-zinc-100 hover:bg-emerald-50 dark:bg-zinc-800/80 dark:hover:bg-emerald-950/40 text-zinc-700 hover:text-emerald-700 dark:text-zinc-300 dark:hover:text-emerald-400 border border-zinc-200 hover:border-emerald-300 dark:border-zinc-700/60 dark:hover:border-emerald-800/60 transition-all shadow-sm active:scale-95 text-left"
+                              >
+                                <ArrowRight className="w-3 h-3 text-emerald-500 shrink-0" />
+                                <span>{item}</span>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+
                       {/* AI 消息交互底栏：过程步骤不展示操作栏，保持步骤流紧凑极简；仅在最终答复展示 */}
                       {!isUser && !isProcessStep && msg.content && (
                         <div>
@@ -4032,6 +4393,34 @@ export default function WorkbenchPage() {
                     onSelect={(text, range) => handleInsertCommandAtCursor(text, range)}
                     onClose={() => { }}
                   />
+                )}
+
+                {/* 模型中断自动重试倒数横幅 */}
+                {autoRetryState?.isWaiting && (
+                  <div className="px-3.5 py-2.5 rounded-2xl bg-amber-500/10 border border-amber-500/35 text-xs text-amber-700 dark:text-amber-300 animate-fade-in shadow-sm flex items-center justify-between gap-3">
+                    <div className="flex items-center space-x-2.5 min-w-0">
+                      <Loader2 className="w-4 h-4 animate-spin text-amber-500 shrink-0" />
+                      <span className="font-medium tracking-wide truncate">
+                        {formatRetryCountdownNotice(autoRetryState.round, autoRetryState.countdown, autoRetryState.maxRounds)}
+                      </span>
+                    </div>
+                    <div className="flex items-center space-x-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => triggerRetryNow()}
+                        className="px-2.5 py-1 rounded-xl bg-amber-500 hover:bg-amber-600 text-white font-medium text-[11px] shadow-sm transition-colors"
+                      >
+                        立即重试
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => cancelAutoRetry(true)}
+                        className="px-2.5 py-1 rounded-xl bg-surface-200 hover:bg-surface-300 text-muted-foreground hover:text-foreground font-medium text-[11px] transition-colors"
+                      >
+                        取消
+                      </button>
+                    </div>
+                  </div>
                 )}
 
                 {/* 附件格式限制 / 超限 / 拒收说明横幅 */}
@@ -4479,15 +4868,27 @@ export default function WorkbenchPage() {
 
                       {/* 实时蜂群看板快捷入口（当前会话存在蜂群或开启蜂群时显示） */}
                       {(activeSwarmId || swarmMode) && (
-                        <button
-                          type="button"
-                          onClick={() => setIsSwarmDrawerOpen(true)}
-                          title="打开右侧实时蜂群协作看板"
-                          className="flex items-center space-x-1 px-2 py-1.5 rounded-xl text-[11px] border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 font-medium transition-all"
-                        >
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                          <span>看板</span>
-                        </button>
+                        <div className="flex items-center space-x-0.5">
+                          <button
+                            type="button"
+                            onClick={() => setIsSwarmDrawerOpen(true)}
+                            title="打开右侧实时蜂群协作看板"
+                            className="flex items-center space-x-1 px-2 py-1.5 rounded-l-xl text-[11px] border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 font-medium transition-all"
+                          >
+                            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+                            <span>看板</span>
+                          </button>
+                          {activeSwarmId && (
+                            <button
+                              type="button"
+                              onClick={() => void handleDisbandSwarm()}
+                              title="解散关闭当前蜂群，恢复单智能体常规对话"
+                              className="px-1.5 py-1.5 rounded-r-xl border-y border-r border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 transition-colors"
+                            >
+                              <X className="w-3 h-3" />
+                            </button>
+                          )}
+                        </div>
                       )}
 
                       {/* 字数提示微标（半屏展开或输入内容后展示） */}
@@ -4669,11 +5070,15 @@ export default function WorkbenchPage() {
               ? 'bg-rose-600'
               : saveFileToastType === 'warning'
               ? 'bg-amber-600'
+              : saveFileToastType === 'info'
+              ? 'bg-sky-600'
               : 'bg-emerald-600'
           }`}
         >
           {saveFileToastType === 'error' || saveFileToastType === 'warning' ? (
             <AlertTriangle className="w-4 h-4 shrink-0" />
+          ) : saveFileToastType === 'info' ? (
+            <Info className="w-4 h-4 shrink-0" />
           ) : (
             <CheckCircle2 className="w-4 h-4 shrink-0" />
           )}
@@ -4713,6 +5118,7 @@ export default function WorkbenchPage() {
           }
           setActiveSwarmMembers(nextMembers);
         }}
+        onDisband={handleDisbandSwarm}
       />
 
       {/* 全局 Ctrl + K 检索模态框 */}

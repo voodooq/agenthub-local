@@ -26,7 +26,7 @@ from .multi_kb_router import MultiKBRetrievalRouter
 
 
 GROUNDING_REFUSAL_TEMPLATE = (
-    "抱歉，在当前专家挂载的现行规程与知识库中，暂未查询到与您问题相关的明确条款或依据，建议联系赛事组委会或业务管理员人工确认。"
+    "抱歉，在当前专家挂载的现行业务规程与知识库中，暂未查询到与您问题相关的明确依据或条款，建议核对相关业务资料或联系管理员人工确认。"
 )
 
 
@@ -52,7 +52,7 @@ class ExpertKnowledgeRouter:
             async with conn.execute(
                 """
                 SELECT ekb.kb_id, ekb.priority_weight, ekb.top_k_override,
-                       kb.name, kb.active_version, kb.current_version, kb.embedding_model, kb.embedding_dim
+                       kb.name, kb.active_version, kb.current_version, kb.embedding_model, kb.embedding_dim, kb.is_published
                 FROM expert_knowledge_bases ekb
                 JOIN knowledge_bases kb ON ekb.kb_id = kb.kb_id
                 WHERE ekb.expert_id = ?
@@ -72,8 +72,19 @@ class ExpertKnowledgeRouter:
         query: str,
         session_mounted_kbs: list[str] | None = None,
         default_top_k: int = 6,
+        is_external_api: bool = False,
     ) -> tuple[bool, str, list[dict[str, Any]], bool]:
         """为指定专家执行知识底座检索与防幻觉熔断。
+
+        Args:
+            expert_id: 目标专家唯一标识
+            query: 用户提问
+            session_mounted_kbs: 会话临时外挂知识库
+            default_top_k: 默认召回候选切片数
+            is_external_api: 是否为对外开放的第三方 API Gateway 调用。
+                             若是对外 API，严格限制未发布版本不可对外调用；
+                             若是 AgentHub 本地系统内部（沙盒内部与外部聊天 @专家 协同），
+                             两个通道均正常支持检索绑定的知识库。
 
         Returns:
             tuple[bool, str, list[dict], bool]:
@@ -92,10 +103,17 @@ class ExpertKnowledgeRouter:
         min_relevance_score = float(expert.get("min_relevance_score") or 0.42)
 
         # 1. 确定最终检索的目标知识库清单
+        # 约束规则：
+        # - 当对外开放 API 接口调用 (is_external_api=True) 时，严格限制未经发布的测试版禁止对外调用；
+        # - 在 AgentHub 本地系统内部（沙盒专属空间与外部聊天中 @专家名 协同）：
+        #   两个通道均全量支持检索专家绑定的生效知识库版本，保障本地问答与业务实测畅通无阻！
         target_kbs: list[dict[str, Any]] = []
 
         if bound_kbs:
             for b in bound_kbs:
+                if is_external_api and not b.get("is_published"):
+                    logger.info(f"[ExpertKBRouter] 知识库 [{b.get('name')}] 未发布（处于测试维护中），对外 API 调用跳过")
+                    continue
                 target_kbs.append({
                     "kb_id": b["kb_id"],
                     "name": b.get("name") or b["kb_id"],
@@ -112,6 +130,9 @@ class ExpertKnowledgeRouter:
             for kid in session_mounted_kbs:
                 if kid not in existing_ids and kid in kb_map:
                     k = kb_map[kid]
+                    if is_external_api and not k.get("is_published"):
+                        logger.info(f"[ExpertKBRouter] 外挂知识库 [{k.get('name')}] 未发布，对外 API 调用跳过")
+                        continue
                     target_kbs.append({
                         "kb_id": kid,
                         "name": k.get("name") or kid,
@@ -122,6 +143,9 @@ class ExpertKnowledgeRouter:
 
         # 铁律：专家未绑定任何知识库时，返回纯净上下文（不瞎搜）
         if not target_kbs:
+            if bound_kbs:
+                unpub_names = "、".join([b.get("name") or b["kb_id"] for b in bound_kbs])
+                logger.info(f"[ExpertKBRouter] 专家绑定的知识库 [{unpub_names}] 均未发布，不可对外提供检索，仅限测试环节。")
             return False, "", [], False
 
         # 2. 并行检索绑定的独立 index.db
@@ -159,51 +183,74 @@ class ExpertKnowledgeRouter:
             now_dt=datetime.now(),
         )
 
-        # 4. 防幻觉拒答熔断检查 (Strict Grounding)
-        if strict_grounding:
-            top_score = reranked[0].get("final_score", 0.0) if reranked else 0.0
-            if not reranked or top_score < min_relevance_score:
+        # 4. 意图自适应判定与溯源评估 (Strict Grounding Evaluation)
+        NON_RAG_INTENT_KEYWORDS = (
+            "图表", "趋势图", "可视化", "折线图", "柱状图", "饼图", "甘特图",
+            "整理", "汇总", "总结", "排版", "格式", "表格", "制图", "绘制", "直观呈现",
+            "写代码", "脚本", "画出", "上述", "前面", "刚刚", "以上", "分析上述", "分析一下",
+            "你好", "您好", "在吗", "帮我画", "呈现"
+        )
+        is_context_or_instruction = any(kw in query for kw in NON_RAG_INTENT_KEYWORDS)
+
+        top_score = reranked[0].get("final_score", 0.0) if reranked else 0.0
+        is_grounding_weak = (not reranked) or (top_score < min_relevance_score)
+
+        if is_grounding_weak:
+            if is_context_or_instruction:
                 logger.info(
-                    f"[ExpertKBRouter] 触发严格溯源熔断：Top-1 得分 {top_score:.3f} < 阈值 {min_relevance_score} (expert={expert_id}, query={query[:30]})"
+                    f"[ExpertKBRouter] 用户提问为上下文/指令/可视化意图，跳过规程强阻断: {query[:35]}"
                 )
-                return True, GROUNDING_REFUSAL_TEMPLATE, [], True
+                # 不阻断，不返回拒答模板，让模型正常根据上文多轮对话或技能作答
+                return True, "", [], False
+            elif strict_grounding:
+                logger.info(
+                    f"[ExpertKBRouter] 规程检索置信度偏低: Top-1 得分 {top_score:.3f} < 阈值 {min_relevance_score} (expert={expert_id}, query={query[:30]})"
+                )
+                # 不再直接杀死会话，而是返回软性约束提示，由 runtime 注入给大模型如实说明
+                weak_prompt = (
+                    "> ⚠️ **[知识底座溯源提示]**：在当前绑定的规程资产库中，未检索到与您当前提问直接匹配的专门条款（最高置信得分偏低）。\n"
+                    "> 请优先核对上文对话记录或人工核验规程原文，严禁凭空虚构任何规则标准与数字金额。"
+                )
+                return True, weak_prompt, [], False
 
         # 5. Small-to-Big 上下文回溯与还原
         final_top: list[dict[str, Any]] = []
         seen_parents: set[str] = set()
 
         for c in reranked:
-            pid = c.get("parent_chunk_id")
-            kid = c.get("kb_id")
-            ver = c.get("version")
-            db_path = KBStorageManager.get_version_db_path(kid, ver)
+            pid = str(c.get("parent_chunk_id") or "").strip()
+            kid = str(c.get("kb_id") or "").strip()
+            ver = str(c.get("version") or "").strip()
 
-            if pid and pid not in seen_parents and db_path.exists():
-                try:
-                    conn = sqlite3.connect(str(db_path))
-                    conn.row_factory = sqlite3.Row
-                    cur = conn.cursor()
-                    cur.execute(
-                        "SELECT id, title, content, section_path, doc_year, effective_date FROM hybrid_chunks WHERE id = ?",
-                        (pid,)
-                    )
-                    parent_row = cur.fetchone()
-                    conn.close()
-                    if parent_row:
-                        c_copy = dict(c)
-                        c_copy["content"] = parent_row["content"]
-                        c_copy["title"] = parent_row["title"]
-                        c_copy["is_expanded_parent"] = True
-                        seen_parents.add(pid)
-                        final_top.append(c_copy)
-                        if len(final_top) >= default_top_k:
-                            break
-                        continue
-                except Exception as p_err:
-                    logger.debug(f"[Small-to-Big] 专家检索父切片回溯失败: {p_err}")
+            if kid and ver:
+                db_path = KBStorageManager.get_version_db_path(kid, ver)
+                if pid and pid not in seen_parents and db_path.exists():
+                    try:
+                        conn = sqlite3.connect(str(db_path))
+                        conn.row_factory = sqlite3.Row
+                        cur = conn.cursor()
+                        cur.execute(
+                            "SELECT id, title, content, section_path, doc_year, effective_date FROM hybrid_chunks WHERE id = ?",
+                            (pid,)
+                        )
+                        parent_row = cur.fetchone()
+                        conn.close()
+                        if parent_row:
+                            c_copy = dict(c)
+                            c_copy["content"] = parent_row["content"]
+                            c_copy["title"] = parent_row["title"]
+                            c_copy["is_expanded_parent"] = True
+                            seen_parents.add(pid)
+                            final_top.append(c_copy)
+                            if len(final_top) >= default_top_k:
+                                break
+                            continue
+                    except Exception as p_err:
+                        logger.debug(f"[Small-to-Big] 专家检索父切片回溯失败: {p_err}")
 
-            chunk_hash = c.get("id") or c.get("title")
-            if chunk_hash not in seen_parents:
+            raw_chunk_hash = c.get("id") or c.get("title")
+            chunk_hash = str(raw_chunk_hash or "").strip()
+            if chunk_hash and chunk_hash not in seen_parents:
                 seen_parents.add(chunk_hash)
                 final_top.append(c)
                 if len(final_top) >= default_top_k:

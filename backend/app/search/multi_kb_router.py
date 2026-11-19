@@ -40,6 +40,9 @@ class MultiKBRetrievalRouter:
             for idx, kid in enumerate(session_mounted_kbs):
                 if kid in kb_map:
                     k = kb_map[kid]
+                    if not k.get("is_published"):
+                        logger.info(f"[MultiKBRouter] 挂载知识库 [{k.get('name')}] 未发布，跳过对外调用")
+                        continue
                     targets.append({
                         "kb_id": kid,
                         "name": k["name"],
@@ -51,7 +54,7 @@ class MultiKBRetrievalRouter:
             if targets:
                 return targets
 
-        # 2. 其次使用专家绑定
+        # 2. 其次使用专家绑定（本地沙盒对话与外部 @专家 均正常检索绑定知识库）
         if expert_id:
             bound = await KBLifecycleManager.get_expert_kbs(expert_id)
             if bound:
@@ -249,11 +252,18 @@ class MultiKBRetrievalRouter:
         """在单个独立 index.db 中执行向量相似度、FTS5 全文与时效元数据联合召回。"""
         results: list[dict[str, Any]] = []
 
-        # 中文问句常见停用词/疑问助词表
+        # 中文问句常见指令前缀与停用虚词表
+        prompt_prefixes = (
+            "帮我查一下", "帮我查询", "帮我看看", "帮我排查", "帮我查", "帮我找",
+            "请帮我查", "请帮我", "请问一下", "请问", "我想查一下", "我想查询", "我想知道",
+            "查询一下", "查询", "查一下", "看一下", "找一下", "检索一下", "检索",
+            "了解一下", "分析一下", "汇总一下", "统计一下",
+        )
         stop_words = {
-            "有什么", "怎么", "如何", "是多少", "是什么", "请问", "在哪里", "有哪些",
-            "谁可以", "怎样", "想知道", "能不能", "可以吗", "请介绍", "讲讲", "帮我查",
-            "关于", "以及", "并且", "的话", "吗", "呢", "吧", "呀", "有啥", "怎么弄",
+            "帮我", "给我", "我们", "你们", "他们", "一下", "一个", "一些", "这个", "那个",
+            "关于", "以及", "并且", "的话", "怎么", "如何", "在哪里", "怎样", "能不能", "可以吗",
+            "是多少", "是什么", "有哪些", "有什么", "谁可以", "请介绍", "讲讲", "怎么弄",
+            "的", "了", "在", "与", "和", "或", "等", "及", "至", "到", "吗", "呢", "吧", "呀",
         }
 
         # 尝试提前计算 query embedding
@@ -269,11 +279,25 @@ class MultiKBRetrievalRouter:
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
             try:
-                # 1. 提取关键词与 2-gram 候选集
-                clean_q = re.sub(r"[^\w\u4e00-\u9fa5\s]", " ", query).strip()
+                # 1. 结构化抽取高价值检索实体词与关键词
+                q_text = query.strip()
+                for p in sorted(prompt_prefixes, key=len, reverse=True):
+                    if q_text.startswith(p):
+                        q_text = q_text[len(p):].strip()
+                        break
+
+                clean_q = re.sub(r"[^\w\u4e00-\u9fa5\s]", " ", q_text).strip()
                 raw_tokens = [w for w in clean_q.split() if w]
 
+                # 提取明确年份 (如 2024, 2025)
+                years = re.findall(r"\b(19\d\d|20\d\d)\b", clean_q)
+
                 keywords: list[str] = []
+                for y in years:
+                    if y not in keywords:
+                        keywords.append(y)
+
+                # 提取去虚词后的实质短语
                 for t in raw_tokens:
                     sub = t
                     for sw in stop_words:
@@ -282,14 +306,26 @@ class MultiKBRetrievalRouter:
                         s_str = s.strip()
                         if len(s_str) >= 2 and s_str not in keywords:
                             keywords.append(s_str)
+
+                # 按长词优先排序实体词（确保如「发票」、「发票明细」、「阿里云」排在前面）
+                keywords.sort(key=len, reverse=True)
+
+                # 补充 2-gram 细粒度子串（排除纯数字碎片如 '02', '20'）
+                ngram_list: list[str] = []
+                for t in raw_tokens:
                     if len(t) >= 2:
                         for i in range(len(t) - 1):
                             bg = t[i : i + 2]
-                            if bg not in stop_words and bg not in keywords:
-                                keywords.append(bg)
+                            if bg not in stop_words and bg not in keywords and bg not in ngram_list:
+                                if not bg.isdigit():
+                                    ngram_list.append(bg)
 
-                if not keywords:
-                    keywords = [clean_q] if clean_q else [query]
+                # 优先保留高价值长实体词，末尾补充高质量 2-gram
+                all_search_terms = keywords + ngram_list
+                if not all_search_terms:
+                    all_search_terms = [clean_q] if clean_q else [query]
+
+                keywords = all_search_terms
 
                 rows: list[sqlite3.Row] = []
                 matched_ids: set[str] = set()
@@ -297,7 +333,7 @@ class MultiKBRetrievalRouter:
                 # 2. 优先尝试 FTS5 全文索引匹配 (排除 chunk_role='parent' 直接召回)
                 fts_candidates = [k for k in keywords if len(k) >= 2]
                 if fts_candidates:
-                    fts_query_str = " OR ".join([f'"{k}"' for k in fts_candidates[:8]])
+                    fts_query_str = " OR ".join([f'"{k}"' for k in fts_candidates[:10]])
                     try:
                         fts_sql = """
                         SELECT c.id, c.remote_uri, c.title, c.content, c.authority_tier, c.mtime,

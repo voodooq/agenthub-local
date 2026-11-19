@@ -276,7 +276,18 @@ class DocumentStreamExtractor:
             except Exception as e:
                 logger.warning(f"流式解析 PDF 失败 ({filename}): {e}")
 
-        return chunks
+        # 补丁一：PDF 提取后切片质量门控，过滤无有效字或乱码切片
+        from ..search.text_quality_gate import TextQualityGate
+        valid_chunks: list[dict[str, Any]] = []
+        for c in chunks:
+            c_text = c.get("content_text", "")
+            is_ok, _ = TextQualityGate.is_chunk_acceptable(c_text, min_body_chars=10)
+            if is_ok:
+                valid_chunks.append(c)
+            else:
+                logger.debug(f"[{filename}] PDF 页面质量未达标，丢弃切片: {c.get('section_path')}")
+
+        return valid_chunks
 
     @classmethod
     def _extract_docx(
@@ -408,6 +419,17 @@ class DocumentStreamExtractor:
                 paragraphs = cls._extract_text_from_binary_stream(raw_bytes)
 
             if not paragraphs:
+                return []
+
+            full_extracted_text = "\n\n".join(paragraphs).strip()
+            # 补丁一：二进制 .doc 文本质量熔断门控审查，严禁乱码入库
+            from ..search.text_quality_gate import TextQualityGate
+            is_ok, reason = TextQualityGate.is_document_acceptable(full_extracted_text)
+            if not is_ok:
+                logger.warning(
+                    f"[{filename}] 二进制 DOC 文本质量门控拦截 ({reason})，中止切片入库。"
+                    "建议使用 Word/WPS 或 LibreOffice 将该文件转存为 .docx 或 .pdf 后重新上传。"
+                )
                 return []
 
             if doc_year == 0:
@@ -749,7 +771,33 @@ class DocumentStreamExtractor:
         cls, raw_bytes: bytes, filename: str, remote_uri: str, authority_tier: int
     ) -> list[dict[str, Any]]:
         """纯文本或 Markdown 切分，采用 ParentChildASTChunker 实施父子分层与表格原子保护。"""
-        content = raw_bytes.decode("utf-8", errors="replace")
+        # 1. 采用 charset-normalizer 自动探测编码并解码，防止 GBK / GB18030 / UTF-16 强行转 UTF-8 产生大量替换符乱码
+        content = ""
+        try:
+            import charset_normalizer
+            best_match = charset_normalizer.from_bytes(raw_bytes).best()
+            if best_match and best_match.encoding:
+                content = str(best_match)
+        except Exception as e:
+            logger.debug(f"charset_normalizer 探测异常: {e}")
+
+        if not content:
+            for enc in ("utf-8", "gb18030", "gbk", "utf-16", "big5"):
+                try:
+                    content = raw_bytes.decode(enc)
+                    break
+                except UnicodeDecodeError:
+                    continue
+        if not content:
+            content = raw_bytes.decode("utf-8", errors="replace")
+
+        # 2. TextQualityGate 文档级质量熔断审查
+        from ..search.text_quality_gate import TextQualityGate
+        is_ok, reason = TextQualityGate.is_document_acceptable(content)
+        if not is_ok:
+            logger.warning(f"[{filename}] 文档质量熔断未通过: {reason}，拦截入库")
+            return []
+
         from ..search.temporal_reranker import TemporalMetadataExtractor
         tmeta = TemporalMetadataExtractor.extract_metadata(filename, content[:600])
         effective_tier = cls.detect_authority_tier(filename, authority_tier)
@@ -788,6 +836,7 @@ class DocumentStreamExtractor:
                         "doc_priority_type": hc.doc_priority_type,
                         "topic_cluster_id": hc.topic_cluster_id,
                         "is_latest_in_cluster": hc.is_latest_in_cluster,
+                        "skip_hype": hc.skip_hype,
                     }
                     for hc in h_chunks
                 ]

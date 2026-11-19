@@ -186,6 +186,11 @@ async def test_expert_binding_and_search_gate():
     conn.commit()
     conn.close()
 
+    # 模拟发布该知识库版本，允许外部专家调用
+    async with db_manager.get_connection() as c_main:
+        await c_main.execute("UPDATE knowledge_bases SET is_published = 1 WHERE kb_id = ?", (kb_id,))
+        await c_main.commit()
+
     # 绑定专家
     expert_id = f"fencing_referee_{int(time.time())}"
     await KBLifecycleManager.bind_expert_kbs(

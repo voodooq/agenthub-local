@@ -29,6 +29,12 @@ from ..core.logging_config import logger
 from ..repository.db import db_manager
 from .storage import KBStorageManager
 from ..search.embedding_provider import embedding_router
+from .version_helper import (
+    parse_semver,
+    format_semver,
+    get_next_version,
+    heal_duplicate_snapshot_versions,
+)
 
 
 def get_snapshots_dir() -> Path:
@@ -154,8 +160,27 @@ class KBExchangeEngine:
         # 2. 计算确定性 content_md5
         content_md5 = cls.calculate_deterministic_md5(documents, chunks, structured_rules)
 
-        # 读取已有知识库元数据
+        # 读取已有知识库元数据与主数据库真实配置
         kb_meta = KBStorageManager.read_manifest(kb_id, version) or {}
+        real_db_name = ""
+        real_domain_type = ""
+        real_rule_profile = ""
+        try:
+            from ..core.config import settings
+            if settings.db_path and Path(settings.db_path).exists():
+                with sqlite3.connect(settings.db_path) as main_c:
+                    main_c.row_factory = sqlite3.Row
+                    row = main_c.cursor().execute(
+                        "SELECT name, domain_type, rule_profile_json FROM knowledge_bases WHERE kb_id = ?",
+                        (kb_id,),
+                    ).fetchone()
+                    if row:
+                        real_db_name = str(row["name"] or "").strip()
+                        real_domain_type = str(row["domain_type"] or "").strip()
+                        real_rule_profile = str(row["rule_profile_json"] or "").strip()
+        except Exception as e:
+            logger.debug(f"[KBExchange.export_bundle] 读取主库元数据跳过: {e}")
+
         kb_uuid = kb_meta.get("kb_uuid") or f"kb_{kb_id}_{uuid.uuid4().hex[:8]}"
         embed_model = kb_meta.get("embedding_model") or "bge-m3"
         embed_dim = kb_meta.get("embedding_dim") or 1024
@@ -169,14 +194,18 @@ class KBExchangeEngine:
             "triples_count": len(triples),
         }
 
-        # 构造 manifest.json 字典
+        # 构造 manifest.json 字典（优先采用主库真实用户命名，杜绝 kb_mnt_... 内部ID反向覆盖）
+        effective_kb_name = real_db_name or kb_meta.get("name") or kb_id
+        effective_domain_type = real_domain_type or kb_meta.get("domain_type") or "general"
+        effective_rule_profile = real_rule_profile or kb_meta.get("rule_profile_json") or ""
+
         manifest = {
             "bundle_format_version": "1.6.0",
             "kb_id": kb_id,
             "kb_uuid": kb_uuid,
-            "kb_name": kb_meta.get("name") or kb_id,
-            "domain_type": kb_meta.get("domain_type") or "general",
-            "rule_profile_json": kb_meta.get("rule_profile_json") or "",
+            "kb_name": effective_kb_name,
+            "domain_type": effective_domain_type,
+            "rule_profile_json": effective_rule_profile,
             "version_tag": version,
             "parent_version_tag": kb_meta.get("parent_version_tag", ""),
             "exported_at": datetime.now().isoformat(),
@@ -436,37 +465,82 @@ class KBExchangeEngine:
         domain_type = manifest.get("domain_type") or "general"
         rule_profile_json = manifest.get("rule_profile_json") or ""
 
-        # 写入或更新 knowledge_bases 表
+        # 写入或更新 knowledge_bases 表（白名单保护：回滚与已有覆盖严禁冲掉 name/source_id/domain_type）
         async with db_manager.get_connection() as conn:
-            await conn.execute(
-                """
-                INSERT OR REPLACE INTO knowledge_bases (
-                    kb_id, name, description, ownership_type, source_id,
-                    active_version, staging_version, embedding_model, embedding_dim,
-                    chunk_count, triple_count, disk_size_bytes, share_repo_uri,
-                    kb_uuid, current_version, content_md5, domain_type, rule_profile_json,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, 'local', NULL, ?, '', ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    target_kb_id,
-                    target_name,
-                    manifest.get("change_summary") or f"从 .ahkb 导入 (版本 {version})",
-                    version,
-                    embed_model,
-                    embed_dim,
-                    total_chunks,
-                    triples_count,
-                    disk_size,
-                    kb_uuid,
-                    version,
-                    content_md5,
-                    domain_type,
-                    rule_profile_json,
-                    now,
-                    now,
-                ),
-            )
+            async with conn.execute(
+                "SELECT * FROM knowledge_bases WHERE kb_id = ?", (target_kb_id,)
+            ) as check_cur:
+                existing_kb = await check_cur.fetchone()
+
+            if existing_kb:
+                # 存在既有知识库：执行元数据白名单保护更新，绝不抹除 source_id、ownership_type、is_published
+                cur_name = str(existing_kb["name"] or "").strip()
+                # 只有当原有名称为空或为内部ID（形如 kb_mnt_...），且传入的 target_name 为人类可读名称时才允许升级名称
+                if (not cur_name or cur_name.startswith("kb_mnt_")) and target_name and not target_name.startswith("kb_mnt_"):
+                    final_name = target_name
+                else:
+                    final_name = cur_name or target_name
+
+                await conn.execute(
+                    """
+                    UPDATE knowledge_bases SET
+                        name = ?,
+                        active_version = ?,
+                        current_version = ?,
+                        content_md5 = ?,
+                        chunk_count = ?,
+                        triple_count = ?,
+                        disk_size_bytes = ?,
+                        embedding_model = ?,
+                        embedding_dim = ?,
+                        updated_at = ?
+                    WHERE kb_id = ?
+                    """,
+                    (
+                        final_name,
+                        version,
+                        version,
+                        content_md5,
+                        total_chunks,
+                        triples_count,
+                        disk_size,
+                        embed_model,
+                        embed_dim,
+                        now,
+                        target_kb_id,
+                    ),
+                )
+            else:
+                # 首次导入全新知识库记录
+                await conn.execute(
+                    """
+                    INSERT INTO knowledge_bases (
+                        kb_id, name, description, ownership_type, source_id,
+                        active_version, staging_version, embedding_model, embedding_dim,
+                        chunk_count, triple_count, disk_size_bytes, share_repo_uri,
+                        kb_uuid, current_version, content_md5, domain_type, rule_profile_json,
+                        created_at, updated_at
+                    ) VALUES (?, ?, ?, 'local', NULL, ?, '', ?, ?, ?, ?, ?, '', ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        target_kb_id,
+                        target_name,
+                        manifest.get("change_summary") or f"从 .ahkb 导入 (版本 {version})",
+                        version,
+                        embed_model,
+                        embed_dim,
+                        total_chunks,
+                        triples_count,
+                        disk_size,
+                        kb_uuid,
+                        version,
+                        content_md5,
+                        domain_type,
+                        rule_profile_json,
+                        now,
+                        now,
+                    ),
+                )
             # 记录版本快照
             snapshot_id = f"snap_{target_kb_id}_{int(now)}_{uuid.uuid4().hex[:6]}"
             doc_manifest_json = json.dumps(manifest.get("documents", []), ensure_ascii=False)
@@ -601,8 +675,19 @@ class KBExchangeEngine:
 
     @classmethod
     async def list_snapshots(cls, kb_id: str) -> list[dict[str, Any]]:
-        """查询指定知识库的所有历史快照记录（按创建时间降序）。"""
+        """查询指定知识库的所有历史快照记录（按创建时间降序），自动清洗重复历史版本并严格确保单一使用态。"""
         async with db_manager.get_connection() as conn:
+            # 1. 自动执行历史重复快照版本平滑自愈（清洗多个相同 v1.0.0 的脏数据）
+            await heal_duplicate_snapshot_versions(conn, kb_id)
+
+            # 2. 查询当前知识库的生效版本
+            async with conn.execute(
+                "SELECT active_version, current_version FROM knowledge_bases WHERE kb_id = ?",
+                (kb_id,),
+            ) as cur:
+                kb_row = await cur.fetchone()
+                active_ver = (kb_row["active_version"] if kb_row else None) or "v1.0.0"
+
             async with conn.execute(
                 """
                 SELECT * FROM kb_version_snapshots
@@ -613,14 +698,113 @@ class KBExchangeEngine:
             ) as cur:
                 rows = await cur.fetchall()
                 results = []
+                active_assigned = False
                 for r in rows:
                     d = dict(r)
                     try:
                         d["doc_manifest"] = json.loads(d.get("doc_manifest_json") or "[]")
                     except Exception:
                         d["doc_manifest"] = []
+
+                    # 严格保证单一使用态：有且仅有一条快照为 is_active = True
+                    if not active_assigned and d["version_tag"] == active_ver:
+                        d["is_active"] = True
+                        active_assigned = True
+                    else:
+                        d["is_active"] = False
+
                     results.append(d)
+
+                # 若所有快照版本号都未精准匹配到 active_ver，但列表不为空，则将最新的第一条标记为 is_active
+                if not active_assigned and results:
+                    results[0]["is_active"] = True
+
                 return results
+
+    @classmethod
+    async def delete_snapshot(cls, kb_id: str, snapshot_id: str) -> dict[str, Any]:
+        """删除指定历史快照及物理归档文件（不可删除正在生效中的版本）。"""
+        async with db_manager.get_connection() as conn:
+            # 检查当前生效版本
+            async with conn.execute(
+                "SELECT active_version FROM knowledge_bases WHERE kb_id = ?", (kb_id,)
+            ) as cur:
+                kb_row = await cur.fetchone()
+                active_ver = (kb_row["active_version"] if kb_row else None) or "v1.0.0"
+
+            async with conn.execute(
+                "SELECT * FROM kb_version_snapshots WHERE snapshot_id = ? AND kb_id = ?",
+                (snapshot_id, kb_id),
+            ) as cur:
+                snap = await cur.fetchone()
+
+            if not snap:
+                raise ValueError(f"快照不存在: {snapshot_id}")
+
+            if snap["version_tag"] == active_ver:
+                raise ValueError(f"快照版本 [{snap['version_tag']}] 为当前正在生效使用的版本，不可删除！请先切换至其他版本后再清除。")
+
+            # 物理删除归档包文件
+            archive_path = Path(snap["bundle_archive_path"]) if snap["bundle_archive_path"] else None
+            deleted_file = False
+            if archive_path and archive_path.exists():
+                try:
+                    archive_path.unlink()
+                    deleted_file = True
+                except Exception as e:
+                    logger.warning(f"删除快照物理归档文件失败: {archive_path}, error={e}")
+
+            await conn.execute(
+                "DELETE FROM kb_version_snapshots WHERE snapshot_id = ?", (snapshot_id,)
+            )
+            await conn.commit()
+
+        logger.info(f"[KBExchange] 已成功删除快照: {snapshot_id} (物理归档已删除: {deleted_file})")
+        return {
+            "success": True,
+            "snapshot_id": snapshot_id,
+            "version_tag": snap["version_tag"],
+            "message": f"快照版本 [{snap['version_tag']}] 已彻底物理清除",
+        }
+
+    @classmethod
+    async def destroy_all_snapshots_for_kb(cls, kb_id: str) -> int:
+        """物理销毁指定知识库的所有快照记录与归档包（用于清理知识库时彻底删除）。"""
+        deleted_count = 0
+        snapshots_dir = get_snapshots_dir()
+        async with db_manager.get_connection() as conn:
+            async with conn.execute(
+                "SELECT snapshot_id, bundle_archive_path FROM kb_version_snapshots WHERE kb_id = ?",
+                (kb_id,),
+            ) as cur:
+                rows = await cur.fetchall()
+
+            for r in rows:
+                p_str = r["bundle_archive_path"]
+                if p_str:
+                    p = Path(p_str)
+                    if p.exists():
+                        try:
+                            p.unlink()
+                        except Exception:
+                            pass
+                deleted_count += 1
+
+            # 额外扫描 snapshots_dir 确保所有该 kb_id 前缀的文件被清理
+            try:
+                for f in snapshots_dir.glob(f"{kb_id}_*.ahkb"):
+                    try:
+                        f.unlink()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
+
+            await conn.execute("DELETE FROM kb_version_snapshots WHERE kb_id = ?", (kb_id,))
+            await conn.commit()
+
+        logger.info(f"[KBExchange] 知识库 [{kb_id}] 所有快照记录及物理归档文件已全部清理 (共 {deleted_count} 个快照)")
+        return deleted_count
 
     @classmethod
     async def compute_snapshot_diff(

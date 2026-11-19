@@ -1389,7 +1389,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                               {p.provider_type}
                             </span>
                             <span className="px-2 py-0.5 rounded bg-purple-500/15 text-purple-700 dark:text-purple-400 border border-purple-500/30 text-[10px]">
-                              职责: {p.role_binding === 'primary' ? '主力推理' : p.role_binding === 'light' ? '后台轻量提炼' : p.role_binding === 'embedding_only' ? '🔢 纯向量 Embedding' : '主力+后台通用'}
+                              职责: {p.role_binding === 'primary' ? '主力推理' : p.role_binding === 'light' ? '后台轻量任务' : p.role_binding === 'embedding_only' ? '🔢 纯向量 Embedding' : '主力+后台通用'}
                             </span>
                             {Number(p.max_context_tokens || 0) > 0 && (
                               <span className="px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-700 dark:text-indigo-400 border border-indigo-500/30 text-[10px] font-mono">
@@ -1695,7 +1695,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           >
                             <option value="both">🧠+⚡ 主力推理 + 后台记忆通用</option>
                             <option value="primary">🧠 仅作为主力对话与 Agent 推理</option>
-                            <option value="light">⚡ 仅作为后台轻量记忆提炼</option>
+                            <option value="light">⚡ 仅作为后台轻量任务：口语化 / 记忆提炼 / 摘要 (Light)</option>
                             <option value="embedding_only">🔢 仅用于知识库向量化 / Embedding</option>
                           </select>
                           {pkceRole === 'embedding_only' && (
@@ -1797,7 +1797,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                           >
                             <option value="both">🧠+⚡ 主力推理 + 后台记忆通用</option>
                             <option value="primary">🧠 仅作为主力对话与 Agent 推理</option>
-                            <option value="light">⚡ 仅作为后台轻量记忆提炼</option>
+                            <option value="light">⚡ 仅作为后台轻量任务：口语化 / 记忆提炼 / 摘要 (Light)</option>
                             <option value="embedding_only">🔢 仅用于知识库向量化 / Embedding</option>
                           </select>
                           {tokenRole === 'embedding_only' && (
@@ -2008,7 +2008,7 @@ export function AccountModal({ isOpen, onClose, onRefresh }: AccountModalProps) 
                       >
                         <option value="both">🧠+⚡ 主力推理 + 后台记忆通用</option>
                         <option value="primary">🧠 仅作为主力对话与 Agent 推理 (Primary)</option>
-                        <option value="light">⚡ 仅作为后台轻量记忆提炼与摘要 (Light)</option>
+                        <option value="light">⚡ 仅作为后台轻量任务：口语化 / 记忆提炼 / 摘要 (Light)</option>
                         <option value="embedding_only">🔢 仅用于知识库向量化 / Embedding（不参与对话）</option>
                       </select>
                       {provRole === 'embedding_only' && (

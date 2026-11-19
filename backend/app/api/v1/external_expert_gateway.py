@@ -181,10 +181,11 @@ async def chat_completions(
     if not user_query:
         raise HTTPException(status_code=400, detail="未找到用户提问内容 (role='user')")
 
-    # 1. 执行专家知识底座隔离检索与防幻觉熔断
+    # 1. 执行专家知识底座隔离检索与防幻觉熔断（对外 API 严格要求知识库必须是已发布版本）
     has_kb, kb_prompt, citations, is_blocked = await ExpertKnowledgeRouter.search_for_expert(
         expert_id=expert_id,
         query=user_query,
+        is_external_api=True,
     )
 
     created_ts = int(time.time())

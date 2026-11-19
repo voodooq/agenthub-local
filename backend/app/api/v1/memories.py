@@ -1008,6 +1008,13 @@ async def save_llm_provider(req: LLMProviderSaveRequest):
         provider_id=req.id,
         max_context_tokens=req.max_context_tokens,
     )
+    try:
+        from ...providers.light_llm_router import light_llm_router
+        from ...search.embedding_provider import embedding_router
+        embedding_router.invalidate_cache()
+        light_llm_router.invalidate_cache()
+    except Exception:
+        pass
     return saved
 
 
@@ -1034,6 +1041,13 @@ async def test_provider_connection(req: LLMProviderTestRequest):
 async def delete_llm_provider(provider_id: str):
     """删除大模型供应商通道（完全放开权限，无任何死锁）"""
     ok = await provider_adapter.delete_provider(provider_id)
+    try:
+        from ...providers.light_llm_router import light_llm_router
+        from ...search.embedding_provider import embedding_router
+        embedding_router.invalidate_cache()
+        light_llm_router.invalidate_cache()
+    except Exception:
+        pass
     return {"status": "ok", "deleted": ok, "id": provider_id}
 
 

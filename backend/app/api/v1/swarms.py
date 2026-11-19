@@ -28,11 +28,31 @@ class SwarmPostMessageRequest(BaseModel):
 async def get_swarm_by_session(session_id: str):
     """按主会话 ID 获取当前关联的 Swarm 及其成员和历史消息。"""
     swarm = await SwarmRepository.get_by_session(session_id)
-    if not swarm:
+    if not swarm or swarm.get("status") != "active":
         return {"swarm": None, "members": [], "messages": []}
     members = await SwarmRepository.list_members(swarm["id"])
     messages, _ = await SwarmRepository.read_messages(swarm["id"], since=0, limit=100)
     return {"swarm": swarm, "members": members, "messages": messages}
+
+
+@router.post("/by-session/{session_id}/disband")
+async def disband_swarm_by_session(session_id: str):
+    """一键解散当前主会话关联的所有活跃 Swarm 蜂群并释放 Worker。"""
+    swarm = await SwarmRepository.get_by_session(session_id)
+    if not swarm:
+        return {"status": "ok", "message": "当前会话无活跃蜂群"}
+    await swarm_manager.kill_swarm(swarm["id"])
+    return {"status": "ok", "disbanded_swarm_id": swarm["id"]}
+
+
+@router.post("/{swarm_id}/disband")
+async def disband_swarm(swarm_id: str):
+    """一键解散关闭指定 Swarm 蜂群，级联终止所有 Worker 并广播状态。"""
+    swarm = await SwarmRepository.get_swarm(swarm_id)
+    if not swarm:
+        raise HTTPException(status_code=404, detail="Swarm 不存在")
+    await swarm_manager.kill_swarm(swarm_id)
+    return {"status": "ok", "disbanded_swarm_id": swarm_id}
 
 
 @router.get("/{swarm_id}")

@@ -47,6 +47,7 @@ class ChatStreamRequest(BaseModel):
     agent_id: str | None = Field(default=None, description="本次绑定的专家 ID")
     grounding_config: dict[str, Any] | None = Field(default=None, description="绑定的专家防幻觉与严谨度配置")
     swarm_id: str | None = Field(default=None, description="可选关联的已有 Swarm ID")
+    is_retry: bool = Field(default=False, description="是否为模型断流/不可用自动重试请求，为True时复用当前轮用户消息避免重复入库")
 
 
 class ToolApprovalRequest(BaseModel):

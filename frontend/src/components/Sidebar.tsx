@@ -202,7 +202,13 @@ export function Sidebar({
         ? allProjects.filter((w) => (w.name || '').toLowerCase().includes(normalizedFilter))
         : allProjects;
 
-      const allStandalone = conversations.filter((c) => !c.workspace_id || c.workspace_id === 'default');
+      // 过滤蜂群内部 Worker 临时通信子会话，避免污染用户的主侧边栏会话列表
+      const isUserVisibleConv = (c: Conversation) =>
+        !(c.title && c.title.startsWith('[Swarm:')) && !(c.id && c.id.startsWith('swarm_'));
+
+      const allStandalone = conversations.filter(
+        (c) => isUserVisibleConv(c) && (!c.workspace_id || c.workspace_id === 'default')
+      );
       const filteredStandalone = normalizedFilter
         ? allStandalone.filter((c) => (c.title || '').toLowerCase().includes(normalizedFilter))
         : allStandalone;
@@ -674,7 +680,12 @@ export function Sidebar({
           {filteredProjectWorkspaces.length > 0 ? (
             <div className="space-y-0.5">
               {filteredProjectWorkspaces.map((ws) => {
-                const wsConvs = conversations.filter((c) => c.workspace_id === ws.id);
+                const wsConvs = conversations.filter(
+                  (c) =>
+                    c.workspace_id === ws.id &&
+                    !(c.title && c.title.startsWith('[Swarm:')) &&
+                    !(c.id && c.id.startsWith('swarm_'))
+                );
                 const isWsActive = activeWorkspaceId === ws.id;
                 const isExpanded = Boolean(expandedWorkspaceIds[ws.id]);
                 const isSandbox = ws.type !== 'physical' || (ws.name || '').startsWith('[沙盒]');

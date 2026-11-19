@@ -14,6 +14,7 @@ import {
   ShieldAlert,
   Loader2,
   AtSign,
+  PowerOff,
 } from 'lucide-react';
 import { SwarmInfo, SwarmMember, SwarmMessage } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
@@ -27,6 +28,7 @@ interface SwarmBoardDrawerProps {
   initialMembers?: SwarmMember[];
   initialMessages?: SwarmMessage[];
   onSwarmUpdated?: (swarm: SwarmInfo | null, members: SwarmMember[]) => void;
+  onDisband?: () => void;
 }
 
 /**
@@ -128,6 +130,7 @@ export function SwarmBoardDrawer({
   initialMembers = [],
   initialMessages = [],
   onSwarmUpdated,
+  onDisband,
 }: SwarmBoardDrawerProps) {
   const [swarm, setSwarm] = useState<SwarmInfo | null>(initialSwarm);
   const [members, setMembers] = useState<SwarmMember[]>(initialMembers);
@@ -137,12 +140,45 @@ export function SwarmBoardDrawer({
   const [inputText, setInputText] = useState('');
   const [sending, setSending] = useState(false);
   const [killingMember, setKillingMember] = useState<string | null>(null);
+  const [disbanding, setDisbanding] = useState(false);
   const [errorBanner, setErrorBanner] = useState<string | null>(null);
 
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const latestSeqRef = useRef<number>(0);
 
   const effectiveSwarmId = swarm?.id || swarmId || null;
+
+  const handleDisbandSwarm = async () => {
+    if (!effectiveSwarmId || disbanding) return;
+    const confirmed = window.confirm(
+      '确定要解散当前蜂群吗？解散后所有节点任务将终止，会话将恢复为单智能体对话模式。'
+    );
+    if (!confirmed) return;
+
+    setDisbanding(true);
+    setErrorBanner(null);
+    try {
+      const res = await apiFetch(
+        `/api/v1/swarms/${encodeURIComponent(effectiveSwarmId)}/disband`,
+        { method: 'POST' }
+      );
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        setErrorBanner(err?.detail || '解散蜂群失败');
+        return;
+      }
+      setSwarm(null);
+      setMembers([]);
+      setMessages([]);
+      onSwarmUpdated?.(null, []);
+      onDisband?.();
+      onClose();
+    } catch (err: any) {
+      setErrorBanner(err?.message || '解散蜂群请求异常');
+    } finally {
+      setDisbanding(false);
+    }
+  };
 
   // 同步外部初始状态
   useEffect(() => {
@@ -479,6 +515,22 @@ export function SwarmBoardDrawer({
           </div>
 
           <div className="flex items-center space-x-1.5 shrink-0">
+            {effectiveSwarmId && (
+              <button
+                type="button"
+                onClick={() => void handleDisbandSwarm()}
+                disabled={disbanding}
+                className="px-2.5 py-1 rounded-lg border border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 text-xs font-medium flex items-center space-x-1 transition-colors disabled:opacity-50"
+                title="解散当前蜂群，终止所有节点并恢复单智能体常规对话"
+              >
+                {disbanding ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                ) : (
+                  <PowerOff className="w-3.5 h-3.5" />
+                )}
+                <span>解散蜂群</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => void fetchSwarmSnapshot(false)}
