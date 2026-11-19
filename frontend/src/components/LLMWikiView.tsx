@@ -275,6 +275,23 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     }
   };
 
+  // 监听是否有知识库处于口语增强处理中，每 3 秒自动轮询进度直到完成
+  useEffect(() => {
+    if (kbsList.length === 0) return;
+    const hasActiveEnhancement = kbsList.some((kb) => {
+      const ext = kbStatusMap[kb.kb_id];
+      if (!ext?.enhancement) return false;
+      const { status, total_parents, hype_completed } = ext.enhancement;
+      return status === 'running' || (total_parents > 0 && hype_completed < total_parents);
+    });
+    if (!hasActiveEnhancement) return;
+
+    const timer = setInterval(() => {
+      fetchKbExtraStatus(kbsList);
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [kbsList, kbStatusMap]);
+
   const handleUpgradeHierarchy = async (kb: KnowledgeBaseItem) => {
     if (!confirm(`确定要将知识库【${kb.name}】一键重构为父子分层结构吗？\n升级前系统将自动生成 auto_backup 快照备份，可随时无损回滚。`)) {
       return;
@@ -1357,49 +1374,24 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                 </span>
                               )}
 
-                              {extra?.enhancement?.status === 'running' && (
-                                <span
-                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0 animate-pulse flex items-center gap-1"
-                                  title={`后台口语化问答已完成 ${extra.enhancement.hype_completed}/${extra.enhancement.total_parents} 条，抽取 ${extra.enhancement.rules_extracted} 条规则`}
-                                >
-                                  ✨ 口语增强 {extra.enhancement.hype_completed}/{extra.enhancement.total_parents}
-                                </span>
-                              )}
-
-                              {extra?.enhancement?.status === 'completed' && (
-                                <span
-                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shrink-0 flex items-center gap-1"
-                                  title="父子切片分层与口语问答检索均已就绪"
-                                >
-                                  ✨ 口语化就绪
-                                </span>
-                              )}
-
-                              {extra?.hierarchy?.needs_upgrade && (
-                                <span
-                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20 shrink-0"
-                                  title="检测到存量切片缺少父子分层结构，建议一键升级"
-                                >
-                                  ⚠️ 待升级分层索引
-                                </span>
-                              )}
-
-                              {extra?.enhancement?.status === 'running' && (
-                                <span
-                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0 animate-pulse flex items-center gap-1"
-                                  title={`后台口语化问答已完成 ${extra.enhancement.hype_completed}/${extra.enhancement.total_parents} 条，抽取 ${extra.enhancement.rules_extracted} 条规则`}
-                                >
-                                  ✨ 口语增强 {extra.enhancement.hype_completed}/{extra.enhancement.total_parents}
-                                </span>
-                              )}
-
-                              {extra?.enhancement?.status === 'completed' && (
-                                <span
-                                  className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shrink-0 flex items-center gap-1"
-                                  title="父子切片分层与口语问答检索均已就绪"
-                                >
-                                  ✨ 口语化就绪
-                                </span>
+                              {extra?.enhancement && extra.enhancement.total_parents > 0 && (
+                                (extra.enhancement.hype_completed >= extra.enhancement.total_parents || extra.enhancement.status === 'completed') ? (
+                                  <span
+                                    className="px-2 py-0.5 rounded text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 shrink-0 flex items-center gap-1"
+                                    title="父子切片分层与口语问答检索均已就绪"
+                                  >
+                                    ✨ 口语化就绪
+                                  </span>
+                                ) : (
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-medium bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 shrink-0 flex items-center gap-1 ${
+                                      extra.enhancement.status === 'running' ? 'animate-pulse' : ''
+                                    }`}
+                                    title={`后台口语化问答已完成 ${extra.enhancement.hype_completed}/${extra.enhancement.total_parents} 条，抽取 ${extra.enhancement.rules_extracted} 条规则`}
+                                  >
+                                    ✨ 口语增强 {extra.enhancement.hype_completed}/{extra.enhancement.total_parents}
+                                  </span>
+                                )
                               )}
                             </div>
 

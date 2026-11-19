@@ -346,8 +346,8 @@ class HyPEQuestionWorker:
         async def _runner():
             cls._running_tasks.add(task_key)
             try:
-                # 持续处理直到全部 parent 完成或达到单次轮转上限
-                for _ in range(5):
+                # 持续循环处理直到全部 parent 完成
+                while True:
                     count = await cls.process_kb_hype(kb_id, version, batch_limit=10)
                     if count == 0:
                         break
@@ -408,6 +408,10 @@ class HyPEQuestionWorker:
             status = "running"
         elif total > 0 and completed >= total:
             status = "completed"
+        elif total > 0:
+            # 存在未完成的父切片且未在运行，自动接续调度后台增强
+            cls.schedule_background_hype(kb_id, version)
+            status = "running"
         else:
             status = "idle"
 
