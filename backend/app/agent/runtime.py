@@ -368,6 +368,12 @@ class AgentRuntime:
         "load_skill_detail",
         "web_fetch",
         "update_working_memory",
+        "search_cloud_wiki",
+        "read_cloud_wiki_section",
+        "list_kb_docs",
+        "list_kb_doc_toc",
+        "read_kb_slices",
+        "query_knowledge_graph",
     })
 
     ARCHIVE_ONLY_TOOLS = frozenset({
@@ -426,6 +432,21 @@ class AgentRuntime:
         r"npm\s+run\s+build|vite\s+build|pip\s+install)",
         re.IGNORECASE,
     )
+
+    @staticmethod
+    def _detect_empty_retrieval_promise(text: str) -> bool:
+        """检测模型是否仅输出口头检索承诺（如“我先帮您查询/我马上为您调取…”）而未发起工具调用。"""
+        clean = (text or "").strip()
+        if not clean or len(clean) > 160:
+            return False
+        if "?" in clean or "？" in clean or "\n-" in clean or "\n1." in clean:
+            return False
+        return bool(
+            re.search(
+                r"(?:我先|我再|我现在|我这就|我马上|我来|现在马上|马上为您|马上为你|立即为您|立即为你|正在为您|正在为你|先帮您|先帮你|先为您|先为你|帮您先|帮你先|稍等).{0,24}(?:查询|检索|调取|调用|核对|查看|查阅|确认|拉取|列出)",
+                clean,
+            )
+        )
 
     @classmethod
     def _detect_unverified_write_hallucination(
@@ -2229,6 +2250,16 @@ class AgentRuntime:
                                 "2. 你必须立即在正文中输出标准 `<tool_call name=\"write_local_file\">` 标签将完整源码直接写入目标文件（切勿将上万字符内联塞入 `execute_local_command`）；\n"
                                 "3. 仅当工具返回真实成功回执后，方可向用户汇报完成。"
                             )
+                        elif last_step_error_info.get("tool") == "empty_retrieval_promise":
+                            step_prompt = (
+                                "[🚨 禁止仅输出口头承诺 —— 请立即输出真实工具调用]:\n"
+                                "系统核验发现你刚才仅回复了“我先/我马上帮您调用工具查询…”，但并未真正发出任何工具调用！\n"
+                                "1. 请勿输出任何过渡性套话，直接在本步输出标准 `<tool_call>` 标签调用知识库工具：\n"
+                                "   - 若需了解库内包含哪些赛事或文档，请先调用 `<tool_call name=\"list_kb_docs\">{}</tool_call>`；\n"
+                                "   - 若已知文档 `doc_id` 需定位章节，调用 `list_kb_doc_toc`；若需连续读取正文，调用 `read_kb_slices`；\n"
+                                "   - 若需按关键词检索，调用 `search_cloud_wiki`。\n"
+                                "2. 必须等工具返回真实检索结果后，再向用户作答。"
+                            )
                         elif last_step_error_info.get("tool") == "hallucinated_action":
                             step_prompt = (
                                 "[🚨 系统防幻觉硬拦截警告 —— 严禁虚假行动与查询声明]:\n"
@@ -2560,6 +2591,27 @@ class AgentRuntime:
                             "tool": "hallucinated_write",
                             "unverified_files": unverified_write_claims,
                             "summary": "模型未调用写盘工具却在纯文本中宣称文件已落盘，强制要求通过 write_local_file 真实写入",
+                        }
+                        step_idx += 1
+                        continue
+
+                    # 🛡️ 拦截空口头检索承诺（例如“我先/我再/我这就调用…”但未附带任何 tool_calls）
+                    if (
+                        active_scene == "agent"
+                        and not is_forced_final_step
+                        and self._detect_empty_retrieval_promise(stripped_without_empty)
+                        and consecutive_stalls < 2
+                        and step_idx < current_max_steps - 1
+                    ):
+                        consecutive_stalls += 1
+                        if step_thinking_level in ("low", "medium"):
+                            lock_high_thinking = True
+                        logger.warning(f"[AgentRuntime] 拦截空口头检索承诺（未调用工具），激活纠偏 (第{consecutive_stalls}次)")
+                        replace_prev_empty_step_pending = True
+                        yield {"type": "stream_reset"}
+                        last_step_error_info = {
+                            "tool": "empty_retrieval_promise",
+                            "summary": "你刚才仅输出了口头检索承诺（如“我先/我马上为您调取查询”）而未发出真实工具调用。请立即调用 list_kb_docs / search_cloud_wiki / list_kb_doc_toc / read_kb_slices 等工具获取真实结果后再作答！",
                         }
                         step_idx += 1
                         continue
@@ -4772,6 +4824,77 @@ class AgentRuntime:
                             "status": "completed",
                             "output": res_text,
                             "compressed": f"[云端章节精读: {s_path}]",
+                        }
+
+                    # ── 工具: 知识库已发布文档清单 (list_kb_docs) ──
+                    elif func_name == "list_kb_docs":
+                        from ..search.multi_kb_router import MultiKBRetrievalRouter
+                        f_kw = str(args.get("filter_keyword") or "").strip()
+                        _, res_text, _ = await MultiKBRetrievalRouter.list_mounted_docs(
+                            expert_id=agent_id,
+                            session_mounted_kbs=getattr(self, "session_mounted_kbs", None),
+                            filter_keyword=f_kw,
+                        )
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"list_kb_docs({f_kw})",
+                            "reason": "列出已发布知识库文档清单",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": f"[知识库文档清单: {f_kw or '全部'}]",
+                        }
+
+                    # ── 工具: 知识库文档切片目录定位 (list_kb_doc_toc) ──
+                    elif func_name == "list_kb_doc_toc":
+                        from ..search.multi_kb_router import MultiKBRetrievalRouter
+                        doc_key = str(args.get("doc_id") or "").strip()
+                        _, res_text = await MultiKBRetrievalRouter.list_doc_toc(
+                            doc_id_or_title=doc_key,
+                            expert_id=agent_id,
+                            session_mounted_kbs=getattr(self, "session_mounted_kbs", None),
+                        )
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"list_kb_doc_toc({doc_key})",
+                            "reason": f"获取文档切片目录: {doc_key}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": f"[文档切片目录: {doc_key}]",
+                        }
+
+                    # ── 工具: 知识库文档按序号连续精读 (read_kb_slices) ──
+                    elif func_name == "read_kb_slices":
+                        from ..search.multi_kb_router import MultiKBRetrievalRouter
+                        doc_key = str(args.get("doc_id") or "").strip()
+                        s_idx = int(args.get("start_index") or 1)
+                        e_idx = int(args.get("end_index") or s_idx)
+                        _, res_text, slice_items = await MultiKBRetrievalRouter.read_doc_slices(
+                            doc_id_or_title=doc_key,
+                            start_index=s_idx,
+                            end_index=e_idx,
+                            expert_id=agent_id,
+                            session_mounted_kbs=getattr(self, "session_mounted_kbs", None),
+                        )
+                        for si in slice_items:
+                            retrieved_evidence_chunks.append({
+                                "source_uri": si.get("remote_uri") or doc_key,
+                                "content_text": si.get("content", "")[:1200],
+                                "authority_tier": si.get("authority_tier", 1),
+                                "score": 0.99,
+                            })
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"read_kb_slices({doc_key}, {s_idx}~{e_idx})",
+                            "reason": f"按序号连续精读切片: {s_idx}~{e_idx}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": f"[连续精读切片: {doc_key} {s_idx}~{e_idx}]",
                         }
 
                     # ── 工具: 知识图谱关系推理 (query_knowledge_graph) ──

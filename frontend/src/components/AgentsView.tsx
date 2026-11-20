@@ -187,6 +187,18 @@ export function AgentsView({
   const [formRequireEvidence, setFormRequireEvidence] = useState(true);
   const [formCustomRules, setFormCustomRules] = useState('');
   const [isGroundingPanelOpen, setIsGroundingPanelOpen] = useState(true);
+  const [registeredTools, setRegisteredTools] = useState<
+    Array<{ name: string; label: string; description: string; category: string; risk_level: string }>
+  >([]);
+  const [toolPresets, setToolPresets] = useState<
+    Array<{ id: string; label: string; description: string; tools: string[] }>
+  >([]);
+  const [toolAutoLinkNotice, setToolAutoLinkNotice] = useState<string | null>(null);
+  const [generatedEvalCases, setGeneratedEvalCases] = useState<
+    Array<{ type: string; input: string; expected_signal: string }>
+  >([]);
+  const [evalSource, setEvalSource] = useState<string | null>(null);
+  const [copiedEvalIdx, setCopiedEvalIdx] = useState<number | null>(null);
 
   // v1.5.9 专家知识底座与对外 API 状态
   const [formKbIsolationMode, setFormKbIsolationMode] = useState<string>('strict_bound_only');
@@ -210,6 +222,14 @@ export function AgentsView({
       .finally(() => {
         if (isMounted) setSkillsLoading(false);
       });
+    apiFetch('/api/v1/agents/registered-tools')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        if (!isMounted || !data) return;
+        if (Array.isArray(data.tools)) setRegisteredTools(data.tools);
+        if (Array.isArray(data.presets)) setToolPresets(data.presets);
+      })
+      .catch(() => {});
     const unsubscribe = subscribeSkillsUpdated(() => {
       if (!isMounted) return;
       const latest = getCachedWorkspaceSkills(workspace?.id);
@@ -306,6 +326,8 @@ export function AgentsView({
     setFormVerifyToolCall(true);
     setFormRequireEvidence(true);
     setFormCustomRules('');
+    setGeneratedEvalCases([]);
+    setEvalSource(null);
     setFormKbIsolationMode('strict_bound_only');
     setFormStrictGrounding(true);
     setFormMinRelevanceScore(0.42);
@@ -377,6 +399,14 @@ export function AgentsView({
         setFormVerifyToolCall(gc.verify_tool_call ?? true);
         setFormRequireEvidence(gc.require_evidence ?? true);
         setFormCustomRules(gc.custom_rules || '');
+      }
+
+      if (Array.isArray(draft.eval_cases)) {
+        setGeneratedEvalCases(draft.eval_cases);
+        setEvalSource(data?.generation_source || null);
+      } else {
+        setGeneratedEvalCases([]);
+        setEvalSource(null);
       }
 
       if (draft.schedule && draft.schedule.enabled) {
@@ -1301,6 +1331,58 @@ export function AgentsView({
                 )}
               </div>
 
+              {/* 推荐验收测试集（Run Trace 可观测核验） */}
+              {generatedEvalCases.length > 0 && (
+                <div className="rounded-xl border border-emerald-500/30 bg-emerald-500/5 p-3 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs font-semibold text-foreground">
+                      推荐验收测试集（Run Trace 核验）
+                    </span>
+                    <span className="text-[10px] px-2 py-0.5 rounded-full border border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                      {evalSource === 'light_llm' ? '轻量模型定制生成' : '规则基线生成'}
+                    </span>
+                  </div>
+                  <div className="space-y-2">
+                    {generatedEvalCases.map((item, idx) => {
+                      const typeLabelMap: Record<string, string> = {
+                        normal_path: '正常路径',
+                        missing_data_trap: '缺资料陷阱',
+                        out_of_bounds: '越界请求',
+                        tool_routing: '工具路由',
+                        high_risk_action: '高风险动作',
+                      };
+                      return (
+                        <div
+                          key={idx}
+                          className="rounded-lg border border-border bg-surface-100 p-2.5 text-[11px] space-y-1"
+                        >
+                          <div className="flex items-center justify-between gap-2">
+                            <span className="px-1.5 py-0.5 rounded bg-surface-200 border border-border text-[10px] font-medium text-foreground">
+                              {typeLabelMap[item.type] || item.type}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                navigator.clipboard.writeText(item.input);
+                                setCopiedEvalIdx(idx);
+                                setTimeout(() => setCopiedEvalIdx((prev) => (prev === idx ? null : prev)), 1500);
+                              }}
+                              className="text-[10px] text-emerald-600 dark:text-emerald-400 hover:underline"
+                            >
+                              {copiedEvalIdx === idx ? '已复制测试句' : '复制测试句'}
+                            </button>
+                          </div>
+                          <p className="text-foreground leading-relaxed">输入：{item.input}</p>
+                          <p className="text-muted-foreground leading-relaxed">
+                            预期信号：{item.expected_signal}
+                          </p>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+
               {/* v1.5.9 专属规程知识底座与对外 API 服务化面板 */}
               <ExpertKnowledgeAndApiPanel
                 agentId={editingAgent?.id}
@@ -1470,20 +1552,152 @@ export function AgentsView({
                 )}
               </div>
 
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
+              <div className="space-y-3 pt-1">
                 <div>
-                  <label className="block text-xs font-semibold text-foreground mb-1 flex items-center space-x-1">
-                    <Wrench className="w-3 h-3 text-muted-foreground" />
-                    <span>工具白名单 (可选，逗号分隔)</span>
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="如: read_file, write_file, run_command"
-                    value={formAllowedTools}
-                    onChange={(e) => setFormAllowedTools(e.target.value)}
-                    className="w-full px-3 py-1.5 rounded-xl bg-surface-100 border border-border text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground/40"
-                  />
+                  <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                    <label className="text-xs font-semibold text-foreground flex items-center space-x-1">
+                      <Wrench className="w-3.5 h-3.5 text-muted-foreground" />
+                      <span>
+                        工具白名单（已选 {parseCommaList(formAllowedTools).length} 个 · 留空表示不限制）
+                      </span>
+                    </label>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {toolPresets.map((preset) => (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          title={preset.description}
+                          onClick={() => {
+                            const current = parseCommaList(formAllowedTools);
+                            const merged = Array.from(new Set([...current, ...preset.tools]));
+                            setFormAllowedTools(merged.join(', '));
+                          }}
+                          className="px-2 py-0.5 rounded-md border border-emerald-500/40 bg-emerald-500/10 text-[11px] font-medium text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 transition-colors"
+                        >
+                          + {preset.label}
+                        </button>
+                      ))}
+                      {parseCommaList(formAllowedTools).length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setFormAllowedTools('')}
+                          className="px-2 py-0.5 rounded-md border border-border bg-surface-100 text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                        >
+                          清空
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {toolAutoLinkNotice && (
+                    <div className="mb-2 px-2.5 py-1.5 rounded-lg border border-sky-500/30 bg-sky-500/10 text-[11px] text-sky-600 dark:text-sky-400">
+                      {toolAutoLinkNotice}
+                    </div>
+                  )}
+
+                  {registeredTools.length > 0 ? (
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-56 overflow-y-auto p-2 rounded-xl bg-surface-100 border border-border">
+                      {registeredTools.map((tool) => {
+                        const selectedList = parseCommaList(formAllowedTools);
+                        const checked = selectedList.includes(tool.name);
+                        const riskBadge =
+                          tool.risk_level === 'high'
+                            ? 'border-rose-500/40 bg-rose-500/10 text-rose-600 dark:text-rose-400'
+                            : tool.risk_level === 'write'
+                            ? 'border-amber-500/40 bg-amber-500/10 text-amber-600 dark:text-amber-400'
+                            : 'border-border bg-surface-200 text-muted-foreground';
+                        return (
+                          <button
+                            key={tool.name}
+                            type="button"
+                            onClick={() => {
+                              let next: string[];
+                              if (checked) {
+                                next = selectedList.filter((t) => t !== tool.name);
+                              } else {
+                                next = [...selectedList, tool.name];
+                                if (
+                                  (tool.name === 'list_kb_doc_toc' || tool.name === 'read_kb_slices') &&
+                                  !next.includes('search_cloud_wiki')
+                                ) {
+                                  next.push('search_cloud_wiki');
+                                  setToolAutoLinkNotice('防呆保护：已自动联动勾选「知识库主检索 (search_cloud_wiki)」');
+                                  setTimeout(() => setToolAutoLinkNotice(null), 3000);
+                                }
+                              }
+                              setFormAllowedTools(next.join(', '));
+                            }}
+                            className={`flex items-start gap-2 p-2 rounded-lg border text-left transition-colors ${
+                              checked
+                                ? 'border-emerald-500/60 bg-emerald-500/10'
+                                : 'border-border/70 bg-background hover:bg-surface-200/60'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              readOnly
+                              checked={checked}
+                              className="mt-0.5 rounded border-border accent-emerald-600 pointer-events-none"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <div className="flex items-center justify-between gap-1">
+                                <span className="text-xs font-semibold text-foreground truncate">
+                                  {tool.label}
+                                </span>
+                                <span className={`shrink-0 px-1.5 py-0.2 rounded border text-[9px] ${riskBadge}`}>
+                                  {tool.category}
+                                </span>
+                              </div>
+                              <p className="mt-0.5 text-[10px] text-muted-foreground line-clamp-2">
+                                {tool.description}
+                              </p>
+                              <div className="mt-0.5 text-[10px] font-mono text-muted-foreground/80">
+                                {tool.name}
+                              </div>
+                            </div>
+                          </button>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <input
+                      type="text"
+                      placeholder="如: read_local_file, search_cloud_wiki"
+                      value={formAllowedTools}
+                      onChange={(e) => setFormAllowedTools(e.target.value)}
+                      className="w-full px-3 py-1.5 rounded-xl bg-surface-100 border border-border text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground/40"
+                    />
+                  )}
+
+                  {/* 向后兼容：若已有专家数据中包含非注册表内的扩展工具名，以标签展示并允许移除 */}
+                  {(() => {
+                    const catalogNames = new Set(registeredTools.map((t) => t.name));
+                    const legacyExtras = parseCommaList(formAllowedTools).filter(
+                      (t) => catalogNames.size > 0 && !catalogNames.has(t)
+                    );
+                    if (legacyExtras.length === 0) return null;
+                    return (
+                      <div className="mt-1.5 flex flex-wrap items-center gap-1 text-[10px]">
+                        <span className="text-muted-foreground">兼容历史工具:</span>
+                        {legacyExtras.map((extra) => (
+                          <button
+                            key={extra}
+                            type="button"
+                            onClick={() => {
+                              const next = parseCommaList(formAllowedTools).filter((t) => t !== extra);
+                              setFormAllowedTools(next.join(', '));
+                            }}
+                            className="px-1.5 py-0.5 rounded border border-border bg-surface-100 font-mono text-foreground hover:border-rose-500/50"
+                            title="点击移除该历史工具"
+                          >
+                            {extra} ×
+                          </button>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
+
                 <div>
                   <label className="block text-xs font-semibold text-foreground mb-1 flex items-center space-x-1">
                     <FolderLock className="w-3 h-3 text-muted-foreground" />

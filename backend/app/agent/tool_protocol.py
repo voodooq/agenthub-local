@@ -196,9 +196,9 @@ class ToolProtocolAdapter:
         r"[<\[]tool_call\s+name=[\"']?([^\"'\]>]+)[\"']?\s*[>\]](.*?)[<\[]/tool_call[>\]]",
         re.DOTALL | re.IGNORECASE,
     )
-    # 清洗无意义的空 tool_call 块（含仅有 ```json {} ``` 或空白），防止触发伪工具调用重发
+    # 清洗无意义的空 tool_call 壳标签（仅限无工具名或 name="" 的空壳），切勿误杀带合法 name 的无参工具调用（如 list_kb_docs）
     _EMPTY_TOOL_CALL_RE = re.compile(
-        r"[<\[]tool_call(?:\s+name=[\"']?[^\"'\]>]*[\"']?)?\s*[>\]]?\s*(?:```(?:json|python)?\s*(?:\{\s*\}|#[^\n]*)?\s*```|\{\s*\})?\s*[<\[]/tool_call[>\]]",
+        r"[<\[]tool_call(?:\s+name=[\"']\s*[\"'])?\s*[>\]]?\s*(?:```(?:json|python)?\s*(?:\{\s*\}|#[^\n]*)?\s*```|\{\s*\})?\s*[<\[]/tool_call[>\]]",
         re.DOTALL | re.IGNORECASE,
     )
     # 模式 1D: 兼容紧凑属性式声明 <tool_call name="func_name"[:\s]*({.*})</tool_call> 或无闭合变体
@@ -994,6 +994,56 @@ class ToolProtocolAdapter:
                 },
             },
             {
+                "name": "list_kb_docs",
+                "description": "免传 doc_id，按当前专家挂载且已发布的知识库范围，去重列出所有可用文档的 doc_id、文件名、范围名称、年份与总切片数（不返回正文）。当用户提问宽泛或切换了新赛事关键词时，先调用此工具确认库内真实包含哪些比赛规程。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filter_keyword": {
+                            "type": "string",
+                            "description": "可选过滤关键词（如年份或赛事名称关键字），留空则列出全部文档。",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "list_kb_doc_toc",
+                "description": "当知识库检索只命中某文档的少数切片（如 1/38）却未找到具体条款时，按 doc_id（见切片底部[指针：上一片=<doc_id>#...]）或文件名列出该文档全部切片序号与章节目录，用于精准定位章节序号。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "doc_id": {
+                            "type": "string",
+                            "description": "文档唯一标识 doc_id（来自切片底部指针）、remote_uri 或文件名关键字。",
+                        },
+                    },
+                    "required": ["doc_id"],
+                },
+            },
+            {
+                "name": "read_kb_slices",
+                "description": "按 (doc_id, start_index, end_index) 直接连续读取指定文档的连续切片原文（例如一次读取第 5 到第 8 片），单次最多连续读取 12 片。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "doc_id": {
+                            "type": "string",
+                            "description": "文档唯一标识 doc_id（来自切片底部指针）、remote_uri 或文件名。",
+                        },
+                        "start_index": {
+                            "type": "integer",
+                            "description": "起始切片序号（从 1 开始）。",
+                        },
+                        "end_index": {
+                            "type": "integer",
+                            "description": "结束切片序号（包含，建议不超过 start_index + 11）。",
+                        },
+                    },
+                    "required": ["doc_id", "start_index", "end_index"],
+                },
+            },
+            {
                 "name": "query_knowledge_graph",
                 "description": "基于 SQLite 递归 CTE 查询以目标实体为中心的 2~3 跳知识图谱关系路径（用于梳理组织归属、历任对接人、兼项限制等关联关系链）。",
                 "parameters": {
@@ -1242,6 +1292,8 @@ class ToolProtocolAdapter:
         支持从 Markdown 代码块（```powershell ... ```）中直接提取免转义执行内容。
         """
         raw = (raw_json or "").strip()
+        if not raw:
+            return {}
         # 1. 直接提取内嵌的 Markdown 代码块
         code_block_m = re.search(r"```(?:powershell|bash|sh|cmd|python|json)?\s*\n([\s\S]*?)\n```", raw, re.IGNORECASE)
         if code_block_m and func_name == "execute_local_command" and '"command"' not in raw:

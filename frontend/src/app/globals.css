@@ -55,19 +55,19 @@
 html.light {
   color-scheme: light;
 
-  /* 浅色模式 (Strata 舒缓温润鼠尾草白 Sage Minimal) - 不刺眼、呼吸感极强 */
-  --bg-main: #f4f6f5;
+  /* 浅色模式 (晨间护眼扁平风) */
+  --bg-main: #f8fafc;
   --bg-sidebar: #ffffff;
   --bg-card: #ffffff;
-  --bg-surface-50: #eef2f0;
+  --bg-surface-50: #f1f5f9;
   --bg-surface-100: #ffffff;
-  --bg-surface-200: #f4f6f5;
-  --bg-surface-300: #e3eae6;
+  --bg-surface-200: #f8fafc;
+  --bg-surface-300: #e2e8f0;
 
-  --color-foreground: #18221d;
-  --color-foreground-muted: #667870;
-  --color-border: rgba(0, 0, 0, 0.07);
-  --color-border-hover: rgba(5, 150, 105, 0.28);
+  --color-foreground: #0f172a;
+  --color-foreground-muted: #64748b;
+  --color-border: #e2e8f0;
+  --color-border-hover: #cbd5e1;
 
   --color-primary: #059669;
   --color-primary-hover: #047857;

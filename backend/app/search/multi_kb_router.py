@@ -19,6 +19,7 @@ from ..kb.storage import KBStorageManager
 from .embedding_provider import embedding_router, HAS_NUMPY, np
 from .temporal_reranker import TemporalReranker
 from .hybrid_engine import HybridSearchEngine
+from .intent_router import QueryIntentRouter
 from .rule_extractor import UniversalRuleExtractor, StructuredRuleExtractor
 
 
@@ -50,6 +51,7 @@ class MultiKBRetrievalRouter:
                         "priority_rank": idx + 1,
                         "domain_type": k.get("domain_type") or "general",
                         "rule_profile_json": k.get("rule_profile_json") or "",
+                        "is_published": bool(k.get("is_published")),
                     })
             if targets:
                 return targets
@@ -66,6 +68,7 @@ class MultiKBRetrievalRouter:
                         "priority_rank": b["priority_rank"],
                         "domain_type": b.get("domain_type") or "general",
                         "rule_profile_json": b.get("rule_profile_json") or "",
+                        "is_published": bool(b.get("is_published", True)),
                     }
                     for b in bound
                 ]
@@ -96,9 +99,10 @@ class MultiKBRetrievalRouter:
                 [],
             )
 
+        intent = QueryIntentRouter.classify(query)
         all_candidates: list[dict[str, Any]] = []
 
-        # 并行检索各个独立知识库 index.db
+        # 并行检索各个独立知识库 index.db（按意图三路分流）
         for target in targets:
             kb_id = target["kb_id"]
             ver = target["version"]
@@ -113,6 +117,32 @@ class MultiKBRetrievalRouter:
             try:
                 # 优先级加权系数 W_priority = 1.15 - 0.05 * (rank - 1)
                 priority_weight = max(0.8, 1.15 - 0.05 * (rank - 1))
+                if intent == "cross_version_compare":
+                    l2_hits = await cls._fetch_cross_version_l2(
+                        db_path=db_path, kb_id=kb_id, kb_name=kb_name, version=ver, priority_weight=priority_weight
+                    )
+                    if l2_hits:
+                        all_candidates.extend(l2_hits)
+                        continue
+                elif intent == "macro_process_summary":
+                    macro_hits = await cls._fetch_macro_summaries(
+                        db_path=db_path, kb_id=kb_id, kb_name=kb_name, version=ver, priority_weight=priority_weight
+                    )
+                    if macro_hits:
+                        all_candidates.extend(macro_hits)
+                        detail_hits = await cls._search_single_index_db(
+                            db_path=db_path,
+                            query=query,
+                            top_k=2,
+                            kb_id=kb_id,
+                            kb_name=kb_name,
+                            version=ver,
+                            priority_weight=priority_weight * 0.9,
+                            include_archived=include_archived,
+                        )
+                        all_candidates.extend(detail_hits[:2])
+                        continue
+
                 kb_chunks = await cls._search_single_index_db(
                     db_path=db_path,
                     query=query,
@@ -420,9 +450,14 @@ class MultiKBRetrievalRouter:
                         except Exception:
                             pass
 
-                    # 如果是口语提问命中的切片，提升相关度激励
+                    # Wiki 高权威反哺与口语提问激励加权
                     role = r["chunk_role"] or "child"
-                    role_boost = 1.15 if role == "hype_question" else 1.0
+                    if role == "wiki_page":
+                        role_boost = 1.25
+                    elif role == "hype_question":
+                        role_boost = 1.15
+                    else:
+                        role_boost = 1.0
 
                     final_score = base_score * tier_bonus * priority_weight * role_boost
                     scored_list.append((final_score, {
@@ -455,3 +490,372 @@ class MultiKBRetrievalRouter:
             return results
 
         return await asyncio.to_thread(_do_query)
+
+    @classmethod
+    async def _fetch_cross_version_l2(
+        cls,
+        db_path: Path,
+        kb_id: str,
+        kb_name: str,
+        version: str,
+        priority_weight: float,
+    ) -> list[dict[str, Any]]:
+        """跨版本对比意图专路：按 topic_cluster_id 提取最新与次新两版 summary_l2。"""
+        def _query() -> list[dict[str, Any]]:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT id, remote_uri, title, content, authority_tier, mtime,
+                           doc_year, effective_date, effective_ts, doc_priority_type,
+                           topic_cluster_id, is_latest_in_cluster, chunk_role, parent_chunk_id
+                    FROM hybrid_chunks
+                    WHERE chunk_role = 'summary_l2'
+                    ORDER BY doc_year DESC, effective_ts DESC, mtime DESC
+                    """
+                ).fetchall()
+                if not rows:
+                    return []
+
+                per_cluster_count: dict[str, int] = {}
+                selected: list[dict[str, Any]] = []
+                for idx, r in enumerate(rows):
+                    cluster = r["topic_cluster_id"] or "__default__"
+                    cnt = per_cluster_count.get(cluster, 0)
+                    if cnt >= 2:
+                        continue
+                    per_cluster_count[cluster] = cnt + 1
+                    score = max(0.85, 1.0 - idx * 0.02) * priority_weight
+                    selected.append({
+                        "id": r["id"],
+                        "kb_id": kb_id,
+                        "kb_name": kb_name,
+                        "version": version,
+                        "remote_uri": r["remote_uri"],
+                        "title": r["title"],
+                        "content": r["content"],
+                        "authority_tier": r["authority_tier"] or 1,
+                        "mtime": r["mtime"],
+                        "doc_year": r["doc_year"],
+                        "effective_date": r["effective_date"],
+                        "effective_ts": r["effective_ts"],
+                        "doc_priority_type": r["doc_priority_type"],
+                        "topic_cluster_id": r["topic_cluster_id"],
+                        "is_latest_in_cluster": r["is_latest_in_cluster"],
+                        "chunk_role": "summary_l2",
+                        "parent_chunk_id": r["id"],
+                        "priority_weight": priority_weight,
+                        "final_score": round(score, 4),
+                        "cosine_similarity": 1.0,
+                    })
+                return selected
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_query)
+
+    @classmethod
+    async def _fetch_macro_summaries(
+        cls,
+        db_path: Path,
+        kb_id: str,
+        kb_name: str,
+        version: str,
+        priority_weight: float,
+    ) -> list[dict[str, Any]]:
+        """全流程/宏观总结意图专路：优先提取 summary_l2 (Top-1) + summary_l1 (Top-4)。"""
+        def _query() -> list[dict[str, Any]]:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                l2_rows = conn.execute(
+                    """
+                    SELECT id, remote_uri, title, content, authority_tier, mtime,
+                           doc_year, effective_date, effective_ts, doc_priority_type,
+                           topic_cluster_id, is_latest_in_cluster
+                    FROM hybrid_chunks
+                    WHERE chunk_role = 'summary_l2'
+                    ORDER BY is_latest_in_cluster DESC, effective_ts DESC
+                    LIMIT 1
+                    """
+                ).fetchall()
+                l1_rows = conn.execute(
+                    """
+                    SELECT id, remote_uri, title, content, authority_tier, mtime,
+                           doc_year, effective_date, effective_ts, doc_priority_type,
+                           topic_cluster_id, is_latest_in_cluster
+                    FROM hybrid_chunks
+                    WHERE chunk_role = 'summary_l1'
+                    ORDER BY is_latest_in_cluster DESC, effective_ts DESC
+                    LIMIT 4
+                    """
+                ).fetchall()
+                results: list[dict[str, Any]] = []
+                for role, group in (("summary_l2", l2_rows), ("summary_l1", l1_rows)):
+                    base = 1.05 if role == "summary_l2" else 0.98
+                    for r in group:
+                        results.append({
+                            "id": r["id"],
+                            "kb_id": kb_id,
+                            "kb_name": kb_name,
+                            "version": version,
+                            "remote_uri": r["remote_uri"],
+                            "title": r["title"],
+                            "content": r["content"],
+                            "authority_tier": r["authority_tier"] or 1,
+                            "mtime": r["mtime"],
+                            "doc_year": r["doc_year"],
+                            "effective_date": r["effective_date"],
+                            "effective_ts": r["effective_ts"],
+                            "doc_priority_type": r["doc_priority_type"],
+                            "topic_cluster_id": r["topic_cluster_id"],
+                            "is_latest_in_cluster": r["is_latest_in_cluster"],
+                            "chunk_role": role,
+                            "parent_chunk_id": r["id"],
+                            "priority_weight": priority_weight,
+                            "final_score": round(base * priority_weight, 4),
+                            "cosine_similarity": 1.0,
+                        })
+                return results
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_query)
+
+    @classmethod
+    def _parse_slice_index_and_doc_id(cls, content: str, fallback_uri: str, fallback_title: str) -> tuple[int, int, str]:
+        """从标准化切片内容中提取 (slice_idx, slice_total, doc_id)。"""
+        m_idx = re.search(r"【切片】(\d+)/(\d+)", content or "")
+        s_idx = int(m_idx.group(1)) if m_idx else 0
+        s_total = int(m_idx.group(2)) if m_idx else 0
+        m_doc = re.search(r"\[指针：上一片=([a-zA-Z0-9_-]+)#", content or "")
+        d_id = m_doc.group(1) if m_doc else KBStorageManager._derive_doc_id(fallback_uri, fallback_title)
+        return s_idx, s_total, d_id
+
+    @classmethod
+    async def _fetch_doc_child_slices(
+        cls,
+        doc_id_or_title: str,
+        expert_id: str | None = None,
+        session_mounted_kbs: list[str] | None = None,
+    ) -> tuple[bool, list[dict[str, Any]]]:
+        """在已授权的知识库中按 doc_id、remote_uri 或标题定位目标文档的全部 child 切片（按序号升序）。"""
+        target_kbs = await cls.resolve_target_kbs(expert_id=expert_id, session_mounted_kbs=session_mounted_kbs)
+        if not target_kbs:
+            return False, []
+
+        needle = (doc_id_or_title or "").strip()
+        if not needle:
+            return True, []
+
+        def _query() -> list[dict[str, Any]]:
+            for kb in target_kbs:
+                db_path = KBStorageManager.get_version_db_path(kb["kb_id"], kb["version"])
+                if not db_path.exists():
+                    continue
+                conn = sqlite3.connect(str(db_path))
+                conn.row_factory = sqlite3.Row
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT id, remote_uri, title, section_path, content, authority_tier
+                        FROM hybrid_chunks
+                        WHERE chunk_role = 'child'
+                          AND (content LIKE ? OR remote_uri LIKE ? OR title LIKE ?)
+                        ORDER BY rowid ASC
+                        """,
+                        (f"%上一片={needle}#%", f"%{needle}%", f"%{needle}%"),
+                    ).fetchall()
+                    if not rows:
+                        continue
+                    items: list[dict[str, Any]] = []
+                    for pos, r in enumerate(rows, 1):
+                        txt = str(r["content"] or "")
+                        s_idx, s_total, d_id = cls._parse_slice_index_and_doc_id(
+                            txt, str(r["remote_uri"] or ""), str(r["title"] or "")
+                        )
+                        items.append({
+                            "kb_id": kb["kb_id"],
+                            "kb_name": kb["name"],
+                            "version": kb["version"],
+                            "doc_id": d_id,
+                            "remote_uri": str(r["remote_uri"] or ""),
+                            "title": str(r["title"] or ""),
+                            "section_path": str(r["section_path"] or ""),
+                            "slice_index": s_idx or pos,
+                            "slice_total": s_total or len(rows),
+                            "content": txt,
+                            "authority_tier": r["authority_tier"] or 1,
+                        })
+                    items.sort(key=lambda x: x["slice_index"])
+                    return items
+                finally:
+                    conn.close()
+            return []
+
+        matched = await asyncio.to_thread(_query)
+        return True, matched
+
+    @classmethod
+    async def list_doc_toc(
+        cls,
+        doc_id_or_title: str,
+        expert_id: str | None = None,
+        session_mounted_kbs: list[str] | None = None,
+    ) -> tuple[bool, str]:
+        """列出指定文档全部 child 切片的【切片序号】、【章节】与前 40 字摘要目录。"""
+        has_gate, slices = await cls._fetch_doc_child_slices(
+            doc_id_or_title=doc_id_or_title,
+            expert_id=expert_id,
+            session_mounted_kbs=session_mounted_kbs,
+        )
+        if not has_gate:
+            return False, "当前未挂载任何知识库，无法查阅文档目录。"
+        if not slices:
+            return True, f"未在已挂载知识库中找到标识为 `{doc_id_or_title}` 的文档切片。"
+
+        first = slices[0]
+        lines = [
+            f"### 📑 文档切片目录：`{first['title']}` (doc_id=`{first['doc_id']}`, 共 {len(slices)} 片 | 来源库: {first['kb_name']} {first['version']})",
+            "如需读取指定章节原文，请调用 `read_kb_slices(doc_id=\"{doc_id}\", start_index=..., end_index=...)`：\n".replace("{doc_id}", first["doc_id"]),
+        ]
+        for s in slices:
+            body = KBStorageManager.strip_chunk_wrappers(s["content"]).replace("\n", " ").strip()
+            lines.append(f"- **[{s['slice_index']}/{s['slice_total']}]** `{s['section_path']}` — {body[:45]}...")
+        return True, "\n".join(lines)
+
+    @classmethod
+    async def read_doc_slices(
+        cls,
+        doc_id_or_title: str,
+        start_index: int = 1,
+        end_index: int = 5,
+        expert_id: str | None = None,
+        session_mounted_kbs: list[str] | None = None,
+    ) -> tuple[bool, str, list[dict[str, Any]]]:
+        """按 (doc_id, start_index, end_index) 直接连续读取指定序号范围的切片完整正文。"""
+        has_gate, slices = await cls._fetch_doc_child_slices(
+            doc_id_or_title=doc_id_or_title,
+            expert_id=expert_id,
+            session_mounted_kbs=session_mounted_kbs,
+        )
+        if not has_gate:
+            return False, "当前未挂载任何知识库，无法读取切片。", []
+        if not slices:
+            return True, f"未找到 doc_id=`{doc_id_or_title}` 的文档切片。", []
+
+        s_idx = max(1, int(start_index or 1))
+        e_idx = max(s_idx, min(int(end_index or s_idx), s_idx + 11))  # 单次最多连续读取 12 片
+        selected = [s for s in slices if s_idx <= s["slice_index"] <= e_idx]
+        if not selected:
+            return True, f"文档 `{slices[0]['title']}` (doc_id=`{slices[0]['doc_id']}`) 共 {len(slices)} 片，范围 {s_idx}~{e_idx} 无命中。", []
+
+        lines = [
+            f"### 📖 连续切片精读：`{selected[0]['title']}` (doc_id=`{selected[0]['doc_id']}`, 切片 {s_idx}~{e_idx}/{selected[0]['slice_total']})\n"
+        ]
+        for s in selected:
+            lines.append(s["content"])
+            lines.append("")
+        return True, "\n".join(lines), selected
+
+    @classmethod
+    async def list_mounted_docs(
+        cls,
+        expert_id: str | None = None,
+        session_mounted_kbs: list[str] | None = None,
+        filter_keyword: str = "",
+    ) -> tuple[bool, str, list[dict[str, Any]]]:
+        """按当前专家挂载且已发布(is_published=1)的知识库，去重列出全部文档的 doc_id/文件名/范围/年份/切片数。"""
+        target_kbs = await cls.resolve_target_kbs(
+            expert_id=expert_id,
+            session_mounted_kbs=session_mounted_kbs,
+        )
+        if not target_kbs:
+            return False, "当前未挂载任何知识库，无法列出文档清单。", []
+
+        published_kbs = [k for k in target_kbs if k.get("is_published", False)]
+        if not published_kbs:
+            return False, "当前挂载的知识库均未发布正式版本，已受发布隔离门控拦截。", []
+
+        kw = (filter_keyword or "").strip().lower()
+
+        def _scan() -> list[dict[str, Any]]:
+            docs_out: list[dict[str, Any]] = []
+            seen_doc_keys: set[tuple[str, str]] = set()
+            for kb in published_kbs:
+                db_path = KBStorageManager.get_version_db_path(kb["kb_id"], kb["version"])
+                if not db_path.exists():
+                    continue
+                conn = sqlite3.connect(str(db_path))
+                conn.row_factory = sqlite3.Row
+                try:
+                    rows = conn.execute(
+                        """
+                        SELECT remote_uri, title, doc_year, topic_cluster_id, content
+                        FROM hybrid_chunks
+                        WHERE chunk_role = 'child' OR chunk_role IS NULL
+                        ORDER BY rowid ASC
+                        """
+                    ).fetchall()
+                    grouped: dict[str, dict[str, Any]] = {}
+                    for r in rows:
+                        uri = str(r["remote_uri"] or "")
+                        title = str(r["title"] or Path(uri).name or "未命名文档")
+                        txt = str(r["content"] or "")
+                        _, _, doc_id = cls._parse_slice_index_and_doc_id(txt, uri, title)
+                        if doc_id not in grouped:
+                            m_scope = re.search(r"【范围】([^|\n]+)", txt)
+                            scope_name = (
+                                m_scope.group(1).strip()
+                                if m_scope
+                                else str(r["topic_cluster_id"] or Path(title).stem or "通用").strip()
+                            )
+                            m_year = re.search(r"【年份】([^|\n]+)", txt)
+                            year_str = (
+                                m_year.group(1).strip()
+                                if m_year
+                                else (str(r["doc_year"]) if int(r["doc_year"] or 0) > 0 else "通用")
+                            )
+                            grouped[doc_id] = {
+                                "kb_id": kb["kb_id"],
+                                "kb_name": kb["name"],
+                                "version": kb["version"],
+                                "doc_id": doc_id,
+                                "remote_uri": uri,
+                                "title": title,
+                                "scope_name": scope_name,
+                                "year": year_str,
+                                "slice_count": 0,
+                            }
+                        grouped[doc_id]["slice_count"] += 1
+
+                    for d in grouped.values():
+                        if kw and (
+                            kw not in d["title"].lower()
+                            and kw not in d["scope_name"].lower()
+                            and kw not in d["year"].lower()
+                        ):
+                            continue
+                        key = (kb["kb_id"], d["doc_id"])
+                        if key not in seen_doc_keys:
+                            seen_doc_keys.add(key)
+                            docs_out.append(d)
+                finally:
+                    conn.close()
+            return docs_out
+
+        docs = await asyncio.to_thread(_scan)
+        if not docs:
+            return True, "当前已发布知识库中未匹配到任何文档记录。", []
+
+        lines = [
+            f"### 📚 已发布知识库文档清单（共 {len(docs)} 份文档，仅返回元信息不含正文）\n"
+        ]
+        for idx, d in enumerate(docs, 1):
+            lines.append(
+                f"{idx}. **【范围】{d['scope_name']}** | 【年份】{d['year']} | 【文件名】`{d['title']}` | "
+                f"doc_id=`{d['doc_id']}` | 切片数={d['slice_count']}（来源库：{d['kb_name']} {d['version']}）"
+            )
+        lines.append("\n如需查看某份文档的详细章节结构，请调用 `list_kb_doc_toc(doc_id=\"...\")`。")
+        return True, "\n".join(lines), docs

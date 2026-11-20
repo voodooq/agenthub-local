@@ -265,9 +265,9 @@ async def chat_completions(
 
     merged_system_prompt = "\n\n".join(system_parts)
 
-    # 转换历史记录
+    # 仅保留紧邻的最近 2 轮必要指代上下文，防止恶意超长历史投毒
     history_tuples = []
-    for m in req.messages[:-1]:
+    for m in req.messages[:-1][-4:]:
         history_tuples.append((m.role, m.content))
 
     # 标记前台对话活跃（让路后台异步任务）

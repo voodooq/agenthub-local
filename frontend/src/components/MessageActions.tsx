@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState } from 'react';
-import { Copy, Check, ThumbsUp, ThumbsDown, RotateCcw, MoreHorizontal, SlidersHorizontal, Download, GitBranch } from 'lucide-react';
+import { Copy, Check, ThumbsUp, ThumbsDown, RotateCcw, MoreHorizontal, SlidersHorizontal, Download, GitBranch, BookPlus } from 'lucide-react';
 
 interface MessageActionsProps {
   content: string;
@@ -9,6 +9,7 @@ interface MessageActionsProps {
   onRegenerate?: () => void;
   onModifyTone?: (tone: 'shorter' | 'longer' | 'simpler' | 'professional') => void;
   onBranchFromHere?: () => void;
+  onSaveToWiki?: () => void;
 }
 
 export function MessageActions({
@@ -17,6 +18,7 @@ export function MessageActions({
   onRegenerate,
   onModifyTone,
   onBranchFromHere,
+  onSaveToWiki,
 }: MessageActionsProps) {
   const [copied, setCopied] = useState(false);
   const [feedback, setFeedback] = useState<'up' | 'down' | null>(null);
@@ -118,6 +120,18 @@ export function MessageActions({
           title="重新生成"
         >
           <RotateCcw className="w-3.5 h-3.5" />
+        </button>
+      )}
+
+      {/* 沉淀到 LLM Wiki */}
+      {onSaveToWiki && (
+        <button
+          onClick={onSaveToWiki}
+          className="px-2 py-1 rounded-md hover:bg-surface-200 hover:text-foreground transition-colors flex items-center gap-1 text-[11px]"
+          title="存到 Wiki 待审阅"
+        >
+          <BookPlus className="w-3.5 h-3.5" strokeWidth={1.75} />
+          <span>存到Wiki</span>
         </button>
       )}
 

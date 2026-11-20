@@ -13,6 +13,7 @@ import asyncio
 from datetime import datetime
 import hashlib
 from pathlib import Path
+import re
 import sqlite3
 import time
 from typing import Any
@@ -101,30 +102,52 @@ class KBUpgradeService:
             conn.row_factory = sqlite3.Row
             cur = conn.cursor()
             try:
-                rows = cur.execute("SELECT remote_uri, title, content, effective_date, topic_cluster_id, authority_tier FROM hybrid_chunks").fetchall()
+                rows = cur.execute(
+                    "SELECT remote_uri, title, content, doc_year, effective_date, effective_ts, doc_priority_type, topic_cluster_id, authority_tier "
+                    "FROM hybrid_chunks WHERE chunk_role IN ('parent', 'child') ORDER BY rowid ASC"
+                ).fetchall()
                 docs_dict: dict[str, dict[str, Any]] = {}
+                seen_bodies: dict[str, set[str]] = {}
                 for r in rows:
                     uri = r["remote_uri"]
+                    raw_part = str(r["content"] or "")
+                    clean_part = re.sub(r"(?m)^(?:【文档来源】|【来源】)[^\n]*\n?", "", raw_part)
+                    clean_part = re.sub(r"(?m)^\[指针：上一片=[^\n]*\]\s*$", "", clean_part).strip()
+                    if not clean_part:
+                        continue
+                    body_sig = hashlib.md5(clean_part.encode("utf-8")).hexdigest()
                     if uri not in docs_dict:
                         docs_dict[uri] = {
                             "remote_uri": uri,
                             "title": r["title"],
                             "content_parts": [],
+                            "doc_year": int(r["doc_year"] or 0),
                             "effective_date": r["effective_date"] or "",
+                            "effective_ts": int(r["effective_ts"] or 0),
+                            "doc_priority_type": r["doc_priority_type"] or "normal",
                             "topic_cluster_id": r["topic_cluster_id"] or "",
                             "authority_tier": r["authority_tier"] or 2,
                         }
-                    docs_dict[uri]["content_parts"].append(r["content"])
+                        seen_bodies[uri] = set()
+                    if body_sig in seen_bodies[uri]:
+                        continue
+                    seen_bodies[uri].add(body_sig)
+                    docs_dict[uri]["content_parts"].append(clean_part)
 
+                from ..search.temporal_reranker import TemporalMetadataExtractor
                 results = []
                 for doc in docs_dict.values():
                     full_text = "\n\n".join(doc["content_parts"])
+                    tmeta = TemporalMetadataExtractor.extract_metadata(doc["title"], full_text[:800])
                     results.append({
                         "remote_uri": doc["remote_uri"],
                         "title": doc["title"],
                         "full_text": full_text,
-                        "effective_date": doc["effective_date"],
-                        "topic_cluster_id": doc["topic_cluster_id"],
+                        "doc_year": doc["doc_year"] or tmeta.doc_year,
+                        "effective_date": doc["effective_date"] or tmeta.effective_date,
+                        "effective_ts": doc["effective_ts"] or tmeta.effective_ts,
+                        "doc_priority_type": doc["doc_priority_type"] or tmeta.doc_priority_type,
+                        "topic_cluster_id": doc["topic_cluster_id"] or tmeta.topic_cluster_id,
                         "authority_tier": doc["authority_tier"],
                     })
                 return results
@@ -143,7 +166,10 @@ class KBUpgradeService:
                 filename=doc["title"],
                 remote_uri=doc["remote_uri"],
                 authority_tier=doc["authority_tier"],
+                doc_year=doc["doc_year"],
                 effective_date=doc["effective_date"],
+                effective_ts=doc["effective_ts"],
+                doc_priority_type=doc["doc_priority_type"],
                 topic_cluster_id=doc["topic_cluster_id"],
             )
             for hc in h_chunks:

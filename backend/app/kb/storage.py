@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import time
@@ -37,6 +38,119 @@ class KBStorageManager:
         p.mkdir(parents=True, exist_ok=True)
         return p
 
+    @staticmethod
+    def strip_chunk_wrappers(text: str) -> str:
+        """剥离切片顶部【来源】/【文档来源】及底部[指针：...]标记，还原纯正文用于去重与重封。"""
+        if not text:
+            return ""
+        cleaned = re.sub(r"(?m)^(?:【文档来源】|【来源】)[^\n]*\n?", "", text)
+        cleaned = re.sub(r"(?m)\n?\[指针：上一片=[^\n]*\]\s*$", "", cleaned)
+        return cleaned.strip()
+
+    @staticmethod
+    def _derive_doc_id(remote_uri: str, title: str) -> str:
+        """生成稳定的短文档标识，用于前后切片指针与文档级去重。"""
+        seed = (remote_uri or title or "doc").strip()
+        return hashlib.md5(seed.encode("utf-8")).hexdigest()[:12]
+
+    @staticmethod
+    def _is_meaningless_identifier(val: str) -> bool:
+        """判断文件名或标识串是否为纯数字、UUID、附件编号或无有效业务词的随机串。"""
+        s = (val or "").strip()
+        if not s:
+            return True
+        if s.isdigit():
+            return True
+        if re.fullmatch(r"[0-9a-fA-F-]{16,}", s):
+            return True
+        # 过滤纯附件/附录/文件编号行（如 "附件11"、"附表2"、"第3号"）
+        if re.fullmatch(r"(?:附件|附表|附录)\s*[0-9一二三四五六七八九十A-Za-z]+", s):
+            return True
+        if re.fullmatch(r"第\s*[0-9一二三四五六七八九十]+\s*号", s):
+            return True
+        has_cjk = bool(re.search(r"[\u4e00-\u9fa5]", s))
+        has_word = bool(re.search(r"[a-zA-Z]{3,}", s))
+        return not has_cjk and not has_word
+
+    @classmethod
+    def extract_scope_name(cls, title: str, topic_cluster_id: str, doc_head_text: str) -> str:
+        """提取真实的业务范围名称：文件名/主题族为纯数字或随机串时，从正文前 5 行非空文本提取主标题。"""
+        cand = (topic_cluster_id or "").strip()
+        if cand and not cls._is_meaningless_identifier(cand):
+            return cand[:40]
+
+        stem = Path(title or "").stem.strip()
+        if stem and not cls._is_meaningless_identifier(stem):
+            return stem[:40]
+
+        # 从文档前 5 行非空文本提取主标题（优先合并前两行短封面标题）
+        non_empty_lines: list[str] = []
+        for raw_line in (doc_head_text or "").splitlines():
+            ln = raw_line.strip().lstrip("#").strip()
+            if not ln or cls._is_meaningless_identifier(ln):
+                continue
+            non_empty_lines.append(ln)
+            if len(non_empty_lines) >= 5:
+                break
+
+        if non_empty_lines:
+            first_line = non_empty_lines[0]
+            # 若首行较短且第二行为副标题/站名（非“一、”开头的章节），合并前两行
+            if (
+                len(first_line) <= 24
+                and len(non_empty_lines) >= 2
+                and len(non_empty_lines[1]) <= 18
+                and not re.match(r"^[一二三四五六七八九十]+[、.]", non_empty_lines[1])
+            ):
+                combined = f"{first_line} {non_empty_lines[1]}"
+            else:
+                combined = first_line
+            combined = re.sub(r"[（(]试行[)）]\s*$", "", combined).strip()
+            return combined[:40]
+
+        return (stem or cand or "通用")[:40]
+
+    @classmethod
+    def _format_standard_chunk_content(
+        cls,
+        *,
+        doc_title: str,
+        scope_name: str,
+        year_str: str,
+        section_path: str,
+        slice_label: str,
+        body: str,
+        doc_id: str,
+        prev_ref: str,
+        next_ref: str,
+    ) -> str:
+        """按唯一标准化规范封装顶部来源头与底部前后指针。"""
+        clean_scope = (scope_name or "通用").strip()[:40]
+        clean_section = (section_path or "正文").strip()
+        if len(clean_section) > 45:
+            clean_section = clean_section[:42].rstrip() + "..."
+        header_line = (
+            f"【来源】{doc_title} | 【范围】{clean_scope} | 【年份】{year_str} | "
+            f"【章节】{clean_section} | 【切片】{slice_label}"
+        )
+        pointer_line = f"[指针：上一片={doc_id}#{prev_ref} | 下一片={doc_id}#{next_ref}]"
+        return f"{header_line}\n{body.strip()}\n{pointer_line}"
+
+    @classmethod
+    def _validate_standard_chunk_before_insert(cls, content: str, chunk_role: str) -> None:
+        """入库前强校验断言：正文章节切片 100% 必须含标准头尾且无旧版【文档来源】污染。"""
+        if chunk_role not in ("child", "parent"):
+            return
+        lines = content.splitlines()
+        if not lines or not lines[0].startswith("【来源】"):
+            raise ValueError(f"切片缺少标准【来源】头部: {content[:80]}")
+        if "【年份】" not in lines[0] or "【切片】" not in lines[0]:
+            raise ValueError(f"切片头部缺少【年份】或【切片】字段: {lines[0]}")
+        if not lines[-1].startswith("[指针：上一片="):
+            raise ValueError(f"切片缺少标准底部[指针：...]标记: {lines[-1]}")
+        if "【文档来源】" in content:
+            raise ValueError("切片正文残留旧版【文档来源】标记，已拦截入库")
+
     @classmethod
     def upsert_chunks_to_version_db(
         cls,
@@ -58,27 +172,158 @@ class KBStorageManager:
         conn = sqlite3.connect(str(db_path))
         try:
             from ..search.light_graph_rag import LightGraphRAGEngine
+            from ..search.text_quality_gate import TextQualityGate
             from ..vfs.document_extractor import DocumentStreamExtractor
+
             actual_written = 0
             with conn:
-                # 预读已有切片 ID 与内容哈希，严格比对已有内容，避免盲目重写与 FTS5 索引无脑膨胀
+                # 预读已有切片 ID、完整内容哈希与 (doc_id, body_hash) 去重索引
                 cur = conn.cursor()
-                cur.execute("SELECT id, content FROM hybrid_chunks")
-                existing_map = {r[0]: hashlib.md5(r[1].encode("utf-8")).hexdigest() for r in cur.fetchall()}
+                cur.execute("SELECT id, remote_uri, title, content, chunk_role FROM hybrid_chunks")
+                existing_map: dict[str, str] = {}
+                existing_body_map: dict[tuple[str, str], str] = {}
+                for row_id, row_uri, row_title, row_content, row_role in cur.fetchall():
+                    raw_txt = row_content or ""
+                    existing_map[row_id] = hashlib.md5(raw_txt.encode("utf-8")).hexdigest()
+                    if row_role in ("child", "parent", None, ""):
+                        d_id = cls._derive_doc_id(row_uri or "", row_title or "")
+                        b_hash = hashlib.md5(cls.strip_chunk_wrappers(raw_txt).encode("utf-8")).hexdigest()
+                        existing_body_map[(d_id, b_hash)] = row_id
 
-                # 本批次内部去重 set，防止同批次内重复扫描导致重复插入
+                # 第一遍：剥离头尾、提取纯正文并按 (doc_id, body_hash) 批次内去重，区分线性 child 序列
+                prepared_items: list[dict[str, Any]] = []
                 seen_chunk_ids_in_batch: set[str] = set()
+                seen_body_keys_in_batch: set[tuple[str, str]] = set()
+                child_indices_by_doc: dict[str, list[int]] = {}
+                doc_head_body_map: dict[str, str] = {}
 
                 for c in chunks:
-                    content = c.get("content_text") or c.get("content") or ""
-                    title = c.get("title") or Path(c["remote_uri"]).name
-                    content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
-                    section_p = str(c.get("section_path") or "")
+                    raw_content = c.get("content_text") or c.get("content") or ""
+                    remote_uri = str(c.get("remote_uri") or "")
+                    title = c.get("title") or (Path(remote_uri).name if remote_uri else "未命名文档")
+                    chunk_role = c.get("chunk_role") or "child"
+                    section_p = str(c.get("section_path") or "正文")
+                    doc_id = cls._derive_doc_id(remote_uri, title)
 
-                    # 严格确定性唯一哈希 ID：杜绝重复切片 (若上游已有确定性 ID 则优先采用)
-                    chunk_id = c.get("id") or hashlib.md5(
-                        f"{c['remote_uri']}:{section_p}:{content_hash}".encode("utf-8")
-                    ).hexdigest()
+                    if chunk_role in ("child", "parent"):
+                        body = cls.strip_chunk_wrappers(raw_content)
+                        if not body:
+                            continue
+                        if doc_id not in doc_head_body_map:
+                            doc_head_body_map[doc_id] = body
+                        is_acceptable, reject_reason = TextQualityGate.is_chunk_acceptable(body)
+                        if not is_acceptable:
+                            logger.debug(f"[KBStorage] 切片质量未达标 ({reject_reason})，丢弃切片: {title} | {section_p}")
+                            continue
+
+                        body_hash = hashlib.md5(body.encode("utf-8")).hexdigest()
+                        dedup_key = (doc_id, body_hash)
+                        if dedup_key in seen_body_keys_in_batch:
+                            logger.debug(f"[KBStorage] 命中同批次纯正文重复，跳过: {title} | {section_p}")
+                            continue
+                        seen_body_keys_in_batch.add(dedup_key)
+                    else:
+                        body = raw_content
+                        body_hash = hashlib.md5(body.encode("utf-8")).hexdigest()
+
+                    doc_year = int(c.get("doc_year") or 0)
+                    effective_date = str(c.get("effective_date") or "")
+                    if doc_year == 0 and len(effective_date) >= 4 and effective_date[:4].isdigit():
+                        doc_year = int(effective_date[:4])
+                    if doc_year == 0:
+                        doc_year = DocumentStreamExtractor.extract_doc_year(title, body[:400])
+
+                    topic_cluster_id = str(c.get("topic_cluster_id") or "")
+                    if not topic_cluster_id:
+                        topic_cluster_id = DocumentStreamExtractor.extract_topic_cluster_id(title)
+
+                    explicit_scope = str(c.get("scope_name") or "").strip()
+                    if explicit_scope and not cls._is_meaningless_identifier(explicit_scope):
+                        scope_name = explicit_scope[:40]
+                    else:
+                        scope_name = cls.extract_scope_name(
+                            title=title,
+                            topic_cluster_id=topic_cluster_id,
+                            doc_head_text=doc_head_body_map.get(doc_id, body),
+                        )
+                    if cls._is_meaningless_identifier(topic_cluster_id) and scope_name:
+                        topic_cluster_id = scope_name
+                    year_str = str(doc_year) if doc_year > 0 else "通用"
+
+                    item = {
+                        **c,
+                        "remote_uri": remote_uri,
+                        "title": title,
+                        "chunk_role": chunk_role,
+                        "section_path": section_p,
+                        "doc_id": doc_id,
+                        "body": body,
+                        "body_hash": body_hash,
+                        "doc_year": doc_year,
+                        "year_str": year_str,
+                        "effective_date": effective_date,
+                        "topic_cluster_id": topic_cluster_id,
+                        "scope_name": scope_name,
+                    }
+                    idx_pos = len(prepared_items)
+                    prepared_items.append(item)
+                    if chunk_role == "child":
+                        child_indices_by_doc.setdefault(doc_id, []).append(idx_pos)
+
+                # 第二遍：仅沿 child 切片的线性阅读顺序编号 {index}/{total} 与前后指针，并执行入库前强校验
+                child_pos_lookup: dict[int, tuple[int, int]] = {}
+                for doc_id, idx_list in child_indices_by_doc.items():
+                    total_c = len(idx_list)
+                    for seq_num, item_idx in enumerate(idx_list, 1):
+                        child_pos_lookup[item_idx] = (seq_num, total_c)
+
+                for idx_pos, item in enumerate(prepared_items):
+                    chunk_role = item["chunk_role"]
+                    doc_id = item["doc_id"]
+                    section_p = item["section_path"]
+
+                    if chunk_role == "child":
+                        seq_num, total_c = child_pos_lookup[idx_pos]
+                        prev_ref = "NONE" if seq_num == 1 else str(seq_num - 1)
+                        next_ref = "NONE" if seq_num == total_c else str(seq_num + 1)
+                        content = cls._format_standard_chunk_content(
+                            doc_title=item["title"],
+                            scope_name=item["scope_name"],
+                            year_str=item["year_str"],
+                            section_path=section_p,
+                            slice_label=f"{seq_num}/{total_c}",
+                            body=item["body"],
+                            doc_id=doc_id,
+                            prev_ref=prev_ref,
+                            next_ref=next_ref,
+                        )
+                    elif chunk_role == "parent":
+                        content = cls._format_standard_chunk_content(
+                            doc_title=item["title"],
+                            scope_name=item["scope_name"],
+                            year_str=item["year_str"],
+                            section_path=section_p,
+                            slice_label="PARENT",
+                            body=item["body"],
+                            doc_id=doc_id,
+                            prev_ref="NONE",
+                            next_ref="NONE",
+                        )
+                    else:
+                        content = item["body"]
+
+                    # 入库前强校验断言
+                    cls._validate_standard_chunk_before_insert(content, chunk_role)
+
+                    content_hash = hashlib.md5(content.encode("utf-8")).hexdigest()
+                    dedup_key = (doc_id, item["body_hash"])
+
+                    # 若库内已存在同 (doc_id, body_hash) 记录，复用其 chunk_id 原地更新（不重复 INSERT）
+                    chunk_id = (
+                        existing_body_map.get(dedup_key)
+                        or item.get("id")
+                        or hashlib.md5(f"{item['remote_uri']}:{section_p}:{item['body_hash']}".encode("utf-8")).hexdigest()
+                    )
 
                     if chunk_id in seen_chunk_ids_in_batch:
                         continue
@@ -88,34 +333,15 @@ class KBStorageManager:
                     if chunk_id in existing_map and existing_map[chunk_id] == content_hash:
                         continue
 
-                    tier = c.get("authority_tier", 2)
-                    mtime = c.get("mtime", now)
-                    etag = c.get("etag", "")
-                    blob = c.get("embedding_blob")
-
-                    chunk_role = c.get("chunk_role") or "child"
-                    parent_chunk_id = c.get("parent_chunk_id")
-                    doc_priority_type = c.get("doc_priority_type") or "normal"
-                    effective_date = c.get("effective_date") or ""
-                    effective_ts = int(c.get("effective_ts") or 0)
-
-                    doc_year = c.get("doc_year")
-                    if doc_year is None or doc_year == 0:
-                        doc_year = DocumentStreamExtractor.extract_doc_year(title, content[:400])
-
-                    topic_cluster_id = c.get("topic_cluster_id")
-                    if not topic_cluster_id:
-                        topic_cluster_id = DocumentStreamExtractor.extract_topic_cluster_id(title)
-
-                    is_latest = c.get("is_latest_in_cluster", 1)
-                    skip_hype = int(c.get("skip_hype") or 0)
-
-                    # 文本切片质量质检门控：彻底拦截残损乱码切片
-                    from ..search.text_quality_gate import TextQualityGate
-                    is_acceptable, reject_reason = TextQualityGate.is_chunk_acceptable(content)
-                    if not is_acceptable and chunk_role in ("parent", "child"):
-                        logger.debug(f"[KBStorage] 切片质量未达标 ({reject_reason})，丢弃切片: {title} | {section_p}")
-                        continue
+                    tier = item.get("authority_tier", 2)
+                    mtime = item.get("mtime", now)
+                    etag = item.get("etag", "")
+                    blob = item.get("embedding_blob")
+                    parent_chunk_id = item.get("parent_chunk_id")
+                    doc_priority_type = item.get("doc_priority_type") or "normal"
+                    effective_ts = int(item.get("effective_ts") or 0)
+                    is_latest = item.get("is_latest_in_cluster", 1)
+                    skip_hype = int(item.get("skip_hype") or 0)
 
                     conn.execute(
                         """
@@ -127,18 +353,18 @@ class KBStorageManager:
                         """,
                         (
                             chunk_id,
-                            c["remote_uri"],
-                            title,
+                            item["remote_uri"],
+                            item["title"],
                             content,
                             tier,
                             mtime,
                             etag,
                             blob,
-                            doc_year,
-                            effective_date,
+                            item["doc_year"],
+                            item["effective_date"],
                             effective_ts,
                             doc_priority_type,
-                            topic_cluster_id,
+                            item["topic_cluster_id"],
                             is_latest,
                             chunk_role,
                             parent_chunk_id,
@@ -151,7 +377,7 @@ class KBStorageManager:
 
                     # 提取并写入启发式知识三元组
                     triples = LightGraphRAGEngine.extract_triples_from_text(
-                        content, c["remote_uri"], authority_tier=tier, effective_time=mtime
+                        content, item["remote_uri"], authority_tier=tier, effective_time=mtime
                     )
                     for t in triples:
                         conn.execute(
@@ -181,9 +407,26 @@ class KBStorageManager:
                     WHERE topic_cluster_id != '';
                 """)
 
+                # 清理因重切导致的悬空三元组及失效衍生口语切片
+                conn.execute("""
+                    DELETE FROM knowledge_triples
+                    WHERE chunk_id IS NOT NULL AND chunk_id != ''
+                      AND chunk_id NOT IN (SELECT id FROM hybrid_chunks)
+                """)
+                conn.execute("""
+                    DELETE FROM hybrid_chunks
+                    WHERE chunk_role = 'hype_question'
+                      AND parent_chunk_id IS NOT NULL AND parent_chunk_id != ''
+                      AND parent_chunk_id NOT IN (SELECT id FROM hybrid_chunks)
+                """)
+
                 cursor = conn.cursor()
+                cursor.execute(
+                    "SELECT count(*) FROM hybrid_chunks WHERE chunk_role IN ('parent', 'child') OR chunk_role IS NULL"
+                )
+                body_chunks = cursor.fetchone()[0]
                 cursor.execute("SELECT count(*) FROM hybrid_chunks")
-                total_chunks = cursor.fetchone()[0]
+                total_rows = cursor.fetchone()[0]
                 cursor.execute("SELECT count(*) FROM knowledge_triples")
                 total_triples = cursor.fetchone()[0]
 
@@ -197,21 +440,72 @@ class KBStorageManager:
             version=version,
             embedding_model=embedding_model,
             embedding_dim=embedding_dim,
-            chunk_count=total_chunks,
+            chunk_count=body_chunks,
             triple_count=total_triples,
             changelog=f"写入/更新 {len(chunks)} 个切片",
+            extra_meta={"total_rows": total_rows},
         )
 
         disk_size = manifest.get("disk_size_bytes", 0)
+        cls.sync_version_stats_to_main_db(
+            kb_id=kb_id,
+            version=version,
+            body_chunks=body_chunks,
+            total_triples=total_triples,
+            disk_size=disk_size,
+        )
 
-        # 触发后台异步 HyPE 提炼口语问答
+        # 仅当写入常规父子切片时，触发后台异步 HyPE 与 RAPTOR 分层摘要构建（避免摘要或 Wiki 反哺时套娃触发）
+        has_base_docs = any(
+            (c.get("chunk_role") or "child") in ("parent", "child")
+            for c in chunks
+        )
+        if has_base_docs:
+            try:
+                from ..search.hype_worker import HyPEQuestionWorker
+                from ..search.raptor_tree import HierarchicalSummaryBuilder
+                HyPEQuestionWorker.schedule_background_hype(kb_id, version)
+                HierarchicalSummaryBuilder.schedule_background_raptor(kb_id, version)
+            except Exception as hype_err:
+                logger.debug(f"[HyPE/RAPTOR] 调度异常: {hype_err}")
+
+        return body_chunks, disk_size
+
+    @classmethod
+    def sync_version_stats_to_main_db(
+        cls,
+        kb_id: str,
+        version: str,
+        body_chunks: int,
+        total_triples: int,
+        disk_size: int,
+    ) -> None:
+        """将版本库的最新有效正文切片数、图谱三元组数与磁盘体积同步回写至主库。"""
         try:
-            from ..search.hype_worker import HyPEQuestionWorker
-            HyPEQuestionWorker.schedule_background_hype(kb_id, version)
-        except Exception as hype_err:
-            logger.debug(f"[HyPE] 调度异常: {hype_err}")
+            from ..repository.db import db_manager
 
-        return total_chunks, disk_size
+            if not Path(db_manager.db_path).exists():
+                return
+            with sqlite3.connect(str(db_manager.db_path)) as mconn:
+                mconn.execute(
+                    """
+                    UPDATE kb_versions
+                    SET chunk_count = ?, triple_count = ?, disk_size_bytes = ?
+                    WHERE kb_id = ? AND version = ?
+                    """,
+                    (body_chunks, total_triples, disk_size, kb_id, version),
+                )
+                mconn.execute(
+                    """
+                    UPDATE knowledge_bases
+                    SET chunk_count = ?, triple_count = ?, disk_size_bytes = ?, updated_at = CURRENT_TIMESTAMP
+                    WHERE kb_id = ? AND active_version = ?
+                    """,
+                    (body_chunks, total_triples, disk_size, kb_id, version),
+                )
+                mconn.commit()
+        except Exception as sync_err:
+            logger.debug(f"[KBStorage] 同步主库统计字段跳过: {sync_err}")
 
     @classmethod
     def extract_and_save_triples_for_kb(

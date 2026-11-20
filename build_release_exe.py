@@ -307,6 +307,9 @@ def build_executable(mode: str, release_version: str) -> Path:
         "backend.app.api.v1.loop",
         "backend.app.api.v1.kb_lifecycle",
         "backend.app.api.v1.external_expert_gateway",
+        "backend.app.api.v1.wiki",
+        "backend.app.api.v1.audio",
+        "backend.app.api.v1.mobile",
         "backend.app.agent.runtime",
         "backend.app.agent.context_builder",
         "backend.app.agent.policy_interceptor",
@@ -325,6 +328,10 @@ def build_executable(mode: str, release_version: str) -> Path:
         "backend.app.service.engine_pool",
         "backend.app.service.audit_service",
         "backend.app.service.attachment_service",
+        "backend.app.service.enrichment_queue",
+        "backend.app.wiki",
+        "backend.app.wiki.storage_manager",
+        "backend.app.wiki.incremental_compiler",
         "backend.app.memory",
         "backend.app.memory.long_term",
         "backend.app.memory.policy_guard",
@@ -344,6 +351,8 @@ def build_executable(mode: str, release_version: str) -> Path:
         "backend.app.kb.version_helper",
         "backend.app.search.query_rewriter",
         "backend.app.search.text_quality_gate",
+        "backend.app.search.raptor_tree",
+        "backend.app.search.intent_router",
     ]
     for hi in hidden_imports:
         pyinstaller_cmd.extend(["--hidden-import", hi])

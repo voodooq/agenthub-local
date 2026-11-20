@@ -283,8 +283,9 @@ async def delete_base(kb_id: str) -> dict[str, Any]:
     # 3. 清理工作区切片与增量同步水位线（防止重新被 auto_adopt 误纳管复活）
     cleaned = _clean_workspace_chunks_and_sync_state(target_mount_id=source_id)
 
-    # 4. 清理数据库元数据
+    # 4. 清理数据库元数据（解绑关联 Wiki 词条的 kb_id，保留物理 .md 文件不误删）
     async with db_manager.get_connection() as conn:
+        await conn.execute("UPDATE wiki_pages SET kb_id = '' WHERE kb_id = ?", (kb_id,))
         await conn.execute("DELETE FROM kb_versions WHERE kb_id = ?", (kb_id,))
         await conn.execute("DELETE FROM expert_kb_bindings WHERE kb_id = ?", (kb_id,))
         await conn.execute("DELETE FROM knowledge_bases WHERE kb_id = ?", (kb_id,))
@@ -314,12 +315,13 @@ async def purge_all_bases() -> dict[str, Any]:
             except Exception:
                 pass
 
-    # 4. 清空全局元数据表
+    # 4. 清空全局元数据表（解绑关联 Wiki 词条的 kb_id，保留物理 .md 文件不误删）
     from ...repository.db import db_manager
     async with db_manager.get_connection() as conn:
         cursor = await conn.execute("SELECT count(*) FROM knowledge_bases")
         row = await cursor.fetchone()
         kb_count = int(row[0]) if row else 0
+        await conn.execute("UPDATE wiki_pages SET kb_id = '' WHERE kb_id != ''")
         await conn.execute("DELETE FROM kb_versions")
         await conn.execute("DELETE FROM kb_version_snapshots")
         await conn.execute("DELETE FROM expert_kb_bindings")
@@ -565,6 +567,7 @@ async def list_kb_chunks(
     page: int = Query(default=1, ge=1, description="页码"),
     page_size: int = Query(default=20, ge=1, le=100, description="每页切片数"),
     search: str | None = Query(default=None, description="可选搜索关键词过滤"),
+    chunk_role: str = Query(default="body", description="过滤切片角色：body=仅有效正文(parent/child) | all=含衍生摘要与HyPE"),
 ) -> dict[str, Any]:
     """分页查看指定独立知识库中的规程切片与分块详情。"""
     kbs = await KBLifecycleManager.list_knowledge_bases()
@@ -590,17 +593,22 @@ async def list_kb_chunks(
     conn = sqlite3.connect(str(db_p))
     conn.row_factory = sqlite3.Row
     try:
-        where_clause = ""
+        conditions: list[str] = []
         params: list[Any] = []
+        if chunk_role != "all":
+            conditions.append("(chunk_role IN ('parent', 'child') OR chunk_role IS NULL)")
         if search and search.strip():
             kw = f"%{search.strip()}%"
-            where_clause = "WHERE content LIKE ? OR title LIKE ?"
+            conditions.append("(content LIKE ? OR title LIKE ?)")
             params.extend([kw, kw])
 
-        # 统计总数
+        where_clause = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+
+        # 统计当前口径总数与全库衍生总行数
         count_sql = f"SELECT count(*) FROM hybrid_chunks {where_clause}"
         cursor = conn.execute(count_sql, params)
         total_count = cursor.fetchone()[0]
+        all_rows_count = conn.execute("SELECT count(*) FROM hybrid_chunks").fetchone()[0]
 
         # 分页查询
         offset = (page - 1) * page_size
@@ -634,6 +642,7 @@ async def list_kb_chunks(
             "name": target_kb["name"],
             "version": target_ver,
             "total_count": total_count,
+            "all_rows_count": all_rows_count,
             "page": page,
             "page_size": page_size,
             "chunks": chunks_data,

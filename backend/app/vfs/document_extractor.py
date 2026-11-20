@@ -146,27 +146,144 @@ class DocumentStreamExtractor:
             return cls._extract_plain_or_markdown(raw_bytes, filename, remote_uri, authority_tier)
 
     @classmethod
+    def _merge_page_texts_preserving_tables(cls, page_texts: list[str]) -> str:
+        """按页合并 PDF 文本，遇到跨页相邻 Markdown 表格行时无缝拼接，避免空行断表。"""
+        merged = ""
+        for page_text in page_texts:
+            part = (page_text or "").strip()
+            if not part:
+                continue
+            if not merged:
+                merged = part
+                continue
+            prev_last = merged.splitlines()[-1].strip()
+            next_first = part.splitlines()[0].strip()
+            if prev_last.startswith("|") and prev_last.endswith("|") and next_first.startswith("|") and next_first.endswith("|"):
+                merged = f"{merged}\n{part}"
+            else:
+                merged = f"{merged}\n\n{part}"
+        return merged
+
+    @classmethod
+    def _build_unified_chunks_from_text(
+        cls,
+        content: str,
+        filename: str,
+        remote_uri: str,
+        authority_tier: int,
+        extra_metadata: dict[str, Any] | None = None,
+    ) -> list[dict[str, Any]]:
+        """统一切片入口：剥离残留页码/旧头，经质量门控与 ParentChildASTChunker 单次切分。"""
+        clean_content = re.sub(r"(?m)^(?:【文档来源】|【来源】)[^\n]*\n?", "", content or "").strip()
+        if not clean_content:
+            return []
+
+        from ..search.text_quality_gate import TextQualityGate
+        is_ok, reason = TextQualityGate.is_document_acceptable(clean_content)
+        if not is_ok:
+            logger.warning(f"[{filename}] 文档质量熔断未通过: {reason}，拦截入库")
+            return []
+
+        from ..search.temporal_reranker import TemporalMetadataExtractor
+        tmeta = TemporalMetadataExtractor.extract_metadata(filename, clean_content[:800])
+        effective_tier = cls.detect_authority_tier(filename, authority_tier)
+        source_type = remote_uri.split("://")[0] if "://" in remote_uri else "cloud"
+
+        try:
+            from ..search.ast_chunker import ParentChildASTChunker
+            h_chunks = ParentChildASTChunker.chunk_document(
+                text=clean_content,
+                filename=filename,
+                remote_uri=remote_uri,
+                authority_tier=effective_tier,
+                doc_year=tmeta.doc_year,
+                effective_date=tmeta.effective_date,
+                effective_ts=tmeta.effective_ts,
+                doc_priority_type=tmeta.doc_priority_type,
+                topic_cluster_id=tmeta.topic_cluster_id,
+                is_latest_in_cluster=1,
+            )
+            if h_chunks:
+                out: list[dict[str, Any]] = []
+                for hc in h_chunks:
+                    item: dict[str, Any] = {
+                        "id": hc.id,
+                        "chunk_role": hc.chunk_role,
+                        "parent_chunk_id": hc.parent_chunk_id,
+                        "remote_uri": hc.remote_uri,
+                        "title": hc.title,
+                        "section_path": hc.section_path,
+                        "start_line": 1,
+                        "end_line": 1,
+                        "content_text": hc.content_text,
+                        "authority_tier": hc.authority_tier,
+                        "source_type": source_type,
+                        "doc_year": hc.doc_year,
+                        "effective_date": hc.effective_date,
+                        "effective_ts": hc.effective_ts,
+                        "doc_priority_type": hc.doc_priority_type,
+                        "topic_cluster_id": hc.topic_cluster_id,
+                        "is_latest_in_cluster": hc.is_latest_in_cluster,
+                        "skip_hype": hc.skip_hype,
+                    }
+                    if extra_metadata:
+                        item["metadata"] = dict(extra_metadata)
+                    out.append(item)
+                return out
+        except Exception as e:
+            logger.warning(f"ParentChildASTChunker 切分异常，回退至常规切分: {e}")
+
+        # 兜底切分：仅保留纯净正文，统一交由落库管线加标准头尾
+        chunks: list[dict[str, Any]] = []
+        lines = clean_content.splitlines(keepends=True)
+        start = 0
+        text_len = len(clean_content)
+        part_idx = 1
+        while start < text_len:
+            end = min(start + cls.MAX_CHUNK_CHARS, text_len)
+            seg = clean_content[start:end].strip()
+            if seg:
+                item: dict[str, Any] = {
+                    "chunk_role": "child",
+                    "parent_chunk_id": None,
+                    "remote_uri": remote_uri,
+                    "title": filename,
+                    "section_path": f"Part_{part_idx}",
+                    "start_line": 1,
+                    "end_line": len(lines),
+                    "content_text": seg,
+                    "authority_tier": effective_tier,
+                    "source_type": source_type,
+                    "doc_year": tmeta.doc_year,
+                    "effective_date": tmeta.effective_date,
+                    "effective_ts": tmeta.effective_ts,
+                    "doc_priority_type": tmeta.doc_priority_type,
+                    "topic_cluster_id": tmeta.topic_cluster_id,
+                    "is_latest_in_cluster": 1,
+                }
+                if extra_metadata:
+                    item["metadata"] = dict(extra_metadata)
+                chunks.append(item)
+                part_idx += 1
+            if end >= text_len:
+                break
+            start = max(end - 120, start + 1)
+        return chunks
+
+    @classmethod
     def _extract_pdf(
         cls, raw_bytes: bytes, filename: str, remote_uri: str, authority_tier: int
     ) -> list[dict[str, Any]]:
-        """四级递进式 PDF 鲁棒解析器：原生表格解析 -> 文本层 -> 乱码/稀疏检测 -> RapidOCR 离线兜底。"""
-        chunks: list[dict[str, Any]] = []
-        from ..search.temporal_reranker import TemporalMetadataExtractor
-        tmeta = TemporalMetadataExtractor.extract_metadata(filename)
-        doc_year = tmeta.doc_year
-        topic_cluster_id = tmeta.topic_cluster_id
-        effective_date = tmeta.effective_date
-        effective_ts = tmeta.effective_ts
-        doc_priority_type = tmeta.doc_priority_type
-        effective_tier = cls.detect_authority_tier(filename, authority_tier)
-
+        """四级递进式 PDF 鲁棒解析器：剥离页码至 metadata，合并跨页表格后统一 AST 切分。"""
         # 1. 优先使用 PyMuPDF (fitz)
         if HAS_FITZ:
             try:
                 doc = fitz.open(stream=raw_bytes, filetype="pdf")
                 ocr_used_pages = 0
+                page_texts: list[str] = []
+                page_numbers: list[int] = []
+
                 for page_idx, page in enumerate(doc, 1):
-                    # 1.1 结构化表格抽取为 Markdown
                     md_tables: list[str] = []
                     try:
                         tables = page.find_tables()
@@ -177,11 +294,9 @@ class DocumentStreamExtractor:
                     except Exception as tab_err:
                         logger.debug(f"[{filename}] P{page_idx} 表格抽取跳过: {tab_err}")
 
-                    # 1.2 页面常规文本层
                     raw_text_val = page.get_text("text")
                     raw_text: str = str(raw_text_val) if raw_text_val is not None else ""
 
-                    # 1.3 质量门控探针：若乱码或文本过少，触发离线 RapidOCR 兜底
                     if cls._needs_ocr_fallback(raw_text, page):
                         ocr_eng = get_ocr_engine()
                         if ocr_eng is not None:
@@ -196,46 +311,32 @@ class DocumentStreamExtractor:
                             except Exception as ocr_err:
                                 logger.debug(f"[{filename}] P{page_idx} OCR 兜底异常: {ocr_err}")
 
-                    merged_content = raw_text.strip()
+                    merged_page = raw_text.strip()
                     if md_tables:
-                        merged_content = f"{merged_content}\n\n" + "\n\n".join(md_tables) if merged_content else "\n\n".join(md_tables)
+                        merged_page = (
+                            f"{merged_page}\n\n" + "\n\n".join(md_tables)
+                            if merged_page
+                            else "\n\n".join(md_tables)
+                        )
+                    if merged_page:
+                        page_texts.append(merged_page)
+                        page_numbers.append(page_idx)
 
-                    if not merged_content:
-                        continue
-
-                    if doc_year == 0 and page_idx == 1:
-                        doc_year = cls.extract_doc_year(filename, merged_content)
-
-                    # 注入时空上下文强元数据头
-                    header = (
-                        f"【文档来源】{filename} | "
-                        f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
-                        f"【主题族】{topic_cluster_id or filename} | "
-                        f"【页码】第 {page_idx} 页\n"
+                full_pdf_text = cls._merge_page_texts_preserving_tables(page_texts)
+                if full_pdf_text:
+                    meta = {
+                        "page_count": len(doc),
+                        "page_numbers": page_numbers,
+                        "page_range": f"{page_numbers[0]}-{page_numbers[-1]}" if page_numbers else "",
+                    }
+                    chunks = cls._build_unified_chunks_from_text(
+                        full_pdf_text, filename, remote_uri, authority_tier, extra_metadata=meta
                     )
-
-                    chunks.append({
-                        "remote_uri": remote_uri,
-                        "title": filename,
-                        "section_path": f"Page_{page_idx}",
-                        "start_line": page_idx,
-                        "end_line": page_idx,
-                        "content_text": header + merged_content,
-                        "authority_tier": effective_tier,
-                        "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
-                        "doc_year": doc_year,
-                        "effective_date": effective_date,
-                        "effective_ts": effective_ts,
-                        "doc_priority_type": doc_priority_type,
-                        "topic_cluster_id": topic_cluster_id,
-                        "is_latest_in_cluster": 1,
-                    })
-
-                if chunks:
-                    logger.info(
-                        f"PyMuPDF 成功解析 PDF [{filename}]: 总页数={len(doc)}, 生成切片={len(chunks)}, OCR兜底={ocr_used_pages}页"
-                    )
-                    return chunks
+                    if chunks:
+                        logger.info(
+                            f"PyMuPDF 成功解析 PDF [{filename}]: 总页数={len(doc)}, 生成切片={len(chunks)}, OCR兜底={ocr_used_pages}页"
+                        )
+                        return chunks
             except Exception as fitz_err:
                 logger.warning(f"PyMuPDF 解析 [{filename}] 失败，尝试回退至 pypdf: {fitz_err}")
 
@@ -243,51 +344,27 @@ class DocumentStreamExtractor:
         if HAS_PYPDF:
             try:
                 reader = pypdf.PdfReader(io.BytesIO(raw_bytes))
+                page_texts = []
+                page_numbers = []
                 for page_idx, page in enumerate(reader.pages, 1):
-                    text = page.extract_text() or ""
-                    text = text.strip()
-                    if not text:
-                        continue
-                    if doc_year == 0 and page_idx == 1:
-                        doc_year = cls.extract_doc_year(filename, text)
-
-                    header = (
-                        f"【文档来源】{filename} | "
-                        f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
-                        f"【主题族】{topic_cluster_id or filename} | "
-                        f"【页码】第 {page_idx} 页\n"
+                    text = (page.extract_text() or "").strip()
+                    if text:
+                        page_texts.append(text)
+                        page_numbers.append(page_idx)
+                full_pdf_text = cls._merge_page_texts_preserving_tables(page_texts)
+                if full_pdf_text:
+                    meta = {
+                        "page_count": len(reader.pages),
+                        "page_numbers": page_numbers,
+                        "page_range": f"{page_numbers[0]}-{page_numbers[-1]}" if page_numbers else "",
+                    }
+                    return cls._build_unified_chunks_from_text(
+                        full_pdf_text, filename, remote_uri, authority_tier, extra_metadata=meta
                     )
-                    chunks.append({
-                        "remote_uri": remote_uri,
-                        "title": filename,
-                        "section_path": f"Page_{page_idx}",
-                        "start_line": page_idx,
-                        "end_line": page_idx,
-                        "content_text": header + text,
-                        "authority_tier": effective_tier,
-                        "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
-                        "doc_year": doc_year,
-                        "effective_date": effective_date,
-                        "effective_ts": effective_ts,
-                        "doc_priority_type": doc_priority_type,
-                        "topic_cluster_id": topic_cluster_id,
-                        "is_latest_in_cluster": 1,
-                    })
             except Exception as e:
                 logger.warning(f"流式解析 PDF 失败 ({filename}): {e}")
 
-        # 补丁一：PDF 提取后切片质量门控，过滤无有效字或乱码切片
-        from ..search.text_quality_gate import TextQualityGate
-        valid_chunks: list[dict[str, Any]] = []
-        for c in chunks:
-            c_text = c.get("content_text", "")
-            is_ok, _ = TextQualityGate.is_chunk_acceptable(c_text, min_body_chars=10)
-            if is_ok:
-                valid_chunks.append(c)
-            else:
-                logger.debug(f"[{filename}] PDF 页面质量未达标，丢弃切片: {c.get('section_path')}")
-
-        return valid_chunks
+        return []
 
     @classmethod
     def _extract_docx(
@@ -322,66 +399,14 @@ class DocumentStreamExtractor:
                         paragraphs.append(p_text)
 
                 if paragraphs:
-                    if doc_year == 0:
-                        doc_year = cls.extract_doc_year(filename, "\n".join(paragraphs[:5]))
-
-                    # 每 5 个段落或 800 字符聚合为一个切片
-                    cur_group: list[str] = []
-                    cur_len = 0
-                    part_idx = 1
-                    for p in paragraphs:
-                        cur_group.append(p)
-                        cur_len += len(p)
-                        if cur_len >= cls.MAX_CHUNK_CHARS or len(cur_group) >= 5:
-                            body = "\n\n".join(cur_group)
-                            header = (
-                                f"【文档来源】{filename} | "
-                                f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
-                                f"【主题族】{topic_cluster_id or filename} | "
-                                f"【分段】第 {part_idx} 节\n"
-                            )
-                            chunks.append({
-                                "remote_uri": remote_uri,
-                                "title": filename,
-                                "section_path": f"Part_{part_idx}",
-                                "start_line": part_idx,
-                                "end_line": part_idx + len(cur_group),
-                                "content_text": header + body,
-                                "authority_tier": effective_tier,
-                                "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
-                                "doc_year": doc_year,
-                                "topic_cluster_id": topic_cluster_id,
-                                "is_latest_in_cluster": 1,
-                            })
-                            part_idx += 1
-                            cur_group = []
-                            cur_len = 0
-
-                    if cur_group:
-                        body = "\n\n".join(cur_group)
-                        header = (
-                            f"【文档来源】{filename} | "
-                            f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
-                            f"【主题族】{topic_cluster_id or filename} | "
-                            f"【分段】第 {part_idx} 节\n"
-                        )
-                        chunks.append({
-                            "remote_uri": remote_uri,
-                            "title": filename,
-                            "section_path": f"Part_{part_idx}",
-                            "start_line": part_idx,
-                            "end_line": part_idx + len(cur_group),
-                            "content_text": header + body,
-                            "authority_tier": effective_tier,
-                            "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
-                            "doc_year": doc_year,
-                            "topic_cluster_id": topic_cluster_id,
-                            "is_latest_in_cluster": 1,
-                        })
+                    full_docx_text = "\n\n".join(paragraphs).strip()
+                    return cls._build_unified_chunks_from_text(
+                        full_docx_text, filename, remote_uri, authority_tier
+                    )
         except Exception as e:
             logger.warning(f"流式解析 DOCX 异常 ({filename})，尝试兼容解析二进制 DOC: {e}")
             return cls._extract_doc(raw_bytes, filename, remote_uri, authority_tier)
-        return chunks
+        return []
 
     @classmethod
     def _extract_doc(
@@ -422,77 +447,12 @@ class DocumentStreamExtractor:
                 return []
 
             full_extracted_text = "\n\n".join(paragraphs).strip()
-            # 补丁一：二进制 .doc 文本质量熔断门控审查，严禁乱码入库
-            from ..search.text_quality_gate import TextQualityGate
-            is_ok, reason = TextQualityGate.is_document_acceptable(full_extracted_text)
-            if not is_ok:
-                logger.warning(
-                    f"[{filename}] 二进制 DOC 文本质量门控拦截 ({reason})，中止切片入库。"
-                    "建议使用 Word/WPS 或 LibreOffice 将该文件转存为 .docx 或 .pdf 后重新上传。"
-                )
-                return []
-
-            if doc_year == 0:
-                doc_year = cls.extract_doc_year(filename, "\n".join(paragraphs[:5]))
-
-            cur_group: list[str] = []
-            cur_len = 0
-            part_idx = 1
-            for p in paragraphs:
-                cur_group.append(p)
-                cur_len += len(p)
-                if cur_len >= cls.MAX_CHUNK_CHARS or len(cur_group) >= 5:
-                    body = "\n\n".join(cur_group)
-                    header = (
-                        f"【文档来源】{filename} | "
-                        f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
-                        f"【主题族】{topic_cluster_id or filename} | "
-                        f"【分段】第 {part_idx} 节\n"
-                    )
-                    chunks.append({
-                        "remote_uri": remote_uri,
-                        "title": filename,
-                        "section_path": f"Part_{part_idx}",
-                        "start_line": part_idx,
-                        "end_line": part_idx + len(cur_group),
-                        "content_text": header + body,
-                        "authority_tier": effective_tier,
-                        "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
-                        "doc_year": doc_year,
-                        "effective_date": effective_date,
-                        "effective_ts": effective_ts,
-                        "doc_priority_type": doc_priority_type,
-                        "topic_cluster_id": topic_cluster_id,
-                        "is_latest_in_cluster": 1,
-                    })
-                    part_idx += 1
-                    cur_group = []
-                    cur_len = 0
-
-            if cur_group:
-                body = "\n\n".join(cur_group)
-                header = (
-                    f"【文档来源】{filename} | "
-                    f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
-                    f"【主题族】{topic_cluster_id or filename} | "
-                    f"【分段】第 {part_idx} 节\n"
-                )
-                chunks.append({
-                    "remote_uri": remote_uri,
-                    "title": filename,
-                    "section_path": f"Part_{part_idx}",
-                    "start_line": part_idx,
-                    "end_line": part_idx + len(cur_group),
-                    "content_text": header + body,
-                    "authority_tier": effective_tier,
-                    "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
-                    "doc_year": doc_year,
-                    "topic_cluster_id": topic_cluster_id,
-                    "is_latest_in_cluster": 1,
-                })
+            return cls._build_unified_chunks_from_text(
+                full_extracted_text, filename, remote_uri, authority_tier
+            )
         except Exception as e:
             logger.warning(f"流式解析 DOC 失败 ({filename}): {e}")
-        return chunks
+        return []
 
     @classmethod
     def _extract_ole2_word_stream(cls, data: bytes) -> bytes | None:
@@ -743,19 +703,15 @@ class DocumentStreamExtractor:
                         table_lines.append("| " + " | ".join(r_str) + " |")
 
                 table_text = "\n".join(table_lines)
-                header = (
-                    f"【文档来源】{filename} | "
-                    f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
-                    f"【主题族】{topic_cluster_id or filename} | "
-                    f"【工作表】{sheetname}\n"
-                )
                 chunks.append({
+                    "chunk_role": "child",
+                    "parent_chunk_id": None,
                     "remote_uri": remote_uri,
                     "title": filename,
                     "section_path": sheetname,
                     "start_line": 1,
                     "end_line": len(rows),
-                    "content_text": header + table_text,
+                    "content_text": table_text,
                     "authority_tier": effective_tier,
                     "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
                     "doc_year": doc_year,
@@ -791,100 +747,9 @@ class DocumentStreamExtractor:
         if not content:
             content = raw_bytes.decode("utf-8", errors="replace")
 
-        # 2. TextQualityGate 文档级质量熔断审查
-        from ..search.text_quality_gate import TextQualityGate
-        is_ok, reason = TextQualityGate.is_document_acceptable(content)
-        if not is_ok:
-            logger.warning(f"[{filename}] 文档质量熔断未通过: {reason}，拦截入库")
-            return []
-
-        from ..search.temporal_reranker import TemporalMetadataExtractor
-        tmeta = TemporalMetadataExtractor.extract_metadata(filename, content[:600])
-        effective_tier = cls.detect_authority_tier(filename, authority_tier)
-
-        try:
-            from ..search.ast_chunker import ParentChildASTChunker
-            h_chunks = ParentChildASTChunker.chunk_document(
-                text=content,
-                filename=filename,
-                remote_uri=remote_uri,
-                authority_tier=effective_tier,
-                doc_year=tmeta.doc_year,
-                effective_date=tmeta.effective_date,
-                effective_ts=tmeta.effective_ts,
-                doc_priority_type=tmeta.doc_priority_type,
-                topic_cluster_id=tmeta.topic_cluster_id,
-                is_latest_in_cluster=1,
-            )
-            if h_chunks:
-                return [
-                    {
-                        "id": hc.id,
-                        "chunk_role": hc.chunk_role,
-                        "parent_chunk_id": hc.parent_chunk_id,
-                        "remote_uri": hc.remote_uri,
-                        "title": hc.title,
-                        "section_path": hc.section_path,
-                        "start_line": 1,
-                        "end_line": 1,
-                        "content_text": hc.content_text,
-                        "authority_tier": hc.authority_tier,
-                        "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
-                        "doc_year": hc.doc_year,
-                        "effective_date": hc.effective_date,
-                        "effective_ts": hc.effective_ts,
-                        "doc_priority_type": hc.doc_priority_type,
-                        "topic_cluster_id": hc.topic_cluster_id,
-                        "is_latest_in_cluster": hc.is_latest_in_cluster,
-                        "skip_hype": hc.skip_hype,
-                    }
-                    for hc in h_chunks
-                ]
-        except Exception as e:
-            logger.warning(f"ParentChildASTChunker 切分异常，回退至常规切分: {e}")
-
-        # 回退常规切分
-        chunks: list[dict[str, Any]] = []
-        doc_year = tmeta.doc_year
-        topic_cluster_id = tmeta.topic_cluster_id
-        effective_date = tmeta.effective_date
-        effective_ts = tmeta.effective_ts
-        doc_priority_type = tmeta.doc_priority_type
-        lines = content.splitlines(keepends=True)
-        start = 0
-        text_len = len(content)
-        part_idx = 1
-        while start < text_len:
-            end = min(start + cls.MAX_CHUNK_CHARS, text_len)
-            seg = content[start:end].strip()
-            if seg:
-                header = (
-                    f"【文档来源】{filename} | "
-                    f"【生效年份】{doc_year if doc_year > 0 else '通用'} | "
-                    f"【主题族】{topic_cluster_id or filename} | "
-                    f"【分段】第 {part_idx} 节\n"
-                )
-                chunks.append({
-                    "remote_uri": remote_uri,
-                    "title": filename,
-                    "section_path": f"Part_{part_idx}",
-                    "start_line": 1,
-                    "end_line": len(lines),
-                    "content_text": header + seg,
-                    "authority_tier": effective_tier,
-                    "source_type": remote_uri.split("://")[0] if "://" in remote_uri else "cloud",
-                    "doc_year": doc_year,
-                    "effective_date": effective_date,
-                    "effective_ts": effective_ts,
-                    "doc_priority_type": doc_priority_type,
-                    "topic_cluster_id": topic_cluster_id,
-                    "is_latest_in_cluster": 1,
-                })
-                part_idx += 1
-            if end >= text_len:
-                break
-            start += cls.MAX_CHUNK_CHARS - 120
-        return chunks
+        return cls._build_unified_chunks_from_text(
+            content, filename, remote_uri, authority_tier
+        )
 
 
 class CloudWikiLRUCache:

@@ -39,15 +39,23 @@ class AudioTranscriber:
             raise RuntimeError(f"初始化 Whisper 模型失败: {str(e)}")
 
     @classmethod
-    def transcribe(cls, audio_file_path: str, language: str = "zh") -> dict[str, Any]:
-        """转写本地音频文件。"""
+    def transcribe(
+        cls,
+        audio_file_path: str,
+        language: str = "zh",
+        initial_prompt: str | None = None,
+    ) -> dict[str, Any]:
+        """转写本地音频文件（支持注入领域热词 initial_prompt）。"""
         p = Path(audio_file_path).resolve()
         if not p.exists():
             return {"success": False, "error": f"音频文件不存在: {audio_file_path}"}
 
         try:
             model = cls._ensure_model()
-            segments, info = model.transcribe(str(p), language=language, beam_size=1)
+            transcribe_kwargs: dict[str, Any] = {"language": language, "beam_size": 1}
+            if initial_prompt and initial_prompt.strip():
+                transcribe_kwargs["initial_prompt"] = initial_prompt.strip()
+            segments, info = model.transcribe(str(p), **transcribe_kwargs)
 
             results: list[dict[str, Any]] = []
             full_texts: list[str] = []

@@ -44,6 +44,8 @@ import {
 } from 'lucide-react';
 import { Workspace } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
+import { useDevDebugMode } from '@/hooks/useDevDebugMode';
+import { WikiWorkspaceView } from './wiki/WikiWorkspaceView';
 import { KBImportConflictModal } from './KBImportConflictModal';
 import { KBVersionDrawer } from './KBVersionDrawer';
 
@@ -86,8 +88,9 @@ const DOMAIN_OPTIONS = [
 ];
 
 export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
-  // 三大主功能区：'train' = 资产清单 (默认), 'mount' = 数据源挂载, 'test' = 召回测试
-  const [activeSection, setActiveSection] = useState<'test' | 'train' | 'mount'>('train');
+  // 四大主功能区：'wiki' = 百科工作台 (默认), 'train' = 资产清单, 'mount' = 数据源挂载, 'test' = 召回测试
+  const [activeSection, setActiveSection] = useState<'wiki' | 'test' | 'train' | 'mount'>('wiki');
+  const { isDevDebug } = useDevDebugMode();
   const [actionMenuKbId, setActionMenuKbId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -143,6 +146,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [viewingChunksKb, setViewingChunksKb] = useState<KnowledgeBaseItem | null>(null);
   const [kbChunks, setKbChunks] = useState<any[]>([]);
   const [totalChunksCount, setTotalChunksCount] = useState<number>(0);
+  const [totalAllRowsCount, setTotalAllRowsCount] = useState<number>(0);
   const [loadingChunks, setLoadingChunks] = useState(false);
   const [chunksPage, setChunksPage] = useState<number>(1);
   const [chunksSearchQuery, setChunksSearchQuery] = useState<string>('');
@@ -914,6 +918,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
         const json = await resp.json();
         setKbChunks(json.chunks || []);
         setTotalChunksCount(json.total_count || 0);
+        setTotalAllRowsCount(json.all_rows_count || json.total_count || 0);
       }
     } catch (e) {
       console.error('加载切片失败:', e);
@@ -1020,6 +1025,18 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
         <div className="flex items-center space-x-6 text-xs sm:text-sm">
           <button
             type="button"
+            onClick={() => setActiveSection('wiki')}
+            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${
+              activeSection === 'wiki'
+                ? 'border-emerald-500 text-foreground font-semibold'
+                : 'border-transparent text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <span>百科工作台 (Wiki)</span>
+          </button>
+
+          <button
+            type="button"
             onClick={() => setActiveSection('train')}
             className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${
               activeSection === 'train'
@@ -1081,6 +1098,11 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
       </div>
 
       {/* 第三层：功能操作区 */}
+      {activeSection === 'wiki' ? (
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <WikiWorkspaceView />
+        </div>
+      ) : (
       <div className="flex-1 overflow-y-auto p-6 space-y-6 select-text">
 
         {/* ========================================================= */}
@@ -1349,7 +1371,9 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                         <FileText className="w-3.5 h-3.5 text-sky-500" />
                         召回证据切片 ({playgroundHits.length})
                       </span>
-                      <span className="text-[10px] text-muted-foreground">按综合置信度得分降序</span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {isDevDebug ? '按综合置信度得分降序' : '按业务相关性排序'}
+                      </span>
                     </div>
 
                     {playgroundHits.length === 0 ? (
@@ -1367,12 +1391,14 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                             >
                               <div className="flex items-center justify-between gap-2">
                                 <span className="font-semibold text-foreground truncate max-w-md" title={h.title}>
-                                  [{i + 1}] {h.title}
+                                  {isDevDebug ? `[${i + 1}] ${h.title}` : `来源：${h.title}${h.section_path ? ` · ${h.section_path}` : ''}`}
                                 </span>
                                 <div className="flex items-center gap-1.5 shrink-0">
-                                  <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-500 font-semibold border border-emerald-500/20">
-                                    得分: {Number(h.final_score || h.score || 0).toFixed(3)}
-                                  </span>
+                                  {isDevDebug && (
+                                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-500 font-semibold border border-emerald-500/20 tabular-nums">
+                                      得分: {Number(h.final_score || h.score || 0).toFixed(3)} · {h.chunk_role || 'child'}
+                                    </span>
+                                  )}
                                   <button
                                     type="button"
                                     onClick={() => handleCopyChunkText(`hit_${i}`, h.content)}
@@ -2296,7 +2322,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                             className="cursor-pointer group/stat"
                             title="点击查看所有规程切片明细"
                           >
-                            <span className="text-muted-foreground text-[11px] block">切片数</span>
+                            <span className="text-muted-foreground text-[11px] block">正文切片</span>
                             <span className="font-bold text-foreground font-mono group-hover/stat:text-sky-400 group-hover/stat:underline tabular-nums transition-colors">
                               {kb.chunk_count.toLocaleString()}
                             </span>
@@ -2383,6 +2409,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
           </div>
         )}
       </div>
+      )}
 
       {/* 空间文件列表浏览器模态框 */}
       {viewingMount && (
@@ -2611,7 +2638,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                     </span>
                   </div>
                   <div className="flex items-center space-x-2 text-xs text-muted-foreground mt-0.5">
-                    <span>总计纳管切片：<strong className="text-foreground">{totalChunksCount}</strong> 个</span>
+                    <span>正文切片：<strong className="text-foreground">{totalChunksCount}</strong> 个{totalAllRowsCount > totalChunksCount ? `（含口语/摘要衍生共 ${totalAllRowsCount} 条）` : ''}</span>
                     <span>·</span>
                     <span>独立 SQLite index.db 存储</span>
                   </div>
@@ -2969,7 +2996,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                     </span>
                   </div>
                   <div className="flex items-center space-x-2 text-xs text-muted-foreground mt-0.5">
-                    <span>总计纳管切片：<strong className="text-foreground">{totalChunksCount}</strong> 个</span>
+                    <span>正文切片：<strong className="text-foreground">{totalChunksCount}</strong> 个{totalAllRowsCount > totalChunksCount ? `（含口语/摘要衍生共 ${totalAllRowsCount} 条）` : ''}</span>
                     <span>·</span>
                     <span>独立 SQLite index.db 存储</span>
                   </div>

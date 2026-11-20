@@ -37,7 +37,13 @@ import {
   Bot,
   Cloud,
   Loader2,
+  Code2,
 } from 'lucide-react';
+
+import { useDevDebugMode } from '@/hooks/useDevDebugMode';
+import { useDeviceProfile } from '@/hooks/useDeviceProfile';
+import { MobileShell } from '@/components/mobile/MobileShell';
+import { SaveToWikiModal } from '@/components/wiki/SaveToWikiModal';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
 import { AgentsView, AgentItem } from '@/components/AgentsView';
@@ -148,7 +154,22 @@ import {
   validateAttachmentCandidate,
 } from '@/utils/attachmentPolicy';
 
-export default function WorkbenchPage() {
+export default function Page() {
+  const { mode, setForceDesktop } = useDeviceProfile();
+
+  if (mode === 'mobile') {
+    return <MobileShell onSwitchToDesktop={() => setForceDesktop(true)} />;
+  }
+
+  return <DesktopWorkbench />;
+}
+
+function DesktopWorkbench() {
+  const { isDevDebug, toggleDevDebug } = useDevDebugMode();
+  const [saveWikiTarget, setSaveWikiTarget] = useState<{
+    content: string;
+    sourceType: 'chat_decision' | 'sql_snapshot';
+  } | null>(null);
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -3662,6 +3683,21 @@ export default function WorkbenchPage() {
               <span className="text-[12px]">画布</span>
             </button>
 
+            {/* 开发者调试视图开关 */}
+            <button
+              type="button"
+              onClick={toggleDevDebug}
+              className={`flex items-center space-x-1 px-2.5 py-1 rounded-md border text-xs transition-colors ${
+                isDevDebug
+                  ? 'border-blue-600/40 bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium'
+                  : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-surface-200/70'
+              }`}
+              title="切换是否显示检索得分、切片 ID 等底层开发者调试信息"
+            >
+              <Code2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+              <span className="text-[12px]">调试视图</span>
+            </button>
+
             {/* 多语种切换器（默认跟随系统语言） */}
             <LanguageToggle />
 
@@ -4348,6 +4384,15 @@ export default function WorkbenchPage() {
                             content={msg.content}
                             executedByAccount={msg.executed_by_account}
                             onModifyTone={handleModifyTone}
+                            onSaveToWiki={() =>
+                              setSaveWikiTarget({
+                                content: msg.content,
+                                sourceType:
+                                  msg.content.includes('|---') || msg.content.includes('| ---')
+                                    ? 'sql_snapshot'
+                                    : 'chat_decision',
+                              })
+                            }
                             onBranchFromHere={
                               !isProcessStep && activeConvId
                                 ? () => handleBranchConversation(msg.id, msg.turn_id)
@@ -5201,6 +5246,14 @@ export default function WorkbenchPage() {
         liveTurnMetrics={messages
           .filter((m) => m.role === 'model' && m.token_stats)
           .map((m) => m.token_stats as TurnTokenMetrics)}
+      />
+
+      {/* 「存到Wiki」多源沉淀弹窗 */}
+      <SaveToWikiModal
+        isOpen={Boolean(saveWikiTarget)}
+        onClose={() => setSaveWikiTarget(null)}
+        initialContent={saveWikiTarget?.content || ''}
+        defaultSourceType={saveWikiTarget?.sourceType || 'chat_decision'}
       />
     </div>
   );

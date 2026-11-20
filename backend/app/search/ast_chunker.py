@@ -429,6 +429,17 @@ class ParentChildASTChunker:
     # 纯页码行正则 (例如: - 4 - / — 12 — / 3 / 第 5 页)
     PAGE_NUMBER_RE = re.compile(r"^\s*[-—~·_]*\s*(?:第\s*)?\d+\s*(?:页)?\s*[-—~·_]*\s*$")
 
+    @classmethod
+    def _is_valid_section_header(cls, stripped: str) -> bool:
+        """严格判定是否为章节标题：排除超过 30 字或含句号/多逗号的长正文条款。"""
+        if not stripped or len(stripped) > 30:
+            return False
+        if "。" in stripped or "；" in stripped:
+            return False
+        if stripped.count("，") + stripped.count(",") >= 2:
+            return False
+        return bool(cls.SECTION_HEADER_RE.match(stripped))
+
     # 声明与签字无业务规则切片特征
     DECLARATION_RE = re.compile(
         r"(?:声明人签字|监护人签字|代表队盖章|免责声明签字|法定代表人签字|签字盖章|签署日期|联系电话[：:]|身份证号[：:])"
@@ -450,7 +461,7 @@ class ParentChildASTChunker:
         mtime: float = 0.0,
         title: str = "",
     ) -> list[HierarchicalChunk]:
-        """将规程或文档切分为父子两级切片。"""
+        """将规程或文档切分为父子两级切片（单子片不生成重复裸父片）。"""
         if not filename and title:
             filename = title
         if not text.strip():
@@ -458,8 +469,29 @@ class ParentChildASTChunker:
 
         import hashlib
 
-        # 1. 提取并保护 Markdown 表格块 (将连续 table 行整块保护)
-        cleaned_text = cls._preserve_markdown_tables(text)
+        # 0. 自动补全时空元数据，防止上游未传年份导致退化为"通用"
+        if not doc_year or not effective_date or not topic_cluster_id:
+            try:
+                from .temporal_reranker import TemporalMetadataExtractor
+
+                tmeta = TemporalMetadataExtractor.extract_metadata(filename, text[:800])
+                if not doc_year:
+                    doc_year = tmeta.doc_year
+                if not effective_date:
+                    effective_date = tmeta.effective_date
+                if not effective_ts:
+                    effective_ts = tmeta.effective_ts
+                if doc_priority_type == "normal" and tmeta.doc_priority_type:
+                    doc_priority_type = tmeta.doc_priority_type
+                if not topic_cluster_id:
+                    topic_cluster_id = tmeta.topic_cluster_id
+            except Exception:
+                pass
+
+        # 1. 剥离历史残留的旧头部/页码/指针行，提取并保护 Markdown 表格块
+        sanitized_text = re.sub(r"(?m)^(?:【文档来源】|【来源】)[^\n]*\n?", "", text)
+        sanitized_text = re.sub(r"(?m)^\[指针：上一片=[^\n]*\]\s*\n?", "", sanitized_text)
+        cleaned_text = cls._preserve_markdown_tables(sanitized_text)
 
         # 2. 按标题和段落分段聚合父切片
         parent_blocks = cls._aggregate_parent_blocks(cleaned_text, filename)
@@ -473,44 +505,48 @@ class ParentChildASTChunker:
             # 判定纯签字声明块 (打上 skip_hype=1 避免送入口语提炼)
             skip_hype_val = 1 if bool(cls.DECLARATION_RE.search(p_content)) and len(p_content) < 300 else 0
 
-            # 写入父切片
-            parent_chunk = HierarchicalChunk(
-                id=parent_id,
-                chunk_role="parent",
-                parent_chunk_id=None,
-                section_path=sec_path,
-                content_text=p_content,
-                title=filename,
-                remote_uri=remote_uri,
-                authority_tier=authority_tier,
-                doc_year=doc_year,
-                effective_date=effective_date,
-                effective_ts=effective_ts,
-                doc_priority_type=doc_priority_type,
-                topic_cluster_id=topic_cluster_id,
-                is_latest_in_cluster=is_latest_in_cluster,
-                mtime=mtime,
-                skip_hype=skip_hype_val,
-            )
-            all_chunks.append(parent_chunk)
-
             # 3. 在父切片内部切割子切片 (Child Chunks)
             child_texts = cls._split_into_children(p_content, cls.CHILD_MAX_CHARS, cls.CHILD_OVERLAP_CHARS)
-            for c_idx, c_raw in enumerate(child_texts, 1):
-                # 拼接时空上下文强元数据前缀
-                date_str = effective_date or (str(doc_year) if doc_year else "通用")
-                header_prefix = f"【来源】{filename} (生效日期: {date_str}) | 【章节】{sec_path}\n"
-                child_content = header_prefix + c_raw
+            if not child_texts:
+                continue
 
-                c_hash = hashlib.md5(child_content.encode("utf-8")).hexdigest()
-                child_id = hashlib.md5(f"child:{parent_id}:{c_idx}:{c_hash}".encode("utf-8")).hexdigest()
+            has_multi_children = len(child_texts) > 1
+            if has_multi_children:
+                # 仅当真正拆分出多个子片时保留父切片供 Small-to-Big 回溯，消除同文重复裸片
+                parent_chunk = HierarchicalChunk(
+                    id=parent_id,
+                    chunk_role="parent",
+                    parent_chunk_id=None,
+                    section_path=sec_path,
+                    content_text=p_content,
+                    title=filename,
+                    remote_uri=remote_uri,
+                    authority_tier=authority_tier,
+                    doc_year=doc_year,
+                    effective_date=effective_date,
+                    effective_ts=effective_ts,
+                    doc_priority_type=doc_priority_type,
+                    topic_cluster_id=topic_cluster_id,
+                    is_latest_in_cluster=is_latest_in_cluster,
+                    mtime=mtime,
+                    skip_hype=skip_hype_val,
+                )
+                all_chunks.append(parent_chunk)
+
+            for c_idx, c_raw in enumerate(child_texts, 1):
+                c_body = c_raw.strip()
+                if not c_body:
+                    continue
+                c_hash = hashlib.md5(c_body.encode("utf-8")).hexdigest()
+                child_sec = f"{sec_path}#c{c_idx}" if has_multi_children else sec_path
+                child_id = hashlib.md5(f"child:{remote_uri}:{child_sec}:{c_hash}".encode("utf-8")).hexdigest()
 
                 child_chunk = HierarchicalChunk(
                     id=child_id,
                     chunk_role="child",
-                    parent_chunk_id=parent_id,
-                    section_path=f"{sec_path}#c{c_idx}",
-                    content_text=child_content,
+                    parent_chunk_id=parent_id if has_multi_children else None,
+                    section_path=child_sec,
+                    content_text=c_body,
                     title=filename,
                     remote_uri=remote_uri,
                     authority_tier=authority_tier,
@@ -559,7 +595,7 @@ class ParentChildASTChunker:
 
         for line in lines:
             stripped = line.strip()
-            if cls.SECTION_HEADER_RE.match(stripped):
+            if cls._is_valid_section_header(stripped):
                 if current_lines:
                     sections.append((current_title, current_lines))
                     current_lines = []

@@ -125,8 +125,15 @@ class HyPEQuestionWorker:
 
         questions: list[str] = []
         for line in candidates:
-            q = line.strip().lstrip("0123456789.-、•*\"'[] ").rstrip("\"',]")
-            if 3 <= len(q) <= 40 and q not in ("[]", "无", "暂无"):
+            q = line.strip().strip("\"'[]").rstrip("\"',]")
+            # 仅剥离列表编号前缀（"1. "、"2、"、"- "），绝不误剥 "1.45米" 等小数数字
+            q = re.sub(r"^(?:\d{1,2}[、)）]\s*|\d{1,2}\.\s+|[-•*]\s*)", "", q).strip()
+            # 过滤因数字截断导致的残缺碎片（如以“米/元/岁/公斤”等孤立单位开头，或失去小数点前缀的“35米/30米/20米”）
+            if re.match(r"^(?:米|元|岁|公分|厘米|千克|公斤)", q):
+                continue
+            if re.match(r"^(?:10|20|30|35|40|45)米", q):
+                continue
+            if 6 <= len(q) <= 45 and q not in ("[]", "无", "暂无"):
                 if not any(bad in q for bad in cls.FORBIDDEN_HYPE_PATTERNS):
                     if q not in questions:
                         questions.append(q)
@@ -237,7 +244,7 @@ class HyPEQuestionWorker:
                        doc_year, effective_date, effective_ts, doc_priority_type,
                        topic_cluster_id, is_latest_in_cluster, section_path
                 FROM hybrid_chunks
-                WHERE chunk_role = 'parent'
+                WHERE (chunk_role = 'parent' OR (chunk_role = 'child' AND (parent_chunk_id IS NULL OR parent_chunk_id = '')))
                   AND (skip_hype IS NULL OR skip_hype = 0)
                   AND id NOT IN (
                       SELECT DISTINCT parent_chunk_id
@@ -354,15 +361,20 @@ class HyPEQuestionWorker:
                     fused_id = pid if count >= cls._max_attempts else None
                     return [], local_rules, fused_id
 
-                # 提取成功：清除历史失败计数并构建口语切片
+                # 提取成功：清除历史失败计数并构建带范围隔离前缀的口语切片
                 cls._failed_attempts.pop(fuse_key, None)
                 local_hypes: list[dict[str, Any]] = []
+                scope_label = str(parent.get("topic_cluster_id") or parent.get("title") or "").strip()[:30]
+                year_val = int(parent.get("doc_year") or 0)
+                prefix_parts = [p for p in (scope_label, str(year_val) if year_val > 0 else "") if p]
+                scope_prefix = f"[{' | '.join(prefix_parts)}] " if prefix_parts else ""
                 for idx, q in enumerate(questions, start=1):
+                    scoped_q = f"{scope_prefix}{q}" if scope_prefix and not q.startswith("[") else q
                     local_hypes.append({
                         "id": f"hype_{pid}_{idx}",
                         "remote_uri": parent.get("remote_uri", ""),
                         "title": f"【口语问答】{q}",
-                        "content": q,
+                        "content": scoped_q,
                         "authority_tier": parent.get("authority_tier", 2),
                         "mtime": parent.get("mtime", time.time()),
                         "etag": parent.get("etag", ""),
@@ -487,14 +499,16 @@ class HyPEQuestionWorker:
                 cls._running_tasks.discard(task_key)
 
         try:
-            loop = asyncio.get_running_loop()
-            loop.create_task(_runner())
+            from ..service.enrichment_queue import BackgroundEnrichmentQueue
+            BackgroundEnrichmentQueue.enqueue(f"hype:{task_key}", _runner)
         except RuntimeError:
             pass
 
     @classmethod
     async def get_enhancement_status(cls, kb_id: str, version: str = "v1.0.0") -> dict[str, Any]:
-        """获取知识库的后台口语化问答与刚性规则抽取进度。"""
+        """获取知识库的后台口语化问答、RAPTOR 分层摘要与刚性规则抽取进度。"""
+        from ..service.enrichment_queue import BackgroundEnrichmentQueue
+
         db_path = KBStorageManager.get_version_db_path(kb_id, version)
         if not db_path.exists():
             return {
@@ -503,10 +517,13 @@ class HyPEQuestionWorker:
                 "total_parents": 0,
                 "hype_completed": 0,
                 "rules_extracted": 0,
+                "raptor_l1_count": 0,
+                "raptor_l2_ready": False,
+                "queue_status": BackgroundEnrichmentQueue.get_queue_status(kb_id),
                 "status": "idle",
             }
 
-        def _query() -> tuple[int, int, int, list[str]]:
+        def _query() -> tuple[int, int, int, list[str], int, bool]:
             conn = sqlite3.connect(str(db_path))
             cur = conn.cursor()
             try:
@@ -517,6 +534,12 @@ class HyPEQuestionWorker:
                     "SELECT count(DISTINCT parent_chunk_id) FROM hybrid_chunks WHERE chunk_role = 'hype_question' AND parent_chunk_id IS NOT NULL"
                 )
                 hype_completed = cur.fetchone()[0]
+
+                cur.execute("SELECT count(*) FROM hybrid_chunks WHERE chunk_role = 'summary_l1'")
+                raptor_l1_count = cur.fetchone()[0]
+
+                cur.execute("SELECT count(*) FROM hybrid_chunks WHERE chunk_role = 'summary_l2'")
+                raptor_l2_ready = cur.fetchone()[0] > 0
 
                 rules_count = 0
                 try:
@@ -543,13 +566,13 @@ class HyPEQuestionWorker:
                 except Exception:
                     pending_ids = []
 
-                return total_parents, hype_completed, rules_count, pending_ids
+                return total_parents, hype_completed, rules_count, pending_ids, raptor_l1_count, raptor_l2_ready
             except Exception:
-                return 0, 0, 0, []
+                return 0, 0, 0, [], 0, False
             finally:
                 conn.close()
 
-        total, completed, rules, pending_ids = await asyncio.to_thread(_query)
+        total, completed, rules, pending_ids, raptor_l1_count, raptor_l2_ready = await asyncio.to_thread(_query)
         active_pending = [
             pid for pid in pending_ids
             if cls._failed_attempts.get((kb_id, version, pid), 0) < cls._max_attempts
@@ -572,6 +595,9 @@ class HyPEQuestionWorker:
             "total_parents": total,
             "hype_completed": completed,
             "rules_extracted": rules,
+            "raptor_l1_count": raptor_l1_count,
+            "raptor_l2_ready": raptor_l2_ready,
+            "queue_status": BackgroundEnrichmentQueue.get_queue_status(kb_id),
             "status": status,
         }
 

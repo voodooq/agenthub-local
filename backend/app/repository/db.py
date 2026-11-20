@@ -977,7 +977,56 @@ class DatabaseManager:
                 created_at          REAL NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_kb_snapshots_kb_time ON kb_version_snapshots(kb_id, created_at DESC);
+
+            -- 9. 自演进 LLM Wiki 空间、词条与双向链接索引表 (v1.6.0+)
+            CREATE TABLE IF NOT EXISTS wiki_spaces (
+                wiki_space_id    TEXT PRIMARY KEY,
+                name             TEXT NOT NULL,
+                description      TEXT DEFAULT '',
+                root_dir_path    TEXT NOT NULL,
+                default_kb_id    TEXT DEFAULT '',
+                auto_ingest_chat INTEGER DEFAULT 1,
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS wiki_pages (
+                page_id               TEXT PRIMARY KEY,
+                wiki_space_id         TEXT NOT NULL,
+                kb_id                 TEXT DEFAULT '',
+                slug                  TEXT NOT NULL,
+                title                 TEXT NOT NULL,
+                category_path         TEXT DEFAULT '未分类',
+                file_path             TEXT NOT NULL,
+                authority_level       TEXT DEFAULT 'decision',
+                review_status         TEXT DEFAULT 'published',
+                effective_date        TEXT DEFAULT '',
+                summary_text          TEXT DEFAULT '',
+                source_refs_json      TEXT DEFAULT '[]',
+                pending_diff_markdown TEXT DEFAULT '',
+                content_md5           TEXT DEFAULT '',
+                created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(wiki_space_id, slug)
+            );
+            CREATE INDEX IF NOT EXISTS idx_wiki_pages_space_status
+                ON wiki_pages(wiki_space_id, review_status, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_wiki_pages_kb
+                ON wiki_pages(kb_id, review_status);
+
+            CREATE TABLE IF NOT EXISTS wiki_links (
+                source_page_id  TEXT NOT NULL,
+                target_slug     TEXT NOT NULL,
+                context_snippet TEXT DEFAULT '',
+                PRIMARY KEY (source_page_id, target_slug)
+            );
+            CREATE INDEX IF NOT EXISTS idx_wiki_links_target ON wiki_links(target_slug);
             """)
+
+            try:
+                (Path.home() / ".agenthub" / "wikis").mkdir(parents=True, exist_ok=True)
+            except OSError as wiki_dir_err:
+                logger.warning(f"初始化物理 Wiki 根目录失败: {wiki_dir_err}")
 
             # 兼容性平滑升级：knowledge_bases 扩展跨端 UUID、当前版本、内容 MD5 与领域规则模板与发布状态
             for col, col_def in [
