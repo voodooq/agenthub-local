@@ -1264,7 +1264,8 @@ async def create_oral_question(kb_id: str, payload: OralQuestionCreatePayload) -
 
     emb_blob = await _compute_single_hype_embedding(final_content)
     new_id = f"hype_manual_{uuid.uuid4().hex[:12]}"
-    short_title = f"【口语问答】{re.sub(r'^\[[^\]]+\]\s*', '', final_content)[:28]}"
+    plain_q = re.sub(r"^\[[^\]]+\]\s*", "", final_content)
+    short_title = f"【口语问答】{plain_q[:28]}"
     now = time.time()
 
     def _insert_q() -> None:
@@ -1306,7 +1307,7 @@ async def create_oral_question(kb_id: str, payload: OralQuestionCreatePayload) -
         kb_id=kb_id,
         target_ver=target_ver,
         db_path=db_path,
-        change_summary=f"手动新增口语问法: {re.sub(r'^\[[^\]]+\]\s*', '', final_content)[:40]}",
+        change_summary=f"手动新增口语问法: {plain_q[:40]}",
     )
     return {"success": True, "item": {"id": new_id, "content": final_content}, "snapshot_id": snapshot_id}
 
@@ -1365,7 +1366,8 @@ async def update_oral_question(
                 final_content = clean_q
 
     emb_blob = await _compute_single_hype_embedding(final_content)
-    short_title = f"【口语问答】{re.sub(r'^\[[^\]]+\]\s*', '', final_content)[:28]}"
+    plain_q = re.sub(r"^\[[^\]]+\]\s*", "", final_content)
+    short_title = f"【口语问答】{plain_q[:28]}"
 
     def _update_q() -> None:
         conn = sqlite3.connect(str(db_path))
@@ -1391,7 +1393,7 @@ async def update_oral_question(
         kb_id=kb_id,
         target_ver=target_ver,
         db_path=db_path,
-        change_summary=f"手动修改口语问法: {re.sub(r'^\[[^\]]+\]\s*', '', final_content)[:40]}",
+        change_summary=f"手动修改口语问法: {plain_q[:40]}",
     )
     return {"success": True, "item": {"id": question_id, "content": final_content}, "snapshot_id": snapshot_id}
 
