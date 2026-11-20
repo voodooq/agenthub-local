@@ -38,10 +38,14 @@ import {
   Cloud,
   Loader2,
   Code2,
+  ArrowDown,
+  Mic,
+  MicOff,
 } from 'lucide-react';
 
 import { useDevDebugMode } from '@/hooks/useDevDebugMode';
 import { useDeviceProfile } from '@/hooks/useDeviceProfile';
+import { groupMessagesByTurn } from '@/utils/turnTimeline';
 import { MobileShell } from '@/components/mobile/MobileShell';
 import { SaveToWikiModal } from '@/components/wiki/SaveToWikiModal';
 
@@ -166,6 +170,13 @@ export default function Page() {
 
 function DesktopWorkbench() {
   const { isDevDebug, toggleDevDebug } = useDevDebugMode();
+
+  useEffect(() => {
+    const saved = window.localStorage.getItem('agenthub_chat_density');
+    if (saved === 'compact' || saved === 'standard' || saved === 'large') {
+      document.documentElement.dataset.chatDensity = saved;
+    }
+  }, []);
   const [saveWikiTarget, setSaveWikiTarget] = useState<{
     content: string;
     sourceType: 'chat_decision' | 'sql_snapshot';
@@ -174,6 +185,17 @@ function DesktopWorkbench() {
   const [activeConvId, setActiveConvId] = useState<string | null>(null);
   const [messages, setMessages] = useState<Message[]>([]);
   const [activeLoop, setActiveLoop] = useState<TaskLoopResponse | null>(null);
+  const [isLoopHudExpanded, setIsLoopHudExpanded] = useState(false);
+  const [sidebarAutoCollapseSignal, setSidebarAutoCollapseSignal] = useState(0);
+  const prevCanvasOpenRef = useRef(false);
+  const [showScrollToBottomBtn, setShowScrollToBottomBtn] = useState(false);
+  const [isPlusMenuOpen, setIsPlusMenuOpen] = useState(false);
+  const plusMenuRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const [canUsePcVoice, setCanUsePcVoice] = useState(false);
+  const [isPcVoiceListening, setIsPcVoiceListening] = useState(false);
+  const pcVoiceRecRef = useRef<any>(null);
+  const [hasMountedKb, setHasMountedKb] = useState(false);
   const [isSkillPickerOpen, setIsSkillPickerOpen] = useState(false);
   const [selectedSopSkill, setSelectedSopSkill] = useState<SkillItem | null>(null);
   const [inputPrompt, setInputPrompt] = useState('');
@@ -652,6 +674,56 @@ function DesktopWorkbench() {
     type: 'html' | 'mermaid' | 'code' | 'image';
   }>({ isOpen: false, title: '', content: '', type: 'code' });
 
+  // 仅在右侧 Canvas 从关闭变为打开的瞬间自动折叠一次左侧边栏，保留用户后续手动展开自由
+  useEffect(() => {
+    if (canvasState.isOpen && !prevCanvasOpenRef.current) {
+      setSidebarAutoCollapseSignal((n) => n + 1);
+    }
+    prevCanvasOpenRef.current = canvasState.isOpen;
+  }, [canvasState.isOpen]);
+
+  // 检测 PC 端安全上下文语音输入支持（非 HTTPS 局域网 IP 访问时不强占按钮位）
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const hasSpeech = Boolean(
+      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
+    );
+    setCanUsePcVoice(Boolean(window.isSecureContext && hasSpeech));
+  }, []);
+
+  // 检测是否挂载/发布了知识库，新建对话时默认进入 Task 模式
+  useEffect(() => {
+    let active = true;
+    Promise.all([
+      apiFetch('/api/v1/kb/bases?published_only=true').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      apiFetch('/api/v1/knowledge/mounts').then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ]).then(([basesRes, mountsRes]) => {
+      if (!active) return;
+      const basesList = Array.isArray(basesRes?.data) ? basesRes.data : [];
+      const mountsList = Array.isArray(mountsRes?.data) ? mountsRes.data : [];
+      const mounted = basesList.length > 0 || mountsList.length > 0;
+      setHasMountedKb(mounted);
+      if (mounted && !activeConvIdRef.current) {
+        setSceneMode('agent');
+      }
+    });
+    return () => {
+      active = false;
+    };
+  }, [activeWorkspaceId]);
+
+  // 点击外部自动关闭左侧「+」弹出菜单
+  useEffect(() => {
+    if (!isPlusMenuOpen) return;
+    const handleClickOutside = (ev: MouseEvent) => {
+      if (plusMenuRef.current && !plusMenuRef.current.contains(ev.target as Node)) {
+        setIsPlusMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, [isPlusMenuOpen]);
+
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const pendingJumpTargetRef = useRef<{ convId: string; messageId?: number } | null>(null);
   const [highlightedMessageId, setHighlightedMessageId] = useState<number | null>(null);
@@ -882,6 +954,7 @@ function DesktopWorkbench() {
             context_prompt: promptWithSkills,
             model_preference: agent.base_model || currentModel,
             security_level: 'standard',
+            agent_id: agent.id,
           }),
         });
         if (res.ok) {
@@ -1531,6 +1604,7 @@ function DesktopWorkbench() {
       loopGoalOverride?: string;
       isRetry?: boolean;
       retryRound?: number;
+      overrideSceneMode?: SceneMode;
     }
   ) => {
     handleSendMessageRef.current = handleSendMessage;
@@ -1803,7 +1877,9 @@ function DesktopWorkbench() {
       (approvedStepsForRequest && approvedStepsForRequest.length > 0) ||
       (options?.inquiryConfirmed && options?.inquiryAction === 'execute_now')
     );
-    const effectiveSceneMode = (isExecuteUnlock && sceneMode === 'chat') ? 'agent' : sceneMode;
+    const effectiveSceneMode =
+      options?.overrideSceneMode ??
+      (isExecuteUnlock && sceneMode === 'chat' ? 'agent' : sceneMode);
     if (effectiveSceneMode === 'agent' && sceneMode !== 'agent') {
       setSceneMode('agent');
       try {
@@ -3463,6 +3539,7 @@ function DesktopWorkbench() {
       {/* 侧边栏 */}
       <Sidebar
         conversations={conversations}
+        collapseSignal={sidebarAutoCollapseSignal}
         activeConvId={activeConvId}
         workspaces={workspaces}
         activeWorkspaceId={activeWorkspaceId}
@@ -3598,8 +3675,8 @@ function DesktopWorkbench() {
             </div>
           </div>
         )}
-        {/* 顶部紧凑上下文微顶栏 */}
-        <header className="h-11 py-1.5 border-b border-border/80 px-4 md:px-6 flex items-center justify-between bg-surface-100 z-10 select-none">
+        {/* 顶部极简导航栏 (h-12 去底框融入主背景) */}
+        <header className="h-12 py-1.5 px-4 md:px-6 flex items-center justify-between bg-background z-10 select-none">
           {(() => {
             const activeWs = workspaces.find((w) => w.id === activeWorkspaceId);
             const activeConvObj = conversations.find((c) => c.id === activeConvId);
@@ -3670,6 +3747,27 @@ function DesktopWorkbench() {
               </button>
             )}
 
+            {/* 已完成 LOOP 任务的极简状态徽标（点击展开领航舱清单与 Skill 沉淀） */}
+            {activeConvId &&
+              activeLoop &&
+              activeLoop.conversation_id === activeConvId &&
+              activeLoop.loop_status === 'completed' &&
+              messages.length > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setIsLoopHudExpanded((prev) => !prev)}
+                  className={`flex items-center space-x-1.5 px-2.5 py-1 rounded-full text-[11px] transition-colors ${
+                    isLoopHudExpanded
+                      ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-300 font-medium'
+                      : 'bg-surface-100 text-muted-foreground hover:text-foreground'
+                  }`}
+                  title="点击展开/收起 LOOP 领航舱清单与 Skill 沉淀入口"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                  <span>LOOP 已交付</span>
+                </button>
+              )}
+
             {/* Canvas 画布极简入口 */}
             <button
               onClick={() => setCanvasState((prev) => ({ ...prev, isOpen: !prev.isOpen }))}
@@ -3687,22 +3785,16 @@ function DesktopWorkbench() {
             <button
               type="button"
               onClick={toggleDevDebug}
-              className={`flex items-center space-x-1 px-2.5 py-1 rounded-md border text-xs transition-colors ${
+              className={`flex items-center space-x-1 px-2.5 py-1 rounded-md text-xs transition-colors ${
                 isDevDebug
-                  ? 'border-blue-600/40 bg-blue-500/10 text-blue-600 dark:text-blue-400 font-medium'
-                  : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-surface-200/70'
+                  ? 'bg-blue-500/15 text-blue-600 dark:text-blue-400 font-medium'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-surface-200/70'
               }`}
               title="切换是否显示检索得分、切片 ID 等底层开发者调试信息"
             >
               <Code2 className="w-3.5 h-3.5" strokeWidth={1.75} />
               <span className="text-[12px]">调试视图</span>
             </button>
-
-            {/* 多语种切换器（默认跟随系统语言） */}
-            <LanguageToggle />
-
-            {/* 界面浅色/深色/跟随系统快速切换器 */}
-            <ThemeToggle />
           </div>
         </header>
 
@@ -3751,11 +3843,12 @@ function DesktopWorkbench() {
 
         {activeNavHub === 'chat' && (
           <>
-            {/* 顶部长程任务领航舱 (Loop HUD) 与敏感操作审批拦截卡片：仅当存在所属当前激活会话的非闲聊任务且有实际对话流时展示 */}
+            {/* 顶部长程任务领航舱 (Loop HUD)：运行中或等待审批时展示；完成后默认收起至顶栏徽标防遮挡正文 */}
             {activeConvId &&
               activeLoop &&
               activeLoop.conversation_id === activeConvId &&
               activeLoop.loop_status !== 'idle' &&
+              (activeLoop.loop_status !== 'completed' || isLoopHudExpanded) &&
               messages.length > 0 && (
                 <div className="px-4 md:px-12 lg:px-24 pt-3">
                   <LoopHUD
@@ -3802,57 +3895,58 @@ function DesktopWorkbench() {
               <SessionTimelineRail messages={messages} containerRef={messagesContainerRef} />
               <div
                 ref={messagesContainerRef}
-                className="flex-1 overflow-y-auto px-4 md:px-12 lg:px-24 py-6 space-y-6"
+                onScroll={(e) => {
+                  const el = e.currentTarget;
+                  const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+                  setShowScrollToBottomBtn(distFromBottom > 140);
+                }}
+                className="flex-1 overflow-y-auto px-4 md:px-10 py-6"
               >
+                <div className="max-w-[800px] mx-auto w-full space-y-6">
                 {messages.length === 0 ? (
                   <PromptStarterCards
                     workspace={workspaces.find((w) => w.id === activeWorkspaceId)}
                     onSelectPrompt={(text) => handleSendMessage(text)}
                   />
                 ) : (
-                  messages.map((msg, index) => {
-                    const isUser = msg.role === 'user';
-                    const isCurrentStreamingMsg = isStreaming && index === messages.length - 1;
+                  groupMessagesByTurn(messages, hasInteractiveInquiryBlock).map((turn, index, turnList) => {
+                    const isUser = turn.role === 'user' && Boolean(turn.userMessage);
+                    const allTurnMessages = isUser
+                      ? [turn.userMessage!]
+                      : [...turn.processMessages, ...(turn.finalMessage ? [turn.finalMessage] : [])];
+                    const msg = isUser
+                      ? turn.userMessage!
+                      : (turn.finalMessage || turn.processMessages[turn.processMessages.length - 1]);
+                    if (!msg) return null;
+
+                    const isCurrentStreamingMsg = isStreaming && index === turnList.length - 1;
                     const isInteractiveCard = !isUser && hasInteractiveInquiryBlock(msg.content || '');
-                    const isProcessStep =
-                      !isUser &&
-                      !isInteractiveCard &&
-                      Boolean(
-                        (msg.tool_events && msg.tool_events.length > 0) ||
-                        (msg.tool_calls_json && msg.tool_calls_json !== '[]') ||
-                        msg.is_process_step
-                      );
-                    // 检查上一条消息是否也是同一发言序列中的中间过程步骤，用于去噪聚合
-                    const prevMsg = index > 0 ? messages[index - 1] : null;
-                    const isPrevProcessStep =
-                      prevMsg &&
-                      prevMsg.role !== 'user' &&
-                      !hasInteractiveInquiryBlock(prevMsg.content || '') &&
-                      Boolean(
-                        (prevMsg.tool_events && prevMsg.tool_events.length > 0) ||
-                        (prevMsg.tool_calls_json && prevMsg.tool_calls_json !== '[]') ||
-                        prevMsg.is_process_step
-                      );
-                    const isContinuousProcessStep = isProcessStep && Boolean(isPrevProcessStep);
-                    const msgKey = String(msg.id ?? `idx_${index}`);
-                    const isSearchHighlighted = Boolean(msg.id && highlightedMessageId === msg.id);
+                    const isProcessStep = !isUser && !turn.finalMessage;
+                    const isContinuousProcessStep = false;
+                    const msgKey = turn.stableKey;
+                    const isSearchHighlighted = allTurnMessages.some(
+                      (m) => Boolean(m.id && highlightedMessageId === m.id)
+                    );
+                    const aggregatedThinking = allTurnMessages
+                      .map((m) => m.thinking)
+                      .filter(Boolean)
+                      .join('\n\n---\n\n');
+                    const aggregatedToolEvents = allTurnMessages.flatMap((m) => m.tool_events || []);
+                    const aggregatedFactRefs = allTurnMessages.flatMap((m) => m.fact_refs || []);
+                    const aggregatedMemoryRefs = allTurnMessages.flatMap((m) => m.memory_refs || []);
                     return (
                       <div
-                        key={msgKey}
+                        key={turn.stableKey}
                         id={msg.id ? `chat-msg-${msg.id}` : `chat-msg-${msgKey}`}
                         data-message-id={msg.id ? String(msg.id) : msgKey}
-                        className={`flex flex-col group transition-all duration-200 ${
-                        isContinuousProcessStep
-                          ? 'space-y-0.5 pl-3 border-l border-border/25 ml-1 mt-0.5'
-                          : isProcessStep
-                            ? 'space-y-1 pl-3 border-l border-border/35 dark:border-border/25 ml-1 mt-1.5'
-                            : 'space-y-2.5'
-                      } ${isUser ? 'items-end' : 'items-start'} ${
-                        isSearchHighlighted
-                          ? 'ring-2 ring-emerald-500/70 bg-emerald-500/5 rounded-2xl p-2 -m-2'
-                          : ''
-                      }`}
-                    >
+                        className={`flex flex-col group transition-all duration-200 space-y-2.5 ${
+                          isUser ? 'items-end' : 'items-start'
+                        } ${
+                          isSearchHighlighted
+                            ? 'ring-2 ring-emerald-500/70 bg-emerald-500/5 rounded-2xl p-2 -m-2'
+                            : ''
+                        }`}
+                      >
                       {/* 发言角色标志：连续过程步骤中隐藏重复的头像与角色头，仅在过程起点与交付答复展示 */}
                       {(!isContinuousProcessStep || isUser) && (
                         <div
@@ -3894,7 +3988,7 @@ function DesktopWorkbench() {
                                   <span>已自动降级</span>
                                 </span>
                               )}
-                              {msg.executed_by_account && (
+                              {msg.executed_by_account && msg.downgrade_info && (
                                 <span
                                   className={`text-[10px] px-1.5 py-0.5 rounded font-mono ${
                                     isProcessStep
@@ -3973,15 +4067,25 @@ function DesktopWorkbench() {
                         </div>
                       )}
 
-                      {/* 思考过程展开收起卡片 */}
-                      {!isUser && msg.thinking && (
-                        <ThinkingBlock content={msg.thinking} isStreaming={isCurrentStreamingMsg} />
+                      {/* 思考过程展开收起卡片（Turn 级聚合） */}
+                      {!isUser && aggregatedThinking && (
+                        <ThinkingBlock content={aggregatedThinking} isStreaming={isCurrentStreamingMsg} />
+                      )}
+
+                      {/* 过程步骤胶囊（Gemini 式置于 AI 正文上方，去框化单行触发，不打断底部操作栏） */}
+                      {!isUser && aggregatedToolEvents.length > 0 && (
+                        <InlineToolCard
+                          events={aggregatedToolEvents}
+                          onApprove={handleApproveToolCall}
+                          debugMode={isDevDebug}
+                          mode="process_only"
+                        />
                       )}
 
                       {/* 确定性事实视图与长期记忆引用溯源微提示 */}
-                      {!isUser && ((msg.fact_refs && msg.fact_refs.length > 0) || (msg.memory_refs && msg.memory_refs.length > 0)) && (
+                      {!isUser && (aggregatedFactRefs.length > 0 || aggregatedMemoryRefs.length > 0) && (
                         <div className="flex flex-wrap items-center gap-2">
-                          {msg.fact_refs && msg.fact_refs.length > 0 && (
+                          {aggregatedFactRefs.length > 0 && (
                             <button
                               type="button"
                               onClick={() => {
@@ -3989,12 +4093,12 @@ function DesktopWorkbench() {
                                 setIsMemoryHubOpen(true);
                               }}
                               className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-teal-500/10 hover:bg-teal-500/15 border border-teal-500/25 text-[11px] text-teal-700 dark:text-teal-300 transition-colors"
-                              title={msg.fact_refs.map((f) => `• [${f.scope === 'global' ? '全局' : '工作区'}] ${f.fact_key} = ${f.fact_value}`).join('\n')}
+                              title={aggregatedFactRefs.map((f) => `• [${f.scope === 'global' ? '全局' : '工作区'}] ${f.fact_key} = ${f.fact_value}`).join('\n')}
                             >
-                              <span>📌 已激活 {msg.fact_refs.length} 项工作区确定性事实（点击查看双时间轴）</span>
+                              <span>📌 已激活 {aggregatedFactRefs.length} 项工作区确定性事实（点击查看双时间轴）</span>
                             </button>
                           )}
-                          {msg.memory_refs && msg.memory_refs.length > 0 && (
+                          {aggregatedMemoryRefs.length > 0 && (
                             <button
                               type="button"
                               onClick={() => {
@@ -4002,10 +4106,10 @@ function DesktopWorkbench() {
                                 setIsMemoryHubOpen(true);
                               }}
                               className="flex items-center space-x-1.5 px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/15 border border-emerald-500/20 text-[11px] text-emerald-600 dark:text-emerald-400 transition-colors"
-                              title={msg.memory_refs.map((m) => `• ${m.content}`).join('\n')}
+                              title={aggregatedMemoryRefs.map((m) => `• ${m.content}`).join('\n')}
                             >
                               <Brain className="w-3 h-3 text-emerald-500" />
-                              <span>已引用 {msg.memory_refs.length} 条长期个人偏好（点击查看或管理）</span>
+                              <span>已引用 {aggregatedMemoryRefs.length} 条长期个人偏好（点击查看或管理）</span>
                             </button>
                           )}
                         </div>
@@ -4045,13 +4149,13 @@ function DesktopWorkbench() {
                             );
                           }
 
-                          // 正式答复与用户发言卡片气泡
+                          // 正式答复与用户发言（AI 回复去框化平铺，对齐 Gemini 极简阅读体验）
                           return (
                             <div
-                              className={`max-w-[88%] md:max-w-[82%] break-anywhere ${
+                              className={`max-w-[92%] md:max-w-[85%] break-anywhere gemini-msg-enter ${
                                 isUser
-                                  ? 'rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] shadow-sm bg-emerald-100 dark:bg-emerald-950/70 text-emerald-950 dark:text-emerald-100 border border-emerald-300/60 dark:border-emerald-500/30 rounded-tr-none shadow-emerald-500/5'
-                                  : 'rounded-2xl px-5 py-3.5 text-[14px] leading-[1.68] shadow-sm bg-surface-card text-foreground rounded-tl-none border border-border/80'
+                                  ? 'rounded-2xl px-4 py-2.5 text-[14px] leading-[1.68] shadow-xs bg-emerald-100 dark:bg-emerald-950/70 text-emerald-950 dark:text-emerald-100 border border-emerald-300/60 dark:border-emerald-500/30 rounded-tr-sm'
+                                  : 'py-1 text-[14.5px] leading-[1.72] text-foreground'
                               }`}
                             >
                           {isUser ? (
@@ -4323,16 +4427,18 @@ function DesktopWorkbench() {
                           );
                         })()}
 
-                      {/* 内联终端工具调用与安全审批卡片：跟随在思考过程与正文输出之后的最底端，避免被上方长内容顶走 */}
-                      {!isUser && msg.tool_events && msg.tool_events.length > 0 && (
+                      {/* 待人工审批高危命令卡（保留在正文底部视口下方，确保不被上方长文本顶走） */}
+                      {!isUser && aggregatedToolEvents.length > 0 && (
                         <InlineToolCard
-                          events={msg.tool_events}
+                          events={aggregatedToolEvents}
                           onApprove={handleApproveToolCall}
+                          debugMode={isDevDebug}
+                          mode="approval_only"
                         />
                       )}
 
-                      {/* 单行轻量 Token 与 KV Cache 水表 */}
-                      {!isUser && msg.token_stats && (
+                      {/* 单行轻量 Token 与 KV Cache 水表：仅开启「调试视图」时直接外显，平时收进 ··· 更多菜单 */}
+                      {!isUser && msg.token_stats && isDevDebug && (
                         <TokenMetricsFooterBar
                           stats={msg.token_stats}
                           onOpenStats={() => setIsTokenStatsModalOpen(true)}
@@ -4351,6 +4457,47 @@ function DesktopWorkbench() {
                           )}
                         </div>
                       )}
+
+                      {/* 纯对话模式且挂载了知识库时的轻量提示与一键切换重查 */}
+                      {!isUser &&
+                        !isProcessStep &&
+                        !isCurrentStreamingMsg &&
+                        msg.content &&
+                        sceneMode === 'chat' &&
+                        hasMountedKb && (
+                          <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-surface-100/80 border border-border/60 text-xs text-muted-foreground max-w-[92%] md:max-w-[85%]">
+                            <span>当前为纯对话模式，未启用知识库检索</span>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                handleSwitchSceneMode('agent');
+                                const turnIndex = groupMessagesByTurn(
+                                  messages,
+                                  hasInteractiveInquiryBlock
+                                ).findIndex((t) => t.stableKey === turn.stableKey);
+                                const prevTurns = groupMessagesByTurn(
+                                  messages,
+                                  hasInteractiveInquiryBlock
+                                ).slice(0, Math.max(0, turnIndex));
+                                const prevUserTurn = [...prevTurns]
+                                  .reverse()
+                                  .find((t) => t.role === 'user' && t.userMessage);
+                                const promptText = prevUserTurn?.userMessage?.content?.trim();
+                                if (promptText) {
+                                  const { cleanContent } = parseMessageAttachments(promptText);
+                                  if (cleanContent) {
+                                    void handleSendMessage(cleanContent, undefined, undefined, undefined, {
+                                      overrideSceneMode: 'agent',
+                                    });
+                                  }
+                                }
+                              }}
+                              className="px-2.5 py-1 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-600 dark:text-emerald-300 font-medium transition-colors shrink-0"
+                            >
+                              切换至 Task 并重新查询
+                            </button>
+                          </div>
+                        )}
 
                       {/* 主动追问与延伸方向快捷胶囊 (SPEC-1.5.9) */}
                       {!isUser && msg.suggestedFollowups && msg.suggestedFollowups.length > 0 && (
@@ -4383,6 +4530,11 @@ function DesktopWorkbench() {
                           <MessageActions
                             content={msg.content}
                             executedByAccount={msg.executed_by_account}
+                            turnMetricsSummary={
+                              msg.token_stats
+                                ? `Turn ${msg.token_stats.turn_id || index} · 上下文 ${Math.round((msg.token_stats.context_tokens || 0) / 100) / 10}k · TTFT ${Math.round(msg.token_stats.ttft_ms || 0)}ms`
+                                : undefined
+                            }
                             onModifyTone={handleModifyTone}
                             onSaveToWiki={() =>
                               setSaveWikiTarget({
@@ -4418,6 +4570,7 @@ function DesktopWorkbench() {
                 })
               )}
               <div ref={messagesEndRef} />
+                </div>
             </div>
           </div>
 
@@ -4428,9 +4581,21 @@ function DesktopWorkbench() {
               onProposeProcessKill={handleProposeProcessKill}
             />
 
-            {/* 底部悬浮输入中枢 */}
-            <div className="p-4 md:px-12 lg:px-24 bg-gradient-to-t from-background via-background/95 to-transparent">
-              <div className="max-w-4xl mx-auto space-y-2 relative">
+            {/* 底部悬浮输入中枢（平滑渐变遮罩 + 居中回到底部按钮 + 无硬边框圆角大胶囊） */}
+            <div className="relative px-4 pb-4 pt-2 md:px-10 bg-background">
+              <div className="pointer-events-none absolute inset-x-0 -top-10 h-10 bg-gradient-to-t from-background via-background/85 to-transparent" />
+              {showScrollToBottomBtn && (
+                <button
+                  type="button"
+                  onClick={() => forceScrollChatToBottom()}
+                  className="absolute -top-11 left-1/2 -translate-x-1/2 z-20 flex h-8 w-8 items-center justify-center rounded-full bg-surface-100 hover:bg-surface-50 text-foreground shadow-md border border-border transition-transform active:scale-95"
+                  title="回到底部最新消息"
+                  aria-label="回到底部"
+                >
+                  <ArrowDown className="w-4 h-4" />
+                </button>
+              )}
+              <div className="max-w-[800px] mx-auto space-y-2 relative">
                 {!isSkillPickerOpen && (
                   <CommandAutocomplete
                     input={inputPrompt}
@@ -4619,8 +4784,131 @@ function DesktopWorkbench() {
                   </div>
                 )}
 
-                {/* 核心输入大胶囊 */}
-                <div className="rounded-2xl border border-border/80 bg-surface-card p-2 focus-within:border-accent focus-within:shadow-md transition-all shadow-sm">
+                {/* 核心输入大胶囊（无硬边框圆角悬浮态，禁止 overflow-hidden 以免裁切向上弹出菜单） */}
+                <div className="relative rounded-[28px] bg-surface-100 p-2.5 shadow-lg focus-within:ring-1 focus-within:ring-white/15 dark:focus-within:ring-white/15 transition-all">
+                  {/* 「+」扩展弹出菜单：挂载于无 overflow 裁切的最外层胶囊容器中 */}
+                  {isPlusMenuOpen && (
+                    <div
+                      ref={plusMenuRef}
+                      className="absolute left-2 bottom-full mb-2 w-60 rounded-2xl glass-modal p-1.5 shadow-2xl border border-border z-50 animate-scale-in text-xs space-y-0.5"
+                    >
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsPlusMenuOpen(false);
+                          fileInputRef.current?.click();
+                        }}
+                        className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl hover:bg-foreground/5 text-foreground transition-colors"
+                      >
+                        <Paperclip className="w-3.5 h-3.5 text-muted-foreground" />
+                        <span>上传文件或图片</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setIsPlusMenuOpen(false);
+                          setIsSkillPickerOpen(true);
+                        }}
+                        className="w-full flex items-center gap-2.5 px-2.5 py-2 rounded-xl hover:bg-foreground/5 text-foreground transition-colors"
+                      >
+                        <span className="w-3.5 text-center font-mono text-emerald-500 font-bold">/</span>
+                        <span>技能与扩展目录</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => handleToggleIncognito()}
+                        className="w-full flex items-center justify-between px-2.5 py-2 rounded-xl hover:bg-foreground/5 text-foreground transition-colors"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <EyeOff className="w-3.5 h-3.5 text-muted-foreground" />
+                          <span>无痕对话模式</span>
+                        </span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${incognito ? 'bg-purple-500/20 text-purple-400' : 'text-muted-foreground'}`}>
+                          {incognito ? '已开启' : '关闭'}
+                        </span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => setSwarmMode((prev) => !prev)}
+                        className="w-full flex items-center justify-between px-2.5 py-2 rounded-xl hover:bg-foreground/5 text-foreground transition-colors"
+                      >
+                        <span className="flex items-center gap-2.5">
+                          <Users className="w-3.5 h-3.5 text-muted-foreground" />
+                          <span>蜂群协作 (/swarm)</span>
+                        </span>
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${swarmMode ? 'bg-violet-500/20 text-violet-300' : 'text-muted-foreground'}`}>
+                          {swarmMode ? '已开启' : '关闭'}
+                        </span>
+                      </button>
+
+                      {sceneMode === 'agent' && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleSwitchExecStrategy(
+                              executionStrategy === 'plan_first' ? 'direct' : 'plan_first'
+                            )
+                          }
+                          className="w-full flex items-center justify-between px-2.5 py-2 rounded-xl hover:bg-foreground/5 text-foreground transition-colors"
+                        >
+                          <span className="flex items-center gap-2.5">
+                            <ClipboardList className="w-3.5 h-3.5 text-muted-foreground" />
+                            <span>执行策略</span>
+                          </span>
+                          <span
+                            className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                              executionStrategy === 'plan_first'
+                                ? 'bg-amber-500/20 text-amber-400'
+                                : 'bg-emerald-500/20 text-emerald-400'
+                            }`}
+                          >
+                            {executionStrategy === 'plan_first' ? '谋定而动' : '自动执行'}
+                          </span>
+                        </button>
+                      )}
+
+                      {sceneMode === 'chat' && (
+                        <button
+                          type="button"
+                          onClick={() => handleToggleClarifyMode()}
+                          className="w-full flex items-center justify-between px-2.5 py-2 rounded-xl hover:bg-foreground/5 text-foreground transition-colors"
+                        >
+                          <span className="flex items-center gap-2.5">
+                            <Compass className="w-3.5 h-3.5 text-muted-foreground" />
+                            <span>需求前置澄清</span>
+                          </span>
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${clarifyMode ? 'bg-emerald-500/20 text-emerald-400' : 'text-muted-foreground'}`}>
+                            {clarifyMode ? '已开启' : '关闭'}
+                          </span>
+                        </button>
+                      )}
+
+                      {(() => {
+                        const latestStats = [...messages]
+                          .reverse()
+                          .find((m) => m.role === 'model' && m.token_stats)?.token_stats;
+                        const usagePct = latestStats
+                          ? Math.min(100, Math.max(0, Math.round(latestStats.context_usage_pct || 0)))
+                          : 0;
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsPlusMenuOpen(false);
+                              setIsTokenStatsModalOpen(true);
+                            }}
+                            className="w-full flex items-center justify-between px-2.5 py-2 mt-1 border-t border-border/60 rounded-xl hover:bg-foreground/5 text-muted-foreground hover:text-foreground transition-colors"
+                          >
+                            <span>上下文与 Token 统计</span>
+                            <span className="font-mono text-[11px]">{usagePct}%</span>
+                          </button>
+                        );
+                      })()}
+                    </div>
+                  )}
                   {/* 多 Skill 联合协同胶囊条 */}
                   {mountedChainSkills.length > 0 && (
                     <div className="flex flex-wrap items-center gap-1.5 px-3 pt-1 pb-1.5 border-b border-border/50 mb-1 text-[11px]">
@@ -4747,315 +5035,135 @@ function DesktopWorkbench() {
                     </button>
                   </div>
 
-                  <div className="flex items-center justify-between pt-1.5 px-1 select-none gap-2 flex-wrap sm:flex-nowrap">
-                    <div className="flex items-center space-x-1.5 flex-wrap gap-y-1">
-                      <label
-                        className="p-1.5 text-muted-foreground hover:text-foreground hover:bg-surface-200/80 rounded-lg cursor-pointer transition-colors"
-                        title="添加常见图片 (PNG/JPG/WebP/GIF ≤10MB)、文档 (PDF ≤10MB · Word/Excel/PPT ≤5MB) 或代码/文本文件（≤5MB）；支持拖拽放置与 Ctrl+V 粘贴，最多 5 个"
-                      >
-                        <input
-                          type="file"
-                          accept={FILE_INPUT_ACCEPT}
-                          multiple
-                          onChange={handleFileUpload}
-                          className="hidden"
-                        />
-                        <Plus className="w-4 h-4" />
-                      </label>
+                  <div className="flex items-center justify-between pt-1.5 px-1.5 select-none gap-2 flex-nowrap">
+                    <div className="flex items-center space-x-2 flex-nowrap min-w-0">
+                      {/* 隐藏文件选择器，供 + 菜单触发 */}
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept={FILE_INPUT_ACCEPT}
+                        multiple
+                        onChange={handleFileUpload}
+                        className="hidden"
+                      />
 
-                      {/* 整合型「模式与策略」下拉菜单（合并 对话/任务、直接执行/谋定而动、需求澄清） */}
-                      <div className="relative" ref={strategyDropdownRef}>
+                      {/* 左侧「+」触发按钮（阻止 mousedown 冒泡以免触发外层 click-outside 立即关闭） */}
+                      <button
+                        type="button"
+                        onMouseDown={(e) => e.stopPropagation()}
+                        onClick={() => setIsPlusMenuOpen((prev) => !prev)}
+                        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors ${
+                          isPlusMenuOpen || incognito || swarmMode
+                            ? 'bg-surface-50 text-emerald-500'
+                            : 'text-muted-foreground hover:text-foreground hover:bg-surface-50'
+                        }`}
+                        title="添加附件、技能或切换无痕/蜂群模式"
+                      >
+                        <Plus className="w-4 h-4" />
+                      </button>
+
+                      {/* 轻量化 [ Chat | Task ] 直达分段开关 */}
+                      <div className="inline-flex items-center rounded-full bg-background/60 p-0.5 shrink-0">
                         <button
                           type="button"
-                          onClick={() => setIsStrategyMenuOpen((prev) => !prev)}
-                          className="flex items-center space-x-1.5 px-2.5 py-1.5 rounded-xl bg-surface-100 hover:bg-surface-200/80 border border-border/80 text-xs font-medium text-foreground transition-colors"
-                          title="切换工作模式与执行策略"
+                          onClick={() => handleSwitchSceneMode('chat')}
+                          className={`px-3 py-1 rounded-full text-[11px] font-medium transition-all ${
+                            sceneMode === 'chat'
+                              ? 'bg-surface-50 text-foreground shadow-xs'
+                              : 'text-muted-foreground hover:text-foreground'
+                          }`}
+                          title="纯对话推演（不修改本地磁盘）"
                         >
-                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
-                          <span>
-                            {sceneMode === 'chat'
-                              ? clarifyMode
-                                ? '对话 · 需求澄清'
-                                : '纯对话模式'
-                              : executionStrategy === 'plan_first'
-                                ? '逐步确认 (谋定而动)'
-                                : '自动执行'}
-                          </span>
-                          <ChevronDown className="w-3.5 h-3.5 text-muted-foreground" />
+                          Chat
                         </button>
-
-                        {isStrategyMenuOpen && (
-                          <div className="absolute left-0 bottom-full mb-2 w-64 rounded-2xl glass-modal p-1.5 shadow-2xl border border-border z-50 animate-scale-in text-xs space-y-1">
-                            <div className="px-2.5 py-1 text-[10px] font-bold text-muted-foreground uppercase tracking-wider border-b border-border/60">
-                              模式与执行策略
-                            </div>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                handleSwitchSceneMode('agent');
-                                handleSwitchExecStrategy('direct');
-                                setIsStrategyMenuOpen(false);
-                              }}
-                              className={`w-full text-left px-2.5 py-2 rounded-xl transition-colors ${
-                                sceneMode === 'agent' && executionStrategy === 'direct'
-                                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold border border-emerald-500/30'
-                                  : 'hover:bg-foreground/5 text-foreground'
-                              }`}
-                            >
-                              <div>⚡ 自动执行（任务模式）</div>
-                              <div className="text-[10px] text-muted-foreground mt-0.5 font-normal">
-                                具身读写当前工作区文件并运行终端工具
-                              </div>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                handleSwitchSceneMode('agent');
-                                handleSwitchExecStrategy('plan_first');
-                                setIsStrategyMenuOpen(false);
-                              }}
-                              className={`w-full text-left px-2.5 py-2 rounded-xl transition-colors ${
-                                sceneMode === 'agent' && executionStrategy === 'plan_first'
-                                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold border border-emerald-500/30'
-                                  : 'hover:bg-foreground/5 text-foreground'
-                              }`}
-                            >
-                              <div>📋 逐步确认 / 谋定而动</div>
-                              <div className="text-[10px] text-muted-foreground mt-0.5 font-normal">
-                                动工前先输出方案与步骤清单，确认后再执行
-                              </div>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                handleSwitchSceneMode('chat');
-                                setIsStrategyMenuOpen(false);
-                              }}
-                              className={`w-full text-left px-2.5 py-2 rounded-xl transition-colors ${
-                                sceneMode === 'chat'
-                                  ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold border border-emerald-500/30'
-                                  : 'hover:bg-foreground/5 text-foreground'
-                              }`}
-                            >
-                              <div>💬 纯对话推演</div>
-                              <div className="text-[10px] text-muted-foreground mt-0.5 font-normal">
-                                仅做思维探讨与知识回答，不修改本地磁盘
-                              </div>
-                            </button>
-
-                            {sceneMode === 'chat' && (
-                              <button
-                                type="button"
-                                onClick={() => handleToggleClarifyMode()}
-                                className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-xl border transition-colors ${
-                                  clarifyMode
-                                    ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-600 dark:text-emerald-400 font-medium'
-                                    : 'border-border/60 text-muted-foreground hover:text-foreground'
-                                }`}
-                              >
-                                <span className="flex items-center space-x-1.5">
-                                  <Compass className="w-3.5 h-3.5" />
-                                  <span>开启需求前置澄清</span>
-                                </span>
-                                <span className="text-[10px]">{clarifyMode ? '已开' : '关闭'}</span>
-                              </button>
-                            )}
-                          </div>
-                        )}
+                        <button
+                          type="button"
+                          onClick={() => handleSwitchSceneMode('agent')}
+                          className={`px-3 py-1 rounded-full text-[11px] font-medium transition-all ${
+                            sceneMode === 'agent'
+                              ? 'bg-emerald-500/18 text-emerald-500 dark:text-emerald-300 shadow-xs'
+                              : 'text-muted-foreground hover:text-foreground'
+                          }`}
+                          title="任务模式（可执行工具并读写工作区）"
+                        >
+                          Task
+                        </button>
                       </div>
 
-                      {/* 快捷技能与扩展呼出 */}
-                      <button
-                        type="button"
-                        onClick={() => setIsSkillPickerOpen(true)}
-                        title="浏览或呼出当前工作区专属技能与扩展 (/)"
-                        className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl text-xs border border-border/80 bg-surface-100 hover:bg-surface-200/80 text-foreground transition-all"
-                      >
-                        <span className="font-mono text-emerald-500">/</span>
-                        <span>技能</span>
-                      </button>
+                      {/* 仅在 Task + 谋定而动 (plan_first) 时显示紧凑可点击切换微标，默认自动执行不占位 */}
+                      {sceneMode === 'agent' && executionStrategy === 'plan_first' && (
+                        <button
+                          type="button"
+                          onClick={() => handleSwitchExecStrategy('direct')}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-amber-500/15 text-amber-500 dark:text-amber-300 text-[11px] shrink-0 whitespace-nowrap transition-colors hover:bg-amber-500/25"
+                          title="当前为「谋定而动 (plan_first)」，点击切换为「自动执行」"
+                        >
+                          <ClipboardList className="w-3 h-3" />
+                          <span>谋定而动</span>
+                        </button>
+                      )}
 
-                      {/* 无痕模式开关 */}
-                      <button
-                        type="button"
-                        onClick={handleToggleIncognito}
-                        title={incognito ? '当前为无痕模式（不读取也不保存长期记忆）' : '点击开启无痕对话模式'}
-                        className={`flex items-center space-x-1 px-2 py-1.5 rounded-xl text-[11px] border transition-all ${incognito
-                            ? 'bg-purple-500/15 border-purple-500/40 text-purple-600 dark:text-purple-400 font-medium'
-                            : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-surface-200/60'
-                          }`}
-                      >
-                        <EyeOff className="w-3.5 h-3.5" />
-                        <span className="hidden sm:inline">无痕</span>
-                      </button>
+                      {/* 仅在激活时显示紧凑状态徽标（无痕 / 蜂群看板） */}
+                      {incognito && (
+                        <button
+                          type="button"
+                          onClick={handleToggleIncognito}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-purple-500/15 text-purple-400 text-[11px]"
+                          title="无痕模式已开启，点击关闭"
+                        >
+                          <EyeOff className="w-3 h-3" />
+                          <span>无痕</span>
+                        </button>
+                      )}
 
-                      {/* 蜂群协作模式开关 (/swarm) */}
-                      <button
-                        type="button"
-                        onClick={() => setSwarmMode((prev) => !prev)}
-                        title={
-                          swarmMode
-                            ? '已开启蜂群协作模式（支持多专家协同与实时看板，也可输入 /swarm 切换）'
-                            : '点击开启蜂群协作模式（支持 @专家名 协同调度）'
-                        }
-                        className={`flex items-center space-x-1 px-2 py-1.5 rounded-xl text-[11px] border transition-all ${
-                          swarmMode
-                            ? 'bg-violet-500/15 border-violet-500/40 text-violet-600 dark:text-violet-300 font-semibold shadow-xs'
-                            : 'border-transparent text-muted-foreground hover:text-foreground hover:bg-surface-200/60'
-                        }`}
-                      >
-                        <Users className="w-3.5 h-3.5" />
-                        <span className="hidden sm:inline">蜂群协作</span>
-                      </button>
-
-                      {/* 实时蜂群看板快捷入口（当前会话存在蜂群或开启蜂群时显示） */}
                       {(activeSwarmId || swarmMode) && (
-                        <div className="flex items-center space-x-0.5">
+                        <div className="flex items-center space-x-0.5 shrink-0 whitespace-nowrap">
                           <button
                             type="button"
                             onClick={() => setIsSwarmDrawerOpen(true)}
                             title="打开右侧实时蜂群协作看板"
-                            className="flex items-center space-x-1 px-2 py-1.5 rounded-l-xl text-[11px] border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 font-medium transition-all"
+                            className="flex items-center space-x-1 px-2 py-1 rounded-l-full text-[11px] bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-500 dark:text-emerald-300 font-medium transition-all"
                           >
                             <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
-                            <span>看板</span>
+                            <span>蜂群看板</span>
                           </button>
                           {activeSwarmId && (
                             <button
                               type="button"
                               onClick={() => void handleDisbandSwarm()}
-                              title="解散关闭当前蜂群，恢复单智能体常规对话"
-                              className="px-1.5 py-1.5 rounded-r-xl border-y border-r border-rose-500/30 bg-rose-500/10 hover:bg-rose-500/20 text-rose-500 transition-colors"
+                              title="解散关闭当前蜂群"
+                              className="px-1.5 py-1 rounded-r-full bg-rose-500/15 hover:bg-rose-500/25 text-rose-500 transition-colors"
                             >
                               <X className="w-3 h-3" />
                             </button>
                           )}
                         </div>
                       )}
-
-                      {/* 字数提示微标（半屏展开或输入内容后展示） */}
-                      {(isInputExpanded || inputPrompt.length > 0) && (
-                        <span className="text-[10px] font-mono text-muted-foreground/80 px-1">
-                          {inputPrompt.length} 字
-                        </span>
-                      )}
                     </div>
 
-                    <div className="flex items-center space-x-2 shrink-0">
-                      {/* ◔ XX% 上下文水位环 */}
+                    <div className="flex items-center space-x-1.5 shrink-0">
+                      {/* 上下文占用 >= 75% 时才在底栏浮现提醒 */}
                       {(() => {
                         const latestStats = [...messages]
                           .reverse()
                           .find((m) => m.role === 'model' && m.token_stats)?.token_stats;
-                        const usagePct = latestStats ? Math.min(100, Math.max(0, Math.round(latestStats.context_usage_pct || 0))) : 0;
-                        const ringColor =
-                          usagePct >= 85
-                            ? 'text-rose-500'
-                            : usagePct >= 65
-                              ? 'text-amber-500'
-                              : 'text-emerald-500';
-                        const r = 6;
-                        const c = 2 * Math.PI * r;
-                        const dashOffset = c - (usagePct / 100) * c;
-
+                        const usagePct = latestStats
+                          ? Math.min(100, Math.max(0, Math.round(latestStats.context_usage_pct || 0)))
+                          : 0;
+                        if (usagePct < 75) return null;
                         return (
                           <button
                             type="button"
                             onClick={() => setIsTokenStatsModalOpen(true)}
-                            className="flex items-center space-x-1.5 px-2 py-1 rounded-xl hover:bg-surface-200/80 text-[11px] font-mono text-muted-foreground hover:text-foreground transition-colors"
-                            title={
-                              latestStats
-                                ? `上下文水位 ${usagePct}% (${latestStats.context_tokens.toLocaleString()} / ${latestStats.context_limit.toLocaleString()} Tokens · 缓存命中 ${latestStats.cache_hit_pct.toFixed(0)}%) — 点击查看详情`
-                                : '查看本会话 Token 消耗与上下文统计'
-                            }
+                            className="px-2 py-1 rounded-full bg-amber-500/15 text-amber-500 text-[11px] font-mono"
+                            title="上下文占用较高，点击查看 Token 详情"
                           >
-                            <svg className="w-4 h-4 -rotate-90" viewBox="0 0 16 16">
-                              <circle
-                                cx="8"
-                                cy="8"
-                                r={r}
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                className="opacity-20"
-                              />
-                              <circle
-                                cx="8"
-                                cy="8"
-                                r={r}
-                                fill="none"
-                                stroke="currentColor"
-                                strokeWidth="2"
-                                strokeDasharray={c}
-                                strokeDashoffset={dashOffset}
-                                strokeLinecap="round"
-                                className={ringColor}
-                              />
-                            </svg>
-                            <span>{usagePct}%</span>
+                            上下文 {usagePct}%
                           </button>
                         );
                       })()}
 
-                      {/* 独立「思考·高/中/低」下拉按钮（当前模型支持思考时展示） */}
-                      {(() => {
-                        const selOpt = availableModels.find((m) => m.id === currentModel) || availableModels[0];
-                        const supportsThink = Boolean(selOpt && (selOpt.hasThinking ?? selOpt.has_thinking));
-                        if (!supportsThink) return null;
-                        const thinkLabelMap: Record<ThinkingLevel, string> = {
-                          low: '思考 · 低',
-                          medium: '思考 · 中',
-                          high: '思考 · 高',
-                        };
-                        return (
-                          <div className="relative" ref={thinkingDropdownRef}>
-                            <button
-                              type="button"
-                              onClick={() => setIsThinkingDropdownOpen((prev) => !prev)}
-                              className="flex items-center space-x-1 px-2.5 py-1.5 rounded-xl bg-surface-100 hover:bg-surface-200/80 border border-border/80 text-xs font-medium text-foreground transition-colors"
-                              title="独立调节思维链推理深度"
-                            >
-                              <Brain className="w-3.5 h-3.5 text-purple-500" />
-                              <span>{thinkLabelMap[thinkingLevel]}</span>
-                              <ChevronDown className="w-3 h-3 text-muted-foreground" />
-                            </button>
-
-                            {isThinkingDropdownOpen && (
-                              <div className="absolute right-0 bottom-full mb-2 w-48 rounded-2xl glass-modal p-1.5 shadow-2xl border border-border z-50 animate-scale-in text-xs space-y-0.5">
-                                {(
-                                  [
-                                    { id: 'low', name: '思考 · 低', desc: '快速直出，短思维链' },
-                                    { id: 'medium', name: '思考 · 中', desc: '推理与响应平衡' },
-                                    { id: 'high', name: '思考 · 高', desc: '深度复杂推理与验算' },
-                                  ] as { id: ThinkingLevel; name: string; desc: string }[]
-                                ).map((opt) => (
-                                  <button
-                                    key={opt.id}
-                                    type="button"
-                                    onClick={() => {
-                                      setThinkingLevel(opt.id);
-                                      setIsThinkingDropdownOpen(false);
-                                    }}
-                                    className={`w-full text-left px-2.5 py-1.5 rounded-xl transition-colors ${
-                                      thinkingLevel === opt.id
-                                        ? 'bg-emerald-500/15 text-emerald-700 dark:text-emerald-300 font-semibold'
-                                        : 'hover:bg-foreground/5 text-foreground'
-                                    }`}
-                                  >
-                                    <div>{opt.name}</div>
-                                    <div className="text-[10px] text-muted-foreground">{opt.desc}</div>
-                                  </button>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })()}
-
-                      {/* 模型选择器（精简触发文案） */}
+                      {/* 模型 + 思考档位合并选择器 */}
                       <ModelSelector
                         currentModel={currentModel}
                         thinkingLevel={thinkingLevel}
@@ -5076,12 +5184,52 @@ function DesktopWorkbench() {
                         onOpenAccountModal={() => setIsAccountOpen(true)}
                       />
 
+                      {/* PC 端语音输入（仅在 window.isSecureContext 且支持语音识别时按需显示） */}
+                      {canUsePcVoice && !isStreaming && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (isPcVoiceListening && pcVoiceRecRef.current) {
+                              pcVoiceRecRef.current.stop();
+                              setIsPcVoiceListening(false);
+                              return;
+                            }
+                            const SpeechRec =
+                              (window as any).SpeechRecognition ||
+                              (window as any).webkitSpeechRecognition;
+                            if (!SpeechRec) return;
+                            const rec = new SpeechRec();
+                            rec.lang = 'zh-CN';
+                            rec.interimResults = false;
+                            rec.onresult = (ev: any) => {
+                              const transcript = ev.results?.[0]?.[0]?.transcript || '';
+                              if (transcript) {
+                                setInputPrompt((prev) => (prev ? `${prev} ${transcript}` : transcript));
+                              }
+                            };
+                            rec.onend = () => setIsPcVoiceListening(false);
+                            rec.onerror = () => setIsPcVoiceListening(false);
+                            pcVoiceRecRef.current = rec;
+                            setIsPcVoiceListening(true);
+                            rec.start();
+                          }}
+                          className={`p-2 rounded-full transition-colors ${
+                            isPcVoiceListening
+                              ? 'bg-emerald-500/20 text-emerald-500 animate-pulse'
+                              : 'text-muted-foreground hover:text-foreground hover:bg-surface-50'
+                          }`}
+                          title={isPcVoiceListening ? '点击停止语音识别' : '语音输入'}
+                        >
+                          {isPcVoiceListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                        </button>
+                      )}
+
                       {/* 发送 / 停止生成切换按钮 */}
                       {isStreaming ? (
                         <button
                           type="button"
                           onClick={() => void stopActiveStream('user')}
-                          className="px-2.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white transition-all shadow-sm shadow-rose-600/25 flex items-center space-x-1.5"
+                          className="px-3 py-2 rounded-full bg-rose-600 hover:bg-rose-500 text-white transition-all shadow-sm flex items-center space-x-1.5"
                           title="立即停止当前生成与终端执行"
                         >
                           <Square className="w-3.5 h-3.5 fill-current" />
@@ -5092,7 +5240,7 @@ function DesktopWorkbench() {
                           type="button"
                           onClick={() => handleSendMessage()}
                           disabled={isUploadingAttachment || (!inputPrompt.trim() && attachments.length === 0)}
-                          className="p-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm shadow-emerald-600/20"
+                          className="p-2 rounded-full bg-emerald-600 hover:bg-emerald-500 text-white transition-all disabled:opacity-30 disabled:cursor-not-allowed shadow-sm"
                           title="发送提问"
                         >
                           <Send className="w-4 h-4" />

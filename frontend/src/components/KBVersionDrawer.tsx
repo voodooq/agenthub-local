@@ -248,10 +248,34 @@ export function KBVersionDrawer({
                 ~ 变更文件: {diffResult.modified_documents.join(', ')}
               </div>
             )}
+            {Array.isArray(diffResult.added_questions) && diffResult.added_questions.length > 0 && (
+              <div className="text-emerald-600 dark:text-emerald-400 space-y-0.5">
+                <div>+ 新增口语问法（{diffResult.added_questions.length} 条）:</div>
+                {diffResult.added_questions.slice(0, 6).map((q: string, idx: number) => (
+                  <div key={idx} className="pl-2 truncate opacity-90">• {q}</div>
+                ))}
+              </div>
+            )}
+            {Array.isArray(diffResult.removed_questions) && diffResult.removed_questions.length > 0 && (
+              <div className="text-rose-600 dark:text-rose-400 space-y-0.5">
+                <div>- 删除口语问法（{diffResult.removed_questions.length} 条）:</div>
+                {diffResult.removed_questions.slice(0, 6).map((q: string, idx: number) => (
+                  <div key={idx} className="pl-2 truncate opacity-90">• {q}</div>
+                ))}
+              </div>
+            )}
             {diffResult.added_documents.length === 0 &&
               diffResult.removed_documents.length === 0 &&
-              diffResult.modified_documents.length === 0 && (
-                <div className="text-zinc-500">两版本文档清单与内容哈希完全一致。</div>
+              diffResult.modified_documents.length === 0 &&
+              (!diffResult.added_questions || diffResult.added_questions.length === 0) &&
+              (!diffResult.removed_questions || diffResult.removed_questions.length === 0) && (
+                diffResult.content_changed || (diffResult.base_md5 && diffResult.target_md5 && diffResult.base_md5 !== diffResult.target_md5) ? (
+                  <div className="text-amber-600 dark:text-amber-400">
+                    源文档未增删，但内容哈希已变更（{String(diffResult.base_md5 || '').slice(0, 8)} ➔ {String(diffResult.target_md5 || '').slice(0, 8)}，切片数 {diffResult.base_chunks ?? '?'} ➔ {diffResult.target_chunks ?? '?'}）。
+                  </div>
+                ) : (
+                  <div className="text-zinc-500">两版本文档清单与内容哈希完全一致。</div>
+                )
               )}
           </div>
         )}

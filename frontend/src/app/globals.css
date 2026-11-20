@@ -5,19 +5,28 @@
 :root {
   color-scheme: dark light;
   
-  /* 基础与表面颜色 (Strata 极客冷曜石墨黑 Obsidian Emerald) */
-  --bg-main: #0b0f0e;
-  --bg-sidebar: #101513;
-  --bg-card: #151b18;
-  --bg-surface-50: #1b2320;
-  --bg-surface-100: #151b18;
-  --bg-surface-200: #101513;
-  --bg-surface-300: #0b0f0e;
+  /* 基础与表面颜色 (Gemini 中性炭黑阶 + 极低噪点) */
+  --bg-main: #131314;
+  --bg-sidebar: #1e1f20;
+  --bg-card: #1e1f20;
+  --bg-surface-50: #282a2c;
+  --bg-surface-100: #1e1f20;
+  --bg-surface-200: #18191b;
+  --bg-surface-300: #131314;
 
-  --color-foreground: #e6ede9;
-  --color-foreground-muted: #82948c;
-  --color-border: rgba(255, 255, 255, 0.07);
-  --color-border-hover: rgba(16, 185, 129, 0.28);
+  --color-foreground: #e6ece9;
+  --color-foreground-muted: #8c9b95;
+  --color-border: rgba(255, 255, 255, 0.06);
+  --color-border-hover: rgba(255, 255, 255, 0.14);
+
+  /* Gemini 风格字体与排版变量 */
+  --font-sans-cjk: 'Inter', 'PingFang SC', 'Microsoft YaHei', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono-code: 'JetBrains Mono', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  --chat-font-size: 16px;
+  --chat-line-height: 1.7;
+  --chat-table-font-size: 14px;
+  --chat-table-border: rgba(255, 255, 255, 0.06);
+  --chat-table-head-bg: rgba(255, 255, 255, 0.035);
 
   --color-primary: #10b981;
   --color-primary-hover: #059669;
@@ -25,24 +34,24 @@
 
   --glass-panel: var(--bg-surface-100);
   --glass-modal: var(--bg-card);
-  --chat-assistant-bg: #151b18;
-  --chat-user-bg: #064e3b;
-  --chat-user-text: #ecfdf5;
+  --chat-assistant-bg: #131314;
+  --chat-user-bg: #282a2c;
+  --chat-user-text: #e6ece9;
 
   /* 间距阶梯 Token (4px / 8px / 12px) */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
 
-  /* Sidebar 组件级 Token (深色 Obsidian Emerald) */
+  /* Sidebar 组件级 Token (中性炭黑去框化) */
   --sidebar-bg: var(--bg-sidebar);
   --sidebar-border: var(--color-border);
   --sidebar-fg: var(--color-foreground);
   --sidebar-section-fg: var(--color-foreground-muted);
   --sidebar-item-hover: rgba(255, 255, 255, 0.05);
-  --sidebar-item-active: var(--color-primary-subtle);
-  --sidebar-item-active-fg: #34d399;
-  --sidebar-item-active-border: rgba(16, 185, 129, 0.35);
+  --sidebar-item-active: rgba(255, 255, 255, 0.08);
+  --sidebar-item-active-fg: #e6ece9;
+  --sidebar-item-active-border: transparent;
   --sidebar-indicator: var(--color-primary);
   --sidebar-pill-bg: var(--bg-surface-50);
   --sidebar-pill-border: var(--color-border);
@@ -64,10 +73,12 @@ html.light {
   --bg-surface-200: #f8fafc;
   --bg-surface-300: #e2e8f0;
 
-  --color-foreground: #0f172a;
+  --color-foreground: #1f2421;
   --color-foreground-muted: #64748b;
-  --color-border: #e2e8f0;
-  --color-border-hover: #cbd5e1;
+  --color-border: rgba(15, 23, 42, 0.08);
+  --color-border-hover: rgba(15, 23, 42, 0.16);
+  --chat-table-border: rgba(15, 23, 42, 0.08);
+  --chat-table-head-bg: rgba(15, 23, 42, 0.03);
 
   --color-primary: #059669;
   --color-primary-hover: #047857;
@@ -85,9 +96,9 @@ html.light {
   --sidebar-fg: var(--color-foreground);
   --sidebar-section-fg: var(--color-foreground-muted);
   --sidebar-item-hover: rgba(0, 0, 0, 0.04);
-  --sidebar-item-active: var(--color-primary-subtle);
-  --sidebar-item-active-fg: var(--color-primary-hover);
-  --sidebar-item-active-border: rgba(5, 150, 105, 0.3);
+  --sidebar-item-active: rgba(15, 23, 42, 0.06);
+  --sidebar-item-active-fg: #1f2421;
+  --sidebar-item-active-border: transparent;
   --sidebar-indicator: var(--color-primary);
   --sidebar-pill-bg: var(--bg-surface-50);
   --sidebar-pill-border: var(--color-border);
@@ -100,9 +111,77 @@ html.light {
 body {
   background-color: var(--bg-main);
   color: var(--color-foreground);
-  font-family: 'Google Sans', 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: var(--font-sans-cjk);
   overflow: hidden;
   transition: background-color 0.2s ease, color 0.2s ease;
+}
+
+code, pre, kbd, samp {
+  font-family: var(--font-mono-code);
+}
+
+@media (max-width: 767px) {
+  :root {
+    --chat-font-size: 15px;
+    --chat-table-font-size: 13.5px;
+  }
+}
+
+html[data-chat-density='compact'] {
+  --chat-font-size: 14px;
+}
+
+html[data-chat-density='standard'] {
+  --chat-font-size: 16px;
+}
+
+html[data-chat-density='large'] {
+  --chat-font-size: 18px;
+}
+
+@media (max-width: 767px) {
+  html[data-chat-density='standard'] {
+    --chat-font-size: 15px;
+  }
+}
+
+/* 对话正文与表格精细排版（极细边框 + tabular-nums 对齐） */
+.chat-markdown-body {
+  font-size: var(--chat-font-size);
+  line-height: var(--chat-line-height);
+  color: var(--color-foreground);
+}
+
+.chat-markdown-body table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--chat-table-font-size);
+  font-variant-numeric: tabular-nums;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.chat-markdown-body thead th {
+  background-color: var(--chat-table-head-bg);
+  border-bottom: 1px solid var(--chat-table-border);
+  font-weight: 600;
+  text-align: left;
+  padding: 0.55rem 0.75rem;
+}
+
+.chat-markdown-body tbody td {
+  border-bottom: 1px solid var(--chat-table-border);
+  padding: 0.5rem 0.75rem;
+}
+
+.chat-markdown-body tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.chat-markdown-body hr {
+  border: none;
+  border-top: 1px solid var(--chat-table-border);
+  margin: 0.9rem 0;
 }
 
 /* 长文本防截断与自然折行 */
@@ -171,4 +250,77 @@ html.light .glass-modal {
 }
 .glow-blue {
   box-shadow: 0 0 20px rgba(59, 130, 246, 0.3);
+}
+
+/* Gemini 风格轻量微动效（仅合成属性 transform / opacity） */
+@keyframes geminiSparklePulse {
+  0%, 100% {
+    transform: scale(0.94);
+    opacity: 0.78;
+  }
+  50% {
+    transform: scale(1.08);
+    opacity: 1;
+  }
+}
+
+@keyframes geminiMsgEnter {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes geminiVoiceOrb {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 24px rgba(16, 185, 129, 0.28);
+  }
+  50% {
+    transform: scale(1.06);
+    box-shadow: 0 0 42px rgba(16, 185, 129, 0.48);
+  }
+}
+
+.gemini-sparkle-pulse {
+  animation: geminiSparklePulse 1.8s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.gemini-msg-enter {
+  animation: geminiMsgEnter 0.18s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+}
+
+.gemini-voice-orb {
+  animation: geminiVoiceOrb 2.2s ease-in-out infinite;
+}
+
+.gemini-accordion-content {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), opacity 0.18s ease;
+  opacity: 0;
+}
+
+.gemini-accordion-content[data-open='true'] {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.gemini-accordion-inner {
+  overflow: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .gemini-sparkle-pulse,
+  .gemini-msg-enter,
+  .gemini-voice-orb {
+    animation: none !important;
+  }
+  .gemini-accordion-content {
+    transition: none !important;
+  }
 }

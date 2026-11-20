@@ -1,10 +1,15 @@
 """
 会话与消息管理接口
 """
+import html
 import json
+import secrets
 import uuid
+from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
+from ...repository.db import db_manager
 from ...schema.conversation_schema import (
     BranchConversationRequest,
     ConversationCreate,
@@ -59,6 +64,172 @@ async def create_conversation(req: ConversationCreate):
         "current_cwd": target_cwd,
     })
     return {"id": conv_id, "title": req.title, "workspace_id": req.workspace_id or "default"}
+
+
+@router.get("/share/{token}", response_class=HTMLResponse)
+async def view_shared_conversation(token: str):
+    """只读公开访问已生成的会话分享快照页面"""
+    async with db_manager.get_connection() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_shares (
+                token TEXT PRIMARY KEY,
+                conversation_id TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        cursor = await conn.execute(
+            "SELECT title, snapshot_json, created_at FROM conversation_shares WHERE token = ?;",
+            (token,),
+        )
+        row = await cursor.fetchone()
+    if not row:
+        return HTMLResponse(
+            content="<h3>分享链接不存在或已被撤销</h3>",
+            status_code=404,
+        )
+
+    title_raw, snapshot_json, created_at = row[0], row[1], row[2]
+    safe_title = html.escape(str(title_raw or "AgentHub 对话分享"))
+    try:
+        items = json.loads(snapshot_json or "[]")
+    except Exception:
+        items = []
+
+    blocks: list[str] = []
+    for item in items:
+        role = item.get("role", "")
+        content = str(item.get("content") or "").strip()
+        if not content:
+            continue
+        is_user = role == "user"
+        safe_body = html.escape(content).replace("\n", "<br/>")
+        blocks.append(
+            f'<section class="msg {"msg-user" if is_user else "msg-ai"}">'
+            f'<div class="role">{"提问" if is_user else "AgentHub"}</div>'
+            f'<div class="body">{safe_body}</div></section>'
+        )
+
+    html_doc = f"""<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>{safe_title}</title>
+  <style>
+    :root {{ color-scheme: light dark; }}
+    body {{ margin: 0; padding: 32px 16px; font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif; background: #131314; color: #e6ece9; line-height: 1.7; }}
+    @media (prefers-color-scheme: light) {{ body {{ background: #f8fafc; color: #1f2421; }} .msg-user {{ background: #e8f5f0 !important; color: #064e3b !important; }} .meta {{ color: #64748b !important; }} }}
+    .wrap {{ max-width: 780px; margin: 0 auto; }}
+    h1 {{ font-size: 20px; margin: 0 0 6px; font-weight: 600; }}
+    .meta {{ font-size: 12px; color: #8c9b95; margin-bottom: 28px; }}
+    .msg {{ margin-bottom: 20px; }}
+    .msg-user {{ background: #282a2c; padding: 12px 16px; border-radius: 16px; margin-left: auto; max-width: 85%; }}
+    .msg-ai {{ padding: 4px 0; }}
+    .role {{ font-size: 11px; opacity: 0.65; margin-bottom: 4px; font-weight: 600; }}
+    .body {{ word-break: break-word; font-size: 15px; }}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <h1>{safe_title}</h1>
+    <div class="meta">只读分享快照 · 创建于 {html.escape(str(created_at)[:19])}</div>
+    {"".join(blocks) or "<p>暂无可展示的对话内容。</p>"}
+  </div>
+</body>
+</html>"""
+    return HTMLResponse(content=html_doc)
+
+
+@router.get("/{conv_id}/share")
+async def get_conversation_share_status(conv_id: str):
+    """查询指定会话是否已生成只读分享链接"""
+    async with db_manager.get_connection() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_shares (
+                token TEXT PRIMARY KEY,
+                conversation_id TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        cursor = await conn.execute(
+            "SELECT token, created_at FROM conversation_shares WHERE conversation_id = ?;",
+            (conv_id,),
+        )
+        row = await cursor.fetchone()
+    if not row:
+        return {"token": None}
+    return {"token": row[0], "created_at": row[1]}
+
+
+@router.post("/{conv_id}/share")
+async def create_conversation_share(conv_id: str):
+    """为指定会话生成或更新只读分享快照链接"""
+    conv = await ConversationRepository.get_by_id(conv_id)
+    if not conv:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    messages = await MessageRepository.get_by_conversation(conv_id)
+    snapshot = [
+        {"role": m.role, "content": m.content}
+        for m in messages
+        if m.role in ("user", "model", "assistant") and (m.content or "").strip()
+    ]
+    token = secrets.token_urlsafe(12)
+    now = datetime.now().isoformat()
+
+    async with db_manager.get_connection() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_shares (
+                token TEXT PRIMARY KEY,
+                conversation_id TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        await conn.execute(
+            "DELETE FROM conversation_shares WHERE conversation_id = ?;",
+            (conv_id,),
+        )
+        await conn.execute(
+            "INSERT INTO conversation_shares (token, conversation_id, title, snapshot_json, created_at) VALUES (?, ?, ?, ?, ?);",
+            (token, conv_id, conv.title or "AgentHub 对话分享", json.dumps(snapshot, ensure_ascii=False), now),
+        )
+        await conn.commit()
+
+    return {"token": token, "share_url": f"/api/v1/conversations/share/{token}"}
+
+
+@router.delete("/{conv_id}/share")
+async def revoke_conversation_share(conv_id: str):
+    """撤销指定会话的只读分享链接"""
+    async with db_manager.get_connection() as conn:
+        await conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS conversation_shares (
+                token TEXT PRIMARY KEY,
+                conversation_id TEXT UNIQUE NOT NULL,
+                title TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            """
+        )
+        await conn.execute(
+            "DELETE FROM conversation_shares WHERE conversation_id = ?;",
+            (conv_id,),
+        )
+        await conn.commit()
+    return {"revoked": True}
 
 
 @router.get("/{conv_id}")

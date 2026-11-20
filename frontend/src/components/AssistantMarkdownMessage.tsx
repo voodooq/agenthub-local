@@ -309,12 +309,43 @@ function ImageRenderer({ src, alt, ...props }: any) {
   );
 }
 
+/**
+ * 定向安全替换表格单元格内的 <br> / <br/> 标签为真实换行，杜绝开启 rehypeRaw 带来的 XSS 风险
+ */
+function renderWithSafeLineBreaks(node: React.ReactNode): React.ReactNode {
+  if (typeof node === 'string') {
+    if (!/<br\s*\/?>/i.test(node)) return node;
+    const parts = node.split(/<br\s*\/?>/i);
+    return parts.map((part, idx) => (
+      <React.Fragment key={idx}>
+        {idx > 0 && <br />}
+        {part}
+      </React.Fragment>
+    ));
+  }
+  if (Array.isArray(node)) {
+    return node.map((child, idx) => (
+      <React.Fragment key={idx}>{renderWithSafeLineBreaks(child)}</React.Fragment>
+    ));
+  }
+  if (
+    React.isValidElement<{ children?: React.ReactNode }>(node) &&
+    node.props?.children !== undefined
+  ) {
+    return React.cloneElement(node, undefined, renderWithSafeLineBreaks(node.props.children));
+  }
+  return node;
+}
+
 // 模块级恒定映射：保证 ReactMarkdown 永远收到相同引用，绝不因外层重绘导致子组件卸载重建
 const STABLE_MARKDOWN_COMPONENTS: Components = {
   pre: PreRenderer,
   code: CodeRenderer,
   a: LinkRenderer,
   img: ImageRenderer,
+  th: ({ children, ...props }) => <th {...props}>{renderWithSafeLineBreaks(children)}</th>,
+  td: ({ children, ...props }) => <td {...props}>{renderWithSafeLineBreaks(children)}</td>,
+  hr: () => <hr className="my-3 border-t border-border/50" />,
 };
 
 interface AssistantMarkdownMessageProps {
@@ -411,7 +442,7 @@ function AssistantMarkdownMessageInner({
         className={
           muted
             ? 'max-w-none break-anywhere text-[12px] leading-[1.58] text-muted-foreground/75 dark:text-muted-foreground/70 [&_p]:my-1 [&_ul]:my-1 [&_ol]:my-1 [&_li]:my-0.5 [&_strong]:font-medium [&_strong]:text-muted-foreground/85 [&_h1]:text-[13px] [&_h1]:font-medium [&_h2]:text-[12.5px] [&_h2]:font-medium [&_h3]:text-[12px] [&_h3]:font-medium [&_blockquote]:border-l-2 [&_blockquote]:border-border/55 [&_blockquote]:pl-2.5 [&_blockquote]:text-muted-foreground/65'
-            : 'prose dark:prose-invert max-w-none text-foreground break-anywhere'
+            : 'chat-markdown-body prose dark:prose-invert max-w-none text-foreground break-anywhere'
         }
       >
         {content ? (

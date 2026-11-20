@@ -879,14 +879,58 @@ class KBExchangeEngine:
         removed = [k for k in m1 if k not in m2]
         modified = [k for k in m1 if k in m2 and m1[k] != m2[k]]
 
+        def _extract_bundle_details(archive_raw: str | None) -> tuple[int, set[str]]:
+            if not archive_raw:
+                return 0, set()
+            ap = Path(archive_raw)
+            if not ap.exists():
+                return 0, set()
+            import tempfile
+            try:
+                with zipfile.ZipFile(ap, "r") as zf:
+                    if "index.db" not in zf.namelist():
+                        return 0, set()
+                    with tempfile.NamedTemporaryFile(delete=False, suffix=".db") as tmp:
+                        tmp.write(zf.read("index.db"))
+                        tmp_p = Path(tmp.name)
+                    try:
+                        c = sqlite3.connect(str(tmp_p))
+                        total = int(c.execute("SELECT COUNT(*) FROM hybrid_chunks").fetchone()[0] or 0)
+                        qs = {
+                            str(row[0])
+                            for row in c.execute(
+                                "SELECT content FROM hybrid_chunks WHERE chunk_role = 'hype_question'"
+                            ).fetchall()
+                            if row[0]
+                        }
+                        c.close()
+                        return total, qs
+                    finally:
+                        tmp_p.unlink(missing_ok=True)
+            except Exception:
+                return 0, set()
+
+        base_chunks, base_qs = _extract_bundle_details(r1["bundle_archive_path"])
+        target_chunks, target_qs = _extract_bundle_details(r2["bundle_archive_path"])
+        added_questions = sorted(target_qs - base_qs)
+        removed_questions = sorted(base_qs - target_qs)
+        content_changed = (r1["content_md5"] or "") != (r2["content_md5"] or "")
+
         return {
             "base_version": r1["version_tag"],
             "target_version": r2["version_tag"],
             "base_md5": r1["content_md5"],
             "target_md5": r2["content_md5"],
+            "base_summary": r1["change_summary"] or "",
+            "target_summary": r2["change_summary"] or "",
+            "content_changed": content_changed,
+            "base_chunks": base_chunks,
+            "target_chunks": target_chunks,
             "added_documents": added,
             "removed_documents": removed,
             "modified_documents": modified,
+            "added_questions": added_questions,
+            "removed_questions": removed_questions,
         }
 
     @classmethod

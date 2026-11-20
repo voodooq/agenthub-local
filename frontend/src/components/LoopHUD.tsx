@@ -161,7 +161,7 @@ export function LoopHUD({ loop, onRefresh }: LoopHUDProps) {
           </span>
 
           <span className="text-[11px] text-muted-foreground bg-surface-200 px-2 py-0.5 rounded border border-border">
-            {t('轮次')}: {loop.current_iteration} / {loop.max_iterations}
+            {t('轮次')}: {loop.current_iteration} / {Math.max(loop.max_iterations || 10, loop.current_iteration || 0)}
           </span>
 
           <span className="text-xs text-foreground truncate max-w-[280px] sm:max-w-[420px] font-mono">

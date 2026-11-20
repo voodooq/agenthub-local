@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '@/utils/apiClient';
 import { ModelOption } from './ModelSelector';
+import { LanguageToggle } from './LanguageToggle';
 import { useTheme, ThemeMode } from '@/context/ThemeContext';
 import { useAppVersion } from '@/config/version';
 
@@ -92,6 +93,23 @@ export function SettingsModal({
   );
   const { theme, setTheme } = useTheme();
   const { fullLabel: appVersionLabel } = useAppVersion();
+  const [chatDensity, setChatDensity] = useState<'compact' | 'standard' | 'large'>(() => {
+    if (typeof window !== 'undefined') {
+      const saved = window.localStorage.getItem('agenthub_chat_density');
+      if (saved === 'compact' || saved === 'standard' || saved === 'large') return saved;
+    }
+    return 'standard';
+  });
+
+  const handleChangeChatDensity = (density: 'compact' | 'standard' | 'large') => {
+    setChatDensity(density);
+    if (typeof document !== 'undefined') {
+      document.documentElement.dataset.chatDensity = density;
+    }
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem('agenthub_chat_density', density);
+    }
+  };
 
   // 上下文记忆轮数状态 (默认 10 轮)
   const [contextRounds, setContextRounds] = useState<number>(10);
@@ -1178,6 +1196,49 @@ export function SettingsModal({
                     </div>
                   );
                 })}
+              </div>
+
+              {/* 聊天阅读字号设置 */}
+              <div className="p-4 rounded-2xl bg-surface-100 border border-border space-y-3">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-bold text-foreground">聊天阅读字号</div>
+                    <p className="text-[11px] text-muted-foreground mt-0.5">
+                      调节对话正文与 Markdown 排版密度（默认 PC 16px / 移动端 15px）
+                    </p>
+                  </div>
+                </div>
+                <div className="grid grid-cols-3 gap-2">
+                  {[
+                    { id: 'compact' as const, label: '紧凑 14px' },
+                    { id: 'standard' as const, label: '标准 16px' },
+                    { id: 'large' as const, label: '大字 18px' },
+                  ].map((opt) => (
+                    <button
+                      key={opt.id}
+                      type="button"
+                      onClick={() => handleChangeChatDensity(opt.id)}
+                      className={`py-2 px-3 rounded-xl border text-xs font-medium transition-all ${
+                        chatDensity === opt.id
+                          ? 'border-emerald-500 bg-emerald-500/12 text-emerald-600 dark:text-emerald-300 shadow-xs'
+                          : 'border-border bg-background text-muted-foreground hover:text-foreground'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* 界面语言设置 */}
+              <div className="p-4 rounded-2xl bg-surface-100 border border-border flex items-center justify-between">
+                <div>
+                  <div className="text-xs font-bold text-foreground">界面显示语言</div>
+                  <p className="text-[11px] text-muted-foreground mt-0.5">
+                    默认跟随操作系统语言，可随时切换界面语种
+                  </p>
+                </div>
+                <LanguageToggle />
               </div>
 
               <div className="p-4 rounded-2xl bg-surface-100 border border-border space-y-2">

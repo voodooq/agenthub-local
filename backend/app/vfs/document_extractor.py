@@ -389,17 +389,63 @@ class DocumentStreamExtractor:
                 root = ET.fromstring(xml_content)
 
                 # 命名空间 w: http://schemas.openxmlformats.org/wordprocessingml/2006/main
-                ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
-                paragraphs: list[str] = []
+                w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                ns = {"w": w_ns}
+                tag_p = f"{{{w_ns}}}p"
+                tag_tbl = f"{{{w_ns}}}tbl"
+                tag_tr = f"{{{w_ns}}}tr"
+                tag_tc = f"{{{w_ns}}}tc"
+                tag_t = f"{{{w_ns}}}t"
 
-                for p in root.findall(".//w:p", ns):
-                    texts = [t.text for t in p.findall(".//w:t", ns) if t.text]
-                    p_text = "".join(texts).strip()
-                    if p_text:
-                        paragraphs.append(p_text)
+                def _extract_p_text(p_elem: ET.Element) -> str:
+                    texts = [t.text for t in p_elem.findall(f".//{tag_t}") if t.text]
+                    return "".join(texts).strip()
 
-                if paragraphs:
-                    full_docx_text = "\n\n".join(paragraphs).strip()
+                def _extract_tbl_markdown(tbl_elem: ET.Element) -> str:
+                    rows_data: list[list[str]] = []
+                    for tr in tbl_elem.findall(f"./{tag_tr}"):
+                        row_cells: list[str] = []
+                        for tc in tr.findall(f"./{tag_tc}"):
+                            cell_parts = [_extract_p_text(cp) for cp in tc.findall(f"./{tag_p}")]
+                            cell_txt = " ".join(p for p in cell_parts if p).replace("|", "｜")
+                            cell_txt = re.sub(r"\s+", " ", cell_txt).strip()
+                            row_cells.append(cell_txt)
+                        if any(row_cells):
+                            rows_data.append(row_cells)
+                    if not rows_data:
+                        return ""
+                    max_cols = max(len(r) for r in rows_data)
+                    if max_cols == 0:
+                        return ""
+                    norm_rows = [r + [""] * (max_cols - len(r)) for r in rows_data]
+                    md_lines = [
+                        "| " + " | ".join(norm_rows[0]) + " |",
+                        "| " + " | ".join(["---"] * max_cols) + " |",
+                    ]
+                    for r in norm_rows[1:]:
+                        md_lines.append("| " + " | ".join(r) + " |")
+                    return "\n".join(md_lines)
+
+                blocks: list[str] = []
+                body = root.find("w:body", ns)
+                if body is not None:
+                    for child in body:
+                        if child.tag == tag_p:
+                            p_text = _extract_p_text(child)
+                            if p_text:
+                                blocks.append(p_text)
+                        elif child.tag == tag_tbl:
+                            md_tbl = _extract_tbl_markdown(child)
+                            if md_tbl:
+                                blocks.append(md_tbl)
+                else:
+                    for p in root.findall(".//w:p", ns):
+                        p_text = _extract_p_text(p)
+                        if p_text:
+                            blocks.append(p_text)
+
+                if blocks:
+                    full_docx_text = "\n\n".join(blocks).strip()
                     return cls._build_unified_chunks_from_text(
                         full_docx_text, filename, remote_uri, authority_tier
                     )

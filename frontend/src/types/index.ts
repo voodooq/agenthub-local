@@ -191,6 +191,9 @@ export interface Workspace {
   created_at: string;
   conversation_count?: number;
   is_path_accessible?: boolean;
+  agent_id?: string | null;
+  bound_agent_id?: string | null;
+  agent_strict_mode?: boolean;
 }
 
 export interface Conversation {

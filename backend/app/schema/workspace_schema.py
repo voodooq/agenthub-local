@@ -14,6 +14,7 @@ class WorkspaceCreate(BaseModel):
     context_prompt: str | None = Field(default=None, description="工作区专属背景契约说明或 System Prompt")
     model_preference: str | None = Field(default=None, description="该工作区优先使用的模型名称")
     security_level: str = Field(default="standard", description="安全策略等级：standard / high / relaxed")
+    agent_id: str | None = Field(default=None, description="绑定的专家 ID（用于标识专家专属沙盒）")
 
 
 class WorkspaceUpdate(BaseModel):

@@ -426,8 +426,11 @@ class ParentChildASTChunker:
         re.MULTILINE,
     )
 
-    # 纯页码行正则 (例如: - 4 - / — 12 — / 3 / 第 5 页)
-    PAGE_NUMBER_RE = re.compile(r"^\s*[-—~·_]*\s*(?:第\s*)?\d+\s*(?:页)?\s*[-—~·_]*\s*$")
+    # 严格页码行正则：必须包含成对修饰符或“第X页 / Page X”，严禁误删正文与表格中的纯数字行
+    PAGE_NUMBER_RE = re.compile(
+        r"^\s*(?:[-—~·_]{1,3}\s*\d+\s*[-—~·_]{1,3}|第\s*\d+\s*页(?:\s*/\s*共?\s*\d+\s*页)?|Page\s*\d+(?:\s*/\s*\d+)?)\s*$",
+        re.IGNORECASE,
+    )
 
     @classmethod
     def _is_valid_section_header(cls, stripped: str) -> bool:

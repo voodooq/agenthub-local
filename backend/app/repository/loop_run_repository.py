@@ -417,6 +417,9 @@ class TaskLoopRepository:
         if iteration is not None:
             fields.append("current_iteration = ?")
             values.append(iteration)
+            # 当微内核自主步数超过初始 max_iterations 时同步向上对齐，避免出现 15/10 倒挂
+            fields.append("max_iterations = MAX(max_iterations, ?)")
+            values.append(iteration)
 
         if pending_approval is not None:
             fields.append("pending_approval_call = ?")

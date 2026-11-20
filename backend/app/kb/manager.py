@@ -225,8 +225,8 @@ class KBLifecycleManager:
             return cur.rowcount > 0
 
     @classmethod
-    async def auto_adopt_mounted_kbs(cls) -> None:
-        """自动扫描云端挂载源并纳管已在工作区中训练切片的独立知识库资产。"""
+    async def auto_adopt_mounted_kbs(cls, *, only_missing: bool = False) -> None:
+        """自动扫描云端挂载源并纳管已在工作区中训练切片的独立知识库资产（带 mtime 与已发布版本双重短路）。"""
         try:
             from ..api.v1.knowledge import _load_mounts
             mounts = _load_mounts()
@@ -245,12 +245,38 @@ class KBLifecycleManager:
                     if idx.exists():
                         candidate_dbs.append(idx)
 
+            max_db_mtime = 0.0
+            for db_p in candidate_dbs:
+                try:
+                    max_db_mtime = max(max_db_mtime, db_p.stat().st_mtime)
+                except OSError:
+                    pass
+
             for m in mounts:
                 m_id = m["mount_id"]
                 kb_id = f"kb_{m_id}"
                 m_name = m["mount_name"]
                 p_type = m["provider_type"]
                 cfg = m.get("config", {})
+
+                # 双重短路检查：已存在且版本已升级或工作区 index.db 未变更时跳过磁盘扫描与写库
+                async with db_manager.get_connection() as conn:
+                    cursor = await conn.execute(
+                        "SELECT kb_id, chunk_count, updated_at, active_version FROM knowledge_bases WHERE kb_id = ?",
+                        (kb_id,),
+                    )
+                    existing_row = await cursor.fetchone()
+
+                if existing_row:
+                    if only_missing:
+                        continue
+                    existing_updated_at = float(existing_row["updated_at"] or 0.0)
+                    existing_active_ver = str(existing_row["active_version"] or "v1.0.0")
+                    if existing_active_ver != "v1.0.0" or (
+                        max_db_mtime > 0 and existing_updated_at >= max_db_mtime
+                    ):
+                        logger.debug(f"挂载源 [{m_name}] ({kb_id}) 状态无变化，跳过重复纳管")
+                        continue
 
                 # 严格计算属于本挂载源的 valid_prefix 与 valid_subpath（防止跨挂载源或越界目录匹配）
                 valid_prefix = ""
@@ -488,7 +514,8 @@ class KBLifecycleManager:
         Args:
             published_only: 为 True 时仅返回已发布正式版本的知识库（供专家挂载筛选使用）。
         """
-        await cls.auto_adopt_mounted_kbs()
+        # 日常查询仅检查是否有尚未注册到主库的新挂载源，避免每次触发全量纳管扫描
+        await cls.auto_adopt_mounted_kbs(only_missing=True)
         async with db_manager.get_connection() as conn:
             async with conn.execute("""
                 SELECT kb.*, ds.name as source_name, ds.source_type
@@ -690,7 +717,7 @@ class KBLifecycleManager:
         }
 
     @classmethod
-    async def prune_versions(cls, kb_id: str, keep_count: int = 3) -> dict[str, Any]:
+    async def prune_versions(cls, kb_id: str, keep_count: int = 1) -> dict[str, Any]:
         """磁盘瘦身清理：仅保留最近 keep_count 个版本以及当前 active/staging 版本。"""
         async with db_manager.get_connection() as conn:
             async with conn.execute("SELECT active_version, staging_version FROM knowledge_bases WHERE kb_id = ?", (kb_id,)) as cur:
@@ -713,16 +740,21 @@ class KBLifecycleManager:
             keep_set.add(staging_ver)
 
         pruned_count, freed_bytes = KBStorageManager.prune_old_versions(kb_id, list(keep_set))
+        real_disk = KBStorageManager.get_kb_disk_size(kb_id)
 
-        # 同步数据库清理被删除的版本记录
-        if pruned_count > 0:
-            async with db_manager.get_connection() as conn:
+        # 同步数据库清理被删除的版本记录并刷新磁盘占用
+        async with db_manager.get_connection() as conn:
+            if pruned_count > 0:
                 placeholders = ",".join(["?"] * len(keep_set))
                 await conn.execute(
                     f"DELETE FROM kb_versions WHERE kb_id = ? AND version NOT IN ({placeholders})",
                     [kb_id] + list(keep_set),
                 )
-                await conn.commit()
+            await conn.execute(
+                "UPDATE knowledge_bases SET disk_size_bytes = ?, updated_at = ? WHERE kb_id = ?",
+                (real_disk, time.time(), kb_id),
+            )
+            await conn.commit()
 
         return {
             "success": True,

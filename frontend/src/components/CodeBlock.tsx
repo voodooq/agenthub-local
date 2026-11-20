@@ -1,27 +1,43 @@
 'use client';
 
 import React, { useEffect, useState } from 'react';
-import { Check, Copy, Download, ChevronDown, ChevronRight, Code, FolderDown } from 'lucide-react';
+import { Check, Copy, Download, ChevronDown, ChevronRight, Code, FolderDown, Maximize2, X } from 'lucide-react';
 
 interface CodeBlockProps {
   language: string;
   code: string;
   subtle?: boolean;
+  mobileMode?: boolean;
+  longCodeThreshold?: number;
   onSendToCanvas?: (code: string, language: string) => void;
   onSaveToWorkspace?: (code: string, language: string) => void;
 }
 
-export function CodeBlock({ language, code, subtle = false, onSendToCanvas, onSaveToWorkspace }: CodeBlockProps) {
+export function CodeBlock({
+  language,
+  code,
+  subtle = false,
+  mobileMode = false,
+  longCodeThreshold = 25,
+  onSendToCanvas,
+  onSaveToWorkspace,
+}: CodeBlockProps) {
+  const lines = code.split('\n');
+  const isMermaid = language.toLowerCase() === 'mermaid';
+  const isLongSnippet = !isMermaid && lines.length > longCodeThreshold;
+
   const [copied, setCopied] = useState(false);
-  const [collapsed, setCollapsed] = useState(subtle);
+  const [collapsed, setCollapsed] = useState(subtle || (!mobileMode && isLongSnippet));
+  const [mobileExpanded, setMobileExpanded] = useState(false);
+  const [fullscreenOpen, setFullscreenOpen] = useState(false);
   const [hasUserInteracted, setHasUserInteracted] = useState(false);
 
   useEffect(() => {
     // 若过程状态动态切换（如步骤触发工具降级为过程步骤），且用户尚未手动展开过，则自动折叠弱化
     if (!hasUserInteracted) {
-      setCollapsed(subtle);
+      setCollapsed(subtle || (!mobileMode && isLongSnippet));
     }
-  }, [subtle, hasUserInteracted]);
+  }, [subtle, hasUserInteracted, mobileMode, isLongSnippet]);
 
   const toggleCollapsed = () => {
     setHasUserInteracted(true);
@@ -59,8 +75,7 @@ export function CodeBlock({ language, code, subtle = false, onSendToCanvas, onSa
     URL.revokeObjectURL(url);
   };
 
-  const lines = code.split('\n');
-  const isMermaid = language.toLowerCase() === 'mermaid';
+  const linesCount = lines.length;
 
   if (subtle) {
     return (
@@ -127,87 +142,222 @@ export function CodeBlock({ language, code, subtle = false, onSendToCanvas, onSa
     );
   }
 
-  return (
-    <div className="my-3 rounded-xl border border-white/10 bg-[#0d0f17] overflow-hidden shadow-lg group">
-      <div className="flex items-center justify-between px-3.5 py-2 bg-surface-100/80 border-b border-white/5 text-xs text-slate-400">
-        <div className="flex items-center space-x-2">
+  if (!mobileMode && !isMermaid && isLongSnippet && collapsed) {
+    return (
+      <div className="my-2.5 flex items-center justify-between gap-3 px-3.5 py-2.5 rounded-xl border border-border/60 dark:border-white/10 bg-surface-100/70 dark:bg-[#0d0f17] text-xs shadow-sm">
+        <div className="flex items-center space-x-2.5 min-w-0">
           <button
             type="button"
             onClick={toggleCollapsed}
-            className="hover:text-slate-200 transition-colors p-0.5"
-            title={collapsed ? '展开代码' : '折叠代码'}
+            className="flex items-center space-x-1.5 text-foreground/90 hover:text-emerald-500 transition-colors"
           >
-            {collapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            <ChevronRight className="w-3.5 h-3.5 shrink-0" />
+            <Code className="w-3.5 h-3.5 text-emerald-500 shrink-0" />
+            <span className="font-mono uppercase tracking-wider font-semibold">
+              {language || 'text'}
+            </span>
           </button>
-          <span className="font-mono uppercase tracking-wider font-semibold text-slate-300">
-            {language || 'text'}
-          </span>
-          <span className="text-[11px] text-slate-500 font-mono">
-            ({lines.length} 行)
+          <span className="text-[11px] text-muted-foreground font-mono">
+            {linesCount} 行代码片段
           </span>
         </div>
 
-        <div className="flex items-center space-x-1.5 opacity-80 group-hover:opacity-100 transition-opacity">
-          {isMermaid && onSendToCanvas && (
+        <div className="flex items-center space-x-1.5 shrink-0">
+          {onSendToCanvas && (
             <button
               type="button"
-              onClick={() => onSendToCanvas(code, 'mermaid')}
-              className="flex items-center space-x-1 px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-colors"
+              onClick={() => onSendToCanvas(code, language || 'text')}
+              className="flex items-center space-x-1 px-2.5 py-1 rounded-lg bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 border border-emerald-500/30 transition-colors font-medium"
             >
-              <Code className="w-3 h-3" />
-              <span>Canvas 预览</span>
+              <Maximize2 className="w-3 h-3" />
+              <span>在 Canvas 打开</span>
             </button>
           )}
-
-          {onSaveToWorkspace && (
-            <button
-              type="button"
-              onClick={() => onSaveToWorkspace(code, language)}
-              className="flex items-center space-x-1 px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-colors"
-              title="一键落盘到当前工作区物理目录"
-            >
-              <FolderDown className="w-3.5 h-3.5 text-emerald-400" />
-              <span>落盘到工作区</span>
-            </button>
-          )}
-
+          <button
+            type="button"
+            onClick={toggleCollapsed}
+            className="px-2.5 py-1 rounded-lg bg-surface-200/70 hover:bg-surface-300/70 text-foreground/80 transition-colors font-medium"
+          >
+            展开内联
+          </button>
           <button
             type="button"
             onClick={handleCopy}
-            className="flex items-center space-x-1 px-2 py-1 rounded hover:bg-white/10 text-slate-300 hover:text-white transition-colors"
+            className="p-1.5 rounded-lg hover:bg-surface-200/70 text-muted-foreground hover:text-foreground transition-colors"
             title="复制代码"
           >
             {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-            <span>{copied ? '已复制' : '复制'}</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleDownload}
-            className="flex items-center space-x-1 px-2 py-1 rounded hover:bg-white/10 text-slate-300 hover:text-white transition-colors"
-            title="保存为本地文件"
-          >
-            <Download className="w-3.5 h-3.5" />
           </button>
         </div>
       </div>
+    );
+  }
 
-      {!collapsed && (
-        <div className="p-3 text-[13px] font-mono leading-relaxed overflow-x-auto selection:bg-emerald-500/40">
-          <table className="w-full border-collapse">
-            <tbody>
-              {lines.map((line, idx) => (
-                <tr key={idx} className="hover:bg-white/[0.02]">
-                  <td className="w-8 select-none text-right pr-4 text-slate-600 text-xs font-mono">
-                    {idx + 1}
-                  </td>
-                  <td className="text-slate-200 whitespace-pre">{line || ' '}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+  return (
+    <>
+      <div className="my-3 rounded-xl border border-white/10 bg-[#0d0f17] overflow-hidden shadow-lg group">
+        <div className="flex items-center justify-between px-3.5 py-2 bg-surface-100/80 border-b border-white/5 text-xs text-slate-400">
+          <div className="flex items-center space-x-2">
+            <button
+              type="button"
+              onClick={toggleCollapsed}
+              className="hover:text-slate-200 transition-colors p-0.5"
+              title={collapsed ? '展开代码' : '折叠代码'}
+            >
+              {collapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </button>
+            <span className="font-mono uppercase tracking-wider font-semibold text-slate-300">
+              {language || 'text'}
+            </span>
+            <span className="text-[11px] text-slate-500 font-mono">
+              ({lines.length} 行)
+            </span>
+          </div>
+
+          <div className="flex items-center space-x-1.5 opacity-90 group-hover:opacity-100 transition-opacity">
+            {(isMermaid || isLongSnippet) && onSendToCanvas && (
+              <button
+                type="button"
+                onClick={() => onSendToCanvas(code, isMermaid ? 'mermaid' : (language || 'text'))}
+                className="flex items-center space-x-1 px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-colors"
+              >
+                <Code className="w-3 h-3" />
+                <span>Canvas 预览</span>
+              </button>
+            )}
+
+            {mobileMode && (
+              <button
+                type="button"
+                onClick={() => setFullscreenOpen(true)}
+                className="flex items-center space-x-1 px-2 py-1 rounded hover:bg-white/10 text-slate-300 hover:text-white transition-colors"
+                title="全屏查看代码"
+              >
+                <Maximize2 className="w-3.5 h-3.5" />
+                <span className="hidden sm:inline">全屏</span>
+              </button>
+            )}
+
+            {onSaveToWorkspace && (
+              <button
+                type="button"
+                onClick={() => onSaveToWorkspace(code, language)}
+                className="flex items-center space-x-1 px-2 py-1 rounded bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 transition-colors"
+                title="一键落盘到当前工作区物理目录"
+              >
+                <FolderDown className="w-3.5 h-3.5 text-emerald-400" />
+                <span>落盘到工作区</span>
+              </button>
+            )}
+
+            <button
+              type="button"
+              onClick={handleCopy}
+              className="flex items-center space-x-1 px-2 py-1 rounded hover:bg-white/10 text-slate-300 hover:text-white transition-colors"
+              title="复制代码"
+            >
+              {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>{copied ? '已复制' : '复制'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleDownload}
+              className="flex items-center space-x-1 px-2 py-1 rounded hover:bg-white/10 text-slate-300 hover:text-white transition-colors"
+              title="保存为本地文件"
+            >
+              <Download className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+
+        {!collapsed && (
+          <div className="relative">
+            <div
+              className={`p-3 text-[13px] font-mono leading-relaxed overflow-x-auto selection:bg-emerald-500/40 ${
+                mobileMode && !mobileExpanded && isLongSnippet ? 'max-h-[260px] overflow-y-hidden' : ''
+              }`}
+            >
+              <table className="w-full border-collapse">
+                <tbody>
+                  {lines.map((line, idx) => (
+                    <tr key={idx} className="hover:bg-white/[0.02]">
+                      <td className="w-8 select-none text-right pr-4 text-slate-600 text-xs font-mono">
+                        {idx + 1}
+                      </td>
+                      <td className="text-slate-200 whitespace-pre">{line || ' '}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+
+            {mobileMode && !mobileExpanded && isLongSnippet && (
+              <div className="absolute inset-x-0 bottom-0 pt-10 pb-2.5 px-3 bg-gradient-to-t from-[#0d0f17] via-[#0d0f17]/90 to-transparent flex items-center justify-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setMobileExpanded(true)}
+                  className="px-3 py-1 rounded-full bg-white/10 hover:bg-white/15 text-slate-200 text-[11px] font-medium border border-white/10 transition-colors"
+                >
+                  展开完整代码 ({linesCount} 行)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setFullscreenOpen(true)}
+                  className="px-3 py-1 rounded-full bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 text-[11px] font-medium border border-emerald-500/30 transition-colors"
+                >
+                  全屏查看
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {fullscreenOpen && (
+        <div className="fixed inset-0 z-[120] bg-[#0d0f17] text-slate-100 flex flex-col">
+          <div className="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-[#12151f] shrink-0">
+            <div className="flex items-center space-x-2">
+              <span className="font-mono uppercase text-xs font-semibold text-emerald-400">
+                {language || 'text'}
+              </span>
+              <span className="text-xs text-slate-400 font-mono">({linesCount} 行)</span>
+            </div>
+            <div className="flex items-center space-x-2">
+              <button
+                type="button"
+                onClick={handleCopy}
+                className="flex items-center space-x-1 px-2.5 py-1.5 rounded-lg bg-white/10 text-xs text-slate-200"
+              >
+                {copied ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
+                <span>{copied ? '已复制' : '复制'}</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setFullscreenOpen(false)}
+                className="p-1.5 rounded-lg bg-white/10 text-slate-300 hover:text-white"
+                aria-label="关闭全屏"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+          <div className="flex-1 overflow-auto p-3 text-[12.5px] font-mono leading-relaxed">
+            <table className="w-full border-collapse">
+              <tbody>
+                {lines.map((line, idx) => (
+                  <tr key={idx}>
+                    <td className="w-8 select-none text-right pr-3 text-slate-600 text-[11px]">
+                      {idx + 1}
+                    </td>
+                    <td className="text-slate-200 whitespace-pre">{line || ' '}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
-    </div>
+    </>
   );
 }

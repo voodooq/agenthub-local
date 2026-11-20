@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Menu,
   Plus,
@@ -10,6 +11,7 @@ import {
   Trash2,
   MoreVertical,
   Edit2,
+  Share2,
   Sliders,
   Library,
   Clock,
@@ -37,6 +39,7 @@ import { Conversation, StatusPillData, Workspace } from '@/types';
 import { useAppVersion } from '@/config/version';
 import { apiFetch } from '@/utils/apiClient';
 import { ServerFolderBrowser } from './ServerFolderBrowser';
+import { ShareConversationModal } from './ShareConversationModal';
 
 export type MainNavHub = 'chat' | 'agents' | 'library' | 'scheduled' | 'skills' | 'memory' | 'llmwiki';
 
@@ -70,6 +73,8 @@ interface SidebarProps {
   hasUpdate?: boolean;
   latestVersion?: string;
   onOpenUpdateModal?: () => void;
+  /** 当外部触发值递增时自动收起侧边栏（仅触发一次，用户可随时手动展开） */
+  collapseSignal?: number;
 }
 
 /**
@@ -130,13 +135,22 @@ export function Sidebar({
   hasUpdate = false,
   latestVersion,
   onOpenUpdateModal,
+  collapseSignal = 0,
 }: SidebarProps) {
   const { tag: appVersionTag } = useAppVersion();
   const [isCollapsed, setIsCollapsed] = useState(false);
+  const [isSystemMenuOpen, setIsSystemMenuOpen] = useState(false);
+
+  useEffect(() => {
+    if (collapseSignal > 0) {
+      setIsCollapsed(true);
+    }
+  }, [collapseSignal]);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingTitle, setEditingTitle] = useState('');
   const [menuOpenId, setMenuOpenId] = useState<string | null>(null);
   const [movingConvId, setMovingConvId] = useState<string | null>(null);
+  const [shareTarget, setShareTarget] = useState<{ id: string; title: string } | null>(null);
   const [expandedWorkspaceIds, setExpandedWorkspaceIds] = useState<Record<string, boolean>>({});
 
   // 内联挂载本地目录 / 新建沙盒工作区状态（替代原本 WorkspaceSwitcher 的下拉隐藏操作）
@@ -690,6 +704,14 @@ export function Sidebar({
                 const isExpanded = Boolean(expandedWorkspaceIds[ws.id]);
                 const isSandbox = ws.type !== 'physical' || (ws.name || '').startsWith('[沙盒]');
                 const displayName = (ws.name || '').replace(/^\[沙盒\]\s*/, '');
+                const isAgentSandbox = Boolean(
+                  ws.agent_id || ws.bound_agent_id || displayName.includes('专家')
+                );
+                const sandboxTitle = isAgentSandbox
+                  ? ws.agent_strict_mode
+                    ? `${displayName} · 专家沙盒 · 严谨模式 (T=0.1)`
+                    : `${displayName} · 专家沙盒`
+                  : `项目: ${ws.name} (${wsConvs.length} 个会话)`;
                 const hasPinnedConv = wsConvs.some((c) => c.is_pinned);
 
                 if (isCollapsed) {
@@ -705,10 +727,12 @@ export function Sidebar({
                           ? 'bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)] border border-[var(--sidebar-item-active-border)]'
                           : 'hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)]'
                       }`}
-                      title={`项目: ${ws.name} (${wsConvs.length} 个会话)`}
+                      title={sandboxTitle}
                     >
                       {ws.type === 'physical' ? (
                         <FolderGit2 className="w-4 h-4" />
+                      ) : isAgentSandbox ? (
+                        <Bot className="w-4 h-4 text-emerald-400" />
                       ) : (
                         <Box className="w-4 h-4" />
                       )}
@@ -737,13 +761,15 @@ export function Sidebar({
                             <ChevronRight className="w-3.5 h-3.5" />
                           )}
                         </span>
-                        <div className="relative shrink-0">
+                        <div className="relative shrink-0" title={isAgentSandbox ? sandboxTitle : undefined}>
                           {ws.type === 'physical' ? (
                             <Folder
                               className={`w-3.5 h-3.5 ${
                                 isWsActive ? 'text-[var(--sidebar-item-active-fg)]' : 'text-[var(--sidebar-section-fg)]'
                               }`}
                             />
+                          ) : isAgentSandbox ? (
+                            <Bot className="w-3.5 h-3.5 text-emerald-400" />
                           ) : (
                             <Box
                               className={`w-3.5 h-3.5 ${
@@ -760,9 +786,9 @@ export function Sidebar({
                           )}
                         </div>
                         <span className="truncate">{displayName}</span>
-                        {isSandbox && (
+                        {ws.type === 'physical' && (
                           <span className="px-1 py-0.2 rounded text-[9px] bg-[var(--sidebar-tag-bg)] text-[var(--sidebar-tag-fg)] shrink-0 font-normal">
-                            沙盒
+                            本地
                           </span>
                         )}
                         {hasPinnedConv && !isWsActive && (
@@ -830,6 +856,7 @@ export function Sidebar({
                               onStartRename={() => handleStartRename(conv)}
                               onTogglePin={() => onTogglePin(conv.id, !conv.is_pinned)}
                               onDelete={() => onDeleteConv(conv.id)}
+                              onShare={() => setShareTarget({ id: conv.id, title: conv.title })}
                               onMoveWorkspace={(targetWsId) => onMoveConvWorkspace?.(conv.id, targetWsId)}
                               menuOpenId={menuOpenId}
                               setMenuOpenId={setMenuOpenId}
@@ -943,6 +970,7 @@ export function Sidebar({
                   onStartRename={() => handleStartRename(conv)}
                   onTogglePin={() => onTogglePin(conv.id, !conv.is_pinned)}
                   onDelete={() => onDeleteConv(conv.id)}
+                  onShare={() => setShareTarget({ id: conv.id, title: conv.title })}
                   onMoveWorkspace={(targetWsId) => onMoveConvWorkspace?.(conv.id, targetWsId)}
                   menuOpenId={menuOpenId}
                   setMenuOpenId={setMenuOpenId}
@@ -974,6 +1002,7 @@ export function Sidebar({
                 onStartRename={() => handleStartRename(conv)}
                 onTogglePin={() => onTogglePin(conv.id, !conv.is_pinned)}
                 onDelete={() => onDeleteConv(conv.id)}
+                onShare={() => setShareTarget({ id: conv.id, title: conv.title })}
                 onMoveWorkspace={(targetWsId) => onMoveConvWorkspace?.(conv.id, targetWsId)}
                 menuOpenId={menuOpenId}
                 setMenuOpenId={setMenuOpenId}
@@ -999,118 +1028,138 @@ export function Sidebar({
         </div>
       </div>
 
-      {/* ④ 底部轻量 surface 账号卡片 + 均匀三联工具条 */}
-      <div className="px-3 pt-2 pb-3 border-t border-[var(--sidebar-border)] space-y-2">
-        {/* 账号算力状态卡片（轻量 surface 风格，无生硬粗边框） */}
-        <button
-          type="button"
-          onClick={onOpenAccounts}
-          className={`w-full flex items-center justify-between rounded-xl bg-[var(--sidebar-card-bg)] hover:bg-[var(--sidebar-card-hover)] transition-colors ${
-            isCollapsed ? 'p-2 justify-center' : 'px-2.5 py-2'
-          }`}
-          title="统一管理算力账号、OAuth 与配额池"
-        >
-          <div className="flex items-center gap-2 min-w-0">
-            <span className={`w-2 h-2 rounded-full shrink-0 ${accountDotClass}`} />
-            {!isCollapsed && (
-              <div className="text-left min-w-0">
-                <div className="text-xs font-semibold text-[var(--sidebar-fg)] truncate flex items-center gap-1.5">
-                  <span className="truncate">{statusPill?.active_account_name || '算力账号池'}</span>
-                  {statusPill?.auth_type === 'oauth_google_one' && (
-                    <span className="text-[9px] px-1 py-0.2 rounded bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)] font-mono">
-                      PRO
-                    </span>
-                  )}
-                </div>
-                <div className="text-[10px] text-[var(--sidebar-section-fg)] truncate">
-                  {statusPill
-                    ? `今日 ${statusPill.today_used} 次${statusPill.is_relayed ? ' · 热接力中' : ''}`
-                    : '点击配置账号 / 本地引擎'}
-                </div>
-              </div>
-            )}
-          </div>
-          {!isCollapsed && <ChevronRight className="w-3.5 h-3.5 text-[var(--sidebar-section-fg)] shrink-0" />}
-        </button>
+      {/* ④ 底部极简状态与设置入口（用量分析 / 系统监控 / 今日调用收进二级菜单） */}
+      <div className="relative px-3 pt-2 pb-3 border-t border-[var(--sidebar-border)]">
+        {isSystemMenuOpen && (
+          <div className="absolute left-3 right-3 bottom-full mb-2 rounded-2xl glass-modal p-1.5 shadow-2xl border border-border z-50 text-xs space-y-0.5">
+            <button
+              type="button"
+              onClick={() => {
+                setIsSystemMenuOpen(false);
+                onOpenAccounts();
+              }}
+              className="w-full flex items-center justify-between px-2.5 py-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-fg)] transition-colors"
+            >
+              <span className="flex items-center gap-2 truncate">
+                <span className={`w-2 h-2 rounded-full shrink-0 ${accountDotClass}`} />
+                <span className="truncate font-medium">
+                  {statusPill?.active_account_name || '算力账号池'}
+                </span>
+              </span>
+              {statusPill && (
+                <span className="text-[10px] text-[var(--sidebar-section-fg)] font-mono shrink-0">
+                  今日 {statusPill.today_used} 次
+                </span>
+              )}
+            </button>
 
-        {/* 三联轻工具条：用量分析 · 系统监控 · 设置 */}
-        {isCollapsed ? (
-          <div className="flex flex-col items-center gap-1 pt-1">
             {onOpenTokenStats && (
               <button
                 type="button"
-                onClick={onOpenTokenStats}
-                className="p-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
-                title="用量分析 (Token 消耗统计)"
+                onClick={() => {
+                  setIsSystemMenuOpen(false);
+                  onOpenTokenStats();
+                }}
+                className="w-full flex items-center gap-2 px-2.5 py-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-fg)] transition-colors"
               >
-                <BarChart3 className="w-4 h-4" />
+                <BarChart3 className="w-3.5 h-3.5 text-[var(--sidebar-section-fg)] shrink-0" />
+                <span>用量分析</span>
               </button>
             )}
+
             {onOpenSystemMonitor && (
               <button
                 type="button"
-                onClick={onOpenSystemMonitor}
-                className="relative p-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
-                title="系统监控与性能"
+                onClick={() => {
+                  setIsSystemMenuOpen(false);
+                  onOpenSystemMonitor();
+                }}
+                className="w-full flex items-center justify-between px-2.5 py-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-fg)] transition-colors"
               >
-                <Activity className="w-4 h-4" />
+                <span className="flex items-center gap-2">
+                  <Activity className="w-3.5 h-3.5 text-[var(--sidebar-section-fg)] shrink-0" />
+                  <span>系统监控</span>
+                </span>
                 {pendingProposalCount > 0 && (
-                  <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-amber-500" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
                 )}
               </button>
             )}
-            <button
-              type="button"
-              onClick={onOpenSettings}
-              className="relative p-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
-              title="偏好设置"
-            >
-              <Sliders className="w-4 h-4" />
-              {hasUpdate && (
-                <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-[var(--sidebar-indicator)] animate-pulse" />
-              )}
-            </button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-3 gap-1">
-            <button
-              type="button"
-              onClick={() => onOpenTokenStats?.()}
-              className="flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-lg hover:bg-[var(--sidebar-item-hover)] text-[11px] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
-              title="查看 Token 消耗与脱水节省统计"
-            >
-              <BarChart3 className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate font-medium">用量分析</span>
-            </button>
 
             <button
               type="button"
-              onClick={() => onOpenSystemMonitor?.()}
-              className="relative flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-lg hover:bg-[var(--sidebar-item-hover)] text-[11px] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
-              title="系统监控与优化提案"
+              onClick={() => {
+                setIsSystemMenuOpen(false);
+                onOpenSettings();
+              }}
+              className="w-full flex items-center justify-between px-2.5 py-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-fg)] transition-colors"
             >
-              <Activity className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate font-medium">系统监控</span>
-              {pendingProposalCount > 0 && (
-                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
-              )}
-            </button>
-
-            <button
-              type="button"
-              onClick={onOpenSettings}
-              className="relative flex items-center justify-center gap-1 px-1.5 py-1.5 rounded-lg hover:bg-[var(--sidebar-item-hover)] text-[11px] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
-              title="系统偏好、外观与模型路由设置"
-            >
-              <Sliders className="w-3.5 h-3.5 shrink-0" />
-              <span className="truncate font-medium">设置</span>
+              <span className="flex items-center gap-2">
+                <Sliders className="w-3.5 h-3.5 text-[var(--sidebar-section-fg)] shrink-0" />
+                <span>系统偏好设置</span>
+              </span>
               {hasUpdate && (
                 <span className="w-1.5 h-1.5 rounded-full bg-[var(--sidebar-indicator)] animate-pulse shrink-0" />
               )}
             </button>
           </div>
         )}
+
+        {isCollapsed ? (
+          <div className="flex flex-col items-center gap-1">
+            <button
+              type="button"
+              onClick={() => setIsSystemMenuOpen((prev) => !prev)}
+              className="relative p-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)] transition-colors"
+              title="设置与系统状态"
+            >
+              <Sliders className="w-4 h-4" />
+              {(hasUpdate || pendingProposalCount > 0) && (
+                <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-[var(--sidebar-indicator)]" />
+              )}
+            </button>
+          </div>
+        ) : (
+          <div className="flex items-center justify-between gap-1.5">
+            <button
+              type="button"
+              onClick={onOpenSettings}
+              className="flex-1 flex items-center gap-2 px-2.5 py-2 rounded-xl hover:bg-[var(--sidebar-item-hover)] text-xs text-[var(--sidebar-fg)] transition-colors min-w-0"
+              title="系统偏好、外观与模型路由设置"
+            >
+              <Sliders className="w-3.5 h-3.5 text-[var(--sidebar-section-fg)] shrink-0" />
+              <span className="truncate font-medium">设置</span>
+              {hasUpdate && (
+                <span className="w-1.5 h-1.5 rounded-full bg-[var(--sidebar-indicator)] animate-pulse shrink-0" />
+              )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsSystemMenuOpen((prev) => !prev)}
+              className={`flex items-center gap-1.5 px-2.5 py-2 rounded-xl text-[11px] transition-colors shrink-0 ${
+                isSystemMenuOpen
+                  ? 'bg-[var(--sidebar-item-active)] text-[var(--sidebar-item-active-fg)]'
+                  : 'hover:bg-[var(--sidebar-item-hover)] text-[var(--sidebar-section-fg)] hover:text-[var(--sidebar-fg)]'
+              }`}
+              title="系统状态、用量分析与算力账号"
+            >
+              <span className={`w-2 h-2 rounded-full shrink-0 ${accountDotClass}`} />
+              <span>系统状态</span>
+              {pendingProposalCount > 0 && (
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" />
+              )}
+            </button>
+          </div>
+        )}
       </div>
+
+      {/* 会话只读分享弹窗 */}
+      <ShareConversationModal
+        conversationId={shareTarget?.id || null}
+        conversationTitle={shareTarget?.title || ''}
+        onClose={() => setShareTarget(null)}
+      />
 
       {/* 挂载本地工程目录弹窗 */}
       {isMountingModalOpen && (
@@ -1290,6 +1339,7 @@ function ConversationRow({
   onStartRename,
   onTogglePin,
   onDelete,
+  onShare,
   onMoveWorkspace,
   menuOpenId,
   setMenuOpenId,
@@ -1308,12 +1358,14 @@ function ConversationRow({
   onStartRename: () => void;
   onTogglePin: () => void;
   onDelete: () => void;
+  onShare: () => void;
   onMoveWorkspace?: (targetWsId: string) => void;
   menuOpenId: string | null;
   setMenuOpenId: (id: string | null) => void;
   movingConvId: string | null;
   setMovingConvId: (id: string | null) => void;
 }) {
+  const [menuAnchor, setMenuAnchor] = useState<{ top: number; left: number }>({ top: 0, left: 0 });
   const isMenuOpen = menuOpenId === conv.id;
   const isMoving = movingConvId === conv.id;
   const isBranch = isBranchedConversation(conv);
@@ -1372,7 +1424,7 @@ function ConversationRow({
         )}
       </div>
 
-      {/* 右侧相对时间 & 悬浮菜单 */}
+      {/* 右侧相对时间 & 悬浮「⋮」菜单（Portal 固定定位在按钮右侧外缘，避免遮挡下方标题或被滚动容器裁切） */}
       {!isEditing && (
         <div className="relative flex items-center shrink-0">
           {relAge && !isMenuOpen && (
@@ -1381,10 +1433,22 @@ function ConversationRow({
             </span>
           )}
           <button
+            type="button"
+            onMouseDown={(e) => e.stopPropagation()}
             onClick={(e) => {
               e.stopPropagation();
-              setMenuOpenId(isMenuOpen ? null : conv.id);
-              setMovingConvId(null);
+              if (isMenuOpen) {
+                setMenuOpenId(null);
+                setMovingConvId(null);
+              } else {
+                const rect = e.currentTarget.getBoundingClientRect();
+                setMenuAnchor({
+                  top: Math.min(rect.top, window.innerHeight - 240),
+                  left: Math.min(rect.right + 8, window.innerWidth - 200),
+                });
+                setMenuOpenId(conv.id);
+                setMovingConvId(null);
+              }
             }}
             className={`p-0.5 rounded-full hover:bg-surface-200 transition-opacity ${
               isMenuOpen ? 'opacity-100 block' : 'hidden group-hover:block'
@@ -1393,79 +1457,102 @@ function ConversationRow({
             <MoreVertical className="w-3.5 h-3.5 text-muted-foreground" />
           </button>
 
-          {isMenuOpen && (
-            <div
-              className="absolute right-0 top-full mt-1 w-44 rounded-xl glass-modal p-1 shadow-2xl border border-border z-40 animate-scale-in text-xs font-normal"
-              onClick={(e) => e.stopPropagation()}
-            >
-              <button
-                onClick={() => onStartRename()}
-                className="w-full flex items-center space-x-2 px-2.5 py-1.5 rounded-lg hover:bg-foreground/5 text-foreground transition-colors"
+          {isMenuOpen &&
+            typeof document !== 'undefined' &&
+            createPortal(
+              <div
+                style={{ top: `${menuAnchor.top}px`, left: `${menuAnchor.left}px` }}
+                className="fixed w-44 rounded-2xl bg-white dark:bg-[#282a2c] text-foreground p-1.5 shadow-xl z-[90] animate-scale-in text-xs font-normal"
+                onMouseDown={(e) => e.stopPropagation()}
+                onClick={(e) => e.stopPropagation()}
               >
-                <Edit2 className="w-3.5 h-3.5" />
-                <span>重命名</span>
-              </button>
-              <button
-                onClick={() => {
-                  onTogglePin();
-                  setMenuOpenId(null);
-                }}
-                className="w-full flex items-center space-x-2 px-2.5 py-1.5 rounded-lg hover:bg-foreground/5 text-foreground transition-colors"
-              >
-                <Pin className="w-3.5 h-3.5" />
-                <span>{conv.is_pinned ? '取消置顶' : '置顶会话'}</span>
-              </button>
-
-              {/* 移动到其他工作区 */}
-              <div className="relative">
                 <button
-                  onClick={() => setMovingConvId(isMoving ? null : conv.id)}
-                  className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg hover:bg-foreground/5 text-foreground transition-colors"
+                  type="button"
+                  onClick={() => {
+                    onShare();
+                    setMenuOpenId(null);
+                  }}
+                  className="w-full flex items-center space-x-2.5 px-2.5 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/[0.07] transition-colors"
                 >
-                  <div className="flex items-center space-x-2">
-                    <FolderInput className="w-3.5 h-3.5 text-sky-400" />
-                    <span>移至项目...</span>
-                  </div>
-                  <span className="text-[10px] text-muted-foreground">▶</span>
+                  <Share2 className="w-3.5 h-3.5 text-muted-foreground shrink-0" strokeWidth={1.75} />
+                  <span>分享对话内容</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onTogglePin();
+                    setMenuOpenId(null);
+                  }}
+                  className="w-full flex items-center space-x-2.5 px-2.5 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/[0.07] transition-colors"
+                >
+                  <Pin className="w-3.5 h-3.5 text-muted-foreground shrink-0" strokeWidth={1.75} />
+                  <span>{conv.is_pinned ? '取消置顶' : '置顶'}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onStartRename()}
+                  className="w-full flex items-center space-x-2.5 px-2.5 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/[0.07] transition-colors"
+                >
+                  <Edit2 className="w-3.5 h-3.5 text-muted-foreground shrink-0" strokeWidth={1.75} />
+                  <span>重命名</span>
                 </button>
 
-                {isMoving && (
-                  <div className="mt-1 p-1 bg-surface-200/90 rounded-lg border border-border space-y-0.5 max-h-40 overflow-y-auto">
-                    {workspaces.map((w) => (
-                      <button
-                        key={w.id}
-                        onClick={() => {
-                          onMoveWorkspace?.(w.id);
-                          setMenuOpenId(null);
-                          setMovingConvId(null);
-                        }}
-                        className={`w-full text-left px-2 py-1 rounded text-[11px] truncate ${
-                          conv.workspace_id === w.id
-                            ? 'text-emerald-400 font-bold'
-                            : 'text-foreground hover:bg-surface-100'
-                        }`}
-                      >
-                        {w.name}
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
+                {/* 移动到其他工作区（精简紧凑） */}
+                <div>
+                  <button
+                    type="button"
+                    onClick={() => setMovingConvId(isMoving ? null : conv.id)}
+                    className="w-full flex items-center justify-between px-2.5 py-2 rounded-xl hover:bg-black/5 dark:hover:bg-white/[0.07] transition-colors"
+                  >
+                    <div className="flex items-center space-x-2.5">
+                      <FolderInput className="w-3.5 h-3.5 text-muted-foreground shrink-0" strokeWidth={1.75} />
+                      <span>移至项目...</span>
+                    </div>
+                    <ChevronRight
+                      className={`w-3 h-3 text-muted-foreground transition-transform ${
+                        isMoving ? 'rotate-90' : ''
+                      }`}
+                    />
+                  </button>
 
-              <div className="my-1 border-t border-border/50" />
+                  {isMoving && (
+                    <div className="mt-1 px-1 py-1 bg-black/[0.04] dark:bg-black/25 rounded-xl space-y-0.5 max-h-32 overflow-y-auto">
+                      {workspaces.map((w) => (
+                        <button
+                          key={w.id}
+                          type="button"
+                          onClick={() => {
+                            onMoveWorkspace?.(w.id);
+                            setMenuOpenId(null);
+                            setMovingConvId(null);
+                          }}
+                          className={`w-full text-left px-2 py-1 rounded-lg text-[11px] truncate ${
+                            conv.workspace_id === w.id
+                              ? 'text-emerald-500 font-semibold'
+                              : 'text-foreground hover:bg-black/5 dark:hover:bg-white/[0.06]'
+                          }`}
+                        >
+                          {w.name}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
-              <button
-                onClick={() => {
-                  onDelete();
-                  setMenuOpenId(null);
-                }}
-                className="w-full flex items-center space-x-2 px-2.5 py-1.5 rounded-lg hover:bg-rose-500/20 text-rose-500 transition-colors"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-                <span>删除</span>
-              </button>
-            </div>
-          )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    onDelete();
+                    setMenuOpenId(null);
+                  }}
+                  className="w-full flex items-center space-x-2.5 px-2.5 py-2 mt-1 rounded-xl hover:bg-rose-500/15 text-rose-500 transition-colors"
+                >
+                  <Trash2 className="w-3.5 h-3.5 shrink-0" strokeWidth={1.75} />
+                  <span>删除</span>
+                </button>
+              </div>,
+              document.body
+            )}
         </div>
       )}
     </div>

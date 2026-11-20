@@ -1008,11 +1008,30 @@ class KBStorageManager:
                 except Exception as e:
                     logger.warning(f"清理旧版本目录 [{child}] 失败: {e}")
 
-        # 对保留活跃的各版本执行 FTS5 重建与 VACUUM 深度瘦身
+        # 清理导出缓存包目录 bundles/（可随时重新导出，释放磁盘占用）
+        bundles_dir = cls.get_kb_dir(kb_id) / "bundles"
+        if bundles_dir.exists():
+            for bf in list(bundles_dir.iterdir()):
+                if bf.is_file():
+                    try:
+                        b_sz = bf.stat().st_size
+                        bf.unlink(missing_ok=True)
+                        freed_bytes += b_sz
+                    except Exception:
+                        pass
+
+        # 对保留活跃的各版本执行 FTS5 重建与 VACUUM 深度瘦身，并计入释放空间
         for ver in keep_set:
             db_p = cls.get_version_db_path(kb_id, ver)
             if db_p.exists():
                 try:
+                    wal_p = Path(f"{db_p}-wal")
+                    shm_p = Path(f"{db_p}-shm")
+                    before_sz = (
+                        db_p.stat().st_size
+                        + (wal_p.stat().st_size if wal_p.exists() else 0)
+                        + (shm_p.stat().st_size if shm_p.exists() else 0)
+                    )
                     conn = sqlite3.connect(str(db_p))
                     try:
                         conn.execute("INSERT INTO hybrid_chunks_fts(hybrid_chunks_fts) VALUES('rebuild');")
@@ -1022,6 +1041,13 @@ class KBStorageManager:
                     conn.execute("PRAGMA wal_checkpoint(TRUNCATE);")
                     conn.execute("VACUUM;")
                     conn.close()
+                    after_sz = (
+                        db_p.stat().st_size
+                        + (wal_p.stat().st_size if wal_p.exists() else 0)
+                        + (shm_p.stat().st_size if shm_p.exists() else 0)
+                    )
+                    if before_sz > after_sz:
+                        freed_bytes += (before_sz - after_sz)
                 except Exception:
                     pass
 

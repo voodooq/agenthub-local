@@ -19,8 +19,22 @@ class WorkspaceRepository:
         return str(Path(p).resolve())
 
     @staticmethod
+    async def _ensure_agent_id_column(conn: Any) -> None:
+        """按需为 workspaces 表补充 agent_id 列以兼容历史库。"""
+        try:
+            cur = await conn.execute("PRAGMA table_info(workspaces);")
+            cols = {r["name"] for r in await cur.fetchall()}
+            if "agent_id" not in cols:
+                await conn.execute("ALTER TABLE workspaces ADD COLUMN agent_id TEXT DEFAULT NULL;")
+                await conn.commit()
+        except Exception as e:
+            logger.debug(f"检查 workspaces.agent_id 列跳过: {e}")
+
+    @staticmethod
     async def get_all() -> list[dict[str, Any]]:
-        """获取所有工作区列表，附带会话总数与路径可访问性"""
+        """获取所有工作区列表，附带会话总数、路径可访问性及绑定专家标识"""
+        import json as _json
+
         query = """
         SELECT 
             w.id,
@@ -32,13 +46,19 @@ class WorkspaceRepository:
             w.security_level,
             w.fts_last_indexed_at,
             w.created_at,
+            w.agent_id,
+            MAX(ap.id) AS bound_agent_id,
+            MAX(ap.grounding_config_json) AS agent_grounding_json,
+            MAX(ap.strict_grounding) AS agent_strict_grounding,
             COUNT(c.id) AS conversation_count
         FROM workspaces w
         LEFT JOIN conversations c ON c.workspace_id = w.id
+        LEFT JOIN agent_profiles ap ON (ap.id = w.agent_id OR REPLACE(w.name, '[沙盒] ', '') = ap.name)
         GROUP BY w.id
         ORDER BY CASE WHEN w.id = 'default' THEN 0 ELSE 1 END, w.created_at DESC;
         """
         async with db_manager.get_connection() as conn:
+            await WorkspaceRepository._ensure_agent_id_column(conn)
             cursor = await conn.execute(query)
             rows = await cursor.fetchall()
             results = []
@@ -46,6 +66,16 @@ class WorkspaceRepository:
                 item = dict(row)
                 p = Path(item["root_path"])
                 item["is_path_accessible"] = p.exists() and p.is_dir()
+                strict_flag = bool(item.pop("agent_strict_grounding", 0))
+                raw_grounding = item.pop("agent_grounding_json", None)
+                if raw_grounding:
+                    try:
+                        parsed_g = _json.loads(raw_grounding)
+                        if isinstance(parsed_g, dict) and "strict_mode" in parsed_g:
+                            strict_flag = bool(parsed_g["strict_mode"])
+                    except Exception:
+                        pass
+                item["agent_strict_mode"] = strict_flag
                 results.append(item)
             return results
 
@@ -148,15 +178,17 @@ class WorkspaceRepository:
         context_prompt = data.get("context_prompt")
         model_preference = data.get("model_preference")
         security_level = data.get("security_level", "standard")
+        agent_id = data.get("agent_id")
 
         insert_sql = """
-        INSERT INTO workspaces (id, name, type, root_path, context_prompt, model_preference, security_level)
-        VALUES (?, ?, ?, ?, ?, ?, ?);
+        INSERT INTO workspaces (id, name, type, root_path, context_prompt, model_preference, security_level, agent_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?);
         """
         async with db_manager.get_connection() as conn:
+            await WorkspaceRepository._ensure_agent_id_column(conn)
             await conn.execute(
                 insert_sql,
-                (ws_id, name, ws_type, norm_path, context_prompt, model_preference, security_level),
+                (ws_id, name, ws_type, norm_path, context_prompt, model_preference, security_level, agent_id),
             )
             await conn.commit()
 

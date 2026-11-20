@@ -923,12 +923,12 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
 
   // 磁盘瘦身清理
   const handlePruneKb = async (kbId: string) => {
-    if (!confirm('是否清理该知识库的历史旧版本快照（保留最新 3 个版本）并执行 VACUUM 释放磁盘？')) return;
+    if (!confirm('是否清理该知识库的历史旧版本目录（仅保留当前生效版本）、导出缓存包并执行 VACUUM 释放磁盘？')) return;
     try {
       const resp = await apiFetch(`/api/v1/kb/bases/${kbId}/prune`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keep_count: 3 }),
+        body: JSON.stringify({ keep_count: 1 }),
       });
       const data = await resp.json();
       alert(`瘦身完成！共释放磁盘空间: ${data.freed_mb || 0} MB`);

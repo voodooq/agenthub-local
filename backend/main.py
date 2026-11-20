@@ -151,6 +151,14 @@ async def lifespan(app: FastAPI):
 
     await db_manager.init_db()
 
+    # 启动生命周期中执行一次知识库挂载资产纳管检查（内部带 mtime 幂等短路）
+    try:
+        from app.kb.manager import KBLifecycleManager
+
+        await KBLifecycleManager.auto_adopt_mounted_kbs()
+    except Exception as kb_adopt_err:
+        logger.warning(f"[KBLifecycle] 启动扫描挂载知识库资产跳过: {kb_adopt_err}")
+
     # 将上次异常退出遗留的活跃 Loop 统一收敛为 paused，防止启动后前端无限卡在执行中状态
     try:
         from app.repository.loop_run_repository import TaskLoopRepository

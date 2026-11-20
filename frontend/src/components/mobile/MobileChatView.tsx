@@ -1,20 +1,23 @@
 'use client';
 
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import {
   BookPlus,
   Check,
+  ChevronDown,
   ChevronRight,
   Copy,
-  Loader2,
   Sparkles,
   Volume2,
   VolumeX,
+  X,
 } from 'lucide-react';
 import { apiFetch } from '@/utils/api';
 import { sanitizeAssistantContent } from '@/utils/toolTagSanitizer';
+import { formatToolNaturalDescription, groupMessagesByTurn } from '@/utils/turnTimeline';
+import { CodeBlock } from '@/components/CodeBlock';
 import { VoiceFirstInputBar } from '@/components/mobile/VoiceFirstInputBar';
 import { SaveToWikiModal } from '@/components/wiki/SaveToWikiModal';
 
@@ -24,54 +27,45 @@ export interface MobileExpertItem {
   description?: string;
 }
 
+interface ToolStepItem {
+  id: string;
+  name: string;
+  status: 'running' | 'completed';
+  command?: string;
+  outputPreview?: string;
+}
+
 interface ChatMsg {
   id: string;
   role: 'user' | 'assistant';
   content: string;
+  toolSteps?: ToolStepItem[];
+  followups?: string[];
 }
 
 interface MobileChatViewProps {
   conversationId: string | null;
   experts: MobileExpertItem[];
   activeExpert: MobileExpertItem | null;
-  sceneMode?: 'agent' | 'chat';
+  sceneMode: 'agent' | 'chat';
+  onChangeSceneMode: (mode: 'agent' | 'chat') => void;
   onSelectExpert: (expert: MobileExpertItem) => void;
   onConversationCreated: (convId: string) => void;
   onOpenSnap: () => void;
 }
 
-const STARTER_PROMPTS = [
-  '帮我核对当前竞赛规程中的关键时间节点与报名资格要求',
-  '总结近期会议决策要点，整理成待归档的规则条款',
-  '查询器材检录规范与常见违规判定标准',
-];
-
 /**
- * 尝试从 Markdown 文本中提取简明的 2 列 Key-Value 键值对，用于移动端紧凑展示
- */
-function extractCompactKeyValues(content: string): Array<{ key: string; value: string }> {
-  const rows: Array<{ key: string; value: string }> = [];
-  const lines = content.split('\n');
-  for (const line of lines) {
-    const m = line.match(/^\s*[-*]\s+\*\*([^*：:]{2,20})\*\*[：:]\s*(.{2,60})$/);
-    if (m) {
-      rows.push({ key: m[1].trim(), value: m[2].trim() });
-    }
-    if (rows.length >= 6) break;
-  }
-  return rows.length >= 2 ? rows : [];
-}
-
-/**
- * 移动端「问专家」主视图
- * 采用原生手机消息流风格：圆润对话气泡、专家身份徽章、15px 高可读排版与胶囊操作栏
+ * 移动端 Gemini 风格对话主视图
+ * - 极简留白空状态（居中星芒 + 问候语）
+ * - 单行可折叠检索/工具状态胶囊（展开可核对工具名与切片来源）
+ * - 去框化平铺 Markdown 正文 + 局部横向滚动表格（防页面溢出）
+ * - 动态追问胶囊（仅当返回动态建议时渲染）
  */
 export function MobileChatView({
   conversationId,
-  experts,
   activeExpert,
-  sceneMode = 'agent',
-  onSelectExpert,
+  sceneMode,
+  onChangeSceneMode,
   onConversationCreated,
   onOpenSnap,
 }: MobileChatViewProps) {
@@ -80,6 +74,7 @@ export function MobileChatView({
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [speakingId, setSpeakingId] = useState<string | null>(null);
   const [saveModalContent, setSaveModalContent] = useState<string | null>(null);
+  const [sheetToolSteps, setSheetToolSteps] = useState<ToolStepItem[] | null>(null);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const skipHistoryLoadConvIdRef = useRef<string | null>(null);
@@ -133,7 +128,7 @@ export function MobileChatView({
       return;
     }
     window.speechSynthesis.cancel();
-    const plainText = cleanText.replace(/[#*`>\[\]()]/g, ' ').trim();
+    const plainText = cleanText.replace(/[#*`>\[\]()|]/g, ' ').trim();
     if (!plainText) return;
     const utterance = new SpeechSynthesisUtterance(plainText);
     utterance.lang = 'zh-CN';
@@ -162,7 +157,7 @@ export function MobileChatView({
       setMessages((prev) => [
         ...prev,
         { id: userMsgId, role: 'user', content: trimmed },
-        { id: assistantMsgId, role: 'assistant', content: '' },
+        { id: assistantMsgId, role: 'assistant', content: '', toolSteps: [] },
       ]);
       setIsStreaming(true);
 
@@ -208,6 +203,77 @@ export function MobileChatView({
                 setMessages((prev) =>
                   prev.map((m) => (m.id === assistantMsgId ? { ...m, content: '' } : m))
                 );
+              } else if (ev.type === 'tool_start') {
+                const callId = String(ev.call_id || `${ev.name || 'tool'}-${Date.now()}`);
+                const tName = String(ev.name || 'tool');
+                setMessages((prev) =>
+                  prev.map((m) => {
+                    if (m.id !== assistantMsgId) return m;
+                    const existing = m.toolSteps || [];
+                    return {
+                      ...m,
+                      toolSteps: [
+                        ...existing,
+                        {
+                          id: callId,
+                          name: tName,
+                          status: 'running',
+                          command: typeof ev.command === 'string' ? ev.command : undefined,
+                        },
+                      ],
+                    };
+                  })
+                );
+              } else if (ev.type === 'tool_end') {
+                const callId = String(ev.call_id || '');
+                const tName = String(ev.name || 'tool');
+                const preview =
+                  typeof ev.output === 'string'
+                    ? ev.output.slice(0, 420)
+                    : typeof ev.compressed === 'string'
+                    ? ev.compressed
+                    : undefined;
+                setMessages((prev) =>
+                  prev.map((m) => {
+                    if (m.id !== assistantMsgId) return m;
+                    const existing = m.toolSteps || [];
+                    const idx = existing.findIndex((s) => (callId && s.id === callId) || (s.name === tName && s.status === 'running'));
+                    if (idx >= 0) {
+                      const nextSteps = [...existing];
+                      nextSteps[idx] = {
+                        ...nextSteps[idx],
+                        status: 'completed',
+                        command: typeof ev.command === 'string' ? ev.command : nextSteps[idx].command,
+                        outputPreview: preview,
+                      };
+                      return { ...m, toolSteps: nextSteps };
+                    }
+                    return {
+                      ...m,
+                      toolSteps: [
+                        ...existing,
+                        {
+                          id: callId || `${tName}-${existing.length}`,
+                          name: tName,
+                          status: 'completed',
+                          command: typeof ev.command === 'string' ? ev.command : undefined,
+                          outputPreview: preview,
+                        },
+                      ],
+                    };
+                  })
+                );
+              } else if (Array.isArray(ev.followups) && ev.followups.length > 0) {
+                const nextFollowups = ev.followups
+                  .filter((x: unknown): x is string => typeof x === 'string' && x.trim().length > 0)
+                  .slice(0, 2);
+                if (nextFollowups.length > 0) {
+                  setMessages((prev) =>
+                    prev.map((m) =>
+                      m.id === assistantMsgId ? { ...m, followups: nextFollowups } : m
+                    )
+                  );
+                }
               } else if (
                 (ev.type === 'chunk' ||
                   ev.type === 'token' ||
@@ -254,195 +320,204 @@ export function MobileChatView({
     [activeExpert?.id, conversationId, isStreaming, onConversationCreated, sceneMode]
   );
 
+  const timelineTurns = useMemo(() => groupMessagesByTurn(messages), [messages]);
+
+  const latestAssistantReply = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+      if (messages[i].role === 'assistant' && messages[i].content.trim()) {
+        const { cleanContent } = sanitizeAssistantContent(messages[i].content, { isStreaming: false });
+        if (cleanContent) return cleanContent;
+      }
+    }
+    return '';
+  }, [messages]);
+
   return (
     <div className="flex h-full flex-col bg-background">
       {/* 消息流区域 */}
       <div className="flex-1 overflow-y-auto px-4 py-4">
         {messages.length === 0 ? (
-          <div className="space-y-6 pt-2">
-            {/* 专家横向滑动选择条 */}
-            <div>
-              <div className="mb-2.5 flex items-center justify-between">
-                <p className="text-xs font-semibold tracking-wide text-muted-foreground">
-                  选择领域专家
-                </p>
-                <span className="rounded-full bg-surface-1 px-2.5 py-0.5 text-[11px] text-muted-foreground">
-                  {sceneMode === 'agent' ? '深度查阅' : '纯文本快聊'}
-                </span>
-              </div>
-              <div className="grid grid-cols-2 gap-2.5">
-                {experts.slice(0, 6).map((ex) => {
-                  const selected = activeExpert?.id === ex.id;
-                  return (
-                    <button
-                      key={ex.id}
-                      type="button"
-                      onClick={() => onSelectExpert(ex)}
-                      className={`flex min-h-[72px] flex-col justify-between rounded-2xl border p-3 text-left transition-all active:scale-[0.98] ${
-                        selected
-                          ? 'border-emerald-500/70 bg-emerald-500/10 shadow-sm'
-                          : 'border-border/70 bg-surface-1'
-                      }`}
-                    >
-                      <div className="flex items-center justify-between gap-1">
-                        <span className="truncate text-sm font-semibold text-foreground">
-                          {ex.name}
-                        </span>
-                        {selected && (
-                          <span className="h-2 w-2 shrink-0 rounded-full bg-emerald-500" />
-                        )}
-                      </div>
-                      <div className="mt-1 line-clamp-1 text-xs text-muted-foreground">
-                        {ex.description || '领域规程顾问'}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+          <div className="flex h-full flex-col items-center justify-center px-4 text-center">
+            <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-2xl bg-emerald-500/12 text-emerald-500">
+              <Sparkles className="h-6 w-6 gemini-sparkle-pulse" strokeWidth={1.75} />
             </div>
-
-            {/* 高频问题推荐 */}
-            <div>
-              <p className="mb-2.5 text-xs font-semibold tracking-wide text-muted-foreground">
-                你可以这样问
+            <h2 className="text-xl font-semibold tracking-tight text-foreground">
+              有什么我可以帮你分担的吗？
+            </h2>
+            {activeExpert?.name && (
+              <p className="mt-2 inline-flex items-center gap-1.5 rounded-full border border-border/70 bg-surface-1 px-3 py-1 text-xs text-muted-foreground">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                <span>当前专家：{activeExpert.name}</span>
               </p>
-              <div className="space-y-2.5">
-                {STARTER_PROMPTS.map((prompt, idx) => (
-                  <button
-                    key={idx}
-                    type="button"
-                    onClick={() => void sendMessage(prompt)}
-                    className="flex min-h-[48px] w-full items-center justify-between gap-3 rounded-2xl border border-border/70 bg-surface-1 px-4 py-3 text-left text-sm text-foreground transition-transform active:scale-[0.99]"
-                  >
-                    <div className="flex min-w-0 items-center gap-2.5">
-                      <Sparkles
-                        className="h-4 w-4 shrink-0 text-emerald-500"
-                        strokeWidth={1.75}
-                      />
-                      <span className="line-clamp-2 leading-snug">{prompt}</span>
-                    </div>
-                    <ChevronRight
-                      className="h-4 w-4 shrink-0 text-muted-foreground"
-                      strokeWidth={1.75}
-                    />
-                  </button>
-                ))}
-              </div>
-            </div>
+            )}
           </div>
         ) : (
-          <div className="space-y-4">
-            {messages.map((msg, msgIdx) => {
-              if (msg.role === 'user') {
+          <div className="space-y-5 pb-2">
+            {timelineTurns.map((turn, turnIdx) => {
+              if (turn.role === 'user' && turn.userMessage) {
                 return (
-                  <div key={msg.id} className="flex justify-end">
-                    <div className="max-w-[82%] rounded-2xl rounded-tr-sm bg-emerald-600 px-4 py-2.5 text-[15px] leading-relaxed text-white shadow-sm">
-                      {msg.content}
+                  <div key={turn.stableKey} className="gemini-msg-enter flex justify-end">
+                    <div className="max-w-[82%] rounded-2xl rounded-tr-sm bg-emerald-600 px-4 py-2.5 text-[15px] leading-relaxed text-white shadow-xs break-anywhere">
+                      {turn.userMessage.content}
                     </div>
                   </div>
                 );
               }
 
-              const isLatestStreaming = isStreaming && msgIdx === messages.length - 1;
-              const { cleanContent } = sanitizeAssistantContent(msg.content, {
+              const targetMsg =
+                turn.finalMessage || turn.processMessages[turn.processMessages.length - 1];
+              if (!targetMsg) return null;
+
+              const isLatestStreaming = isStreaming && turnIdx === timelineTurns.length - 1;
+              const { cleanContent } = sanitizeAssistantContent(targetMsg.content, {
                 isStreaming: isLatestStreaming,
               });
+              const toolSteps: ToolStepItem[] = [
+                ...turn.processMessages.flatMap((m) => m.toolSteps || []),
+                ...(turn.finalMessage?.toolSteps || []),
+              ];
+              const hasTools = toolSteps.length > 0;
+              const runningStep = toolSteps.find((s) => s.status === 'running');
+              const lastStep = toolSteps[toolSteps.length - 1];
 
-              // 历史消息中纯工具调用步骤在清洗后为空，直接跳过不渲染空卡片
-              if (!cleanContent && !isLatestStreaming) {
+              if (!cleanContent && !isLatestStreaming && !hasTools) {
                 return null;
               }
 
-              const compactPairs = cleanContent ? extractCompactKeyValues(cleanContent) : [];
-
               return (
-                <div
-                  key={msg.id}
-                  className="rounded-2xl border border-border/70 bg-surface-1 p-4 shadow-sm"
-                >
-                  {/* 专家小抬头 */}
-                  <div className="mb-2.5 flex items-center justify-between text-xs text-muted-foreground">
-                    <div className="flex items-center gap-1.5 font-medium text-foreground/85">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                      <span>{activeExpert?.name || '专家顾问'}</span>
+                <div key={turn.stableKey} className="gemini-msg-enter space-y-2.5">
+                  {/* 单行可折叠检索 / 工具状态胶囊（点击弹出半屏 Bottom Sheet 查看过程详情与命中切片） */}
+                  {hasTools && (
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => setSheetToolSteps(toolSteps)}
+                        className="inline-flex min-h-[34px] max-w-full items-center gap-2 rounded-full border border-border/70 bg-surface-1 px-3 py-1 text-xs font-medium text-foreground/85 transition-colors active:bg-surface-2"
+                      >
+                        <Sparkles
+                          className={`h-3.5 w-3.5 shrink-0 text-emerald-500 ${
+                            runningStep ? 'gemini-sparkle-pulse' : ''
+                          }`}
+                          strokeWidth={1.85}
+                        />
+                        <span className="truncate">
+                          {runningStep
+                            ? `正在${formatToolNaturalDescription({ name: runningStep.name, command: runningStep.command })}...`
+                            : toolSteps.length === 1 && lastStep
+                            ? formatToolNaturalDescription({ name: lastStep.name, command: lastStep.command })
+                            : `已完成 ${toolSteps.length} 项检索与核验`}
+                        </span>
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" />
+                        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                      </button>
                     </div>
-                    <span className="text-[11px]">
-                      {sceneMode === 'agent' ? '深度查阅' : '快聊'}
-                    </span>
-                  </div>
+                  )}
 
-                  {compactPairs.length > 0 && (
-                    <div className="mb-3 grid grid-cols-2 gap-2 border-b border-border/60 pb-3">
-                      {compactPairs.map((pair, idx) => (
-                        <div
+                  {/* AI 回复正文（去框化平铺，Markdown 表格支持局部横向滚动，代码块支持 260px 限高与全屏查看） */}
+                  {cleanContent ? (
+                    <div className="chat-markdown-body prose prose-sm max-w-none text-foreground dark:prose-invert [&_p]:my-2 [&_ul]:my-2 [&_ol]:my-2 break-anywhere">
+                      <ReactMarkdown
+                        remarkPlugins={[remarkGfm]}
+                        components={{
+                          pre: ({ children }) => <>{children}</>,
+                          code: ({ className, children, ...props }) => {
+                            const match = /language-(\w+)/.exec(className || '');
+                            const codeStr = String(children).replace(/\n$/, '');
+                            const isBlock = Boolean(match) || codeStr.includes('\n');
+                            if (isBlock) {
+                              return (
+                                <CodeBlock
+                                  code={codeStr}
+                                  language={match ? match[1] : 'text'}
+                                  mobileMode={true}
+                                />
+                              );
+                            }
+                            return (
+                              <code className={className} {...props}>
+                                {children}
+                              </code>
+                            );
+                          },
+                          table: ({ children }) => (
+                            <div className="my-2.5 w-full overflow-x-auto rounded-xl border border-border/60 bg-surface-1/60">
+                              <table className="min-w-full border-collapse text-xs">{children}</table>
+                            </div>
+                          ),
+                          th: ({ children }) => (
+                            <th className="border-b border-border/60 bg-surface-2/60 px-3 py-2 text-left font-semibold whitespace-nowrap">
+                              {children}
+                            </th>
+                          ),
+                          td: ({ children }) => (
+                            <td className="border-b border-border/40 px-3 py-2 whitespace-nowrap">
+                              {children}
+                            </td>
+                          ),
+                        }}
+                      >
+                        {cleanContent}
+                      </ReactMarkdown>
+                    </div>
+                  ) : isLatestStreaming ? (
+                    <div className="inline-flex items-center gap-2 py-1 text-sm text-muted-foreground">
+                      <Sparkles className="h-4 w-4 text-emerald-500 gemini-sparkle-pulse" />
+                      <span>正在思考并查阅知识库...</span>
+                    </div>
+                  ) : null}
+
+                  {/* 动态追问胶囊（无动态推荐时不渲染） */}
+                  {!isLatestStreaming && targetMsg.followups && targetMsg.followups.length > 0 && (
+                    <div className="flex flex-wrap gap-2 pt-1">
+                      {targetMsg.followups.slice(0, 2).map((q, idx) => (
+                        <button
                           key={idx}
-                          className="rounded-xl border border-border/60 bg-background px-3 py-2"
+                          type="button"
+                          onClick={() => void sendMessage(q)}
+                          className="min-h-[36px] rounded-full border border-emerald-500/35 bg-emerald-500/8 px-3.5 py-1.5 text-xs font-medium text-emerald-700 dark:text-emerald-300 transition-transform active:scale-95"
                         >
-                          <div className="text-[11px] text-muted-foreground">{pair.key}</div>
-                          <div className="mt-0.5 text-xs font-semibold text-foreground tabular-nums">
-                            {pair.value}
-                          </div>
-                        </div>
+                          {q}
+                        </button>
                       ))}
                     </div>
                   )}
 
-                  {cleanContent ? (
-                    <div className="prose prose-sm max-w-none text-[15px] leading-[1.65] text-foreground dark:prose-invert [&_p]:my-2 [&_ul]:my-2 [&_ol]:my-2 [&_table]:block [&_table]:w-full [&_table]:overflow-x-auto [&_table]:whitespace-nowrap">
-                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{cleanContent}</ReactMarkdown>
-                    </div>
-                  ) : (
-                    <div className="flex items-center gap-2 py-2 text-sm text-muted-foreground">
-                      <Loader2 className="h-4 w-4 animate-spin text-emerald-500" strokeWidth={1.75} />
-                      <span>正在查阅资料与工具...</span>
-                    </div>
-                  )}
-
-                  {cleanContent && (
-                    <div className="mt-3.5 flex items-center gap-2 border-t border-border/60 pt-3">
+                  {/* 极简底部操作条 */}
+                  {cleanContent && !isLatestStreaming && (
+                    <div className="flex items-center gap-1.5 pt-1 text-muted-foreground">
                       <button
                         type="button"
-                        onClick={() => handleToggleSpeak(msg.id, cleanContent)}
-                        className="flex h-9 items-center gap-1.5 rounded-full bg-background px-3 text-xs font-medium text-muted-foreground transition-transform active:scale-95"
+                        onClick={() => handleCopy(targetMsg.id, cleanContent)}
+                        aria-label="复制回复"
+                        className="flex h-9 items-center gap-1 rounded-full px-2.5 text-xs transition-colors active:bg-surface-1"
                       >
-                        {speakingId === msg.id ? (
-                          <>
-                            <VolumeX className="h-3.5 w-3.5 text-emerald-500" strokeWidth={1.75} />
-                            <span className="text-emerald-600 dark:text-emerald-400">停止</span>
-                          </>
+                        {copiedId === targetMsg.id ? (
+                          <Check className="h-3.5 w-3.5 text-emerald-500" strokeWidth={1.75} />
                         ) : (
-                          <>
-                            <Volume2 className="h-3.5 w-3.5" strokeWidth={1.75} />
-                            <span>朗读</span>
-                          </>
+                          <Copy className="h-3.5 w-3.5" strokeWidth={1.75} />
                         )}
                       </button>
 
                       <button
                         type="button"
-                        onClick={() => handleCopy(msg.id, cleanContent)}
-                        className="flex h-9 items-center gap-1.5 rounded-full bg-background px-3 text-xs font-medium text-muted-foreground transition-transform active:scale-95"
+                        onClick={() => handleToggleSpeak(targetMsg.id, cleanContent)}
+                        aria-label={speakingId === targetMsg.id ? '停止朗读' : '朗读回复'}
+                        className="flex h-9 items-center gap-1 rounded-full px-2.5 text-xs transition-colors active:bg-surface-1"
                       >
-                        {copiedId === msg.id ? (
-                          <>
-                            <Check className="h-3.5 w-3.5 text-emerald-500" strokeWidth={1.75} />
-                            <span className="text-emerald-600 dark:text-emerald-400">已复制</span>
-                          </>
+                        {speakingId === targetMsg.id ? (
+                          <VolumeX className="h-3.5 w-3.5 text-emerald-500" strokeWidth={1.75} />
                         ) : (
-                          <>
-                            <Copy className="h-3.5 w-3.5" strokeWidth={1.75} />
-                            <span>复制</span>
-                          </>
+                          <Volume2 className="h-3.5 w-3.5" strokeWidth={1.75} />
                         )}
                       </button>
 
                       <button
                         type="button"
                         onClick={() => setSaveModalContent(cleanContent)}
-                        className="ml-auto flex h-9 items-center gap-1.5 rounded-full bg-emerald-500/15 px-3.5 text-xs font-semibold text-emerald-600 transition-transform active:scale-95 dark:text-emerald-400"
+                        className="ml-auto flex h-9 items-center gap-1 rounded-full px-3 text-xs font-medium text-emerald-600 dark:text-emerald-400 transition-colors active:bg-emerald-500/10"
                       >
                         <BookPlus className="h-3.5 w-3.5" strokeWidth={1.75} />
-                        <span>收藏到Wiki</span>
+                        <span>存到Wiki</span>
                       </button>
                     </div>
                   )}
@@ -457,6 +532,9 @@ export function MobileChatView({
       <VoiceFirstInputBar
         expertId={activeExpert?.id}
         disabled={isStreaming}
+        sceneMode={sceneMode}
+        onChangeSceneMode={onChangeSceneMode}
+        latestAssistantReply={latestAssistantReply}
         onSubmit={(txt) => void sendMessage(txt)}
         onOpenSnap={onOpenSnap}
       />
@@ -467,6 +545,69 @@ export function MobileChatView({
         initialContent={saveModalContent || ''}
         defaultSourceType="chat_decision"
       />
+
+      {/* 半屏 Bottom Sheet：展示工具执行步骤与命中切片详情 */}
+      {sheetToolSteps && (
+        <div
+          className="fixed inset-0 z-50 flex items-end bg-black/50 backdrop-blur-[2px]"
+          onClick={() => setSheetToolSteps(null)}
+        >
+          <div
+            className="w-full max-h-[70vh] rounded-t-3xl border-t border-border/70 bg-background flex flex-col shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-5 py-3.5 border-b border-border/50 shrink-0">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-emerald-500" />
+                <span className="text-sm font-semibold text-foreground">
+                  检索与执行过程（共 {sheetToolSteps.length} 步）
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSheetToolSteps(null)}
+                className="p-1.5 rounded-full hover:bg-surface-1 text-muted-foreground"
+                aria-label="关闭过程详情"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-2.5 text-xs">
+              {sheetToolSteps.map((step, idx) => (
+                <div
+                  key={step.id || idx}
+                  className="rounded-2xl border border-border/60 bg-surface-1 p-3 space-y-1.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium text-foreground truncate">
+                      {formatToolNaturalDescription({ name: step.name, command: step.command })}
+                    </span>
+                    <span
+                      className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-medium ${
+                        step.status === 'running'
+                          ? 'bg-amber-500/15 text-amber-500'
+                          : 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                      }`}
+                    >
+                      {step.status === 'running' ? '执行中' : step.name}
+                    </span>
+                  </div>
+                  {step.command && (
+                    <div className="font-mono text-[11px] text-muted-foreground break-all">
+                      $ {step.command}
+                    </div>
+                  )}
+                  {step.outputPreview && (
+                    <pre className="max-h-40 overflow-y-auto whitespace-pre-wrap break-anywhere rounded-xl bg-background/80 p-2.5 font-mono text-[11px] leading-relaxed text-foreground/85 border border-border/40">
+                      {step.outputPreview}
+                    </pre>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
