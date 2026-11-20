@@ -434,7 +434,10 @@ class KBLifecycleManager:
                 hierarchy_status = await KBUpgradeService.check_hierarchy_status(kid, active_ver)
                 if hierarchy_status.get("needs_upgrade"):
                     logger.info(f"[AutoPipeline] 知识库 [{kid}] 缺少父子关系，开始自动重塑分层...")
-                    await KBUpgradeService.upgrade_kb_to_parent_child(kid, active_ver)
+                    upgrade_res = await KBUpgradeService.upgrade_kb_to_parent_child(kid, active_ver)
+                    if isinstance(upgrade_res, dict) and upgrade_res.get("version"):
+                        active_ver = str(upgrade_res["version"])
+                        summary_item["version"] = active_ver
                     summary_item["hierarchy"] = "auto_upgraded"
                 else:
                     summary_item["hierarchy"] = "already_hierarchical"

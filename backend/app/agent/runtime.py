@@ -4785,6 +4785,8 @@ class AgentRuntime:
                                     "authority_tier": 1,
                                     "score": 0.95,
                                 })
+                        tool_output = res_text
+                        compressed = f"[云端规程检索完成: '{q_str}']"
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4793,7 +4795,7 @@ class AgentRuntime:
                             "reason": f"云端知识库规程检索: {q_str}",
                             "status": "completed",
                             "output": res_text,
-                            "compressed": f"[云端规程检索完成: '{q_str}']",
+                            "compressed": compressed,
                         }
 
                     # ── 工具: 云端章节精读 (read_cloud_wiki_section) ──
@@ -4815,6 +4817,8 @@ class AgentRuntime:
                                 "authority_tier": 1,
                                 "score": 0.98,
                             })
+                        tool_output = res_text
+                        compressed = f"[云端章节精读: {s_path}]"
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4823,7 +4827,7 @@ class AgentRuntime:
                             "reason": f"精读云端章节: {s_path}",
                             "status": "completed",
                             "output": res_text,
-                            "compressed": f"[云端章节精读: {s_path}]",
+                            "compressed": compressed,
                         }
 
                     # ── 工具: 知识库已发布文档清单 (list_kb_docs) ──
@@ -4835,6 +4839,8 @@ class AgentRuntime:
                             session_mounted_kbs=getattr(self, "session_mounted_kbs", None),
                             filter_keyword=f_kw,
                         )
+                        tool_output = res_text
+                        compressed = f"[知识库文档清单: {f_kw or '全部'}]"
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4843,7 +4849,7 @@ class AgentRuntime:
                             "reason": "列出已发布知识库文档清单",
                             "status": "completed",
                             "output": res_text,
-                            "compressed": f"[知识库文档清单: {f_kw or '全部'}]",
+                            "compressed": compressed,
                         }
 
                     # ── 工具: 知识库文档切片目录定位 (list_kb_doc_toc) ──
@@ -4855,6 +4861,8 @@ class AgentRuntime:
                             expert_id=agent_id,
                             session_mounted_kbs=getattr(self, "session_mounted_kbs", None),
                         )
+                        tool_output = res_text
+                        compressed = f"[文档切片目录: {doc_key}]"
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4863,7 +4871,7 @@ class AgentRuntime:
                             "reason": f"获取文档切片目录: {doc_key}",
                             "status": "completed",
                             "output": res_text,
-                            "compressed": f"[文档切片目录: {doc_key}]",
+                            "compressed": compressed,
                         }
 
                     # ── 工具: 知识库文档按序号连续精读 (read_kb_slices) ──
@@ -4886,6 +4894,8 @@ class AgentRuntime:
                                 "authority_tier": si.get("authority_tier", 1),
                                 "score": 0.99,
                             })
+                        tool_output = res_text
+                        compressed = f"[连续精读切片: {doc_key} {s_idx}~{e_idx}]"
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4894,7 +4904,7 @@ class AgentRuntime:
                             "reason": f"按序号连续精读切片: {s_idx}~{e_idx}",
                             "status": "completed",
                             "output": res_text,
-                            "compressed": f"[连续精读切片: {doc_key} {s_idx}~{e_idx}]",
+                            "compressed": compressed,
                         }
 
                     # ── 工具: 知识图谱关系推理 (query_knowledge_graph) ──
@@ -4911,6 +4921,8 @@ class AgentRuntime:
                             max_hops=hops,
                             pod_id=pod_id_val,
                         )
+                        tool_output = res_text
+                        compressed = f"[知识图谱查询完成: '{target_ent}']"
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4919,7 +4931,7 @@ class AgentRuntime:
                             "reason": f"查询知识图谱实体关系: {target_ent}",
                             "status": "completed",
                             "output": res_text,
-                            "compressed": f"[知识图谱查询完成: '{target_ent}']",
+                            "compressed": compressed,
                         }
 
                     # ── 工具: 离线语音转写 (transcribe_audio_file) ──
@@ -4932,6 +4944,8 @@ class AgentRuntime:
                             res_text = f"### 🎙️ 语音转写结果 ({t_res.get('file_name')}):\n\n{t_res.get('text', '')}"
                         except Exception as a_err:
                             res_text = f"语音转写失败: {str(a_err)}"
+                        tool_output = res_text
+                        compressed = f"[音频转写完成: '{a_path}']"
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4940,7 +4954,7 @@ class AgentRuntime:
                             "reason": f"转写音频文件: {a_path}",
                             "status": "completed",
                             "output": res_text,
-                            "compressed": f"[音频转写完成: '{a_path}']",
+                            "compressed": compressed,
                         }
 
                     # ── 工具: 浏览器多模态页面审查 (browser_inspect_page) ──
@@ -4949,6 +4963,8 @@ class AgentRuntime:
                         t_url = str(args.get("url") or "").strip()
                         w_sec = float(args.get("wait_seconds") or 2.0)
                         res_text = await browser_inspect_page(url=t_url, wait_seconds=w_sec)
+                        tool_output = res_text
+                        compressed = f"[浏览器审查完成: '{t_url}']"
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4957,7 +4973,7 @@ class AgentRuntime:
                             "reason": f"无头浏览器页面审查: {t_url}",
                             "status": "completed",
                             "output": res_text,
-                            "compressed": f"[浏览器审查完成: '{t_url}']",
+                            "compressed": compressed,
                         }
 
                     # ── 工具: 浏览器拟人化交互操作 (browser_interact_action) ──
@@ -4967,6 +4983,8 @@ class AgentRuntime:
                         b_tgt = str(args.get("target") or "").strip()
                         b_txt = str(args.get("text") or "").strip()
                         res_text = await browser_interact_action(action=b_act, target=b_tgt, text=b_txt)
+                        tool_output = res_text
+                        compressed = f"[浏览器操作完成: {b_act}]"
                         yield {
                             "type": "tool_end",
                             "call_id": call_id,
@@ -4975,7 +4993,7 @@ class AgentRuntime:
                             "reason": f"浏览器交互操作: {b_act}",
                             "status": "completed",
                             "output": res_text,
-                            "compressed": f"[浏览器操作完成: {b_act}]",
+                            "compressed": compressed,
                         }
 
                     # ── Swarm 四原语执行分支 (swarm_control / swarm_post / swarm_read / swarm_wait) ──

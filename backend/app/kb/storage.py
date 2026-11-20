@@ -651,6 +651,11 @@ class KBStorageManager:
         deleted_count = 0
         try:
             cur = conn.cursor()
+            has_table = cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hybrid_chunks'"
+            ).fetchone()
+            if not has_table:
+                return 0, 0, 0
             cur.execute("SELECT id, remote_uri FROM hybrid_chunks")
             rows = cur.fetchall()
             bad_ids = []

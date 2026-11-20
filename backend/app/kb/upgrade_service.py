@@ -15,6 +15,7 @@ import hashlib
 from pathlib import Path
 import re
 import sqlite3
+import struct
 import time
 from typing import Any
 
@@ -181,6 +182,82 @@ class KBUpgradeService:
             version=new_version,
             chunks=new_chunks,
         )
+
+        # Step 4.5: 为新版本父子切片实时补齐向量 Embedding，确保导出包与检索开箱即用
+        try:
+            provider = await embedding_router.get_provider()
+            if provider and provider.is_available:
+                new_db_path = KBStorageManager.get_version_db_path(kb_id, new_version)
+                def _load_unembedded() -> list[tuple[str, str]]:
+                    import sqlite3
+                    with sqlite3.connect(str(new_db_path)) as c:
+                        return c.execute(
+                            "SELECT id, content FROM hybrid_chunks WHERE embedding_blob IS NULL AND chunk_role IN ('parent', 'child')"
+                        ).fetchall()
+                rows_to_embed = await asyncio.to_thread(_load_unembedded)
+                if rows_to_embed:
+                    batch_size = 32
+                    embedded_pairs: list[tuple[bytes, str]] = []
+                    for i in range(0, len(rows_to_embed), batch_size):
+                        batch = rows_to_embed[i : i + batch_size]
+                        texts = [r[1] for r in batch]
+                        vecs = await provider.encode_batch(texts)
+                        if vecs is not None:
+                            for (cid, _), vec in zip(batch, vecs):
+                                vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+                                if vec_list:
+                                    embedded_pairs.append((struct.pack(f"<{len(vec_list)}f", *vec_list), cid))
+                    if embedded_pairs:
+                        def _save_embeddings() -> None:
+                            import sqlite3
+                            with sqlite3.connect(str(new_db_path)) as c:
+                                c.executemany(
+                                    "UPDATE hybrid_chunks SET embedding_blob = ? WHERE id = ?",
+                                    embedded_pairs,
+                                )
+                                c.commit()
+                        await asyncio.to_thread(_save_embeddings)
+                        logger.info(f"[KBUpgrade] 已为新版本 [{new_version}] 补齐 {len(embedded_pairs)} 条父子切片向量。")
+        except Exception as emb_err:
+            logger.warning(f"[KBUpgrade] 新版本 [{new_version}] 向量化跳过: {emb_err}")
+
+        # Step 4.5: 为新版本父子切片实时补齐向量 Embedding，确保导出包与检索开箱即用
+        try:
+            provider = await embedding_router.get_provider()
+            if provider and provider.is_available:
+                new_db_path = KBStorageManager.get_version_db_path(kb_id, new_version)
+                def _load_unembedded() -> list[tuple[str, str]]:
+                    import sqlite3
+                    with sqlite3.connect(str(new_db_path)) as c:
+                        return c.execute(
+                            "SELECT id, content FROM hybrid_chunks WHERE embedding_blob IS NULL AND chunk_role IN ('parent', 'child')"
+                        ).fetchall()
+                rows_to_embed = await asyncio.to_thread(_load_unembedded)
+                if rows_to_embed:
+                    batch_size = 32
+                    embedded_pairs: list[tuple[bytes, str]] = []
+                    for i in range(0, len(rows_to_embed), batch_size):
+                        batch = rows_to_embed[i : i + batch_size]
+                        texts = [r[1] for r in batch]
+                        vecs = await provider.encode_batch(texts)
+                        if vecs is not None:
+                            for (cid, _), vec in zip(batch, vecs):
+                                vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+                                if vec_list:
+                                    embedded_pairs.append((struct.pack(f"<{len(vec_list)}f", *vec_list), cid))
+                    if embedded_pairs:
+                        def _save_embeddings() -> None:
+                            import sqlite3
+                            with sqlite3.connect(str(new_db_path)) as c:
+                                c.executemany(
+                                    "UPDATE hybrid_chunks SET embedding_blob = ? WHERE id = ?",
+                                    embedded_pairs,
+                                )
+                                c.commit()
+                        await asyncio.to_thread(_save_embeddings)
+                        logger.info(f"[KBUpgrade] 已为新版本 [{new_version}] 补齐 {len(embedded_pairs)} 条父子切片向量。")
+        except Exception as emb_err:
+            logger.warning(f"[KBUpgrade] 新版本 [{new_version}] 向量化跳过: {emb_err}")
 
         # 原子同步主表与版本表
         async with db_manager.get_connection() as conn:

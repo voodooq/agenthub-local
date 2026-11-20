@@ -42,6 +42,15 @@ class KBPackageEngine:
         if not db_path.exists():
             raise FileNotFoundError(f"知识库 [{kb_id}] 的版本 [{version}] index.db 不存在")
 
+        # 打包前强制 WAL checkpoint，确保 -wal 中未刷盘的切片与三元组全部落入 index.db
+        try:
+            chk_conn = sqlite3.connect(str(db_path))
+            chk_conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            chk_conn.commit()
+            chk_conn.close()
+        except Exception as wal_err:
+            logger.warning(f"[KBPackageEngine.export_package] WAL checkpoint 跳过: {wal_err}")
+
         if output_dir is None:
             output_dir = KBStorageManager.get_kb_dir(kb_id) / "packages"
         output_dir.mkdir(parents=True, exist_ok=True)

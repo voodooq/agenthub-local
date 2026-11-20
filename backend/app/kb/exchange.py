@@ -138,6 +138,13 @@ class KBExchangeEngine:
         except Exception:
             pass
 
+        # 关键修复：打包 index.db 前必须强制将 WAL 日志刷盘并截断，防止增量切片/HyPE/三元组留在 -wal 中丢失
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            conn.commit()
+        except Exception as wal_err:
+            logger.warning(f"[KBExchange.export_bundle] WAL checkpoint 跳过: {wal_err}")
+
         conn.close()
 
         # 提取文档清单（聚合切片的唯一 remote_uri）
@@ -442,7 +449,15 @@ class KBExchangeEngine:
         target_ver_dir.mkdir(parents=True, exist_ok=True)
         target_db = target_ver_dir / "index.db"
 
-        # 从 zip 解压 index.db
+        # 从 zip 解压 index.db（写入前清理可能残留的旧 -wal / -shm，防止跨包错乱）
+        for wal_suffix in ("-wal", "-shm"):
+            stale_wal = Path(f"{target_db}{wal_suffix}")
+            if stale_wal.exists():
+                try:
+                    stale_wal.unlink()
+                except Exception:
+                    pass
+
         with zipfile.ZipFile(bundle_path, "r") as zf:
             if "index.db" in zf.namelist():
                 with open(target_db, "wb") as f_out:
@@ -451,11 +466,35 @@ class KBExchangeEngine:
                 with open(target_ver_dir / "manifest.json", "wb") as f_out:
                     f_out.write(zf.read("manifest.json"))
 
+        # 确保结构化规则表/三元组表初始化，并从解压后的真实 index.db 核对实际数量
+        KBStorageManager.init_version_db_schema(target_db)
+        with zipfile.ZipFile(bundle_path, "r") as zf:
+            if "structured_rules.jsonl" in zf.namelist():
+                try:
+                    rule_lines = zf.read("structured_rules.jsonl").decode("utf-8").splitlines()
+                    rules_to_restore = [json.loads(line) for line in rule_lines if line.strip()]
+                    if rules_to_restore:
+                        from ..search.rule_extractor import StructuredRuleExtractor
+                        StructuredRuleExtractor.batch_save_rules(target_db, rules_to_restore)
+                except Exception as r_err:
+                    logger.debug(f"[KBExchange] 恢复 structured_rules.jsonl 异常: {r_err}")
+
+        actual_chunks = 0
+        actual_triples = 0
+        try:
+            chk_conn = sqlite3.connect(str(target_db))
+            actual_chunks = int(chk_conn.execute("SELECT COUNT(*) FROM hybrid_chunks").fetchone()[0] or 0)
+            actual_triples = int(chk_conn.execute("SELECT COUNT(*) FROM knowledge_triples").fetchone()[0] or 0)
+            chk_conn.close()
+        except Exception as cnt_err:
+            logger.debug(f"[KBExchange] 核对恢复库真实行数跳过: {cnt_err}")
+
         now = time.time()
         disk_size = target_db.stat().st_size if target_db.exists() else 0
         stats = manifest.get("stats", {})
-        total_chunks = stats.get("parent_chunks", 0) + stats.get("child_chunks", 0) + stats.get("hype_questions", 0)
-        triples_count = stats.get("triples_count", 0)
+        manifest_chunks = stats.get("parent_chunks", 0) + stats.get("child_chunks", 0) + stats.get("hype_questions", 0)
+        total_chunks = actual_chunks if actual_chunks > 0 else manifest_chunks
+        triples_count = actual_triples if actual_triples > 0 else stats.get("triples_count", 0)
         embed_spec = manifest.get("embedding_spec", {})
         embed_model = embed_spec.get("model", "bge-m3")
         embed_dim = embed_spec.get("dimension", 1024)
@@ -567,20 +606,26 @@ class KBExchangeEngine:
                     doc_manifest_json,
                 ),
             )
+            # 同步写入或更新 kb_versions 版本记录，避免导入新库后版本抽屉/发布状态缺失记录
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO kb_versions (
+                    kb_id, version, status, changelog, chunk_count, triple_count,
+                    disk_size_bytes, package_hash, created_by, created_at, is_published
+                ) VALUES (?, ?, 'ready', ?, ?, ?, ?, ?, 'imported', ?, 0)
+                """,
+                (
+                    target_kb_id,
+                    version,
+                    manifest.get("change_summary") or f"从 .ahkb 导入 ({version})",
+                    total_chunks,
+                    triples_count,
+                    disk_size,
+                    content_md5,
+                    now,
+                ),
+            )
             await conn.commit()
-
-        # 确保结构化规则表初始化并导入 structured_rules.jsonl
-        KBStorageManager.init_version_db_schema(target_db)
-        with zipfile.ZipFile(bundle_path, "r") as zf:
-            if "structured_rules.jsonl" in zf.namelist():
-                try:
-                    rule_lines = zf.read("structured_rules.jsonl").decode("utf-8").splitlines()
-                    rules_to_restore = [json.loads(line) for line in rule_lines if line.strip()]
-                    if rules_to_restore:
-                        from ..search.rule_extractor import StructuredRuleExtractor
-                        StructuredRuleExtractor.batch_save_rules(target_db, rules_to_restore)
-                except Exception as r_err:
-                    logger.debug(f"[KBExchange] 恢复 structured_rules.jsonl 异常: {r_err}")
 
         # 向量维度适配检查
         provider = await embedding_router.get_provider()

@@ -9,11 +9,13 @@ AgentHub Local v1.5.8 知识库生命周期治理、版本发布与专家沙盒�
 """
 import asyncio
 from pathlib import Path
+import re
 import shutil
 import sqlite3
 import tempfile
 import time
 from typing import Any
+import uuid
 from fastapi import APIRouter, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -1060,6 +1062,11 @@ async def get_kb_oralized_results(
                 )
                 q_rows = cur.fetchall()
                 oral_questions = [r["content"] for r in q_rows if r["content"]]
+                oral_question_items = [
+                    {"id": r["id"], "content": r["content"]}
+                    for r in q_rows
+                    if r["content"]
+                ]
 
                 rules = []
                 try:
@@ -1086,6 +1093,7 @@ async def get_kb_oralized_results(
                     "snippet": (prow["content"] or "")[:300] + ("..." if len(prow["content"] or "") > 300 else ""),
                     "full_content": prow["content"] or "",
                     "oral_questions": oral_questions,
+                    "oral_question_items": oral_question_items,
                     "rules": rules,
                 })
 
@@ -1117,6 +1125,323 @@ async def get_kb_oralized_results(
         "page": page,
         "page_size": page_size,
     }
+
+
+class OralQuestionCreatePayload(BaseModel):
+    parent_chunk_id: str
+    content: str
+    version: str | None = None
+
+
+class OralQuestionUpdatePayload(BaseModel):
+    content: str
+    version: str | None = None
+
+
+async def _compute_single_hype_embedding(text: str) -> bytes | None:
+    """为单条手动增改的口语问法计算向量 BLOB（不可用时安全降级返回 None）。"""
+    try:
+        from ...search.embedding_provider import embedding_router
+        import struct
+        provider = await embedding_router.get_provider()
+        if provider and provider.is_available:
+            vecs = await provider.encode_batch([text])
+            if vecs is not None and len(vecs) > 0:
+                vec = vecs[0]
+                vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
+                if vec_list:
+                    return struct.pack(f"<{len(vec_list)}f", *vec_list)
+    except Exception as exc:
+        logger.debug(f"[OralManual] 计算向量跳过: {exc}")
+    return None
+
+
+async def _record_manual_oral_version_snapshot(
+    kb_id: str,
+    target_ver: str,
+    db_path: Path,
+    change_summary: str,
+) -> str:
+    """每次手动调整口语问法后，同步校准统计、刷新 content_md5 并留存版本演进快照。"""
+    from ...repository.db import db_manager
+
+    def _count() -> tuple[int, int]:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cnt = int(conn.execute("SELECT COUNT(*) FROM hybrid_chunks").fetchone()[0] or 0)
+            return cnt, int(db_path.stat().st_size if db_path.exists() else 0)
+        finally:
+            conn.close()
+
+    total_cnt, disk_sz = await asyncio.to_thread(_count)
+    snapshot_id = ""
+    new_md5 = ""
+    try:
+        snapshot_id = await KBExchangeEngine.create_snapshot(
+            kb_id=kb_id,
+            version_tag=target_ver,
+            snapshot_type="manual_edit",
+            change_summary=change_summary,
+        )
+        async with db_manager.get_connection() as conn:
+            async with conn.execute(
+                "SELECT content_md5 FROM kb_version_snapshots WHERE snapshot_id = ?",
+                (snapshot_id,),
+            ) as cur:
+                srow = await cur.fetchone()
+                if srow and srow["content_md5"]:
+                    new_md5 = str(srow["content_md5"])
+    except Exception as snap_err:
+        logger.warning(f"[OralManual] 生成手动调整版本快照失败: {snap_err}")
+
+    now = time.time()
+    async with db_manager.get_connection() as conn:
+        if new_md5:
+            await conn.execute(
+                "UPDATE knowledge_bases SET chunk_count = ?, disk_size_bytes = ?, content_md5 = ?, updated_at = ? WHERE kb_id = ?",
+                (total_cnt, disk_sz, new_md5, now, kb_id),
+            )
+            await conn.execute(
+                "UPDATE kb_versions SET chunk_count = ?, disk_size_bytes = ?, package_hash = ?, changelog = ? WHERE kb_id = ? AND version = ?",
+                (total_cnt, disk_sz, new_md5, change_summary, kb_id, target_ver),
+            )
+        else:
+            await conn.execute(
+                "UPDATE knowledge_bases SET chunk_count = ?, disk_size_bytes = ?, updated_at = ? WHERE kb_id = ?",
+                (total_cnt, disk_sz, now, kb_id),
+            )
+            await conn.execute(
+                "UPDATE kb_versions SET chunk_count = ?, disk_size_bytes = ?, changelog = ? WHERE kb_id = ? AND version = ?",
+                (total_cnt, disk_sz, change_summary, kb_id, target_ver),
+            )
+        await conn.commit()
+    return snapshot_id
+
+
+@router.post("/{kb_id}/oralized-results")
+@router.post("/bases/{kb_id}/oralized-results")
+async def create_oral_question(kb_id: str, payload: OralQuestionCreatePayload) -> dict[str, Any]:
+    """手动为指定父切片新增一条口语化日常提问，并同步写入 FTS5 与向量索引。"""
+    clean_q = (payload.content or "").strip()
+    if not clean_q:
+        raise HTTPException(status_code=400, detail="口语问法内容不能为空")
+
+    kbs = await KBLifecycleManager.list_knowledge_bases()
+    target_kb = next((k for k in kbs if k["kb_id"] == kb_id), None)
+    if not target_kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    target_ver = (payload.version or "").strip() or target_kb.get("active_version") or target_kb.get("current_version") or "v1.0.0"
+    db_path = KBStorageManager.get_version_db_path(kb_id, target_ver)
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail=f"版本 [{target_ver}] 数据库不存在")
+
+    def _load_parent() -> dict[str, Any] | None:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT id, remote_uri, title, topic_cluster_id, doc_year, authority_tier FROM hybrid_chunks WHERE id = ? AND chunk_role = 'parent'",
+                (payload.parent_chunk_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    parent_row = await asyncio.to_thread(_load_parent)
+    if not parent_row:
+        raise HTTPException(status_code=404, detail=f"未找到父切片: {payload.parent_chunk_id}")
+
+    scope_name = str(parent_row.get("topic_cluster_id") or "").strip()
+    doc_year = int(parent_row.get("doc_year") or 0)
+    if clean_q.startswith("[") and "]" in clean_q:
+        final_content = clean_q
+    elif scope_name:
+        scope_tag = f"[{scope_name} | {doc_year}]" if doc_year else f"[{scope_name}]"
+        final_content = f"{scope_tag} {clean_q}"
+    else:
+        final_content = clean_q
+
+    emb_blob = await _compute_single_hype_embedding(final_content)
+    new_id = f"hype_manual_{uuid.uuid4().hex[:12]}"
+    short_title = f"【口语问答】{re.sub(r'^\[[^\]]+\]\s*', '', final_content)[:28]}"
+    now = time.time()
+
+    def _insert_q() -> None:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                """
+                INSERT INTO hybrid_chunks (
+                    id, remote_uri, title, content, chunk_role, parent_chunk_id,
+                    topic_cluster_id, doc_year, authority_tier, embedding_blob, created_at
+                ) VALUES (?, ?, ?, ?, 'hype_question', ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    new_id,
+                    parent_row.get("remote_uri") or "",
+                    short_title,
+                    final_content,
+                    payload.parent_chunk_id,
+                    scope_name,
+                    doc_year,
+                    int(parent_row.get("authority_tier") or 1),
+                    emb_blob,
+                    now,
+                ),
+            )
+            try:
+                conn.execute(
+                    "INSERT INTO hybrid_chunks_fts (id, remote_uri, title, content) VALUES (?, ?, ?, ?)",
+                    (new_id, parent_row.get("remote_uri") or "", short_title, final_content),
+                )
+            except Exception:
+                pass
+            conn.commit()
+        finally:
+            conn.close()
+
+    await asyncio.to_thread(_insert_q)
+    snapshot_id = await _record_manual_oral_version_snapshot(
+        kb_id=kb_id,
+        target_ver=target_ver,
+        db_path=db_path,
+        change_summary=f"手动新增口语问法: {re.sub(r'^\[[^\]]+\]\s*', '', final_content)[:40]}",
+    )
+    return {"success": True, "item": {"id": new_id, "content": final_content}, "snapshot_id": snapshot_id}
+
+
+@router.put("/{kb_id}/oralized-results/{question_id}")
+@router.put("/bases/{kb_id}/oralized-results/{question_id}")
+async def update_oral_question(
+    kb_id: str,
+    question_id: str,
+    payload: OralQuestionUpdatePayload,
+) -> dict[str, Any]:
+    """手动修改指定口语化日常提问内容，同步更新 FTS5 与向量索引。"""
+    clean_q = (payload.content or "").strip()
+    if not clean_q:
+        raise HTTPException(status_code=400, detail="口语问法内容不能为空")
+
+    kbs = await KBLifecycleManager.list_knowledge_bases()
+    target_kb = next((k for k in kbs if k["kb_id"] == kb_id), None)
+    if not target_kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    target_ver = (payload.version or "").strip() or target_kb.get("active_version") or target_kb.get("current_version") or "v1.0.0"
+    db_path = KBStorageManager.get_version_db_path(kb_id, target_ver)
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail=f"版本 [{target_ver}] 数据库不存在")
+
+    def _load_existing() -> dict[str, Any] | None:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            row = conn.execute(
+                "SELECT id, remote_uri, content, topic_cluster_id, doc_year FROM hybrid_chunks WHERE id = ? AND chunk_role = 'hype_question'",
+                (question_id,),
+            ).fetchone()
+            return dict(row) if row else None
+        finally:
+            conn.close()
+
+    existing = await asyncio.to_thread(_load_existing)
+    if not existing:
+        raise HTTPException(status_code=404, detail="未找到对应的口语化问法记录")
+
+    if clean_q.startswith("[") and "]" in clean_q:
+        final_content = clean_q
+    else:
+        old_prefix_m = re.match(r"^(\[[^\]]+\]\s*)", existing.get("content") or "")
+        if old_prefix_m:
+            final_content = f"{old_prefix_m.group(1)}{clean_q}"
+        else:
+            scope_name = str(existing.get("topic_cluster_id") or "").strip()
+            doc_year = int(existing.get("doc_year") or 0)
+            if scope_name:
+                scope_tag = f"[{scope_name} | {doc_year}]" if doc_year else f"[{scope_name}]"
+                final_content = f"{scope_tag} {clean_q}"
+            else:
+                final_content = clean_q
+
+    emb_blob = await _compute_single_hype_embedding(final_content)
+    short_title = f"【口语问答】{re.sub(r'^\[[^\]]+\]\s*', '', final_content)[:28]}"
+
+    def _update_q() -> None:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            conn.execute(
+                "UPDATE hybrid_chunks SET title = ?, content = ?, embedding_blob = ? WHERE id = ? AND chunk_role = 'hype_question'",
+                (short_title, final_content, emb_blob, question_id),
+            )
+            try:
+                conn.execute("DELETE FROM hybrid_chunks_fts WHERE id = ?", (question_id,))
+                conn.execute(
+                    "INSERT INTO hybrid_chunks_fts (id, remote_uri, title, content) VALUES (?, ?, ?, ?)",
+                    (question_id, existing.get("remote_uri") or "", short_title, final_content),
+                )
+            except Exception:
+                pass
+            conn.commit()
+        finally:
+            conn.close()
+
+    await asyncio.to_thread(_update_q)
+    snapshot_id = await _record_manual_oral_version_snapshot(
+        kb_id=kb_id,
+        target_ver=target_ver,
+        db_path=db_path,
+        change_summary=f"手动修改口语问法: {re.sub(r'^\[[^\]]+\]\s*', '', final_content)[:40]}",
+    )
+    return {"success": True, "item": {"id": question_id, "content": final_content}, "snapshot_id": snapshot_id}
+
+
+@router.delete("/{kb_id}/oralized-results/{question_id}")
+@router.delete("/bases/{kb_id}/oralized-results/{question_id}")
+async def delete_oral_question(
+    kb_id: str,
+    question_id: str,
+    version: str | None = Query(default=None),
+) -> dict[str, Any]:
+    """手动删除指定口语化日常提问，并同步清理 FTS5 与校准切片统计。"""
+    kbs = await KBLifecycleManager.list_knowledge_bases()
+    target_kb = next((k for k in kbs if k["kb_id"] == kb_id), None)
+    if not target_kb:
+        raise HTTPException(status_code=404, detail="知识库不存在")
+
+    target_ver = (version or "").strip() or target_kb.get("active_version") or target_kb.get("current_version") or "v1.0.0"
+    db_path = KBStorageManager.get_version_db_path(kb_id, target_ver)
+    if not db_path.exists():
+        raise HTTPException(status_code=404, detail=f"版本 [{target_ver}] 数据库不存在")
+
+    def _delete_q() -> int:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            cur = conn.execute(
+                "DELETE FROM hybrid_chunks WHERE id = ? AND chunk_role = 'hype_question'",
+                (question_id,),
+            )
+            deleted = cur.rowcount
+            try:
+                conn.execute("DELETE FROM hybrid_chunks_fts WHERE id = ?", (question_id,))
+            except Exception:
+                pass
+            conn.commit()
+            return deleted
+        finally:
+            conn.close()
+
+    deleted_cnt = await asyncio.to_thread(_delete_q)
+    if deleted_cnt == 0:
+        raise HTTPException(status_code=404, detail="未找到对应的口语化问法记录")
+
+    snapshot_id = await _record_manual_oral_version_snapshot(
+        kb_id=kb_id,
+        target_ver=target_ver,
+        db_path=db_path,
+        change_summary=f"手动删除口语问法: {question_id}",
+    )
+    return {"success": True, "deleted_id": question_id, "snapshot_id": snapshot_id}
 
 
 @router.post("/{kb_id}/cleanup-garbled")

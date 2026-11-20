@@ -127,3 +127,12 @@ class CloudVFSSyncManager:
                 SELECT COUNT(*) as cnt FROM cloud_vfs_sync_state WHERE mount_id = ?
             """, (mount_id,)).fetchone()
             return row["cnt"] if row else 0
+
+    def clear_sync_state(self, mount_id: str) -> None:
+        """清理指定挂载源的增量同步水位线，以便重新全量切片建库。"""
+        with closing(self._get_connection()) as conn:
+            with conn:
+                conn.execute(
+                    "DELETE FROM cloud_vfs_sync_state WHERE mount_id = ?",
+                    (mount_id,),
+                )

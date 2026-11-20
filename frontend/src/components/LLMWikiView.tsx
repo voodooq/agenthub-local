@@ -39,6 +39,7 @@ import {
   ChevronRight,
   HelpCircle,
   Edit2,
+  Plus,
   ShieldAlert,
   MoreHorizontal,
 } from 'lucide-react';
@@ -209,6 +210,10 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
       snippet: string;
       full_content: string;
       oral_questions: string[];
+      oral_question_items?: Array<{
+        id: string;
+        content: string;
+      }>;
       rules: Array<{
         rule_name: string;
         rule_type: string;
@@ -223,6 +228,11 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [oralPage, setOralPage] = useState(1);
   const [oralKeyword, setOralKeyword] = useState('');
   const [expandedParentIds, setExpandedParentIds] = useState<Record<string, boolean>>({});
+  const [addingOralParentId, setAddingOralParentId] = useState<string | null>(null);
+  const [addingOralText, setAddingOralText] = useState('');
+  const [editingOralId, setEditingOralId] = useState<string | null>(null);
+  const [editingOralText, setEditingOralText] = useState('');
+  const [oralMutating, setOralMutating] = useState(false);
 
   const fetchOralResults = useCallback(async (kb: KnowledgeBaseItem, page = 1, keyword = '') => {
     setOralLoading(true);
@@ -250,8 +260,91 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     setOralKeyword('');
     setOralPage(1);
     setExpandedParentIds({});
+    setAddingOralParentId(null);
+    setAddingOralText('');
+    setEditingOralId(null);
+    setEditingOralText('');
     setOralModalOpen(true);
     fetchOralResults(kb, 1, '');
+  };
+
+  const handleCreateOralQuestion = async (parentChunkId: string) => {
+    if (!oralModalKb || !addingOralText.trim() || oralMutating) return;
+    setOralMutating(true);
+    try {
+      const ver = oralModalKb.active_version || 'v1.0.0';
+      const res = await apiFetch(`/api/v1/kb/bases/${oralModalKb.kb_id}/oralized-results`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          parent_chunk_id: parentChunkId,
+          content: addingOralText.trim(),
+          version: ver,
+        }),
+      });
+      if (res.ok) {
+        setAddingOralParentId(null);
+        setAddingOralText('');
+        await fetchOralResults(oralModalKb, oralPage, oralKeyword);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`新增口语问法失败: ${err.detail || res.statusText}`);
+      }
+    } catch (e: any) {
+      alert(`新增口语问法异常: ${e?.message || e}`);
+    } finally {
+      setOralMutating(false);
+    }
+  };
+
+  const handleUpdateOralQuestion = async (questionId: string) => {
+    if (!oralModalKb || !editingOralText.trim() || oralMutating) return;
+    setOralMutating(true);
+    try {
+      const ver = oralModalKb.active_version || 'v1.0.0';
+      const res = await apiFetch(`/api/v1/kb/bases/${oralModalKb.kb_id}/oralized-results/${encodeURIComponent(questionId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: editingOralText.trim(),
+          version: ver,
+        }),
+      });
+      if (res.ok) {
+        setEditingOralId(null);
+        setEditingOralText('');
+        await fetchOralResults(oralModalKb, oralPage, oralKeyword);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`修改口语问法失败: ${err.detail || res.statusText}`);
+      }
+    } catch (e: any) {
+      alert(`修改口语问法异常: ${e?.message || e}`);
+    } finally {
+      setOralMutating(false);
+    }
+  };
+
+  const handleDeleteOralQuestion = async (questionId: string) => {
+    if (!oralModalKb || oralMutating) return;
+    setOralMutating(true);
+    try {
+      const ver = oralModalKb.active_version || 'v1.0.0';
+      const res = await apiFetch(
+        `/api/v1/kb/bases/${oralModalKb.kb_id}/oralized-results/${encodeURIComponent(questionId)}?version=${encodeURIComponent(ver)}`,
+        { method: 'DELETE' }
+      );
+      if (res.ok) {
+        await fetchOralResults(oralModalKb, oralPage, oralKeyword);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        alert(`删除口语问法失败: ${err.detail || res.statusText}`);
+      }
+    } catch (e: any) {
+      alert(`删除口语问法异常: ${e?.message || e}`);
+    } finally {
+      setOralMutating(false);
+    }
   };
 
   const handleRevealLocalFile = async (filePath: string) => {
@@ -3635,13 +3728,141 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                         </span>
                       </div>
 
-                      {/* 口语化提炼问法（核心亮点） */}
+                      {/* 口语化提炼问法（支持手动增删改） */}
                       <div className="p-3 rounded-lg bg-surface-100 border border-emerald-500/25 space-y-2">
-                        <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
-                          <MessageSquare className="w-3.5 h-3.5 text-emerald-500" />
-                          <span>已提炼的大白话日常提问（{item.oral_questions.length}）</span>
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="text-xs font-semibold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5">
+                            <MessageSquare className="w-3.5 h-3.5 text-emerald-500" />
+                            <span>已提炼的大白话日常提问（{(item.oral_question_items ?? item.oral_questions).length}）</span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setAddingOralParentId(item.parent_chunk_id);
+                              setAddingOralText('');
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[11px] font-medium bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-600 dark:text-emerald-300 border border-emerald-500/25 transition-colors"
+                          >
+                            <Plus className="w-3 h-3" />
+                            <span>新增口语</span>
+                          </button>
                         </div>
-                        {item.oral_questions.length > 0 ? (
+
+                        {addingOralParentId === item.parent_chunk_id && (
+                          <div className="flex items-center gap-1.5 pt-1">
+                            <input
+                              type="text"
+                              value={addingOralText}
+                              onChange={(e) => setAddingOralText(e.target.value)}
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter') handleCreateOralQuestion(item.parent_chunk_id);
+                                if (e.key === 'Escape') {
+                                  setAddingOralParentId(null);
+                                  setAddingOralText('');
+                                }
+                              }}
+                              placeholder="输入大白话问题，例如：1.00米赛怎么算名次？"
+                              className="flex-1 px-2.5 py-1 rounded-md bg-surface-200 border border-emerald-500/40 text-xs text-foreground focus:outline-none focus:border-emerald-500"
+                              autoFocus
+                            />
+                            <button
+                              type="button"
+                              disabled={oralMutating || !addingOralText.trim()}
+                              onClick={() => handleCreateOralQuestion(item.parent_chunk_id)}
+                              className="px-2 py-1 rounded-md bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white text-xs font-medium inline-flex items-center gap-1"
+                            >
+                              <Check className="w-3 h-3" />
+                              <span>保存</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setAddingOralParentId(null);
+                                setAddingOralText('');
+                              }}
+                              className="p-1 rounded-md text-muted-foreground hover:text-foreground hover:bg-surface-200"
+                              title="取消"
+                            >
+                              <X className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        )}
+
+                        {(item.oral_question_items && item.oral_question_items.length > 0) ? (
+                          <div className="flex flex-wrap gap-1.5">
+                            {item.oral_question_items.map((qItem) => (
+                              editingOralId === qItem.id ? (
+                                <div
+                                  key={qItem.id}
+                                  className="flex items-center gap-1 px-2 py-1 rounded-lg bg-surface-200 border border-emerald-500/50 w-full sm:w-auto min-w-[260px]"
+                                >
+                                  <input
+                                    type="text"
+                                    value={editingOralText}
+                                    onChange={(e) => setEditingOralText(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') handleUpdateOralQuestion(qItem.id);
+                                      if (e.key === 'Escape') {
+                                        setEditingOralId(null);
+                                        setEditingOralText('');
+                                      }
+                                    }}
+                                    className="flex-1 bg-transparent text-xs text-foreground focus:outline-none"
+                                    autoFocus
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={oralMutating || !editingOralText.trim()}
+                                    onClick={() => handleUpdateOralQuestion(qItem.id)}
+                                    className="p-0.5 text-emerald-500 hover:text-emerald-400"
+                                    title="保存修改"
+                                  >
+                                    <Check className="w-3.5 h-3.5" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingOralId(null);
+                                      setEditingOralText('');
+                                    }}
+                                    className="p-0.5 text-muted-foreground hover:text-foreground"
+                                    title="取消"
+                                  >
+                                    <X className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              ) : (
+                                <div
+                                  key={qItem.id}
+                                  className="group px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/20 text-xs text-emerald-800 dark:text-emerald-200 font-medium flex items-center gap-1.5"
+                                >
+                                  <span className="text-emerald-500">💬</span>
+                                  <span>{qItem.content}</span>
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      setEditingOralId(qItem.id);
+                                      setEditingOralText(qItem.content);
+                                    }}
+                                    className="opacity-60 hover:opacity-100 text-emerald-600 dark:text-emerald-300 ml-0.5"
+                                    title="修改该口语问法"
+                                  >
+                                    <Edit2 className="w-3 h-3" />
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={oralMutating}
+                                    onClick={() => handleDeleteOralQuestion(qItem.id)}
+                                    className="opacity-60 hover:opacity-100 text-rose-500"
+                                    title="删除该口语问法"
+                                  >
+                                    <Trash2 className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              )
+                            ))}
+                          </div>
+                        ) : item.oral_questions.length > 0 ? (
                           <div className="flex flex-wrap gap-1.5">
                             {item.oral_questions.map((q, qIdx) => (
                               <div

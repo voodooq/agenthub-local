@@ -276,6 +276,30 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
                     logger.warning(f"训练去重：跳过重复文件 [{_f.title}] size={_f.size}")
             files = deduped_files
             modified = sync_mgr.filter_modified_files(m["mount_id"], files)
+            # 防呆自愈：若独立知识库目录/切片已被物理清空或尚未建库，但水位线仍残留导致 modified 为空，则自动重置水位线并全量重训
+            if files and not modified:
+                from ...kb.storage import KBStorageManager
+                kb_id_chk = f"kb_{m['mount_id']}"
+                kb_dir_chk = KBStorageManager.get_kb_dir(kb_id_chk) / "versions"
+                has_any_chunks = False
+                if kb_dir_chk.exists():
+                    for ver_db in kb_dir_chk.glob("*/index.db"):
+                        try:
+                            import sqlite3 as _s3
+                            with _s3.connect(str(ver_db)) as _c:
+                                _tbl = _c.execute(
+                                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hybrid_chunks'"
+                                ).fetchone()
+                                if _tbl and int(_c.execute("SELECT COUNT(*) FROM hybrid_chunks").fetchone()[0] or 0) > 0:
+                                    has_any_chunks = True
+                                    break
+                        except Exception:
+                            pass
+                if not has_any_chunks:
+                    logger.info(f"挂载源 [{m['mount_name']}] 目标知识库为空/已销毁，自动重置同步水位线以执行全量重建")
+                    sync_mgr.clear_sync_state(m["mount_id"])
+                    modified = list(files)
+
             mount_new_chunks: list[dict[str, Any]] = []
             for f in modified:
                 try:
