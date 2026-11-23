@@ -206,7 +206,8 @@ class KBUpgradeService:
                             for (cid, _), vec in zip(batch, vecs):
                                 vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
                                 if vec_list:
-                                    embedded_pairs.append((struct.pack(f"<{len(vec_list)}f", *vec_list), cid))
+                                    from .embedding_codec import encode_embedding_f16
+                                    embedded_pairs.append((encode_embedding_f16(vec_list), cid))
                     if embedded_pairs:
                         def _save_embeddings() -> None:
                             import sqlite3
@@ -244,7 +245,8 @@ class KBUpgradeService:
                             for (cid, _), vec in zip(batch, vecs):
                                 vec_list = vec.tolist() if hasattr(vec, "tolist") else list(vec)
                                 if vec_list:
-                                    embedded_pairs.append((struct.pack(f"<{len(vec_list)}f", *vec_list), cid))
+                                    from .embedding_codec import encode_embedding_f16
+                                    embedded_pairs.append((encode_embedding_f16(vec_list), cid))
                     if embedded_pairs:
                         def _save_embeddings() -> None:
                             import sqlite3

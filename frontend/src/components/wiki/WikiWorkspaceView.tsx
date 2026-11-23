@@ -20,6 +20,7 @@ import {
   Plus,
   Search,
   Trash2,
+  Upload,
 } from 'lucide-react';
 import { apiFetch } from '@/utils/apiClient';
 
@@ -118,6 +119,11 @@ export function WikiWorkspaceView() {
   const [ingestTitle, setIngestTitle] = useState('');
   const [ingestContent, setIngestContent] = useState('');
   const [ingesting, setIngesting] = useState(false);
+  const [showSplitImportModal, setShowSplitImportModal] = useState(false);
+  const [splitFilename, setSplitFilename] = useState('ontology_guide.md');
+  const [splitContent, setSplitContent] = useState('');
+  const [splittingImport, setSplittingImport] = useState(false);
+  const [deletingPage, setDeletingPage] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
 
   const showToast = (msg: string) => {
@@ -310,6 +316,97 @@ export function WikiWorkspaceView() {
     }
   };
 
+  const handleSplitImportFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setSplitFilename(file.name);
+    const text = await file.text();
+    setSplitContent(text);
+  };
+
+  const handleSplitImportSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeSpaceId || !splitContent.trim()) return;
+    setSplittingImport(true);
+    try {
+      const res = await apiFetch('/api/v1/wiki/import/markdown-split', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          wiki_space_id: activeSpaceId,
+          filename: splitFilename.trim() || 'ontology_guide.md',
+          content: splitContent,
+          auto_split: true,
+          auto_publish: true,
+        }),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        const pages = json.data?.pages || [];
+        setShowSplitImportModal(false);
+        setSplitContent('');
+        await loadPages(activeSpaceId, searchKeyword);
+        await loadSpaces();
+        if (pages[0]?.page_id) {
+          await loadPageDetail(pages[0].page_id);
+        }
+        showToast(`已自动拆解导入 ${json.data?.imported_count ?? pages.length} 篇词条`);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || '导入拆解失败，请检查文档格式');
+      }
+    } finally {
+      setSplittingImport(false);
+    }
+  };
+
+  const handleDeleteSelectedPage = async () => {
+    if (!selectedPage || deletingPage) return;
+    const confirmed = window.confirm(`确定要删除词条「${selectedPage.title}」吗？删除后将移入回收站。`);
+    if (!confirmed) return;
+    setDeletingPage(true);
+    try {
+      const res = await apiFetch(`/api/v1/wiki/pages/${selectedPage.page_id}?hard_delete=false`, {
+        method: 'DELETE',
+      });
+      if (res.ok) {
+        setSelectedPage(null);
+        setEditorMode('read');
+        await loadPages(activeSpaceId, searchKeyword);
+        await loadSpaces();
+        showToast('词条已移入回收站');
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || '删除词条失败');
+      }
+    } finally {
+      setDeletingPage(false);
+    }
+  };
+
+  const handleDeleteActiveSpace = async () => {
+    if (!activeSpaceId) return;
+    const activeSpace = spaces.find((s) => s.wiki_space_id === activeSpaceId);
+    const spaceName = activeSpace?.name || activeSpaceId;
+    const confirmed = window.confirm(
+      `确定要清空并删除整个 Wiki 空间「${spaceName}」吗？\n删除后将移除该空间下所有词条与索引，且不可恢复。`
+    );
+    if (!confirmed) return;
+    const res = await apiFetch(`/api/v1/wiki/spaces/${encodeURIComponent(activeSpaceId)}`, {
+      method: 'DELETE',
+    });
+    if (res.ok) {
+      setSelectedPage(null);
+      setPages([]);
+      setActiveSpaceId('');
+      await loadSpaces();
+      showToast(`已删除空间「${spaceName}」`);
+    } else {
+      const err = await res.json().catch(() => ({}));
+      showToast(err.detail || '删除空间失败');
+    }
+  };
+
   const handleLinkMouseEnter = (slug: string, e: React.MouseEvent) => {
     if (hoverTimerRef.current) clearTimeout(hoverTimerRef.current);
     const rect = (e.target as HTMLElement).getBoundingClientRect();
@@ -384,6 +481,18 @@ export function WikiWorkspaceView() {
             <Plus className="w-3.5 h-3.5" strokeWidth={1.75} />
             <span>新建空间</span>
           </button>
+
+          {activeSpaceId && (
+            <button
+              type="button"
+              onClick={handleDeleteActiveSpace}
+              className="px-2.5 py-1 rounded-md border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 text-xs flex items-center gap-1 transition-colors"
+              title="删除整个 Wiki 空间及其中所有词条"
+            >
+              <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+              <span>删除空间</span>
+            </button>
+          )}
         </div>
 
         <div className="flex items-center gap-2">
@@ -392,6 +501,16 @@ export function WikiWorkspaceView() {
               {toastMsg}
             </span>
           )}
+          <button
+            type="button"
+            disabled={!activeSpaceId}
+            onClick={() => setShowSplitImportModal(true)}
+            className="px-2.5 py-1 rounded-md border border-border hover:bg-surface-200 text-xs flex items-center gap-1 disabled:opacity-40"
+            title="上传或粘贴 Markdown 总纲，按二级标题自动拆解归类"
+          >
+            <Upload className="w-3.5 h-3.5" strokeWidth={1.75} />
+            <span>导入拆解 .md</span>
+          </button>
           <button
             type="button"
             disabled={!activeSpaceId}
@@ -588,14 +707,26 @@ export function WikiWorkspaceView() {
 
                 <div className="flex items-center gap-2 shrink-0">
                   {editorMode === 'read' ? (
-                    <button
-                      type="button"
-                      onClick={() => setEditorMode('edit')}
-                      className="px-3 py-1.5 rounded-md border border-border hover:bg-surface-200 text-xs font-medium flex items-center gap-1.5"
-                    >
-                      <Edit3 className="w-3.5 h-3.5" strokeWidth={1.75} />
-                      <span>编辑</span>
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setEditorMode('edit')}
+                        className="px-3 py-1.5 rounded-md border border-border hover:bg-surface-200 text-xs font-medium flex items-center gap-1.5"
+                      >
+                        <Edit3 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                        <span>编辑</span>
+                      </button>
+                      <button
+                        type="button"
+                        disabled={deletingPage}
+                        onClick={handleDeleteSelectedPage}
+                        className="px-3 py-1.5 rounded-md border border-rose-500/30 text-rose-600 dark:text-rose-400 hover:bg-rose-500/10 text-xs font-medium flex items-center gap-1.5 disabled:opacity-40"
+                        title="删除当前词条（软删除移入回收站）"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                        <span>{deletingPage ? '删除中...' : '删除'}</span>
+                      </button>
+                    </div>
                   ) : (
                     <>
                       <button
@@ -951,6 +1082,68 @@ export function WikiWorkspaceView() {
                 className="px-4 py-1.5 rounded-md bg-slate-900 text-white dark:bg-zinc-100 dark:text-zinc-900 font-medium disabled:opacity-50"
               >
                 {ingesting ? '处理中...' : '确认提交'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {/* 导入拆解 .md 弹窗 */}
+      {showSplitImportModal && (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleSplitImportSubmit}
+            className="w-full max-w-2xl rounded-xl border border-border bg-surface-50 p-5 shadow-2xl space-y-3"
+          >
+            <div className="flex items-center justify-between">
+              <h3 className="text-sm font-semibold">导入并自动拆解 Markdown 总纲</h3>
+              <span className="text-[11px] text-text-tertiary">
+                按二级标题 (##) 自动拆解归类并发布到当前 Wiki 空间
+              </span>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] text-text-secondary mb-1">选择本地 .md 文件</label>
+                <input
+                  type="file"
+                  accept=".md,.markdown,.txt"
+                  onChange={handleSplitImportFileChange}
+                  className="w-full text-xs text-text-secondary file:mr-2 file:py-1 file:px-2.5 file:rounded-md file:border file:border-border file:bg-surface-200 file:text-xs file:text-text-primary hover:file:bg-surface-300"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] text-text-secondary mb-1">源文件名</label>
+                <input
+                  type="text"
+                  value={splitFilename}
+                  onChange={(e) => setSplitFilename(e.target.value)}
+                  placeholder="例如：fencing_business_ontology_and_query_guide.md"
+                  className="w-full px-3 py-1.5 text-xs rounded-md border border-border bg-surface-100"
+                />
+              </div>
+            </div>
+            <textarea
+              autoFocus
+              rows={12}
+              value={splitContent}
+              onChange={(e) => setSplitContent(e.target.value)}
+              placeholder="上传本地 .md 文件或直接粘贴包含多个 ## 二级标题的 Markdown 文档..."
+              className="w-full px-3 py-2 text-xs font-mono rounded-md border border-border bg-surface-100 focus:outline-none focus:border-blue-500/60"
+            />
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                type="button"
+                onClick={() => setShowSplitImportModal(false)}
+                className="px-3 py-1.5 rounded-md border border-border text-xs"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={splittingImport || !splitContent.trim()}
+                className="px-3 py-1.5 rounded-md bg-slate-900 text-white dark:bg-zinc-100 dark:text-zinc-900 text-xs font-medium disabled:opacity-40"
+              >
+                {splittingImport ? '正在拆解入库...' : '开始拆解并发布'}
               </button>
             </div>
           </form>

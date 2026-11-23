@@ -264,28 +264,33 @@ class ArtifactRepository:
 
     @staticmethod
     async def list_artifacts(
-        workspace_id: str,
+        workspace_id: str | None = None,
         file_type: str | None = None,
         limit: int = 100,
         auto_sync: bool = True,
     ) -> list[dict]:
         """
-        查询指定工作区下的资产列表（默认自动前置物理增量扫描同步）
+        查询指定工作区或全部工作区下的资产列表（单工作区模式默认自动前置物理增量扫描同步）
         """
-        if auto_sync:
+        is_all = not workspace_id or workspace_id == "__all__"
+        if auto_sync and not is_all and workspace_id:
             try:
                 await ArtifactRepository.sync_physical_workspace_artifacts(workspace_id)
             except Exception as e:
                 logger.warning(f"列举资产前自动物理同步异常: {e}")
 
-        query = "SELECT * FROM workspace_artifacts WHERE workspace_id = ?"
-        params: list = [workspace_id]
+        conditions: list[str] = []
+        params: list = []
+        if not is_all and workspace_id:
+            conditions.append("workspace_id = ?")
+            params.append(workspace_id)
 
         if file_type:
-            query += " AND file_type = ?"
+            conditions.append("file_type = ?")
             params.append(file_type)
 
-        query += " ORDER BY created_at DESC LIMIT ?;"
+        where_sql = f"WHERE {' AND '.join(conditions)}" if conditions else ""
+        query = f"SELECT * FROM workspace_artifacts {where_sql} ORDER BY created_at DESC LIMIT ?;"
         params.append(limit)
 
         async with db_manager.get_connection() as conn:

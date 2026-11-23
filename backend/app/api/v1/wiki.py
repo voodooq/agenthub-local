@@ -35,11 +35,20 @@ class UpdateWikiPageRequest(BaseModel):
 
 class IngestWikiRequest(BaseModel):
     wiki_space_id: str = Field(..., description="目标 Wiki 空间 ID")
-    source_type: Literal["kb_doc", "meeting_note", "chat_decision", "sql_snapshot", "camera_ocr"]
+    source_type: Literal["kb_doc", "meeting_note", "chat_decision", "sql_snapshot", "data_snapshot", "camera_ocr"]
     content: str = Field(..., description="待编译摄入的原始文本内容")
     source_meta: dict[str, Any] = Field(default_factory=dict, description="来源元数据")
     target_slug: str | None = Field(default=None, description="指定合并目标词条 slug")
     auto_publish: bool = Field(default=False, description="是否跳过审阅直接收藏发布（不覆写既有官方词条）")
+
+
+class ImportMarkdownSplitRequest(BaseModel):
+    wiki_space_id: str = Field(..., description="目标 Wiki 空间 ID")
+    filename: str = Field(..., description="导入的 Markdown 文件名")
+    content: str = Field(..., description="Markdown 完整正文")
+    auto_split: bool = Field(default=True, description="是否按二级标题 (##) 自动拆解归类")
+    auto_publish: bool = Field(default=True, description="是否直接发布为正式词条")
+    kb_id: str = Field(default="", description="可选关联知识库 ID")
 
 
 @router.get("/spaces")
@@ -62,6 +71,16 @@ async def create_wiki_space(req: CreateWikiSpaceRequest) -> dict[str, Any]:
         return {"success": True, "data": space}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.delete("/spaces/{space_id}")
+async def delete_wiki_space(space_id: str) -> dict[str, Any]:
+    """删除整个 Wiki 空间及其下所有词条与索引。"""
+    try:
+        res = await WikiStorageManager.delete_space(space_id)
+        return {"success": True, "data": res}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
 
 
 @router.get("/spaces/{space_id}/pages")
@@ -168,4 +187,137 @@ async def discard_wiki_inbox(page_id: str) -> dict[str, Any]:
         return {"success": True, "data": res, "message": "已丢弃待审阅增量"}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.post("/import/markdown-split")
+async def import_markdown_split_to_wiki(req: ImportMarkdownSplitRequest) -> dict[str, Any]:
+    """导入总纲 Markdown 文档，原件存入 raw/ 并按二级标题自动拆解归类落盘。"""
+    try:
+        res = await WikiStorageManager.import_markdown_split(
+            wiki_space_id=req.wiki_space_id,
+            filename=req.filename,
+            content=req.content,
+            auto_split=req.auto_split,
+            auto_publish=req.auto_publish,
+            kb_id=req.kb_id,
+        )
+        return {"success": True, "data": res}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.delete("/pages/{page_id}")
+async def delete_wiki_page(
+    page_id: str,
+    hard_delete: bool = Query(default=False, description="True 为物理彻底删除，False 为软删除移入 .trash/"),
+    reason: str = Query(default="", description="删除原因说明"),
+) -> dict[str, Any]:
+    """删除 Wiki 词条（支持软删除与物理硬删除）。"""
+    try:
+        res = await WikiStorageManager.delete_page(page_id, hard_delete=hard_delete, reason=reason)
+        return {"success": True, "data": res}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@router.get("/export/ontology-bundle")
+async def export_wiki_ontology_bundle(
+    wiki_space_id: str = Query(default="", description="指定 Wiki 空间 ID，留空则检索全部空间"),
+    query: str = Query(default="", description="可选过滤关键词"),
+    limit: int = Query(default=12, ge=1, le=30),
+) -> dict[str, Any]:
+    """导出已发布业务口径与 SQL 红线精简包。"""
+    res = await WikiStorageManager.export_ontology_bundle(
+        wiki_space_id=wiki_space_id,
+        query=query,
+        limit=limit,
+    )
+    return {"success": True, "data": res}
+
+
+class SaveStatsSnapshotRequest(BaseModel):
+    """用户确认将已通过红线审计的统计结果沉淀为百科统计快照。"""
+
+    agent_id: str = Field(..., min_length=1, description="归属数字专家 ID")
+    title: str = Field(..., min_length=1, max_length=120, description="快照标题/主题")
+    markdown_content: str = Field(..., min_length=1, description="完整统计结果 Markdown 内容")
+    query_scope: str = Field(default="", description="统计查询条件与口径范围说明")
+    verified_sqls: list[str] = Field(default_factory=list, description="已通过审计验证的 SQL 列表")
+    profile_id: str = Field(default="", description="关联 Schema Profile ID")
+    captured_at: str = Field(default="", description="统计时间字符串")
+
+
+@router.post("/stats-snapshot")
+async def save_wiki_stats_snapshot(req: SaveStatsSnapshotRequest) -> dict[str, Any]:
+    """沉淀百科统计快照（若专家尚未绑定百科空间，自动按专家名称创建专属空间并自动绑定）。"""
+    try:
+        res = await WikiStorageManager.save_stats_snapshot(
+            agent_id=req.agent_id,
+            title=req.title,
+            markdown_content=req.markdown_content,
+            query_scope=req.query_scope,
+            verified_sqls=req.verified_sqls,
+            profile_id=req.profile_id,
+            captured_at=req.captured_at,
+        )
+        return {"success": True, "data": res}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+class QuickSaveWikiRequest(BaseModel):
+    """沙盒对话一键存到 Wiki 请求（自动归属当前沙盒/专家空间并自动判断来源类型）。"""
+
+    content: str = Field(..., min_length=1, description="待存入的对话内容 Markdown")
+    workspace_id: str = Field(default="default", description="当前沙盒工作区 ID")
+    workspace_name: str = Field(default="", description="当前沙盒工作区名称")
+    agent_id: str = Field(default="", description="当前沙盒或对话绑定的数字专家 ID")
+    has_sql: bool = Field(default=False, description="本轮是否包含业务库 SQL 查询结果")
+    title_hint: str = Field(default="", description="可选标题提示")
+
+
+@router.post("/quick-save")
+async def quick_save_to_wiki(req: QuickSaveWikiRequest) -> dict[str, Any]:
+    """沙盒对话一键存到当前沙盒/专家 Wiki 空间，自动创建空间并自动识别来源类型。"""
+    try:
+        space = await WikiStorageManager.ensure_workspace_wiki_space(
+            workspace_id=req.workspace_id,
+            workspace_name=req.workspace_name,
+            agent_id=req.agent_id,
+        )
+        source_type, source_type_label = WikiStorageManager.infer_wiki_source_type(
+            req.content, has_sql=req.has_sql
+        )
+        source_meta: dict[str, Any] = {
+            "workspace_id": req.workspace_id,
+            "workspace_name": req.workspace_name,
+            "agent_id": req.agent_id,
+            "auto_inferred_type": source_type,
+        }
+        if req.title_hint.strip():
+            source_meta["title_hint"] = req.title_hint.strip()[:80]
+
+        compiled = await WikiIncrementalCompiler.ingest_and_compile(
+            wiki_space_id=space["wiki_space_id"],
+            source_type=source_type,
+            raw_content=req.content,
+            source_meta=source_meta,
+            auto_publish=False,
+        )
+        page_info = compiled.get("page") if isinstance(compiled, dict) else {}
+        return {
+            "success": True,
+            "data": {
+                "wiki_space_id": space["wiki_space_id"],
+                "wiki_space_name": space.get("name", ""),
+                "source_type": source_type,
+                "source_type_label": source_type_label,
+                "page_title": (page_info or {}).get("title") or req.title_hint or "已沉淀词条",
+                "page_id": (page_info or {}).get("page_id") or "",
+                "compiled": compiled,
+            },
+        }
+    except Exception as e:
+        logger.error(f"[WikiAPI] 一键存入沙盒 Wiki 异常: {e}")
+        raise HTTPException(status_code=500, detail=f"存入 Wiki 失败: {e}")
 

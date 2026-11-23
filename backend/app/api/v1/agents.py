@@ -230,6 +230,8 @@ class AgentCreateRequest(BaseModel):
     min_relevance_score: float | None = Field(0.42, description="防幻觉熔断最低语义相似度阈值")
     api_service_enabled: int | None = Field(0, description="是否开启对外 API 服务")
     api_model_slug: str | None = Field("", description="对外暴露的模型标识别名")
+    allow_biz_sql: int | None = Field(0, description="是否允许调用 Auto Ontology 业务数据工具")
+    bound_wiki_spaces: list[str] | None = Field(default_factory=list, description="绑定的百科工作台 Wiki 空间 ID 列表")
 
 
 class AgentUpdateRequest(BaseModel):
@@ -250,6 +252,8 @@ class AgentUpdateRequest(BaseModel):
     min_relevance_score: float | None = Field(None, description="防幻觉熔断最低语义相似度阈值")
     api_service_enabled: int | None = Field(None, description="是否开启对外 API 服务")
     api_model_slug: str | None = Field(None, description="对外暴露的模型标识别名")
+    allow_biz_sql: int | None = Field(None, description="是否允许调用 Auto Ontology 业务数据工具")
+    bound_wiki_spaces: list[str] | None = Field(None, description="绑定的百科工作台 Wiki 空间 ID 列表")
 
 
 class GeneratedEvalCaseSchema(BaseModel):

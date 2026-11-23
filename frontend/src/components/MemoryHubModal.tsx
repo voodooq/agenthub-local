@@ -365,7 +365,7 @@ export function MemoryHubModal({
         params.set('workspace_id', workspaceId || 'default');
         params.set('include_global', 'false');
       } else {
-        params.set('workspace_id', workspaceId || 'default');
+        params.set('workspace_id', '__all__');
         params.set('include_global', 'true');
       }
       params.set('include_history', String(factIncludeHistory));

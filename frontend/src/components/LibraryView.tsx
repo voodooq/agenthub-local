@@ -71,12 +71,13 @@ export function LibraryView({ workspace, onOpenCanvas, onOpenCloudWiki }: Librar
   const [currentPath, setCurrentPath] = useState<string>('');
   // 视图模式：'grid' 卡片大图标模式 | 'table' 详细信息列表模式 | 'flat' 平铺总览模式
   const [viewMode, setViewMode] = useState<'grid' | 'table' | 'flat'>('grid');
+  const [scopeMode, setScopeMode] = useState<'all' | 'workspace'>('all');
 
   const fetchArtifacts = async (silent = false) => {
-    if (!workspace) return;
     if (!silent) setLoading(true);
     try {
-      const res = await apiFetch(`/api/v1/artifacts?workspace_id=${workspace.id}`);
+      const targetWs = scopeMode === 'workspace' && workspace?.id ? workspace.id : '__all__';
+      const res = await apiFetch(`/api/v1/artifacts?workspace_id=${encodeURIComponent(targetWs)}`);
       if (res.ok) {
         const data = await res.json();
         setArtifacts(data.artifacts || []);
@@ -90,8 +91,8 @@ export function LibraryView({ workspace, onOpenCanvas, onOpenCloudWiki }: Librar
 
   useEffect(() => {
     fetchArtifacts();
-    setCurrentPath(''); // 切换工作区时重置为根目录
-  }, [workspace?.id]);
+    setCurrentPath(''); // 切换范围或工作区时重置为根目录
+  }, [workspace?.id, scopeMode]);
 
   const handleSyncArtifacts = async () => {
     if (!workspace) return;
@@ -397,6 +398,16 @@ export function LibraryView({ workspace, onOpenCanvas, onOpenCloudWiki }: Librar
 
         {/* 功能区切换居右对齐 */}
         <div className="flex items-center space-x-2">
+          {/* 全局 / 当前沙盒切换 */}
+          <button
+            type="button"
+            onClick={() => setScopeMode((prev) => (prev === 'all' ? 'workspace' : 'all'))}
+            className="px-2.5 py-1.5 rounded-lg bg-surface-200 border border-border text-xs text-foreground hover:bg-surface-300 transition-colors"
+            title="点击切换「全部工作区资产」与「仅当前沙盒资产」"
+          >
+            {scopeMode === 'all' ? '全部工作区' : `当前沙盒：${workspace?.name || 'default'}`}
+          </button>
+
           {/* 类型过滤 Tab */}
           <div className="flex items-center space-x-1 p-1 rounded-lg bg-surface-200 border border-border text-xs">
             <button

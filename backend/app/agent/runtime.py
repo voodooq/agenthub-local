@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -230,6 +231,7 @@ class AgentRuntime:
         extra_activate_servers: list[str] | set[str] | None = None,
         allowed_tools: list[str] | None = None,
         include_swarm: bool = False,
+        skip_mcp: bool = False,
     ) -> tuple[list[dict[str, Any]], str]:
         """装配 Agent 模式可用工具集（支持 MCP 两段式目录、Swarm 原语按需挂载与工具白名单过滤）。"""
         all_builtin = ToolProtocolAdapter.get_builtin_tools()
@@ -237,6 +239,18 @@ class AgentRuntime:
         if include_swarm:
             active_tools.extend(ToolProtocolAdapter.get_swarm_tools())
         mcp_catalog_prompt = ""
+
+        def _filter_allowed(tools_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
+            if not allowed_tools:
+                return tools_list
+            allow_set = {t.strip() for t in allowed_tools if t.strip()}
+            if not allow_set:
+                return tools_list
+            return [t for t in tools_list if str(t.get("name", "")).strip() in allow_set]
+
+        if skip_mcp:
+            # IM 渠道不加载桌面端 MCP，彻底避免远程 MCP 超时拖慢微信/企微响应
+            return _filter_allowed(active_tools), ""
 
         prev_anchor = cls._mcp_anchor_by_conv.get(conv_id, 0)
         if collapse_anchor_turn_id > prev_anchor:
@@ -246,14 +260,6 @@ class AgentRuntime:
             cls._mcp_anchor_by_conv[conv_id] = collapse_anchor_turn_id
 
         activated_set = cls._activated_mcp_servers_by_conv.setdefault(conv_id, set())
-
-        def _filter_allowed(tools_list: list[dict[str, Any]]) -> list[dict[str, Any]]:
-            if not allowed_tools:
-                return tools_list
-            allow_set = {t.strip() for t in allowed_tools if t.strip()}
-            if not allow_set:
-                return tools_list
-            return [t for t in tools_list if str(t.get("name", "")).strip() in allow_set]
 
         try:
             catalog = await mcp_manager.get_mcp_catalog_summary()
@@ -374,6 +380,9 @@ class AgentRuntime:
         "list_kb_doc_toc",
         "read_kb_slices",
         "query_knowledge_graph",
+        "read_wiki_ontology_guides",
+        "search_biz_ontology_terms",
+        "query_biz_data_via_ontology",
     })
 
     ARCHIVE_ONLY_TOOLS = frozenset({
@@ -939,6 +948,11 @@ class AgentRuntime:
         agent_id: str | None = None,
         grounding_config: dict[str, Any] | None = None,
         is_retry: bool = False,
+        force_live: bool = False,
+        caller_channel: str = "local_agent",
+        endpoint_token: str | None = None,
+        simulated_role: str | None = None,
+        simulated_scope: dict[str, Any] | str | None = None,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行双层循环流式推理与工具编排，向外输出标准化 SSE 字典事件流。
@@ -1380,9 +1394,151 @@ class AgentRuntime:
                 conv_collapse_anchor = 0
 
         include_swarm_tools = bool(swarm_mode or swarm_role)
+        # 仅屏蔽慢速远程 Ontology 查数工具，保留 read_wiki_ontology_guides 始终可读百科
+        biz_sql_tool_names = {"search_biz_ontology_terms", "query_biz_data_via_ontology"}
+        allow_biz_sql_for_run = False
+        matched_stats_snapshot: dict[str, Any] | None = None
+        bound_schema_profile_id: str = ""
+        round_biz_sql_records: list[dict[str, Any]] = []
+        from ..schema.access_control import (
+            build_rls_prompt_constraint,
+            mask_sensitive_rows,
+            resolve_caller_identity,
+        )
+
+        caller_identity = await resolve_caller_identity(
+            channel=caller_channel,
+            endpoint_token=endpoint_token,
+            simulated_role=simulated_role,
+            simulated_scope=simulated_scope,
+        )
+
+        # Level 1（最高优先级）：先查专家绑定百科空间 + 当前沙盒百科空间内已审核发布的百科词条
+        if active_scene == "agent" and not is_planning_phase and (agent_id or workspace_id):
+            try:
+                from ..wiki.storage_manager import WikiStorageManager
+
+                wiki_guide_hits = await WikiStorageManager.search_published_wiki_guides(
+                    agent_id=agent_id or "",
+                    workspace_id=workspace_id or "",
+                    user_query=user_message,
+                    limit=2,
+                )
+                if wiki_guide_hits:
+                    has_fresh = any(not h.get("is_stale") for h in wiki_guide_hits)
+                    blocks: list[str] = []
+                    for h in wiki_guide_hits:
+                        stale_tag = (
+                            f"⚠️ 已存储 {h['age_days']} 天（可能较陈旧，请按需再查知识库/实时数据核实）"
+                            if h.get("is_stale")
+                            else f"✅ 新鲜有效（更新时间：{h.get('updated_at', '')}）"
+                        )
+                        blocks.append(
+                            f"#### 《{h.get('title', '')}》（空间：{h.get('wiki_space_name', '')} | {stale_tag}）\n"
+                            f"{str(h.get('body_markdown') or '')[:2600]}"
+                        )
+                    priority_rule = (
+                        "1. 上述已审核通过的【百科工作台】词条优先级**高于底层知识库**；\n"
+                        "2. 若上述百科词条已明确包含用户所需的答案（如联系方式、规程结论、口径说明），"
+                        "**请直接依据百科词条给出完整准确的回复并注明来源词条与更新时间，禁止再反复调用 `search_cloud_wiki` 翻查底层知识库浪费时间**；\n"
+                        "3. 仅当百科词条未覆盖用户所需细节、或标记为存储时间过长需核实最新数据时，再降级查询知识库或实时业务数据。"
+                        if has_fresh
+                        else "上述百科词条存储时间较长，可先参考并在必要时继续查询知识库或实时业务数据核实最新信息。"
+                    )
+                    wiki_first_prompt = (
+                        "### 📚 Level 1 百科工作台优先命中（已审核通过）\n"
+                        f"{priority_rule}\n\n"
+                        + "\n\n---\n\n".join(blocks)
+                    )
+                    system_override = (
+                        f"{wiki_first_prompt}\n\n{system_override}" if system_override else wiki_first_prompt
+                    )
+                    logger.info(
+                        f"[WikiFirst] Level 1 优先命中 {len(wiki_guide_hits)} 条已发布百科词条 "
+                        f"(agent={agent_id}, ws={workspace_id}, top={wiki_guide_hits[0].get('title')})"
+                    )
+            except Exception as wiki_first_err:
+                logger.debug(f"[WikiFirst] Level 1 百科优先检索跳过: {wiki_first_err}")
+        if active_scene == "agent" and agent_id:
+            try:
+                from ..repository.agent_repository import AgentProfileRepository
+                from ..repository.schema_repository import SchemaProfileRepository
+                from ..schema.context_injector import (
+                    build_agent_schema_context,
+                    resolve_agent_ontology_client,
+                )
+                from ..schema.intent_router import route_query_intent
+
+                agent_row = await AgentProfileRepository.get_agent(agent_id)
+                if agent_row and int(agent_row.get("allow_biz_sql") or 0) == 1:
+                    ao_client = await resolve_agent_ontology_client(agent_id)
+                    if ao_client is not None:
+                        b_list = await SchemaProfileRepository.get_agent_bindings(agent_id)
+                        b_info = b_list[0] if b_list else None
+                        bound_schema_profile_id = str((b_info or {}).get("profile_id") or "")
+                        route_res = await route_query_intent(
+                            user_message,
+                            agent_id=agent_id,
+                            force_live=force_live,
+                            caller=caller_identity,
+                        )
+                        logger.info(
+                            f"[IntentRouter] agent={agent_id} channel={caller_identity.channel} "
+                            f"role={caller_identity.role} route={route_res.route} "
+                            f"force_live={force_live} reason={route_res.reason}"
+                        )
+                        allow_biz_sql_for_run = route_res.allow_ontology_tools
+                        rls_constraint = build_rls_prompt_constraint(caller_identity)
+                        if rls_constraint and allow_biz_sql_for_run:
+                            system_override = (
+                                f"{system_override}\n\n{rls_constraint}" if system_override else rls_constraint
+                            )
+                        if route_res.route == "stats_wiki_first" and route_res.snapshot_hit:
+                            matched_stats_snapshot = route_res.snapshot_hit
+                            snap = route_res.snapshot_hit
+                            snap_prompt = (
+                                "### ⚡ 命中百科统计快照（优先核对并秒回）\n"
+                                f"- **快照标题**：{snap.get('title', '')}\n"
+                                f"- **统计时间**：`{snap.get('captured_at', '')}`\n"
+                                f"- **口径范围**：{snap.get('query_scope', '')}\n"
+                                "- **执行规则**：\n"
+                                "  1. 先核对当前用户提问的年份、月份、地区与统计维度是否与本快照完全一致；\n"
+                                "  2. 若完全一致，**禁止重复调用 `query_biz_data_via_ontology`**，直接基于快照内容清晰回答，并在回答开头醒目标注「⏱️ 以上数据来自百科统计快照（统计时间：...），如需最新实时数据可点击下方重查」；\n"
+                                "  3. 仅当核对发现快照缺少所需维度或年份不一致时，才调用 `query_biz_data_via_ontology` 补充实时查询。\n\n"
+                                f"#### 快照正文\n{str(snap.get('body_markdown') or '')[:4000]}"
+                            )
+                            system_override = (
+                                f"{system_override}\n\n{snap_prompt}" if system_override else snap_prompt
+                            )
+                        elif route_res.inject_schema_context:
+                            schema_ctx = await build_agent_schema_context(agent_id, user_query=user_message)
+                            if schema_ctx:
+                                system_override = (
+                                    f"{system_override}\n\n{schema_ctx}" if system_override else schema_ctx
+                                )
+            except Exception as biz_gate_err:
+                logger.warning(f"[AutoOntology] 专家业务数据门控检查异常: {biz_gate_err}")
+
+        # 轻量追问引导约定：仅在桌面端最终答复末尾输出 2~3 条下一步引导（IM 渠道不需要卡片，省去冗余 Token）
+        if not is_planning_phase and not swarm_role and caller_identity.channel != "im_bot":
+            followup_hint = (
+                "\n\n### 输出末尾引导约定\n"
+                "在完整回答正文结束后的最后一行，附带 2~3 个自然、具体、用户最可能继续追问的下一步问题，严格采用如下单行 HTML 注释格式（禁止放在代码块中）：\n"
+                "<!-- FOLLOWUP_SUGGESTIONS: [\"下一步追问1\", \"下一步追问2\"] -->"
+            )
+            system_override = f"{system_override}{followup_hint}" if system_override else followup_hint.strip()
+
+        effective_allowed_tools = list(allowed_tools) if allowed_tools else None
+        if effective_allowed_tools is not None and "read_tool_ref" not in effective_allowed_tools:
+            effective_allowed_tools.append("read_tool_ref")
+        if allow_biz_sql_for_run and effective_allowed_tools is not None:
+            for b_tool in biz_sql_tool_names:
+                if b_tool not in effective_allowed_tools:
+                    effective_allowed_tools.append(b_tool)
+
         allowed_tools_set: set[str] | None = (
-            {t.strip() for t in allowed_tools if t.strip()}
-            if allowed_tools
+            {t.strip() for t in effective_allowed_tools if t.strip()}
+            if effective_allowed_tools
             else None
         )
 
@@ -1400,9 +1556,13 @@ class AgentRuntime:
                     conv_id=conv_id,
                     user_message=user_message,
                     collapse_anchor_turn_id=conv_collapse_anchor,
-                    allowed_tools=allowed_tools,
+                    allowed_tools=effective_allowed_tools,
                     include_swarm=include_swarm_tools,
+                    skip_mcp=(caller_channel == "im_bot"),
                 )
+
+            if not allow_biz_sql_for_run:
+                active_tools = [t for t in active_tools if t.get("name") not in biz_sql_tool_names]
 
         # 若用户已批准方案，将执行步骤持久化写入工作区 .agenthub/scratchpad.md
         if approved_plan_steps and target_cwd:
@@ -1426,6 +1586,7 @@ class AgentRuntime:
         active_skill_ids: list[str] = list(pre_matched_ids)
         recovered_error_count = 0
         total_tool_steps = 0
+        biz_ontology_query_count = 0
         circuit_breaker_triggered = False
         produced_artifacts: list[str] = []
         has_workspace_mutations = False
@@ -1535,12 +1696,14 @@ class AgentRuntime:
             """
             nonlocal active_loop_obj, tracked_loop_id, step_idx
 
-            # 0. 检查是否在白名单中
-            if t_name in policy_gate.session_whitelists:
+            from .policy_interceptor import add_workspace_whitelist, is_workspace_whitelisted
+
+            # 0. 检查是否在当前任务或沙盒工作区全放行白名单中
+            if t_name in policy_gate.session_whitelists or is_workspace_whitelisted(ws_id, t_name):
                 if result_holder is not None:
                     result_holder["allowed"] = True
                     result_holder["args"] = t_args
-                    result_holder["guidance"] = "在任务白名单中直接放行"
+                    result_holder["guidance"] = "已在沙盒白名单中直接放行"
                     result_holder["is_timeout"] = False
                 return
 
@@ -1568,7 +1731,7 @@ class AgentRuntime:
                 active_loop_obj.loop_status = "waiting_approval"
                 active_loop_obj.pending_approval_call = pending_call
 
-            # 2. 推送 SSE 事件让前端呼出 ApprovalCard（启动 15s 倒计时）
+            # 2. 推送 SSE 事件让前端在对话内容区呼出红色风控审批卡（启动 20s 倒计时）
             yield {
                 "type": "loop_step",
                 "loop_id": loop_id,
@@ -1578,9 +1741,9 @@ class AgentRuntime:
                 "scratchpad_md": active_loop_obj.scratchpad_md if active_loop_obj else "",
             }
 
-            # 3. 注册并异步挂起协程，等待人工操作或 15 秒超时自动封锁
+            # 3. 注册并异步挂起协程，等待人工操作或 20 秒超时自动封锁
             approval_event_manager.register(call_id, loop_id=loop_id)
-            decision_res = await approval_event_manager.wait_for_decision(call_id, timeout_seconds=15.0)
+            decision_res = await approval_event_manager.wait_for_decision(call_id, timeout_seconds=20.0)
 
             # 4. 恢复 Loop 状态为 executing 并清除待审批项
             await TaskLoopRepository.update_loop_status(
@@ -1610,10 +1773,11 @@ class AgentRuntime:
                     result_holder["is_timeout"] = False
             elif decision_res.action == "approve_all":
                 policy_gate.add_to_whitelist(t_name)
+                add_workspace_whitelist(ws_id, t_name)
                 if result_holder is not None:
                     result_holder["allowed"] = True
                     result_holder["args"] = t_args
-                    result_holder["guidance"] = "已加入本任务白名单并放行"
+                    result_holder["guidance"] = "已加入当前沙盒全放行白名单并放行"
                     result_holder["is_timeout"] = False
             elif decision_res.action == "modify_args":
                 eff_args = decision_res.modified_arguments or t_args
@@ -1622,10 +1786,10 @@ class AgentRuntime:
                     result_holder["args"] = eff_args
                     result_holder["guidance"] = "已采用用户修改后的参数放行"
                     result_holder["is_timeout"] = False
-            else:  # reject 或 15s 超时自动封锁
+            else:  # reject 或 20s 超时自动封锁
                 guidance = decision_res.user_guidance or "用户拒绝了该项高危操作，请更换安全的替代方案。"
                 if decision_res.is_timeout:
-                    guidance = "【15秒超时自动封锁】审批卡未在 15 秒内收到操作，安全网关已自动封锁该高危操作并阻止执行。"
+                    guidance = "【20秒超时自动封锁】审批卡未在 20 秒内收到操作，安全网关已自动封锁该高危操作并阻止执行。"
                 if result_holder is not None:
                     result_holder["allowed"] = False
                     result_holder["args"] = t_args
@@ -2738,6 +2902,21 @@ class AgentRuntime:
                     except Exception as conf_err:
                         logger.debug(f"[AgentRuntime] 自然收尾置信度治理跳过: {conf_err}")
 
+                    from ..schema.intent_router import extract_followup_suggestions
+                    final_saved_text, parsed_followups = extract_followup_suggestions(final_saved_text or "")
+                    if matched_stats_snapshot and not round_biz_sql_records:
+                        parsed_followups = [
+                            {
+                                "label": "🔄 重新实时查询最新数据",
+                                "prompt": effective_user_message,
+                                "force_live": True,
+                            },
+                            *[
+                                item for item in parsed_followups
+                                if "重新实时查询" not in str(item.get("label") or "")
+                            ][:2],
+                        ]
+
                     if final_saved_text:
                         await MessageRepository.save_message(
                             conversation_id=conv_id,
@@ -2763,6 +2942,31 @@ class AgentRuntime:
                         is_waiting_user_decision=is_waiting_user_decision,
                     ):
                         yield tail_ev
+
+                    if parsed_followups:
+                        yield {
+                            "type": "followup_suggestions",
+                            "suggestions": parsed_followups[:3],
+                        }
+                    if agent_id and round_biz_sql_records:
+                        # 按每个子查询去重取最后一次尝试，若仍存在未消除的红线告警则拦截沉淀
+                        latest_by_q: dict[str, dict[str, Any]] = {}
+                        for rec in round_biz_sql_records:
+                            latest_by_q[rec["query"]] = rec
+                        eff_recs = list(latest_by_q.values())
+                        unresolved_alerts = [
+                            a for r in eff_recs for a in (r.get("audit_alerts") or [])
+                        ]
+                        yield {
+                            "type": "stats_snapshot_offer",
+                            "agent_id": agent_id,
+                            "title": effective_user_message[:60] or "业务统计快照",
+                            "query_scope": effective_user_message,
+                            "verified_sqls": [r["sql"] for r in eff_recs if r.get("sql")],
+                            "profile_id": bound_schema_profile_id,
+                            "has_audit_alert": bool(unresolved_alerts),
+                            "audit_alerts": unresolved_alerts[:5],
+                        }
 
                     stream_completed_normally = True
                     yield {
@@ -4742,6 +4946,311 @@ class AgentRuntime:
                             "compressed": f"[混合检索完成: 关键词 '{q_str}']",
                         }
 
+                    # ── 工具: 读取本地 Wiki 业务数据口径与红线指南 (read_wiki_ontology_guides) ──
+                    elif func_name == "read_wiki_ontology_guides":
+                        from ..repository.agent_repository import AgentProfileRepository
+                        from ..schema.context_injector import build_agent_schema_context
+                        from ..wiki.storage_manager import WikiStorageManager
+
+                        kw_guide = str(args.get("keyword") or "").strip()
+                        space_arg = str(args.get("wiki_space_id") or "").strip()
+                        try:
+                            parts: list[str] = []
+                            bound_spaces: list[str] = []
+                            if agent_id:
+                                schema_ctx = await build_agent_schema_context(agent_id, user_query=user_message)
+                                if schema_ctx:
+                                    parts.append(schema_ctx)
+                                ag_row = await AgentProfileRepository.get_agent(agent_id)
+                                if ag_row and isinstance(ag_row.get("bound_wiki_spaces"), list):
+                                    bound_spaces = ag_row["bound_wiki_spaces"]
+
+                            if space_arg:
+                                # 指定专家时禁止越权指定未绑定的其他业务 Wiki 空间
+                                if agent_id and bound_spaces and space_arg not in bound_spaces:
+                                    target_spaces = []
+                                else:
+                                    target_spaces = [space_arg]
+                            elif bound_spaces:
+                                target_spaces = bound_spaces
+                            elif agent_id:
+                                # 严守专家隔离：未绑定百科空间时，仅允许查当前沙盒专属空间，绝不跨库全扫 [""]
+                                clean_ws = (workspace_id or "").strip()
+                                if clean_ws:
+                                    safe_ws_key = re.sub(r"[^a-zA-Z0-9_-]", "_", clean_ws)[:32]
+                                    target_spaces = [f"wiki_ws_{safe_ws_key}"]
+                                else:
+                                    target_spaces = []
+                            else:
+                                target_spaces = [""]
+
+                            for sid in target_spaces:
+                                bundle = await WikiStorageManager.export_ontology_bundle(
+                                    wiki_space_id=sid,
+                                    query=kw_guide,
+                                    limit=10,
+                                )
+                                if bundle.get("bundle_markdown"):
+                                    parts.append(str(bundle["bundle_markdown"]))
+                            res_text = (
+                                "\n\n".join(parts)
+                                or f"暂未收录与「{kw_guide or '业务数据'}」相关的结构图谱或口径词条。"
+                            )
+                        except Exception as wg_err:
+                            res_text = f"读取业务数据口径异常: {wg_err}"
+                        tool_output = res_text
+                        compressed = f"[本地 Wiki 业务口径指南: '{kw_guide or '全部'}']"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"read_wiki_ontology_guides({kw_guide})",
+                            "reason": f"读取本地 Wiki 业务口径: {kw_guide or '核心口径'}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: Auto Ontology 业务术语检索 (search_biz_ontology_terms) ──
+                    elif func_name == "search_biz_ontology_terms":
+                        from ..schema.context_injector import resolve_agent_ontology_client
+
+                        kw_str = str(args.get("keyword") or "").strip()
+                        client = await resolve_agent_ontology_client(agent_id)
+                        if not client:
+                            res_text = "系统尚未配置或启用 Auto Ontology 业务数据连接，请在系统设置中配置服务器地址与 API Token。"
+                        else:
+                            try:
+                                terms, is_fallback_all = await client.search_terms_with_meta(
+                                    keyword=kw_str,
+                                    limit=25,
+                                )
+                                if not terms:
+                                    res_text = f"未在 Auto Ontology 中检索到与「{kw_str}」相关的业务术语。"
+                                else:
+                                    lines = []
+                                    if is_fallback_all:
+                                        lines.append(
+                                            f"> ⚠️ 未精确匹配「{kw_str}」，已自动返回全量术语，请直接使用下方英文实体名进行查询：\n"
+                                        )
+                                    for t in terms:
+                                        schemas = ", ".join(str(s) for s in (t.get("schema_names") or []))
+                                        desc = str(t.get("description") or "")[:160]
+                                        lines.append(f"- **{t.get('name')}** ({schemas}): {desc}")
+                                    res_text = "\n".join(lines)
+                            except Exception as ao_err:
+                                res_text = f"Auto Ontology 术语检索异常: {ao_err}"
+                        tool_output = res_text
+                        compressed = f"[业务本体术语检索: '{kw_str}']"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"search_biz_ontology_terms({kw_str})",
+                            "reason": f"检索 Auto Ontology 业务术语: {kw_str or '概览'}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: Auto Ontology 自然语言业务数据查询 (query_biz_data_via_ontology) ──
+                    elif func_name == "query_biz_data_via_ontology":
+                        from ..repository.schema_repository import SchemaProfileRepository
+                        from ..schema.context_injector import (
+                            audit_sql_against_schema,
+                            resolve_agent_ontology_client,
+                        )
+                        from ..schema.data_cleaner import DataResponseCleaner
+                        from ..schema.query_assembler import QueryInstructionAssembler
+
+                        q_biz = str(args.get("question") or "").strip()
+                        ao_conv_id = str(args.get("conversation_id") or "").strip() or None
+                        client = await resolve_agent_ontology_client(agent_id)
+                        if not client:
+                            res_text = "系统尚未配置或启用 Auto Ontology 业务数据连接，请在系统设置中配置服务器地址与 API Token。"
+                        elif not q_biz:
+                            res_text = "查询问题不能为空。"
+                        else:
+                            effective_question = q_biz
+                            if agent_id:
+                                try:
+                                    bindings = await SchemaProfileRepository.get_agent_bindings(agent_id)
+                                    if bindings:
+                                        primary_b = bindings[0]
+                                        mounted = primary_b.get("mounted_entities", "*")
+                                        sel_tables = mounted if isinstance(mounted, list) else None
+                                        graph_ctx = await SchemaProfileRepository.get_profile_graph(
+                                            primary_b["profile_id"],
+                                            entity_filter=sel_tables,
+                                        )
+                                        if graph_ctx:
+                                            assembled = QueryInstructionAssembler.assemble_instruction(
+                                                question=q_biz,
+                                                profile_context=graph_ctx,
+                                                selected_tables=sel_tables,
+                                            )
+                                            effective_question = assembled["assembled_prompt"]
+                                except Exception as asm_err:
+                                    logger.debug(f"[SchemaAssembler] 跳过指令拼装: {asm_err}")
+                            try:
+                                progress_q: asyncio.Queue[str | None] = asyncio.Queue()
+
+                                async def _ao_progress(msg: str) -> None:
+                                    await progress_q.put(msg)
+
+                                ask_started_at = time.monotonic()
+                                ask_timeout_sec = 125.0
+                                ask_task = asyncio.create_task(
+                                    client.ask_question(
+                                        question=effective_question,
+                                        conversation_id=ao_conv_id,
+                                        on_progress=_ao_progress,
+                                    )
+                                )
+                                try:
+                                    while not ask_task.done():
+                                        elapsed_wait = time.monotonic() - ask_started_at
+                                        if elapsed_wait >= ask_timeout_sec:
+                                            ask_task.cancel()
+                                            raise TimeoutError(
+                                                f"Auto Ontology 网关查询超过 {int(ask_timeout_sec)} 秒未返回，已自动熔断中止。"
+                                                "请将多站点/多表复杂统计拆分为单站或单实体简单问题后再查询。"
+                                            )
+                                        try:
+                                            prog_msg = await asyncio.wait_for(progress_q.get(), timeout=5.0)
+                                        except asyncio.TimeoutError:
+                                            elapsed_sec_int = int(time.monotonic() - ask_started_at)
+                                            prog_msg = f"正在等待 Auto Ontology 业务库返回结果（已等待 {elapsed_sec_int}s / 上限 120s）..."
+                                        if prog_msg:
+                                            yield {
+                                                "type": "tool_progress",
+                                                "call_id": call_id,
+                                                "name": func_name,
+                                                "message": prog_msg,
+                                            }
+                                    res = await ask_task
+                                finally:
+                                    if not ask_task.done():
+                                        ask_task.cancel()
+                                rows = res.get("rows") or []
+                                sql_code = res.get("sql_code") or ""
+                                ans_text = res.get("response") or "已完成查询"
+                                elapsed_sec = float(res.get("elapsed_seconds") or 0.0)
+                                biz_ontology_query_count += 1
+
+                                cleaned_info = DataResponseCleaner.clean_query_result(rows)
+                                cleaned_rows = cleaned_info["cleaned_rows"]
+                                dirty_cnt = int(cleaned_info["dirty_count"])
+                                dirty_notice = (
+                                    f"\n> 🧹 **脏数据清洗**：已过滤 {dirty_cnt} 条空值/无效分组行（`null` / `\"\"` / `NONE`）。\n"
+                                    if dirty_cnt > 0
+                                    else ""
+                                )
+
+                                dumped_notice = ""
+                                preview_limit = 60
+                                if len(cleaned_rows) > preview_limit:
+                                    import csv
+
+                                    ws_root_dir = Path(target_cwd or ".").resolve()
+                                    ts_tag = int(time.time())
+                                    tmp_dir = ws_root_dir / "output" / "_tmp"
+                                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                                    tmp_file = tmp_dir / f"ontology_query_{ts_tag}.json"
+                                    tmp_file.write_text(
+                                        json.dumps(cleaned_rows, ensure_ascii=False, indent=2),
+                                        encoding="utf-8",
+                                    )
+                                    rel_tmp = f"output/_tmp/{tmp_file.name}"
+
+                                    export_dir = ws_root_dir / "output" / "exports"
+                                    export_dir.mkdir(parents=True, exist_ok=True)
+                                    csv_file = export_dir / f"ontology_export_{ts_tag}.csv"
+                                    fieldnames = list(cleaned_rows[0].keys()) if isinstance(cleaned_rows[0], dict) else []
+                                    if fieldnames:
+                                        with csv_file.open("w", encoding="utf-8-sig", newline="") as cf:
+                                            writer = csv.DictWriter(cf, fieldnames=fieldnames, extrasaction="ignore")
+                                            writer.writeheader()
+                                            writer.writerows(cleaned_rows)
+                                    rel_csv = f"output/exports/{csv_file.name}"
+
+                                    dumped_notice = (
+                                        f"\n> 📦 **防撑爆落盘与自动导出**：全量共 {len(cleaned_rows)} 行已保存至 `{rel_tmp}`，"
+                                        f"并同步导出 Excel 可直接打开的 CSV 文件：`{rel_csv}`。"
+                                        f"以下仅展示前 {preview_limit} 行预览；如需进一步加工请用 Python 读取上述文件。\n"
+                                    )
+                                limit_notice = ""
+                                if biz_ontology_query_count >= 5:
+                                    limit_notice = (
+                                        "\n\n> 🛑 **单轮查询上限提醒**：已达单轮查询上限（5次），"
+                                        "请直接基于现有数据汇总回复或告知用户局限，禁止继续重试。"
+                                    )
+                                preview_rows = (
+                                    json.dumps(cleaned_rows[:preview_limit], ensure_ascii=False, indent=2)
+                                    if cleaned_rows
+                                    else "[]"
+                                )
+                                audit_alerts = (
+                                    await audit_sql_against_schema(
+                                        agent_id, sql_code, question_hint=q_biz, caller=caller_identity
+                                    )
+                                    if agent_id and sql_code
+                                    else []
+                                )
+                                has_perm_block = any("权限越权拦截" in a for a in audit_alerts)
+                                if has_perm_block:
+                                    # 铁闸 3：命中 P001-P003 权限越权时，硬丢弃全部返回行，严禁越权数据进入模型上下文
+                                    cleaned_rows = []
+                                    preview_rows = "[]"
+                                    ans_text = "🚫 当前用户身份无权查看本次查询所涉及的数据范围或敏感字段，结果已被权限红线拦截。"
+                                elif cleaned_rows:
+                                    # 铁闸 4：非总部角色进入大模型上下文前统一对手机号/证件号等敏感字段打码
+                                    cleaned_rows = mask_sensitive_rows(cleaned_rows, caller_identity)
+                                    preview_rows = json.dumps(
+                                        cleaned_rows[:preview_limit], ensure_ascii=False, indent=2
+                                    )
+                                if sql_code:
+                                    round_biz_sql_records.append(
+                                        {
+                                            "query": q_biz,
+                                            "sql": sql_code,
+                                            "audit_alerts": list(audit_alerts),
+                                            "rows_count": len(cleaned_rows),
+                                        }
+                                    )
+                                audit_notice = ""
+                                if audit_alerts:
+                                    bullet_alerts = "\n".join(f"- {a}" for a in audit_alerts)
+                                    audit_notice = (
+                                        f"\n> 🚨 **数据结构红线审计告警（请修正提问后重查，禁止直接采用有风险的统计结果）**：\n"
+                                        f"{bullet_alerts}\n\n"
+                                    )
+                                res_text = (
+                                    f"{audit_notice}"
+                                    f"### 业务库查询结论\n{ans_text}\n"
+                                    f"{dirty_notice}"
+                                    f"{dumped_notice}\n"
+                                    f"### 执行 SQL\n```sql\n{sql_code}\n```\n\n"
+                                    f"### 结构化返回数据（有效 {len(cleaned_rows)} 行，展示前 {min(len(cleaned_rows), preview_limit)} 行）\n"
+                                    f"```json\n{preview_rows}\n```\n\n"
+                                    f"[Auto Ontology 耗时: {elapsed_sec:.1f}s]"
+                                    f"{limit_notice}"
+                                )
+                            except Exception as ao_err:
+                                res_text = f"Auto Ontology 业务数据查询失败: {ao_err}"
+                        tool_output = res_text
+                        compressed = f"[业务数据只读查询完成: '{q_biz[:40]}']"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"query_biz_data_via_ontology({q_biz})",
+                            "reason": f"查询实时业务库: {q_biz[:50]}",
+                            "status": "completed",
+                            "output": res_text,
+                            "compressed": compressed,
+                        }
+
                     # ── 工具: 云端 LLM Wiki 规程检索 (search_cloud_wiki / v1.5.8 显式挂载门控) ──
                     elif func_name == "search_cloud_wiki":
                         from ..search.multi_kb_router import MultiKBRetrievalRouter
@@ -4770,8 +5279,14 @@ class AgentRuntime:
                                 })
                         elif is_gated and not router_chunks:
                             res_text = router_text
+                        elif agent_id:
+                            # 严守专家知识库硬隔离：指定专家无已发布绑定知识库时，严禁回退全局大杂烩表导致跨业务泄露（如击剑查出篮球/马术）
+                            res_text = (
+                                "当前专家暂无已发布的绑定知识库（已严格禁止跨库检索其他业务知识库）。"
+                                "请仅依据当前专家已审核的百科空间内容作答，若无相关记录请如实告知用户。"
+                            )
                         else:
-                            # 回退工作区旧式云端同步缓存或返回纯净提示
+                            # 非指定专家的通用对话才允许回退工作区旧式云端同步缓存
                             res_text = await search_cloud_wiki(
                                 workspace_root=ws_root,
                                 query=q_str,
@@ -4800,16 +5315,28 @@ class AgentRuntime:
 
                     # ── 工具: 云端章节精读 (read_cloud_wiki_section) ──
                     elif func_name == "read_cloud_wiki_section":
+                        from ..search.multi_kb_router import MultiKBRetrievalRouter
                         from ..tools.workspace_fts import read_cloud_wiki_section
                         r_uri = str(args.get("remote_uri") or "").strip()
                         s_path = str(args.get("section_path") or "").strip()
                         ws_root = target_cwd or "."
 
-                        res_text = await read_cloud_wiki_section(
-                            remote_uri=r_uri,
-                            section_path=s_path,
-                            workspace_root=ws_root,
+                        allowed_kbs_for_sec = (
+                            await MultiKBRetrievalRouter.resolve_target_kbs(
+                                expert_id=agent_id,
+                                session_mounted_kbs=getattr(self, "session_mounted_kbs", None),
+                            )
+                            if agent_id
+                            else None
                         )
+                        if agent_id and not allowed_kbs_for_sec:
+                            res_text = "当前专家暂无已发布的绑定知识库，已拦截跨库章节精读。"
+                        else:
+                            res_text = await read_cloud_wiki_section(
+                                remote_uri=r_uri,
+                                section_path=s_path,
+                                workspace_root=ws_root,
+                            )
                         if res_text and "读取云端切片失败" not in res_text:
                             retrieved_evidence_chunks.append({
                                 "source_uri": r_uri or s_path,
@@ -5656,6 +6183,21 @@ class AgentRuntime:
                     except Exception as conf_err:
                         logger.debug(f"[AgentRuntime] 置信度治理自审跳过: {conf_err}")
 
+                    from ..schema.intent_router import extract_followup_suggestions
+                    clean_deliverable, parsed_followups = extract_followup_suggestions(clean_deliverable or "")
+                    if matched_stats_snapshot and not round_biz_sql_records:
+                        parsed_followups = [
+                            {
+                                "label": "🔄 重新实时查询最新数据",
+                                "prompt": effective_user_message,
+                                "force_live": True,
+                            },
+                            *[
+                                item for item in parsed_followups
+                                if "重新实时查询" not in str(item.get("label") or "")
+                            ][:2],
+                        ]
+
                     await MessageRepository.save_message(
                         conversation_id=conv_id,
                         role="model",
@@ -5685,6 +6227,30 @@ class AgentRuntime:
 
                     if conf_rep_event:
                         yield conf_rep_event
+
+                    if parsed_followups:
+                        yield {
+                            "type": "followup_suggestions",
+                            "suggestions": parsed_followups[:3],
+                        }
+                    if agent_id and round_biz_sql_records:
+                        latest_by_q2: dict[str, dict[str, Any]] = {}
+                        for rec in round_biz_sql_records:
+                            latest_by_q2[rec["query"]] = rec
+                        eff_recs2 = list(latest_by_q2.values())
+                        unresolved_alerts2 = [
+                            a for r in eff_recs2 for a in (r.get("audit_alerts") or [])
+                        ]
+                        yield {
+                            "type": "stats_snapshot_offer",
+                            "agent_id": agent_id,
+                            "title": effective_user_message[:60] or "业务统计快照",
+                            "query_scope": effective_user_message,
+                            "verified_sqls": [r["sql"] for r in eff_recs2 if r.get("sql")],
+                            "profile_id": bound_schema_profile_id,
+                            "has_audit_alert": bool(unresolved_alerts2),
+                            "audit_alerts": unresolved_alerts2[:5],
+                        }
 
                     stream_completed_normally = True
                     yield {

@@ -103,16 +103,16 @@ class ExpertKnowledgeRouter:
         min_relevance_score = float(expert.get("min_relevance_score") or 0.42)
 
         # 1. 确定最终检索的目标知识库清单
-        # 约束规则：
-        # - 当对外开放 API 接口调用 (is_external_api=True) 时，严格限制未经发布的测试版禁止对外调用；
-        # - 在 AgentHub 本地系统内部（沙盒专属空间与外部聊天中 @专家名 协同）：
-        #   两个通道均全量支持检索专家绑定的生效知识库版本，保障本地问答与业务实测畅通无阻！
+        # 严守发布治理红线：未发布知识库仅限后台“知识库测试 (Playground)”使用，
+        # 无论前台本地沙盒、IM 渠道还是外部 API，一律禁止读取未发布知识库！
         target_kbs: list[dict[str, Any]] = []
 
         if bound_kbs:
             for b in bound_kbs:
-                if is_external_api and not b.get("is_published"):
-                    logger.info(f"[ExpertKBRouter] 知识库 [{b.get('name')}] 未发布（处于测试维护中），对外 API 调用跳过")
+                if not b.get("is_published"):
+                    logger.info(
+                        f"[ExpertKBRouter] 知识库 [{b.get('name')}] 未发布（处于草稿/测试状态），已拦截专家检索"
+                    )
                     continue
                 target_kbs.append({
                     "kb_id": b["kb_id"],
@@ -130,8 +130,8 @@ class ExpertKnowledgeRouter:
             for kid in session_mounted_kbs:
                 if kid not in existing_ids and kid in kb_map:
                     k = kb_map[kid]
-                    if is_external_api and not k.get("is_published"):
-                        logger.info(f"[ExpertKBRouter] 外挂知识库 [{k.get('name')}] 未发布，对外 API 调用跳过")
+                    if not k.get("is_published"):
+                        logger.info(f"[ExpertKBRouter] 外挂知识库 [{k.get('name')}] 未发布，已拦截专家检索")
                         continue
                     target_kbs.append({
                         "kb_id": kid,

@@ -54,10 +54,12 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
         if not path.startswith("/api/"):
             return await call_next(request)
 
-        # 健康检查、OAuth 回调以及本地上传附件静态预览直接放行（供 <img> 标签与浏览器无损直接渲染）
+        # 健康检查、OAuth 回调、本地上传附件静态预览以及自带高强度令牌/签名校验的 IM 渠道入站与扫码绑定接口放行
         if (
             path in ("/api/v1/health", "/api/v1/accounts/oauth/callback")
             or path.startswith("/api/v1/chat/uploads/")
+            or path.startswith("/api/v1/dialogue-wiki/ingress/")
+            or path.startswith("/api/v1/dialogue-wiki/bind/")
         ):
             return await call_next(request)
 
@@ -196,11 +198,34 @@ async def lifespan(app: FastAPI):
     except Exception as sched_err:
         logger.warning(f"[Scheduler] 启动计划任务后台守护器失败: {sched_err}")
 
+    # 若已配置个人微信 ClawBot 机器人且本机已有登录态，服务启动时自动在后台静默拉起 Sidecar，避免漏收或延迟回复
+    async def _auto_boot_weixin_sidecar() -> None:
+        try:
+            has_clawbot_link = False
+            async with db_manager.get_connection() as conn:
+                cur = await conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='dialogue_channel_links'"
+                )
+                if await cur.fetchone():
+                    cur2 = await conn.execute(
+                        "SELECT 1 FROM dialogue_channel_links WHERE channel_type = 'weixin_clawbot' AND status = 'active' LIMIT 1"
+                    )
+                    has_clawbot_link = (await cur2.fetchone()) is not None
+            session_file = Path.home() / ".agenthub" / "weixin_clawbot_session.json"
+            if has_clawbot_link or session_file.exists():
+                from app.channels.qr_binding import ensure_clawbot_sidecar_running
+                ok_boot, msg_boot = await ensure_clawbot_sidecar_running()
+                logger.info(f"[WeixinClawbot] 启动自检自动拉起 Sidecar: ok={ok_boot}, msg={msg_boot}")
+        except Exception as wx_boot_err:
+            logger.debug(f"[WeixinClawbot] 启动自动拉起 Sidecar 跳过: {wx_boot_err}")
+
+    weixin_boot_task = asyncio.create_task(_auto_boot_weixin_sidecar())
+
     try:
         yield
     finally:
         logger.info("应用正在优雅关机，正在清理后台任务与常驻 MCP 进程池...")
-        for bg_task in (decay_task, scheduler_task, parent_watch_task):
+        for bg_task in (decay_task, scheduler_task, parent_watch_task, weixin_boot_task):
             if bg_task and not bg_task.done():
                 bg_task.cancel()
                 try:

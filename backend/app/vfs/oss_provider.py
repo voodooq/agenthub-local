@@ -165,68 +165,89 @@ class OSSProvider(CloudVFSProvider):
             return False, f"连接对象存储异常: {str(e)}"
 
     async def list_files(self, recursive: bool = True) -> list[CloudFileMeta]:
-        """列举存储桶内指定前缀的对象。"""
-        query = f"prefix={self.prefix}&max-keys=200" if self.prefix else "max-keys=200"
-        req_url, headers = self._sign("GET", object_key="", query=query)
-
+        """列举存储桶内指定前缀的全部对象（自动分页拉取，突破单页 200 上限）。"""
         files: list[CloudFileMeta] = []
+        marker = ""
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(req_url, headers=headers)
-                if resp.status_code != 200:
-                    err_detail = self._parse_error_msg(resp.text, resp.status_code)
-                    logger.warning(f"列举 OSS 对象失败: {err_detail}")
-                    return []
-
-                root = ET.fromstring(resp.text)
-                # 解析 S3 / OSS ListBucketResult
-                for content in root.findall(".//{http://s3.amazonaws.com/doc/2006-03-01/}Contents") or root.findall(".//Contents"):
-                    key_node = content.find("{http://s3.amazonaws.com/doc/2006-03-01/}Key") or content.find("Key")
-                    if key_node is None or not key_node.text:
-                        continue
-                    key = key_node.text
-                    # 边界约束：若配置了目录前缀，严格仅收录该前缀范围内的文件，防止扫描外部目录
+                while True:
+                    query_parts = ["max-keys=500"]
                     if self.prefix:
-                        p_norm = self.prefix.rstrip("/")
-                        if not (key == p_norm or key.startswith(p_norm + "/")):
+                        query_parts.append(f"prefix={self.prefix}")
+                    if marker:
+                        query_parts.append(f"marker={marker}")
+                    query = "&".join(sorted(query_parts))
+                    req_url, headers = self._sign("GET", object_key="", query=query)
+
+                    resp = await client.get(req_url, headers=headers)
+                    if resp.status_code != 200:
+                        err_detail = self._parse_error_msg(resp.text, resp.status_code)
+                        logger.warning(f"列举 OSS 对象失败: {err_detail}")
+                        break
+
+                    root = ET.fromstring(resp.text)
+                    ns = "{http://s3.amazonaws.com/doc/2006-03-01/}"
+                    last_key = ""
+                    # 解析 S3 / OSS ListBucketResult
+                    for content in root.findall(f".//{ns}Contents") or root.findall(".//Contents"):
+                        key_node = content.find(f"{ns}Key") or content.find("Key")
+                        if key_node is None or not key_node.text:
                             continue
+                        key = key_node.text
+                        last_key = key
+                        # 边界约束：若配置了目录前缀，严格仅收录该前缀范围内的文件，防止扫描外部目录
+                        if self.prefix:
+                            p_norm = self.prefix.rstrip("/")
+                            if not (key == p_norm or key.startswith(p_norm + "/")):
+                                continue
 
-                    size_node = content.find("{http://s3.amazonaws.com/doc/2006-03-01/}Size") or content.find("Size")
-                    size = int(size_node.text) if size_node is not None and size_node.text else 0
+                        size_node = content.find(f"{ns}Size") or content.find("Size")
+                        size = int(size_node.text) if size_node is not None and size_node.text else 0
 
-                    etag_node = content.find("{http://s3.amazonaws.com/doc/2006-03-01/}ETag") or content.find("ETag")
-                    etag = etag_node.text.strip('"') if etag_node is not None and etag_node.text else ""
+                        etag_node = content.find(f"{ns}ETag") or content.find("ETag")
+                        etag = etag_node.text.strip('"') if etag_node is not None and etag_node.text else ""
 
-                    # 解析真实修改时间戳 LastModified (ISO-8601 格式)，严禁使用 time.time() 导致每次增量判定失真
-                    mtime_node = content.find("{http://s3.amazonaws.com/doc/2006-03-01/}LastModified") or content.find("LastModified")
-                    mtime_val = 0.0
-                    if mtime_node is not None and mtime_node.text:
-                        raw_date = mtime_node.text.strip()
-                        try:
-                            clean_date = raw_date.replace("Z", "+00:00")
-                            dt = datetime.fromisoformat(clean_date)
-                            mtime_val = dt.timestamp()
-                        except Exception:
+                        # 解析真实修改时间戳 LastModified (ISO-8601 格式)，严禁使用 time.time() 导致每次增量判定失真
+                        mtime_node = content.find(f"{ns}LastModified") or content.find("LastModified")
+                        mtime_val = 0.0
+                        if mtime_node is not None and mtime_node.text:
+                            raw_date = mtime_node.text.strip()
                             try:
-                                dt = email.utils.parsedate_to_datetime(raw_date)
+                                clean_date = raw_date.replace("Z", "+00:00")
+                                dt = datetime.fromisoformat(clean_date)
                                 mtime_val = dt.timestamp()
                             except Exception:
-                                mtime_val = 0.0
+                                try:
+                                    dt = email.utils.parsedate_to_datetime(raw_date)
+                                    mtime_val = dt.timestamp()
+                                except Exception:
+                                    mtime_val = 0.0
 
-                    remote_uri = f"oss://{self.bucket}/{key}"
-                    title = key.split("/")[-1]
+                        remote_uri = f"oss://{self.bucket}/{key}"
+                        title = key.split("/")[-1]
 
-                    files.append(
-                        CloudFileMeta(
-                            remote_uri=remote_uri,
-                            title=title,
-                            size=size,
-                            etag=etag,
-                            mtime=mtime_val,
-                            is_dir=key.endswith("/"),
-                            authority_tier=self.authority_tier,
+                        files.append(
+                            CloudFileMeta(
+                                remote_uri=remote_uri,
+                                title=title,
+                                size=size,
+                                etag=etag,
+                                mtime=mtime_val,
+                                is_dir=key.endswith("/"),
+                                authority_tier=self.authority_tier,
+                            )
                         )
-                    )
+
+                    trunc_node = root.find(f"{ns}IsTruncated") or root.find("IsTruncated")
+                    is_truncated = (trunc_node is not None and (trunc_node.text or "").strip().lower() == "true")
+                    if not is_truncated:
+                        break
+                    next_marker_node = root.find(f"{ns}NextMarker") or root.find("NextMarker")
+                    next_marker = (next_marker_node.text or "").strip() if next_marker_node is not None else ""
+                    new_marker = next_marker or last_key
+                    if not new_marker or new_marker == marker:
+                        break
+                    marker = new_marker
         except Exception as e:
             logger.warning(f"列举 OSS 异常: {e}")
 

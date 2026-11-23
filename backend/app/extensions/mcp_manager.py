@@ -832,7 +832,7 @@ class _RemoteHttpMCPConnection(BaseMCPConnection):
                         "capabilities": {},
                         "clientInfo": {"name": "AgentHub-Local", "version": settings.app_version},
                     },
-                    timeout_override=min(30.0, self.timeout_seconds),
+                    timeout_override=min(5.0, self.timeout_seconds),
                 )
             except httpx.HTTPError as e:
                 self._last_error = f"连接远程 MCP 异常: {e}"
@@ -1207,7 +1207,7 @@ class _RemoteHttpMCPConnection(BaseMCPConnection):
 class MCPManager:
     """全局 MCP 客户端常驻连接池（支持热插拔重载、远程协议与失败冷却自愈）"""
 
-    FAILURE_COOLDOWN_SECONDS = 20.0
+    FAILURE_COOLDOWN_SECONDS = 120.0
 
     def __init__(self, config_path: str | Path | None = None) -> None:
         self.base_dir = get_writable_app_root()

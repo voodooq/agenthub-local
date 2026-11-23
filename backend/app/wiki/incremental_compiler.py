@@ -23,7 +23,7 @@ from ..repository.db import db_manager
 from ..search.embedding_provider import embedding_router
 from .storage_manager import WikiStorageManager
 
-SourceType = Literal["kb_doc", "meeting_note", "chat_decision", "sql_snapshot", "camera_ocr"]
+SourceType = Literal["kb_doc", "meeting_note", "chat_decision", "sql_snapshot", "data_snapshot", "camera_ocr"]
 
 _COMPILE_SYSTEM_PROMPT = (
     "你是企业知识百科（LLM Wiki）整理专家。"
@@ -40,6 +40,7 @@ _SOURCE_LABEL_MAP: dict[str, str] = {
     "meeting_note": "会议纪要",
     "chat_decision": "对话沉淀",
     "sql_snapshot": "数据快照",
+    "data_snapshot": "数据快照",
     "camera_ocr": "拍照识别",
 }
 
@@ -266,7 +267,7 @@ class WikiIncrementalCompiler:
         if not authority_level:
             if source_type == "kb_doc":
                 authority_level = "official"
-            elif source_type == "sql_snapshot":
+            elif source_type in ("sql_snapshot", "data_snapshot"):
                 authority_level = "data_snapshot"
             else:
                 authority_level = "decision"

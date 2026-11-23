@@ -1021,6 +1021,83 @@ class DatabaseManager:
                 PRIMARY KEY (source_page_id, target_slug)
             );
             CREATE INDEX IF NOT EXISTS idx_wiki_links_target ON wiki_links(target_slug);
+
+            -- 10. 通用数据结构图谱与数字专家绑定表 (v1.8.0+)
+            CREATE TABLE IF NOT EXISTS schema_profiles (
+                id                TEXT PRIMARY KEY,
+                name              TEXT NOT NULL,
+                description       TEXT DEFAULT '',
+                domain_prefix     TEXT DEFAULT '',
+                ontology_base_url TEXT DEFAULT '',
+                ontology_api_key  TEXT DEFAULT '',
+                is_active         INTEGER DEFAULT 1,
+                created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+
+            CREATE TABLE IF NOT EXISTS schema_entities (
+                id           TEXT PRIMARY KEY,
+                profile_id   TEXT NOT NULL,
+                table_name   TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                category     TEXT DEFAULT 'CORE_MAIN',
+                description  TEXT DEFAULT '',
+                primary_key  TEXT DEFAULT 'id',
+                pos_x        REAL DEFAULT 0,
+                pos_y        REAL DEFAULT 0,
+                created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(profile_id, table_name),
+                FOREIGN KEY (profile_id) REFERENCES schema_profiles(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_schema_entities_profile ON schema_entities(profile_id);
+
+            CREATE TABLE IF NOT EXISTS schema_fields (
+                id             TEXT PRIMARY KEY,
+                entity_id      TEXT NOT NULL,
+                field_name     TEXT NOT NULL,
+                field_type     TEXT NOT NULL,
+                display_name   TEXT DEFAULT '',
+                description    TEXT DEFAULT '',
+                is_nullable    INTEGER DEFAULT 1,
+                is_primary_key INTEGER DEFAULT 0,
+                enum_values    TEXT DEFAULT '',
+                sort_order     INTEGER DEFAULT 0,
+                FOREIGN KEY (entity_id) REFERENCES schema_entities(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_schema_fields_entity ON schema_fields(entity_id, sort_order);
+
+            CREATE TABLE IF NOT EXISTS schema_relations (
+                id               TEXT PRIMARY KEY,
+                profile_id       TEXT NOT NULL,
+                source_entity_id TEXT NOT NULL,
+                source_field     TEXT NOT NULL,
+                target_entity_id TEXT NOT NULL,
+                target_field     TEXT NOT NULL,
+                relation_type    TEXT NOT NULL DEFAULT 'LOGICAL_JOIN',
+                cardinality      TEXT NOT NULL DEFAULT 'N:1',
+                join_condition   TEXT DEFAULT '',
+                filter_rule      TEXT DEFAULT '',
+                is_warning       INTEGER DEFAULT 0,
+                warning_message  TEXT DEFAULT '',
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (profile_id) REFERENCES schema_profiles(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_schema_relations_profile ON schema_relations(profile_id);
+
+            CREATE TABLE IF NOT EXISTS agent_schema_bindings (
+                id               TEXT PRIMARY KEY,
+                agent_id         TEXT NOT NULL,
+                profile_id       TEXT NOT NULL,
+                is_primary       INTEGER DEFAULT 0,
+                mounted_entities TEXT DEFAULT '*',
+                created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(agent_id, profile_id),
+                FOREIGN KEY (profile_id) REFERENCES schema_profiles(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_agent_schema_bindings_agent ON agent_schema_bindings(agent_id);
             """)
 
             try:

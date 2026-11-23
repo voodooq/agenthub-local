@@ -34,6 +34,7 @@ import {
   FileCode2,
   X,
   AlertCircle,
+  Loader2,
 } from 'lucide-react';
 import { Conversation, StatusPillData, Workspace } from '@/types';
 import { useAppVersion } from '@/config/version';
@@ -46,6 +47,8 @@ export type MainNavHub = 'chat' | 'agents' | 'library' | 'scheduled' | 'skills' 
 interface SidebarProps {
   conversations: Conversation[];
   activeConvId: string | null;
+  runningConvIds?: string[];
+  unreadConvIds?: string[];
   workspaces: Workspace[];
   activeWorkspaceId: string;
   activeNavHub?: MainNavHub;
@@ -108,6 +111,8 @@ function isBranchedConversation(conv: Conversation): boolean {
 export function Sidebar({
   conversations,
   activeConvId,
+  runningConvIds = [],
+  unreadConvIds = [],
   workspaces,
   activeWorkspaceId,
   activeNavHub = 'chat',
@@ -702,16 +707,22 @@ export function Sidebar({
                 );
                 const isWsActive = activeWorkspaceId === ws.id;
                 const isExpanded = Boolean(expandedWorkspaceIds[ws.id]);
-                const isSandbox = ws.type !== 'physical' || (ws.name || '').startsWith('[沙盒]');
-                const displayName = (ws.name || '').replace(/^\[沙盒\]\s*/, '');
-                const isAgentSandbox = Boolean(
-                  ws.agent_id || ws.bound_agent_id || displayName.includes('专家')
-                );
-                const sandboxTitle = isAgentSandbox
-                  ? ws.agent_strict_mode
-                    ? `${displayName} · 专家沙盒 · 严谨模式 (T=0.1)`
-                    : `${displayName} · 专家沙盒`
-                  : `项目: ${ws.name} (${wsConvs.length} 个会话)`;
+                const isImSandbox =
+                  (ws.id || '').startsWith('ws_im_') ||
+                  (ws.name || '').startsWith('[IM]');
+                const isSandbox =
+                  isImSandbox || ws.type !== 'physical' || (ws.name || '').startsWith('[沙盒]');
+                const displayName = (ws.name || '').replace(/^(?:\[沙盒\]|\[IM\])\s*/, '');
+                const isAgentSandbox =
+                  !isImSandbox &&
+                  Boolean(ws.agent_id || ws.bound_agent_id || displayName.includes('专家'));
+                const sandboxTitle = isImSandbox
+                  ? `${displayName} · IM 对接专属沙盒 (${wsConvs.length} 个会话)`
+                  : isAgentSandbox
+                    ? ws.agent_strict_mode
+                      ? `${displayName} · 专家沙盒 · 严谨模式 (T=0.1)`
+                      : `${displayName} · 专家沙盒`
+                    : `项目: ${ws.name} (${wsConvs.length} 个会话)`;
                 const hasPinnedConv = wsConvs.some((c) => c.is_pinned);
 
                 if (isCollapsed) {
@@ -731,6 +742,8 @@ export function Sidebar({
                     >
                       {ws.type === 'physical' ? (
                         <FolderGit2 className="w-4 h-4" />
+                      ) : isImSandbox ? (
+                        <MessageSquare className="w-4 h-4 text-sky-400" />
                       ) : isAgentSandbox ? (
                         <Bot className="w-4 h-4 text-emerald-400" />
                       ) : (
@@ -761,13 +774,15 @@ export function Sidebar({
                             <ChevronRight className="w-3.5 h-3.5" />
                           )}
                         </span>
-                        <div className="relative shrink-0" title={isAgentSandbox ? sandboxTitle : undefined}>
+                        <div className="relative shrink-0" title={isAgentSandbox || isImSandbox ? sandboxTitle : undefined}>
                           {ws.type === 'physical' ? (
                             <Folder
                               className={`w-3.5 h-3.5 ${
                                 isWsActive ? 'text-[var(--sidebar-item-active-fg)]' : 'text-[var(--sidebar-section-fg)]'
                               }`}
                             />
+                          ) : isImSandbox ? (
+                            <MessageSquare className="w-3.5 h-3.5 text-sky-400" />
                           ) : isAgentSandbox ? (
                             <Bot className="w-3.5 h-3.5 text-emerald-400" />
                           ) : (
@@ -786,6 +801,11 @@ export function Sidebar({
                           )}
                         </div>
                         <span className="truncate">{displayName}</span>
+                        {isImSandbox && (
+                          <span className="px-1 py-0.2 rounded text-[9px] bg-sky-500/15 text-sky-400 border border-sky-500/30 shrink-0 font-mono">
+                            IM
+                          </span>
+                        )}
                         {ws.type === 'physical' && (
                           <span className="px-1 py-0.2 rounded text-[9px] bg-[var(--sidebar-tag-bg)] text-[var(--sidebar-tag-fg)] shrink-0 font-normal">
                             本地
@@ -842,6 +862,8 @@ export function Sidebar({
                               conv={conv}
                               workspaces={workspaces}
                               isActive={activeConvId === conv.id}
+                              isRunning={runningConvIds.includes(conv.id)}
+                              hasUnread={unreadConvIds.includes(conv.id)}
                               isCollapsed={false}
                               isEditing={editingId === conv.id}
                               editingTitle={editingTitle}
@@ -956,6 +978,8 @@ export function Sidebar({
                   conv={conv}
                   workspaces={workspaces}
                   isActive={activeConvId === conv.id}
+                  isRunning={runningConvIds.includes(conv.id)}
+                  hasUnread={unreadConvIds.includes(conv.id)}
                   isCollapsed={isCollapsed}
                   isEditing={editingId === conv.id}
                   editingTitle={editingTitle}
@@ -988,6 +1012,8 @@ export function Sidebar({
                 conv={conv}
                 workspaces={workspaces}
                 isActive={activeConvId === conv.id}
+                isRunning={runningConvIds.includes(conv.id)}
+                hasUnread={unreadConvIds.includes(conv.id)}
                 isCollapsed={isCollapsed}
                 isEditing={editingId === conv.id}
                 editingTitle={editingTitle}
@@ -1330,6 +1356,8 @@ function ConversationRow({
   conv,
   workspaces,
   isActive,
+  isRunning = false,
+  hasUnread = false,
   isCollapsed,
   isEditing,
   editingTitle,
@@ -1349,6 +1377,8 @@ function ConversationRow({
   conv: Conversation;
   workspaces: Workspace[];
   isActive: boolean;
+  isRunning?: boolean;
+  hasUnread?: boolean;
   isCollapsed: boolean;
   isEditing: boolean;
   editingTitle: string;
@@ -1397,6 +1427,18 @@ function ConversationRow({
       }`}
     >
       <div className="flex items-center space-x-1.5 truncate flex-1 pr-1 min-w-0">
+        {isRunning ? (
+          <Loader2
+            className="w-3.5 h-3.5 text-emerald-500 animate-spin shrink-0"
+            aria-label="正在执行中"
+          />
+        ) : hasUnread ? (
+          <span
+            className="w-2 h-2 rounded-full bg-emerald-500 shrink-0 shadow-[0_0_6px_rgba(16,185,129,0.7)]"
+            title="有新结果待查看"
+            aria-label="有新结果待查看"
+          />
+        ) : null}
         {Boolean(conv.is_pinned) && <Pin className="w-3 h-3 text-amber-500 shrink-0 rotate-45" />}
         {isBranch && (
           <GitBranch

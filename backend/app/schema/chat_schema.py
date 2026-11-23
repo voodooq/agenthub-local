@@ -48,6 +48,10 @@ class ChatStreamRequest(BaseModel):
     grounding_config: dict[str, Any] | None = Field(default=None, description="绑定的专家防幻觉与严谨度配置")
     swarm_id: str | None = Field(default=None, description="可选关联的已有 Swarm ID")
     is_retry: bool = Field(default=False, description="是否为模型断流/不可用自动重试请求，为True时复用当前轮用户消息避免重复入库")
+    force_live: bool = Field(default=False, description="是否跳过百科统计快照强制走 Auto Ontology 实时查数")
+    caller_channel: str = Field(default="local_agent", description="接入端通道: local_agent | im_bot | web_ui | external_api")
+    simulated_role: str | None = Field(default=None, description="仅 local_agent 调试用的模拟身份角色")
+    simulated_scope: dict[str, Any] | str | None = Field(default=None, description="仅 local_agent 调试用的模拟作用域")
 
 
 class ToolApprovalRequest(BaseModel):

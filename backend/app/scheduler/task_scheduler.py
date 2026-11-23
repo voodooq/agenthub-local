@@ -409,11 +409,22 @@ class TaskScheduler:
                 )
                 await conn.commit()
 
-            exec_result = await self._execute_headless_agent(workspace_id, prompt, agent_id=bound_agent_id)
-            final_status = "success" if exec_result.get("success") else "failed"
-            output_text = exec_result.get("output_text") or ""
-            error_message = exec_result.get("error_message")
-            conversation_id = exec_result.get("conversation_id")
+            if str(prompt or "").startswith("__SYS_KB_SYNC__:"):
+                kb_target = str(prompt).split(":", 1)[1].strip()
+                mount_id = kb_target[3:] if kb_target.startswith("kb_") else kb_target
+                from ..api.v1.knowledge import run_incremental_sync
+
+                sync_res = await run_incremental_sync(mount_id=mount_id, source_tag="auto")
+                final_status = "success" if sync_res.get("success", True) else "failed"
+                output_text = str(sync_res.get("message") or "知识库增量同步巡检完成")
+                error_message = None if final_status == "success" else output_text
+                conversation_id = None
+            else:
+                exec_result = await self._execute_headless_agent(workspace_id, prompt, agent_id=bound_agent_id)
+                final_status = "success" if exec_result.get("success") else "failed"
+                output_text = exec_result.get("output_text") or ""
+                error_message = exec_result.get("error_message")
+                conversation_id = exec_result.get("conversation_id")
 
         except Exception as exc:
             final_status = "failed"

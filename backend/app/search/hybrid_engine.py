@@ -345,14 +345,14 @@ class HybridSearchEngine:
                         valid_vectors: list[Any] = []
                         q_list: list[float] = [float(x) for x in q_vec]
 
+                        from ..kb.embedding_codec import decode_embedding
                         for r in rows:
                             cid = r["chunk_id"]
                             chunk_cache[cid] = dict(r)
                             blob = r["embedding_blob"]
                             if blob:
-                                arr = array.array("f")
-                                arr.frombytes(blob)
-                                if len(arr) == q_len:
+                                arr = decode_embedding(blob, q_len)
+                                if arr is not None and len(arr) == q_len:
                                     chunk_ids.append(cid)
                                     valid_vectors.append(arr)
 

@@ -6,7 +6,7 @@ from .v1 import (
     health, accounts, conversations, chat, search, quota, audit, oauth,
     models, settings, sync, system, memories, workspaces, loop, skills,
     artifacts, scheduled, experiences, agents, swarms, processes, knowledge,
-    kb_lifecycle, external_expert_gateway, wiki, audio, mobile
+    kb_lifecycle, external_expert_gateway, wiki, audio, mobile, biz_sql, schema_profiles, dialogue_wiki
 )
 
 api_router = APIRouter(prefix="/api/v1")
@@ -15,8 +15,11 @@ api_router.include_router(knowledge.router)
 api_router.include_router(kb_lifecycle.router)
 api_router.include_router(external_expert_gateway.router)
 api_router.include_router(wiki.router)
+api_router.include_router(schema_profiles.router)
+api_router.include_router(dialogue_wiki.router)
 api_router.include_router(audio.router)
 api_router.include_router(mobile.router)
+api_router.include_router(biz_sql.router)
 api_router.include_router(processes.router)
 api_router.include_router(agents.router)
 api_router.include_router(swarms.router)

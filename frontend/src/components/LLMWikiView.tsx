@@ -31,6 +31,7 @@ import {
   Upload,
   Download,
   History,
+  Clock,
   FlaskConical,
   MessageSquare,
   ChevronDown,
@@ -47,6 +48,8 @@ import { Workspace } from '@/types';
 import { apiFetch } from '@/utils/apiClient';
 import { useDevDebugMode } from '@/hooks/useDevDebugMode';
 import { WikiWorkspaceView } from './wiki/WikiWorkspaceView';
+import { SchemaGraphView } from './schema/SchemaGraphView';
+import { DialogueWikiView } from './wiki/DialogueWikiView';
 import { KBImportConflictModal } from './KBImportConflictModal';
 import { KBVersionDrawer } from './KBVersionDrawer';
 
@@ -58,7 +61,7 @@ interface LLMWikiViewProps {
 export interface CloudMountItem {
   mount_id: string;
   mount_name: string;
-  provider_type: 'wecom' | 'webdav' | 'oss';
+  provider_type: 'wecom' | 'webdav' | 'oss' | 'sandbox';
   authority_tier: number;
   config: Record<string, any>;
 }
@@ -78,6 +81,9 @@ export interface KnowledgeBaseItem {
   domain_type?: string;
   rule_profile_json?: string;
   is_published?: boolean;
+  auto_sync_enabled?: boolean;
+  auto_sync_cron?: string;
+  auto_sync_task_id?: string | null;
 }
 
 const DOMAIN_OPTIONS = [
@@ -89,8 +95,8 @@ const DOMAIN_OPTIONS = [
 ];
 
 export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
-  // 四大主功能区：'wiki' = 百科工作台 (默认), 'train' = 资产清单, 'mount' = 数据源挂载, 'test' = 召回测试
-  const [activeSection, setActiveSection] = useState<'wiki' | 'test' | 'train' | 'mount'>('wiki');
+  // 四大主功能区：'wiki' = 百科工作台 (默认), 'schema' = 数据工作台, 'dialogue' = 用户对话Wiki, 'train'/'mount'/'test' = 资产工作台
+  const [activeSection, setActiveSection] = useState<'wiki' | 'schema' | 'dialogue' | 'test' | 'train' | 'mount'>('wiki');
   const { isDevDebug } = useDevDebugMode();
   const [actionMenuKbId, setActionMenuKbId] = useState<string | null>(null);
 
@@ -107,7 +113,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [isPublishingVersion, setIsPublishingVersion] = useState(false);
 
   // ── 挂载部分状态 ──
-  const [providerTab, setProviderTab] = useState<'wecom' | 'webdav' | 'oss'>('wecom');
+  const [providerTab, setProviderTab] = useState<'wecom' | 'webdav' | 'oss' | 'sandbox'>('wecom');
   const [mountName, setMountName] = useState('');
   const [authorityTier, setAuthorityTier] = useState<number>(1);
   const [mountsList, setMountsList] = useState<CloudMountItem[]>([]);
@@ -120,9 +126,13 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [wecomForm, setWecomForm] = useState({ corpid: '', corpsecret: '', space_id: '' });
   const [webdavForm, setWebdavForm] = useState({ base_url: '', username: '', password: '', root_path: '/' });
   const [ossForm, setOssForm] = useState({ endpoint: '', bucket: '', access_key: '', secret_key: '', prefix: '' });
+  const [sandboxForm, setSandboxForm] = useState({ workspace_id: '', root_path: '', sub_path: '' });
+  const [sandboxWorkspaces, setSandboxWorkspaces] = useState<Array<{ id: string; name: string; root_path?: string }>>([]);
 
   // ── 训练部分状态 ──
   const [training, setTraining] = useState(false);
+  const [trainProgress, setTrainProgress] = useState<number>(0);
+  const [trainStageText, setTrainStageText] = useState<string>('');
   const [trainStatusMsg, setTrainStatusMsg] = useState<string | null>(null);
   const [kbsList, setKbsList] = useState<KnowledgeBaseItem[]>([]);
   const [loadingKbs, setLoadingKbs] = useState(false);
@@ -135,6 +145,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [playgroundSimulatedAnswer, setPlaygroundSimulatedAnswer] = useState<string | null>(null);
   const [playgroundGroundingStatus, setPlaygroundGroundingStatus] = useState<any | null>(null);
   const [togglingPublishKbId, setTogglingPublishKbId] = useState<string | null>(null);
+  const [togglingAutoSyncKbId, setTogglingAutoSyncKbId] = useState<string | null>(null);
 
   // ── 查看空间文件状态 ──
   const [viewingMount, setViewingMount] = useState<CloudMountItem | null>(null);
@@ -426,7 +437,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
           setTimeout(() => {
             try {
               a.remove();
-            } catch {}
+            } catch { }
           }, 30000);
         } catch (domErr) {
           console.warn('[LLMWiki] DOM 下载触发异常:', domErr);
@@ -496,7 +507,80 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   useEffect(() => {
     loadMounts();
     loadKBs();
+    apiFetch('/api/v1/workspaces')
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data) => {
+        const list = Array.isArray(data) ? data : data?.workspaces || data?.data || [];
+        setSandboxWorkspaces(list);
+      })
+      .catch(() => { });
   }, [workspace?.id]);
+
+  // 切走页面再切回「LLMWiki」时，自动向后端查询是否有正在运行中的训练任务，无缝恢复进度条与轮询
+  useEffect(() => {
+    let active = true;
+    let resumeTimer: number | null = null;
+
+    const applyProgress = (pData: any) => {
+      if (!active || !pData) return;
+      if (typeof pData.percent === 'number') {
+        setTrainProgress(pData.percent);
+      }
+      const fileSuffix = pData.current_file ? ` · ${pData.current_file}` : '';
+      if (pData.stage) {
+        setTrainStageText(`${pData.stage}${fileSuffix}`);
+      }
+    };
+
+    const checkAndResume = async () => {
+      try {
+        const res = await apiFetch('/api/v1/knowledge/sync/progress');
+        if (!active || !res.ok) return;
+        const json = await res.json();
+        const pData = json?.data;
+        if (!pData || !pData.running) return;
+
+        setTraining(true);
+        applyProgress(pData);
+        const activeTaskId = pData.task_id ? `?task_id=${encodeURIComponent(String(pData.task_id))}` : '';
+
+        resumeTimer = window.setInterval(async () => {
+          try {
+            const pRes = await apiFetch(`/api/v1/knowledge/sync/progress${activeTaskId}`);
+            if (!active || !pRes.ok) return;
+            const pJson = await pRes.json();
+            const cur = pJson?.data;
+            if (!cur) return;
+            applyProgress(cur);
+            if (!cur.running) {
+              if (resumeTimer !== null) {
+                window.clearInterval(resumeTimer);
+                resumeTimer = null;
+              }
+              setTraining(false);
+              setTrainProgress(100.0);
+              setTrainStageText('增量训练与切片已完成');
+              setTrainStatusMsg(`训练同步完成，新写入/更新 ${cur.new_chunks ?? 0} 个切片`);
+              void loadKBs();
+              void loadMounts();
+            }
+          } catch {
+            // 忽略轮询瞬时网络异常
+          }
+        }, 500);
+      } catch {
+        // 忽略初始化探测异常
+      }
+    };
+
+    void checkAndResume();
+    return () => {
+      active = false;
+      if (resumeTimer !== null) {
+        window.clearInterval(resumeTimer);
+      }
+    };
+  }, []);
 
   const loadMounts = async () => {
     setLoadingMounts(true);
@@ -697,6 +781,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const getCurrentConfig = () => {
     if (providerTab === 'wecom') return wecomForm;
     if (providerTab === 'webdav') return webdavForm;
+    if (providerTab === 'sandbox') return sandboxForm;
     return ossForm;
   };
 
@@ -769,11 +854,32 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     }
   };
 
-  // 触发增量训练/构建
+  // 触发增量训练/构建（带实时百分比进度轮询）
   const handleTriggerTrain = async (targetMountId?: string) => {
     const finalMountId = targetMountId || (selectedMountForTrain === 'all' ? undefined : selectedMountForTrain);
+    const taskId = `sync_${Date.now()}`;
     setTraining(true);
+    setTrainProgress(2.0);
+    setTrainStageText('正在扫描挂载源文档列表...');
     setTrainStatusMsg(null);
+
+    const pollTimer = window.setInterval(async () => {
+      try {
+        const progRes = await apiFetch(`/api/v1/knowledge/sync/progress?task_id=${encodeURIComponent(taskId)}`);
+        if (progRes.ok) {
+          const progJson = await progRes.json();
+          const pData = progJson?.data;
+          if (pData && typeof pData.percent === 'number') {
+            setTrainProgress(pData.percent);
+            const fileSuffix = pData.current_file ? ` · ${pData.current_file}` : '';
+            setTrainStageText(`${pData.stage || '正在增量训练...'}${fileSuffix}`);
+          }
+        }
+      } catch {
+        // 忽略轮询瞬时异常
+      }
+    }, 450);
+
     try {
       const resp = await apiFetch('/api/v1/knowledge/sync', {
         method: 'POST',
@@ -781,15 +887,19 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
         body: JSON.stringify({
           workspace_root: workspace?.root_path || '.',
           mount_id: finalMountId || null,
+          task_id: taskId,
         }),
       });
       const data = await resp.json();
+      setTrainProgress(100.0);
+      setTrainStageText('增量训练与切片已完成');
       setTrainStatusMsg(data.message || '训练同步完成');
       await loadKBs();
       await loadMounts();
     } catch (e: any) {
       setTrainStatusMsg('训练失败: ' + (e.message || '网络异常'));
     } finally {
+      window.clearInterval(pollTimer);
       setTraining(false);
     }
   };
@@ -918,6 +1028,47 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
       alert(`操作异常: ${e.message}`);
     } finally {
       setTogglingPublishKbId(null);
+    }
+  };
+
+  // 开启/关闭单个知识库的系统级定时增量同步（联动「已安排调度」）
+  const handleToggleAutoSync = async (
+    kb: KnowledgeBaseItem,
+    enabled: boolean,
+    cronExpr?: string
+  ) => {
+    setTogglingAutoSyncKbId(kb.kb_id);
+    try {
+      const resp = await apiFetch(`/api/v1/kb/bases/${kb.kb_id}/auto-sync-toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled,
+          cron_expr: cronExpr || kb.auto_sync_cron || '*/15 * * * *',
+          workspace_id: 'default',
+        }),
+      });
+      const data = await resp.json();
+      if (!resp.ok) {
+        alert(data.detail || '切换定时同步任务失败');
+        return;
+      }
+      setKbsList((prev) =>
+        prev.map((item) =>
+          item.kb_id === kb.kb_id
+            ? {
+              ...item,
+              auto_sync_enabled: Boolean(data.auto_sync_enabled),
+              auto_sync_cron: data.auto_sync_cron || item.auto_sync_cron || '*/15 * * * *',
+              auto_sync_task_id: data.auto_sync_task_id || null,
+            }
+            : item
+        )
+      );
+    } catch (e: any) {
+      alert('切换定时同步任务异常: ' + (e.message || '网络错误'));
+    } finally {
+      setTogglingAutoSyncKbId(null);
     }
   };
 
@@ -1070,14 +1221,14 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
 
   return (
     <div className="flex-1 flex flex-col h-full bg-background overflow-hidden">
-      {/* 第一层：图标，功能名称，功能描述，全局的功能按钮 放在页面顶部右侧 */}
-      <div className="p-6 border-b border-border flex items-center justify-between shrink-0 bg-background">
+      {/* 第一层：图标，功能名称，功能描述 */}
+      <div className="px-6 py-4 border-b border-border flex items-center justify-between shrink-0 bg-background">
         <div className="flex items-center space-x-2.5">
-          <div className="p-2.5 rounded-xl bg-sky-500/10 text-sky-500 border border-sky-500/20">
+          <div className="p-2 rounded-xl bg-sky-500/10 text-sky-500 border border-sky-500/20">
             <BookOpen className="w-5 h-5" />
           </div>
           <div>
-            <h1 className="text-lg font-bold text-foreground flex items-center space-x-2">
+            <h1 className="text-base font-bold text-foreground flex items-center space-x-2">
               <span>LLMwiki (知识中枢)</span>
               <span className="px-2 py-0.5 rounded-full text-[11px] bg-sky-500/10 text-sky-500 font-mono">
                 {mountsList.length} 挂载 · {kbsList.length} 知识库
@@ -1088,56 +1239,37 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
             </p>
           </div>
         </div>
-
-        {/* 全局的功能按钮 放在页面顶部右侧 */}
-        <div className="flex items-center space-x-2.5">
-          <button
-            onClick={() => {
-              loadMounts();
-              loadKBs();
-            }}
-            className="flex items-center space-x-1.5 px-3 py-2 rounded-xl border border-border bg-surface-100 hover:bg-surface-200 text-foreground text-xs font-medium transition-all"
-            title="刷新数据"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${loadingMounts || loadingKbs ? 'animate-spin' : ''}`} />
-            <span>刷新</span>
-          </button>
-          <button
-            onClick={() => handleTriggerTrain()}
-            disabled={training || mountsList.length === 0}
-            className="flex items-center space-x-1.5 px-4 py-2 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white text-xs font-semibold shadow-md transition-all active:scale-95 disabled:opacity-50"
-          >
-            <Sparkles className="w-4 h-4" />
-            <span>{training ? '训练中...' : '启动增量训练'}</span>
-          </button>
-        </div>
       </div>
 
-      {/* 第二层：平级线性工具风 Tab 导航栏 */}
+      {/* 第二层：四大一级工作台目录 */}
       <div className="px-6 border-b border-border bg-surface-100/40 flex items-center justify-between shrink-0">
         <div className="flex items-center space-x-6 text-xs sm:text-sm">
           <button
             type="button"
             onClick={() => setActiveSection('wiki')}
-            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${
-              activeSection === 'wiki'
+            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${activeSection === 'wiki'
                 ? 'border-emerald-500 text-foreground font-semibold'
                 : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
+              }`}
           >
-            <span>百科工作台 (Wiki)</span>
+            <BookOpen className="w-3.5 h-3.5 text-sky-500" />
+            <span>百科工作台</span>
           </button>
 
           <button
             type="button"
-            onClick={() => setActiveSection('train')}
-            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${
-              activeSection === 'train'
+            onClick={() => {
+              if (activeSection === 'wiki' || activeSection === 'schema' || activeSection === 'dialogue') {
+                setActiveSection('train');
+              }
+            }}
+            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${activeSection === 'train' || activeSection === 'mount' || activeSection === 'test'
                 ? 'border-emerald-500 text-foreground font-semibold'
                 : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
+              }`}
           >
-            <span>资产清单</span>
+            <Layers className="w-3.5 h-3.5 text-amber-500" />
+            <span>资产工作台</span>
             <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-200 text-muted-foreground font-mono">
               {kbsList.length}
             </span>
@@ -1145,48 +1277,27 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
 
           <button
             type="button"
-            onClick={() => setActiveSection('mount')}
-            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${
-              activeSection === 'mount'
+            onClick={() => setActiveSection('schema')}
+            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${activeSection === 'schema'
                 ? 'border-emerald-500 text-foreground font-semibold'
                 : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
+              }`}
           >
-            <span>数据源挂载</span>
-            <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-surface-200 text-muted-foreground font-mono">
-              {mountsList.length}
-            </span>
+            <Network className="w-3.5 h-3.5 text-emerald-500" />
+            <span>数据工作台</span>
           </button>
 
           <button
             type="button"
-            onClick={() => setActiveSection('test')}
-            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${
-              activeSection === 'test'
+            onClick={() => setActiveSection('dialogue')}
+            className={`py-3 border-b-2 font-medium transition-all flex items-center gap-2 ${activeSection === 'dialogue'
                 ? 'border-emerald-500 text-foreground font-semibold'
                 : 'border-transparent text-muted-foreground hover:text-foreground'
-            }`}
+              }`}
           >
-            <span>召回测试</span>
+            <MessageSquare className="w-3.5 h-3.5 text-violet-500" />
+            <span>用户对话Wiki</span>
           </button>
-        </div>
-
-        <div className="flex items-center gap-2 py-2">
-          <label
-            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-foreground text-xs font-medium cursor-pointer transition-all ${
-              isImporting ? 'opacity-50 pointer-events-none' : ''
-            }`}
-            title="导入免重新训练的 .ahkb 离线归档知识包"
-          >
-            <Upload className="w-3.5 h-3.5 text-muted-foreground" />
-            <span>{isImporting ? '导入中...' : '导入 .ahkb'}</span>
-            <input
-              type="file"
-              accept=".ahkb,.zip"
-              onChange={handleImportFileSelect}
-              className="hidden"
-            />
-          </label>
         </div>
       </div>
 
@@ -1195,1313 +1306,1543 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
         <div className="flex-1 min-h-0 overflow-hidden">
           <WikiWorkspaceView />
         </div>
+      ) : activeSection === 'schema' ? (
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <SchemaGraphView />
+        </div>
+      ) : activeSection === 'dialogue' ? (
+        <div className="flex-1 min-h-0 overflow-hidden">
+          <DialogueWikiView />
+        </div>
       ) : (
-      <div className="flex-1 overflow-y-auto p-6 space-y-6 select-text">
-
-        {/* ========================================================= */}
-        {/* 第一部分：1、知识库测试 (默认)                            */}
-        {/* ========================================================= */}
-        {activeSection === 'test' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
-            {/* 左侧：知识库选择、版本切换与发布控制台 (4 列) */}
-            <div className="lg:col-span-4 space-y-5">
-              <div className="rounded-2xl border border-border bg-surface-card p-5 shadow-sm space-y-4">
-                <div className="flex items-center justify-between border-b border-border pb-3">
-                  <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-                    <FlaskConical className="w-4 h-4 text-sky-500" />
-                    知识库与版本选择
-                  </h3>
-                  <span className="text-[10px] text-muted-foreground font-mono">
-                    {kbsList.length} 个知识库
-                  </span>
-                </div>
-
-                <div>
-                  <label className="text-xs font-medium text-muted-foreground block mb-1">
-                    选择待测试的知识库
-                  </label>
-                  <select
-                    value={selectedKbId}
-                    onChange={(e) => setSelectedKbId(e.target.value)}
-                    className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500"
-                  >
-                    {kbsList.map((kb) => (
-                      <option key={kb.kb_id} value={kb.kb_id}>
-                        {kb.name} {kb.is_published ? `(已发布: ${kb.active_version})` : `(未发布·当前: ${kb.active_version})`}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-
-                {/* 版本选择器 */}
-                <div>
-                  <div className="flex items-center justify-between mb-1">
-                    <label className="text-xs font-medium text-muted-foreground">
-                      选择测试版本
-                    </label>
-                    {loadingVersions && (
-                      <span className="text-[10px] text-muted-foreground animate-pulse">
-                        加载版本中...
-                      </span>
-                    )}
-                  </div>
-                  <select
-                    value={selectedVersion}
-                    onChange={(e) => setSelectedVersion(e.target.value)}
-                    className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500 font-mono"
-                  >
-                    {kbVersionsList.map((v) => {
-                      const curKb = kbsList.find((k) => k.kb_id === selectedKbId);
-                      const isAct = v.version === curKb?.active_version;
-                      const isPublishedRelease = Boolean(curKb?.is_published && isAct);
-                      return (
-                        <option key={v.version} value={v.version}>
-                          {v.version} {isPublishedRelease ? '★ [当前正式发布版]' : isAct ? '· [测试维护版 (未发布)]' : '· [历史测试版]'} (切片: {v.chunk_count})
-                        </option>
-                      );
-                    })}
-                  </select>
-                </div>
-
-                {/* 当前版本的发布状态卡片 */}
-                {(() => {
-                  const curKb = kbsList.find((k) => k.kb_id === selectedKbId);
-                  const isTargetVersionActive = Boolean(
-                    curKb && (selectedVersion === curKb.active_version || (!selectedVersion && curKb.active_version))
-                  );
-                  // 只有当知识库已开启发布，且当前选中的是 active_version，才算作对外生效的正式发布版本！
-                  const isCurrentRelease = Boolean(curKb?.is_published && isTargetVersionActive);
-                  const matchedVerInfo = kbVersionsList.find((v) => v.version === selectedVersion);
-                  const chunkCount = matchedVerInfo?.chunk_count ?? curKb?.chunk_count ?? 0;
-                  const tripleCount = matchedVerInfo?.triple_count ?? curKb?.triple_count ?? 0;
-                  const diskMb = ((matchedVerInfo?.disk_size_bytes ?? curKb?.disk_size_bytes ?? 0) / (1024 * 1024)).toFixed(2);
-
-                  return (
-                    <div className="p-3.5 rounded-xl border border-border bg-surface-100/60 space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="text-xs text-muted-foreground">版本生效状态:</span>
-                        {isCurrentRelease ? (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center gap-1 font-semibold">
-                            <CheckCircle2 className="w-3 h-3 text-emerald-500" />
-                            正式发布版本 (对外生效中)
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/25 flex items-center gap-1 font-semibold">
-                            <AlertCircle className="w-3 h-3 text-amber-500" />
-                            测试维护版本 (未发布 · 外部专家不可调用)
-                          </span>
-                        )}
-                      </div>
-
-                      {/* 若当前版本未发布，提供正式发布按钮 */}
-                      {!isCurrentRelease && curKb && (
-                        <button
-                          type="button"
-                          disabled={togglingPublishKbId === curKb.kb_id || !selectedVersion}
-                          onClick={() => handleTogglePublish(curKb, selectedVersion, true)}
-                          className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm transition disabled:opacity-50"
-                          title="在此测试台充分测试验收无误后，点击将此版本发布对外正式生效，绑定的智能体专家方可检索调用"
-                        >
-                          <ShieldCheck className="w-4 h-4" />
-                          <span>{togglingPublishKbId === curKb.kb_id ? '发布中...' : '测试验收通过，发布此版本为正式版 ★'}</span>
-                        </button>
-                      )}
-
-                      {/* 若当前版本已发布，提供取消发布按钮 */}
-                      {isCurrentRelease && curKb && (
-                        <button
-                          type="button"
-                          disabled={togglingPublishKbId === curKb.kb_id || !selectedVersion}
-                          onClick={() => handleTogglePublish(curKb, selectedVersion, false)}
-                          className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30 text-xs font-medium shadow-sm transition disabled:opacity-50"
-                          title="将当前版本转为未发布测试维护状态，外部专家将暂停调用"
-                        >
-                          <AlertCircle className="w-4 h-4 text-amber-500" />
-                          <span>{togglingPublishKbId === curKb.kb_id ? '处理中...' : '暂停外部专家调用，转为测试维护中'}</span>
-                        </button>
-                      )}
-
-                      <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border/60 text-center">
-                        <div className="p-1 rounded bg-surface-200/50">
-                          <span className="text-[10px] text-muted-foreground block">规程切片</span>
-                          <span className="text-xs font-bold font-mono text-foreground">{chunkCount}</span>
-                        </div>
-                        <div className="p-1 rounded bg-surface-200/50">
-                          <span className="text-[10px] text-muted-foreground block">图谱三元组</span>
-                          <span className="text-xs font-bold font-mono text-foreground">{tripleCount}</span>
-                        </div>
-                        <div className="p-1 rounded bg-surface-200/50">
-                          <span className="text-[10px] text-muted-foreground block">库体积</span>
-                          <span className="text-xs font-bold font-mono text-foreground">{diskMb} MB</span>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })()}
-
-                <div className="text-[11px] text-muted-foreground bg-primary/5 p-3 rounded-xl border border-primary/10 leading-relaxed flex items-start gap-2">
-                  <HelpCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
-                  <div>
-                    <strong>版本准出硬性规范</strong>：未经测试验收的版本严禁发布对外调用。新训练或更新的知识库默认处于【测试维护中（未发布）】状态；请先在右侧验货台中充分发起自然语言提问，验证切片召回质量。验收无误后点击上方【测试验收通过，发布此版本为正式版】，绑定的智能体专家方可采纳使用。
-                  </div>
-                </div>
-              </div>
+        <div className="flex-1 min-h-0 flex flex-col bg-background">
+          {/* 资产工作台二级目录（资产清单 / 知识库源 / 知识库测试）与专属操作按钮 */}
+          <div className="px-4 py-2 border-b border-border bg-surface-card flex flex-wrap items-center justify-between gap-3 shrink-0">
+            <div className="flex items-center gap-1.5 text-xs">
+              <button
+                type="button"
+                onClick={() => setActiveSection('train')}
+                className={`px-3 py-1.5 rounded-md font-medium transition-colors flex items-center gap-1.5 ${activeSection === 'train'
+                    ? 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-surface-200'
+                  }`}
+              >
+                <span>资产清单</span>
+                <span className="text-[10px] font-mono opacity-80">({kbsList.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSection('mount')}
+                className={`px-3 py-1.5 rounded-md font-medium transition-colors flex items-center gap-1.5 ${activeSection === 'mount'
+                    ? 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-surface-200'
+                  }`}
+              >
+                <span>知识库源</span>
+                <span className="text-[10px] font-mono opacity-80">({mountsList.length})</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveSection('test')}
+                className={`px-3 py-1.5 rounded-md font-medium transition-colors ${activeSection === 'test'
+                    ? 'bg-emerald-500/15 text-emerald-500 border border-emerald-500/30'
+                    : 'text-muted-foreground hover:text-foreground hover:bg-surface-200'
+                  }`}
+              >
+                <span>知识库测试</span>
+              </button>
             </div>
-
-            {/* 右侧：实测验货与提问评测台 (8 列) */}
-            <div className="lg:col-span-8 space-y-5">
-              <div className="rounded-2xl border border-border bg-surface-card p-5 shadow-sm space-y-4">
-                <div className="flex items-center justify-between border-b border-border pb-3">
-                  <div>
-                    <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-                      <Search className="w-4 h-4 text-sky-500" />
-                      检索命中率即测验货台 (Playground)
-                    </h3>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      向指定版本的规程切片发起语义向量与 BM25 混合检索，测试置信召回精度
-                    </p>
-                  </div>
-                  {(() => {
-                    const curKb = kbsList.find((k) => k.kb_id === selectedKbId);
-                    const isTargetVersionActive = Boolean(
-                      curKb && (selectedVersion === curKb.active_version || (!selectedVersion && curKb.active_version))
-                    );
-                    const isCurrentRelease = Boolean(curKb?.is_published && isTargetVersionActive);
-                    return isCurrentRelease ? (
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center gap-1 font-semibold">
-                        <CheckCircle2 className="w-3 h-3 text-emerald-500" />
-                        已发布正式版: {selectedVersion || '默认'}
-                      </span>
-                    ) : (
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/25 flex items-center gap-1 font-semibold">
-                        <AlertCircle className="w-3 h-3 text-amber-500" />
-                        测试维护版 (未发布): {selectedVersion || '默认'}
-                      </span>
-                    );
-                  })()}
-                </div>
-
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    placeholder="输入测试问题，如: 比赛报名费或押金退还标准、2024年开票记录..."
-                    value={playgroundQuery}
-                    onChange={(e) => setPlaygroundQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleTestPlayground()}
-                    className="flex-1 rounded-xl border border-border bg-surface-100 px-3.5 py-2.5 text-xs outline-none focus:border-sky-500 focus:bg-surface-card transition-all"
-                  />
-                  <button
-                    type="button"
-                    onClick={handleTestPlayground}
-                    disabled={playgroundTesting}
-                    className="px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shrink-0 disabled:opacity-50 transition-all shadow-sm flex items-center gap-1.5"
-                  >
-                    <Search className={`w-3.5 h-3.5 ${playgroundTesting ? 'animate-spin' : ''}`} />
-                    <span>{playgroundTesting ? '检索中...' : '测试命中'}</span>
-                  </button>
-                </div>
-
-                {/* 自然语言模拟检测回答与 Grounding 评估区 */}
-                {playgroundTesting && (
-                  <div className="p-4 rounded-xl border border-sky-500/30 bg-sky-500/5 text-xs text-sky-600 dark:text-sky-400 flex items-center gap-2.5 animate-pulse">
-                    <Sparkles className="w-4 h-4 animate-spin text-sky-500" />
-                    <span>正在检索当前版本切片，并调用大模型模拟专家生成自然语言回答...</span>
-                  </div>
-                )}
-
-                {playgroundSimulatedAnswer && !playgroundTesting && (
-                  <div className="rounded-xl border border-primary/25 bg-surface-100/70 p-4 space-y-2.5 shadow-sm">
-                    <div className="flex items-center justify-between border-b border-border/60 pb-2">
-                      <div className="flex items-center gap-1.5">
-                        <MessageSquare className="w-4 h-4 text-primary" />
-                        <span className="text-xs font-semibold text-foreground">
-                          智能体专家模拟答复 (自然语言检测)
-                        </span>
-                      </div>
-                      <div className="flex items-center gap-2">
-                        {playgroundGroundingStatus && (
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-medium border ${
-                              playgroundGroundingStatus.is_grounded
-                                ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
-                                : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
-                            }`}
-                          >
-                            {playgroundGroundingStatus.is_grounded
-                              ? `事实依据充分 (召回 ${playgroundGroundingStatus.used_chunks_count ?? playgroundHits?.length ?? 0} 条切片)`
-                              : '缺少明确依据 (知识库未充分覆盖)'}
-                          </span>
-                        )}
-                        <button
-                          type="button"
-                          onClick={() => handleCopyChunkText('simulated_answer', playgroundSimulatedAnswer)}
-                          className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-surface-200 transition"
-                          title="复制模拟回答"
-                        >
-                          {copiedChunkId === 'simulated_answer' ? (
-                            <Check className="w-3.5 h-3.5 text-emerald-500" />
-                          ) : (
-                            <Copy className="w-3.5 h-3.5" />
-                          )}
-                        </button>
-                      </div>
-                    </div>
-                    <div className="text-xs text-foreground/90 leading-relaxed whitespace-pre-wrap bg-surface-card p-3 rounded-lg border border-border/50 select-text font-sans">
-                      {playgroundSimulatedAnswer}
-                    </div>
-                    <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-1">
-                      <span>
-                        🎯 提示：检测结果满意后，请发布此版本；只有发布的知识库版本才能被外部专家正常调用。
-                      </span>
-                    </div>
-                  </div>
-                )}
-
-                {playgroundHits && (
-                  <div className="space-y-3 pt-3 border-t border-border">
-                    <div className="flex items-center justify-between text-xs">
-                      <span className="font-semibold text-foreground flex items-center gap-1.5">
-                        <FileText className="w-3.5 h-3.5 text-sky-500" />
-                        召回证据切片 ({playgroundHits.length})
-                      </span>
-                      <span className="text-[10px] text-muted-foreground">
-                        {isDevDebug ? '按综合置信度得分降序' : '按业务相关性排序'}
-                      </span>
-                    </div>
-
-                    {playgroundHits.length === 0 ? (
-                      <div className="py-12 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl">
-                        未检索到与查询匹配的相关规程切片，建议调整测试提问或检查该版本是否切片就绪
-                      </div>
-                    ) : (
-                      <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
-                        {playgroundHits.map((h, i) => {
-                          const isExpanded = expandedHitIdx === i;
-                          return (
-                            <div
-                              key={i}
-                              className="p-3.5 rounded-xl bg-surface-100/60 border border-border text-xs space-y-2 hover:border-sky-500/40 transition-all"
-                            >
-                              <div className="flex items-center justify-between gap-2">
-                                <span className="font-semibold text-foreground truncate max-w-md" title={h.title}>
-                                  {isDevDebug ? `[${i + 1}] ${h.title}` : `来源：${h.title}${h.section_path ? ` · ${h.section_path}` : ''}`}
-                                </span>
-                                <div className="flex items-center gap-1.5 shrink-0">
-                                  {isDevDebug && (
-                                    <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-500 font-semibold border border-emerald-500/20 tabular-nums">
-                                      得分: {Number(h.final_score || h.score || 0).toFixed(3)} · {h.chunk_role || 'child'}
-                                    </span>
-                                  )}
-                                  <button
-                                    type="button"
-                                    onClick={() => handleCopyChunkText(`hit_${i}`, h.content)}
-                                    className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-surface-200 transition"
-                                    title="复制此切片原文"
-                                  >
-                                    {copiedChunkId === `hit_${i}` ? (
-                                      <Check className="w-3.5 h-3.5 text-emerald-500" />
-                                    ) : (
-                                      <Copy className="w-3.5 h-3.5" />
-                                    )}
-                                  </button>
-                                </div>
-                              </div>
-                              <p
-                                className={`text-muted-foreground text-[11px] leading-relaxed whitespace-pre-wrap ${
-                                  isExpanded ? '' : 'line-clamp-4'
-                                }`}
-                              >
-                                {h.content}
-                              </p>
-                              {h.content.length > 140 && (
-                                <button
-                                  type="button"
-                                  onClick={() => setExpandedHitIdx(isExpanded ? null : i)}
-                                  className="text-[10px] text-sky-500 hover:text-sky-600 font-medium"
-                                >
-                                  {isExpanded ? '收起原文 ↑' : '展开查看切片全文 ↓'}
-                                </button>
-                              )}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ========================================================= */}
-        {/* 第三部分：3、知识库云盘挂载                               */}
-        {/* ========================================================= */}
-        {activeSection === 'mount' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
-            {/* 顶部横幅提示：后期对接 Ontology 与外部抓取 */}
-            <div className="lg:col-span-12 p-3.5 rounded-xl border border-sky-500/20 bg-sky-500/5 text-xs text-sky-700 dark:text-sky-300 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <HardDrive className="w-4 h-4 text-sky-500 shrink-0" />
-                <span>
-                  <strong>CloudVFS 存储接入层</strong>：当前已支持企业微信微盘、WebDAV 私有云与 S3/OSS 对象存储挂载；后期将全面对接 <strong>Ontology 本体知识图谱体系</strong> 及 <strong>外部自动化抓取数据源</strong>。
-                </span>
-              </div>
-            </div>
-
-            {/* 左侧：添加挂载源配置表单 (7 列) */}
-            <div className="lg:col-span-7 space-y-5">
-              <div className="rounded-2xl border border-border bg-surface-card p-5 md:p-6 shadow-sm space-y-5">
-                <div className="flex items-center justify-between border-b border-border pb-3">
-                  <div>
-                    <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
-                      <Cloud className="w-4 h-4 text-sky-500" />
-                      挂接外部云端或本地存储
-                    </h2>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      支持将企业内部现有的文档空间只读或读写挂载到虚拟文件系统 (CloudVFS)
-                    </p>
-                  </div>
-                </div>
-
-                {/* 存储类型选择选项卡 */}
-                <div>
-                  <label className="text-xs font-medium text-muted-foreground mb-2 block">
-                    选择云端存储提供商
-                  </label>
-                  <div className="grid grid-cols-3 gap-2.5">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setProviderTab('wecom');
-                        setTestResult(null);
-                      }}
-                      className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${providerTab === 'wecom'
-                          ? 'border-sky-500 bg-sky-500/5 font-semibold text-foreground shadow-sm'
-                          : 'border-border bg-surface-100/60 text-muted-foreground hover:text-foreground hover:border-border/80'
-                        }`}
-                    >
-                      <Cloud className="w-5 h-5 text-sky-500 mb-1" />
-                      <span>企业微信微盘</span>
-                      <span className="text-[10px] text-muted-foreground mt-0.5">Corp API</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setProviderTab('webdav');
-                        setTestResult(null);
-                      }}
-                      className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${providerTab === 'webdav'
-                          ? 'border-emerald-500 bg-emerald-500/5 font-semibold text-foreground shadow-sm'
-                          : 'border-border bg-surface-100/60 text-muted-foreground hover:text-foreground hover:border-border/80'
-                        }`}
-                    >
-                      <HardDrive className="w-5 h-5 text-emerald-500 mb-1" />
-                      <span>WebDAV</span>
-                      <span className="text-[10px] text-muted-foreground mt-0.5">Alist / NAS / 本地盘</span>
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setProviderTab('oss');
-                        setTestResult(null);
-                      }}
-                      className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${providerTab === 'oss'
-                          ? 'border-amber-500 bg-amber-500/5 font-semibold text-foreground shadow-sm'
-                          : 'border-border bg-surface-100/60 text-muted-foreground hover:text-foreground hover:border-border/80'
-                        }`}
-                    >
-                      <Database className="w-5 h-5 text-amber-500 mb-1" />
-                      <span>对象存储</span>
-                      <span className="text-[10px] text-muted-foreground mt-0.5">S3 / OSS / MinIO</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* 通用基础设置 */}
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-xs font-semibold text-foreground block mb-1">
-                      挂载展示名称 <span className="text-red-500">*</span>
-                    </label>
-                    <input
-                      type="text"
-                      placeholder="如: 击剑赛事技术规程库 / 财务制度"
-                      value={mountName}
-                      onChange={(e) => setMountName(e.target.value)}
-                      className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500 focus:bg-surface-card transition-all"
-                    />
-                  </div>
-
-                  <div>
-                    <label className="text-xs font-semibold text-foreground block mb-1">
-                      权威等级仲裁 (Authority Tier)
-                    </label>
-                    <select
-                      value={authorityTier}
-                      onChange={(e) => setAuthorityTier(Number(e.target.value))}
-                      className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500 focus:bg-surface-card transition-all"
-                    >
-                      <option value={1}>Tier 1: 正式发布库 / 定稿规程 (置信权重 1.25)</option>
-                      <option value={2}>Tier 2: 工作区日常参考库 (置信权重 1.00)</option>
-                      <option value={3}>Tier 3: 草稿与归档旧版 (置信权重 0.60)</option>
-                    </select>
-                  </div>
-                </div>
-
-                {/* 企微专有配置 */}
-                {providerTab === 'wecom' && (
-                  <div className="rounded-xl border border-border/80 bg-surface-100/40 p-4 space-y-3.5">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-xs font-medium text-muted-foreground block mb-1">
-                          CorpId (企业ID)
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="ww0b918f532c2838cb..."
-                          value={wecomForm.corpid}
-                          onChange={(e) => setWecomForm({ ...wecomForm, corpid: e.target.value })}
-                          className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-sky-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs font-medium text-muted-foreground block mb-1">
-                          CorpSecret (微盘自建应用密钥)
-                        </label>
-                        <input
-                          type="password"
-                          placeholder="••••••••••••••••"
-                          value={wecomForm.corpsecret}
-                          onChange={(e) => setWecomForm({ ...wecomForm, corpsecret: e.target.value })}
-                          className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-sky-500"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-xs font-semibold text-foreground">
-                          微盘 SpaceId <span className="text-red-500">*</span>
-                        </label>
-                        <span className="text-[10px] text-amber-500 font-mono">必填</span>
-                      </div>
-                      <input
-                        type="text"
-                        placeholder="如 s.1970324948326374... 或直接粘贴空间分享链接"
-                        value={wecomForm.space_id}
-                        onChange={(e) => setWecomForm({ ...wecomForm, space_id: e.target.value })}
-                        className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-sky-500"
-                      />
-                      <p className="mt-1 text-[11px] text-muted-foreground">
-                        在企业微信电脑端打开微盘空间，右键点击“复制链接”即可直接粘贴，系统将自动识别提取 SpaceId。
-                      </p>
-                    </div>
-                  </div>
-                )}
-
-                {/* WebDAV 专有配置 */}
-                {providerTab === 'webdav' && (
-                  <div className="rounded-xl border border-border/80 bg-surface-100/40 p-4 space-y-3.5">
-                    <div>
-                      <div className="flex items-center justify-between mb-1">
-                        <label className="text-xs font-semibold text-foreground">
-                          WebDAV 端点 URL <span className="text-red-500">*</span>
-                        </label>
-                        <span className="text-[10px] text-muted-foreground">
-                          Alist 路径为 <code className="text-emerald-500 font-bold">/dav</code>（字母 a，非 dev）
-                        </span>
-                      </div>
-                      <input
-                        type="text"
-                        placeholder="http://127.0.0.1:5244/dav 或 https://nas.local:5006"
-                        value={webdavForm.base_url}
-                        onChange={(e) => setWebdavForm({ ...webdavForm, base_url: e.target.value })}
-                        className={`w-full rounded-lg border bg-surface-card px-2.5 py-1.5 text-xs outline-none transition-colors ${webdavForm.base_url.includes('/dev')
-                            ? 'border-amber-500 focus:border-amber-500'
-                            : 'border-border focus:border-emerald-500'
-                          }`}
-                      />
-                      {webdavForm.base_url.includes('/dev') && (
-                        <div className="mt-1.5 flex items-center justify-between p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-[11px] animate-fade-in">
-                          <span className="flex items-center gap-1">
-                            <AlertCircle className="w-3.5 h-3.5 shrink-0" />
-                            检测到输入包含 <code>/dev</code>，Alist 等服务标准路径为 <code>/dav</code>（字母 a）
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => setWebdavForm({ ...webdavForm, base_url: webdavForm.base_url.replace('/dev', '/dav') })}
-                            className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-600 text-white font-medium transition shrink-0 ml-2"
-                          >
-                            一键修正为 /dav
-                          </button>
-                        </div>
-                      )}
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-xs font-medium text-muted-foreground block mb-1">用户名</label>
-                        <input
-                          type="text"
-                          placeholder="admin"
-                          value={webdavForm.username}
-                          onChange={(e) => setWebdavForm({ ...webdavForm, username: e.target.value })}
-                          className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-emerald-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs font-medium text-muted-foreground block mb-1">密码</label>
-                        <input
-                          type="password"
-                          placeholder="••••••••"
-                          value={webdavForm.password}
-                          onChange={(e) => setWebdavForm({ ...webdavForm, password: e.target.value })}
-                          className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-emerald-500"
-                        />
-                      </div>
-                    </div>
-
-                    <div>
-                      <label className="text-xs font-medium text-muted-foreground block mb-1">根路径 (Root Path)</label>
-                      <input
-                        type="text"
-                        placeholder="/"
-                        value={webdavForm.root_path}
-                        onChange={(e) => setWebdavForm({ ...webdavForm, root_path: e.target.value })}
-                        className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-emerald-500"
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {/* 对象存储 OSS 专有配置 */}
-                {providerTab === 'oss' && (
-                  <div className="rounded-xl border border-border/80 bg-surface-100/40 p-4 space-y-3.5">
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-xs font-medium text-muted-foreground block mb-1">
-                          Endpoint 端点
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="https://oss-cn-beijing.aliyuncs.com"
-                          value={ossForm.endpoint}
-                          onChange={(e) => setOssForm({ ...ossForm, endpoint: e.target.value })}
-                          className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-amber-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs font-medium text-muted-foreground block mb-1">
-                          Bucket 桶名
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="yybasket"
-                          value={ossForm.bucket}
-                          onChange={(e) => setOssForm({ ...ossForm, bucket: e.target.value })}
-                          className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-amber-500"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div>
-                        <label className="text-xs font-medium text-muted-foreground block mb-1">
-                          AccessKey ID
-                        </label>
-                        <input
-                          type="text"
-                          placeholder="LTAI5t..."
-                          value={ossForm.access_key}
-                          onChange={(e) => setOssForm({ ...ossForm, access_key: e.target.value })}
-                          className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-amber-500"
-                        />
-                      </div>
-                      <div>
-                        <label className="text-xs font-medium text-muted-foreground block mb-1">
-                          SecretKey Secret
-                        </label>
-                        <input
-                          type="password"
-                          placeholder="••••••••••••••••"
-                          value={ossForm.secret_key}
-                          onChange={(e) => setOssForm({ ...ossForm, secret_key: e.target.value })}
-                          className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-amber-500"
-                        />
-                      </div>
-                    </div>
-                  </div>
-                )}
-
-                {/* 连通性测试结果面板 */}
-                {testResult && (
-                  <div
-                    className={`flex items-start gap-2.5 rounded-xl p-3 text-xs leading-relaxed transition-all ${testResult.success
-                        ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
-                        : 'bg-red-500/10 text-red-500 border border-red-500/20'
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  loadMounts();
+                  loadKBs();
+                }}
+                className="px-2.5 py-1 rounded-md border border-border hover:bg-surface-200 text-xs flex items-center gap-1 transition-colors"
+                title="刷新数据"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingMounts || loadingKbs ? 'animate-spin' : ''}`} />
+                <span>刷新</span>
+              </button>
+              {activeSection === 'train' && (
+                <>
+                  <label
+                    className={`px-2.5 py-1 rounded-md border border-border hover:bg-surface-200 text-xs flex items-center gap-1 cursor-pointer transition-colors ${isImporting ? 'opacity-50 pointer-events-none' : ''
                       }`}
+                    title="导入免重新训练的 .ahkb 离线归档知识包"
                   >
-                    {testResult.success ? (
-                      <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
-                    ) : (
-                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                    )}
-                    <div className="space-y-0.5">
-                      <div className="font-semibold">{testResult.success ? '连接测试成功' : '连接测试失败'}</div>
-                      <div className="text-[11px] opacity-90">{testResult.message}</div>
-                    </div>
-                  </div>
-                )}
-
-                {/* 操作按键组 */}
-                <div className="flex items-center justify-between pt-2 border-t border-border">
-                  <span className="text-[11px] text-muted-foreground">
-                    建议先测试服务连通性，确保权限校验无误后再行保存。
-                  </span>
-
-                  <div className="flex items-center gap-2.5">
-                    <button
-                      type="button"
-                      onClick={handleTestConnection}
-                      disabled={testing}
-                      className="flex items-center gap-1.5 rounded-xl border border-border px-4 py-2 text-xs font-medium text-foreground hover:bg-surface-200 transition-colors disabled:opacity-50"
-                    >
-                      <PlugZap className="w-3.5 h-3.5 text-sky-500" />
-                      {testing ? '正在测试连通性...' : '测试连通性'}
-                    </button>
-
-                    <button
-                      type="button"
-                      onClick={handleSaveMount}
-                      disabled={saving}
-                      className="flex items-center gap-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 px-4 py-2 text-xs font-medium text-white shadow-sm transition-all disabled:opacity-50"
-                    >
-                      <Check className="w-3.5 h-3.5" />
-                      {saving ? '保存中...' : '保存挂载'}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            </div>
-
-            {/* 右侧：已挂载的数据源列表与说明卡片 (5 列) */}
-            <div className="lg:col-span-5 space-y-5">
-              <div className="rounded-2xl border border-border bg-surface-card p-5 shadow-sm space-y-4">
-                <div className="flex items-center justify-between border-b border-border pb-3">
-                  <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
-                    <Layers className="w-4 h-4 text-sky-500" />
-                    已挂载的虚拟数据源 ({mountsList.length})
-                  </h3>
-                  <button
-                    onClick={loadMounts}
-                    disabled={loadingMounts}
-                    className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
-                    title="刷新列表"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${loadingMounts ? 'animate-spin' : ''}`} />
-                  </button>
-                </div>
-
-                <div className="space-y-3">
-                  {mountsList.length === 0 ? (
-                    <div className="py-12 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl space-y-2">
-                      <HardDrive className="w-8 h-8 text-muted-foreground/40 mx-auto" />
-                      <div>暂未挂载外部知识库源</div>
-                      <p className="text-[11px] text-muted-foreground/80 max-w-[240px] mx-auto">
-                        请在左侧表单中配置企业微信微盘、WebDAV 或对象存储
-                      </p>
-                    </div>
-                  ) : (
-                    mountsList.map((m) => (
-                      <div
-                        key={m.mount_id}
-                        className="rounded-xl border border-border bg-surface-100/50 p-3.5 text-xs hover:border-border/80 transition-all space-y-2.5"
-                      >
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex items-center gap-2 min-w-0">
-                            {m.provider_type === 'wecom' && (
-                              <div className="p-1.5 rounded-lg bg-sky-500/10 text-sky-500">
-                                <Cloud className="w-4 h-4" />
-                              </div>
-                            )}
-                            {m.provider_type === 'webdav' && (
-                              <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-500">
-                                <HardDrive className="w-4 h-4" />
-                              </div>
-                            )}
-                            {m.provider_type === 'oss' && (
-                              <div className="p-1.5 rounded-lg bg-amber-500/10 text-amber-500">
-                                <Database className="w-4 h-4" />
-                              </div>
-                            )}
-                            <div className="min-w-0">
-                              <h4 className="font-semibold text-foreground truncate">{m.mount_name}</h4>
-                              <div className="flex items-center gap-1.5 mt-0.5">
-                                <span className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] font-mono uppercase text-muted-foreground">
-                                  {m.provider_type}
-                                </span>
-                                <span
-                                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${m.authority_tier === 1
-                                      ? 'bg-sky-500/10 text-sky-500'
-                                      : m.authority_tier === 2
-                                        ? 'bg-surface-200 text-foreground'
-                                        : 'bg-amber-500/10 text-amber-500'
-                                    }`}
-                                >
-                                  Tier {m.authority_tier}
-                                </span>
-                              </div>
-                            </div>
-                          </div>
-
-                          <button
-                            onClick={() => handleDeleteMount(m.mount_id)}
-                            className="text-muted-foreground hover:text-red-500 p-1.5 rounded-lg hover:bg-surface-200 transition-colors"
-                            title="解除此挂载"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-
-                        <div className="pt-2 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
-                          <span className="truncate max-w-[170px]">
-                            {m.provider_type === 'wecom' && `微盘 Space: ${m.config?.space_id || '未知'}`}
-                            {m.provider_type === 'webdav' && `URL: ${m.config?.base_url || '未知'}`}
-                            {m.provider_type === 'oss' && `Bucket: ${m.config?.bucket || '未知'}`}
-                          </span>
-                          <div className="flex items-center gap-2.5 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => handleViewFiles(m)}
-                              className="text-foreground hover:text-sky-500 font-medium flex items-center gap-1 hover:underline transition-colors"
-                              title="实时查看空间内所有文件与目录"
-                            >
-                              <FolderOpen className="w-3.5 h-3.5 text-sky-500" />
-                              <span>浏览文件</span>
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setSelectedMountForTrain(m.mount_id);
-                                setActiveSection('train');
-                              }}
-                              className="text-sky-500 hover:text-sky-600 font-medium flex items-center gap-0.5"
-                            >
-                              <span>前往训练</span>
-                              <ArrowRight className="w-3 h-3" />
-                            </button>
-                          </div>
-                        </div>
-                      </div>
-                    ))
-                  )}
-                </div>
-              </div>
-
-              {/* 快速下一步引导卡片 */}
-              <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-5 space-y-2.5">
-                <div className="flex items-center gap-2 text-sky-600 dark:text-sky-400 font-semibold text-xs">
-                  <ShieldCheck className="w-4 h-4" />
-                  挂载与索引机制说明
-                </div>
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  挂载完成后，数据源即纳入本地虚拟文件系统（CloudVFS）。您可随时在“2、知识库训练”中触发增量切片与语义向量 Embedding 构建，规程文档将生成独立 SQLite 知识库，支持跨专家调用与高精度仲裁搜索。
-                </p>
-                <div className="pt-1">
-                  <button
-                    onClick={() => setActiveSection('train')}
-                    className="inline-flex items-center gap-1.5 text-xs text-sky-600 dark:text-sky-400 font-medium hover:underline"
-                  >
-                    立即切换到知识库训练 <ArrowRight className="w-3 h-3" />
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-
-        {/* ========================================================= */}
-        {/* 第二部分：2、知识库的训练与维护                           */}
-        {/* ========================================================= */}
-        {activeSection === 'train' && (
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
-            {/* 全宽：训练调度与知识库资产维护中心 (12 列) */}
-            <div className="lg:col-span-12 space-y-6">
-              {/* 训练操作面板 */}
-              <div className="rounded-2xl border border-border bg-surface-card p-5 md:p-6 shadow-sm space-y-5">
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-border pb-4">
-                  <div>
-                    <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
-                      <Sparkles className="w-4 h-4 text-amber-500" />
-                      规程切片与向量索引训练
-                    </h2>
-                    <p className="text-xs text-muted-foreground mt-0.5">
-                      从挂载数据源拉取最新文档，执行自适应滑动窗口分块、向量 Embedding 及图谱三元组提取
-                    </p>
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <div>
-                    <label className="text-xs font-semibold text-foreground block mb-1">
-                      选择训练数据源
-                    </label>
-                    <select
-                      value={selectedMountForTrain}
-                      onChange={(e) => setSelectedMountForTrain(e.target.value)}
-                      className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-amber-500"
-                    >
-                      <option value="all">全量同步 (所有已挂载数据源)</option>
-                      {mountsList.map((m) => (
-                        <option key={m.mount_id} value={m.mount_id}>
-                          {m.mount_name} ({m.provider_type})
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-
-                  <div>
-                    <label className="text-xs font-semibold text-foreground block mb-1">
-                      切片算法策略
-                    </label>
-                    <div className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs text-muted-foreground flex items-center justify-between">
-                      <span>自适应 Markdown / 标题感知切片</span>
-                      <span className="font-mono text-[10px] text-amber-500">512~1024 Token</span>
-                    </div>
-                  </div>
-                </div>
-
-                <div>
+                    <Upload className="w-3.5 h-3.5" />
+                    <span>{isImporting ? '导入中...' : '导入 .ahkb'}</span>
+                    <input
+                      type="file"
+                      accept=".ahkb,.zip"
+                      onChange={handleImportFileSelect}
+                      className="hidden"
+                    />
+                  </label>
                   <button
                     type="button"
                     onClick={() => handleTriggerTrain()}
                     disabled={training || mountsList.length === 0}
-                    className="w-full flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-medium text-xs shadow-md transition-all disabled:opacity-50"
+                    className={`relative overflow-hidden px-2.5 py-1 rounded-md text-xs font-medium flex items-center gap-1 transition-colors disabled:opacity-70 ${training
+                        ? 'bg-transparent border border-emerald-500/50 text-foreground'
+                        : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                      }`}
                   >
-                    <RefreshCw className={`w-4 h-4 ${training ? 'animate-spin' : ''}`} />
-                    {training ? '正在增量解析文档与生成向量索引...' : '一键启动知识库增量训练与切片'}
+                    {training && (
+                      <span
+                        className="absolute inset-y-0 left-0 bg-emerald-500/80 transition-all duration-300 ease-out"
+                        style={{ width: `${Math.min(100, Math.max(0, trainProgress))}%` }}
+                      />
+                    )}
+                    <Sparkles className="w-3.5 h-3.5 relative z-10" />
+                    <span className="relative z-10 font-mono">
+                      {training ? `训练中 ${trainProgress.toFixed(1)}%` : '启动增量训练'}
+                    </span>
                   </button>
-                  {mountsList.length === 0 && (
-                    <p className="text-[11px] text-amber-500 mt-1.5 text-center">
-                      当前尚未添加任何挂载源，请先切换到“1、知识库挂载”添加文档源。
-                    </p>
-                  )}
+                </>
+              )}
+            </div>
+          </div>
+          <div className="flex-1 overflow-y-auto p-4 space-y-4 select-text">
+
+            {/* ========================================================= */}
+            {/* 第一部分：1、知识库测试 (默认)                            */}
+            {/* ========================================================= */}
+            {activeSection === 'test' && (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
+                {/* 左侧：知识库选择、版本切换与发布控制台 (4 列) */}
+                <div className="lg:col-span-4 space-y-5">
+                  <div className="rounded-2xl border border-border bg-surface-card p-5 shadow-sm space-y-4">
+                    <div className="flex items-center justify-between border-b border-border pb-3">
+                      <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                        <FlaskConical className="w-4 h-4 text-sky-500" />
+                        知识库与版本选择
+                      </h3>
+                      <span className="text-[10px] text-muted-foreground font-mono">
+                        {kbsList.length} 个知识库
+                      </span>
+                    </div>
+
+                    <div>
+                      <label className="text-xs font-medium text-muted-foreground block mb-1">
+                        选择待测试的知识库
+                      </label>
+                      <select
+                        value={selectedKbId}
+                        onChange={(e) => setSelectedKbId(e.target.value)}
+                        className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500"
+                      >
+                        {kbsList.map((kb) => (
+                          <option key={kb.kb_id} value={kb.kb_id}>
+                            {kb.name} {kb.is_published ? `(已发布: ${kb.active_version})` : `(未发布·当前: ${kb.active_version})`}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+
+                    {/* 版本选择器 */}
+                    <div>
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-xs font-medium text-muted-foreground">
+                          选择测试版本
+                        </label>
+                        {loadingVersions && (
+                          <span className="text-[10px] text-muted-foreground animate-pulse">
+                            加载版本中...
+                          </span>
+                        )}
+                      </div>
+                      <select
+                        value={selectedVersion}
+                        onChange={(e) => setSelectedVersion(e.target.value)}
+                        className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500 font-mono"
+                      >
+                        {kbVersionsList.map((v) => {
+                          const curKb = kbsList.find((k) => k.kb_id === selectedKbId);
+                          const isAct = v.version === curKb?.active_version;
+                          const isPublishedRelease = Boolean(curKb?.is_published && isAct);
+                          return (
+                            <option key={v.version} value={v.version}>
+                              {v.version} {isPublishedRelease ? '★ [当前正式发布版]' : isAct ? '· [测试维护版 (未发布)]' : '· [历史测试版]'} (切片: {v.chunk_count})
+                            </option>
+                          );
+                        })}
+                      </select>
+                    </div>
+
+                    {/* 当前版本的发布状态卡片 */}
+                    {(() => {
+                      const curKb = kbsList.find((k) => k.kb_id === selectedKbId);
+                      const isTargetVersionActive = Boolean(
+                        curKb && (selectedVersion === curKb.active_version || (!selectedVersion && curKb.active_version))
+                      );
+                      // 只有当知识库已开启发布，且当前选中的是 active_version，才算作对外生效的正式发布版本！
+                      const isCurrentRelease = Boolean(curKb?.is_published && isTargetVersionActive);
+                      const matchedVerInfo = kbVersionsList.find((v) => v.version === selectedVersion);
+                      const chunkCount = matchedVerInfo?.chunk_count ?? curKb?.chunk_count ?? 0;
+                      const tripleCount = matchedVerInfo?.triple_count ?? curKb?.triple_count ?? 0;
+                      const diskMb = ((matchedVerInfo?.disk_size_bytes ?? curKb?.disk_size_bytes ?? 0) / (1024 * 1024)).toFixed(2);
+
+                      return (
+                        <div className="p-3.5 rounded-xl border border-border bg-surface-100/60 space-y-3">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs text-muted-foreground">版本生效状态:</span>
+                            {isCurrentRelease ? (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center gap-1 font-semibold">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                                正式发布版本 (对外生效中)
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/25 flex items-center gap-1 font-semibold">
+                                <AlertCircle className="w-3 h-3 text-amber-500" />
+                                测试维护版本 (未发布 · 外部专家不可调用)
+                              </span>
+                            )}
+                          </div>
+
+                          {/* 若当前版本未发布，提供正式发布按钮 */}
+                          {!isCurrentRelease && curKb && (
+                            <button
+                              type="button"
+                              disabled={togglingPublishKbId === curKb.kb_id || !selectedVersion}
+                              onClick={() => handleTogglePublish(curKb, selectedVersion, true)}
+                              className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold shadow-sm transition disabled:opacity-50"
+                              title="在此测试台充分测试验收无误后，点击将此版本发布对外正式生效，绑定的智能体专家方可检索调用"
+                            >
+                              <ShieldCheck className="w-4 h-4" />
+                              <span>{togglingPublishKbId === curKb.kb_id ? '发布中...' : '测试验收通过，发布此版本为正式版 ★'}</span>
+                            </button>
+                          )}
+
+                          {/* 若当前版本已发布，提供取消发布按钮 */}
+                          {isCurrentRelease && curKb && (
+                            <button
+                              type="button"
+                              disabled={togglingPublishKbId === curKb.kb_id || !selectedVersion}
+                              onClick={() => handleTogglePublish(curKb, selectedVersion, false)}
+                              className="w-full flex items-center justify-center gap-1.5 py-2 px-3 rounded-xl bg-amber-500/10 hover:bg-amber-500/20 text-amber-700 dark:text-amber-300 border border-amber-500/30 text-xs font-medium shadow-sm transition disabled:opacity-50"
+                              title="将当前版本转为未发布测试维护状态，外部专家将暂停调用"
+                            >
+                              <AlertCircle className="w-4 h-4 text-amber-500" />
+                              <span>{togglingPublishKbId === curKb.kb_id ? '处理中...' : '暂停外部专家调用，转为测试维护中'}</span>
+                            </button>
+                          )}
+
+                          <div className="grid grid-cols-3 gap-2 pt-2 border-t border-border/60 text-center">
+                            <div className="p-1 rounded bg-surface-200/50">
+                              <span className="text-[10px] text-muted-foreground block">规程切片</span>
+                              <span className="text-xs font-bold font-mono text-foreground">{chunkCount}</span>
+                            </div>
+                            <div className="p-1 rounded bg-surface-200/50">
+                              <span className="text-[10px] text-muted-foreground block">图谱三元组</span>
+                              <span className="text-xs font-bold font-mono text-foreground">{tripleCount}</span>
+                            </div>
+                            <div className="p-1 rounded bg-surface-200/50">
+                              <span className="text-[10px] text-muted-foreground block">库体积</span>
+                              <span className="text-xs font-bold font-mono text-foreground">{diskMb} MB</span>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    <div className="text-[11px] text-muted-foreground bg-primary/5 p-3 rounded-xl border border-primary/10 leading-relaxed flex items-start gap-2">
+                      <HelpCircle className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" />
+                      <div>
+                        <strong>版本准出硬性规范</strong>：未经测试验收的版本严禁发布对外调用。新训练或更新的知识库默认处于【测试维护中（未发布）】状态；请先在右侧验货台中充分发起自然语言提问，验证切片召回质量。验收无误后点击上方【测试验收通过，发布此版本为正式版】，绑定的智能体专家方可采纳使用。
+                      </div>
+                    </div>
+                  </div>
                 </div>
 
-                {trainStatusMsg && (
-                  <div className="p-3.5 rounded-xl bg-surface-100 border border-border text-xs text-foreground leading-relaxed whitespace-pre-wrap font-mono">
-                    {trainStatusMsg}
-                  </div>
-                )}
-              </div>
+                {/* 右侧：实测验货与提问评测台 (8 列) */}
+                <div className="lg:col-span-8 space-y-5">
+                  <div className="rounded-2xl border border-border bg-surface-card p-5 shadow-sm space-y-4">
+                    <div className="flex items-center justify-between border-b border-border pb-3">
+                      <div>
+                        <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                          <Search className="w-4 h-4 text-sky-500" />
+                          检索命中率即测验货台 (Playground)
+                        </h3>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          向指定版本的规程切片发起语义向量与 BM25 混合检索，测试置信召回精度
+                        </p>
+                      </div>
+                      {(() => {
+                        const curKb = kbsList.find((k) => k.kb_id === selectedKbId);
+                        const isTargetVersionActive = Boolean(
+                          curKb && (selectedVersion === curKb.active_version || (!selectedVersion && curKb.active_version))
+                        );
+                        const isCurrentRelease = Boolean(curKb?.is_published && isTargetVersionActive);
+                        return isCurrentRelease ? (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20 flex items-center gap-1 font-semibold">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-500" />
+                            已发布正式版: {selectedVersion || '默认'}
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/25 flex items-center gap-1 font-semibold">
+                            <AlertCircle className="w-3 h-3 text-amber-500" />
+                            测试维护版 (未发布): {selectedVersion || '默认'}
+                          </span>
+                        );
+                      })()}
+                    </div>
 
-              {/* 独立知识库资产清单 (KB Assets) */}
-              <div className="space-y-3">
-                {kbsList.length === 0 ? (
-                  <div className="py-12 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl space-y-2 bg-surface-card">
-                    <Database className="w-8 h-8 text-muted-foreground/40 mx-auto" />
-                    <div>暂无已训练的知识库资产</div>
-                    <p className="text-[11px] text-muted-foreground/80 max-w-[240px] mx-auto">
-                      请在上方点击“启动增量训练”生成第一个知识库，或直接点击上方“导入 .ahkb”
-                    </p>
-                  </div>
-                ) : (
-                  kbsList.map((kb) => {
-                    const isSelected = selectedKbId === kb.kb_id;
-                    const extra = kbStatusMap[kb.kb_id];
-                    return (
-                      <div
-                        key={kb.kb_id}
-                        onClick={() => setSelectedKbId(kb.kb_id)}
-                        className={`rounded-xl border p-4 text-xs transition-all cursor-pointer space-y-3 relative ${
-                          isSelected
-                            ? 'border-emerald-500/50 bg-surface-card shadow-sm ring-1 ring-emerald-500/20'
-                            : 'border-border bg-surface-card hover:border-border/90'
-                        }`}
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        placeholder="输入测试问题，如: 比赛报名费或押金退还标准、2024年开票记录..."
+                        value={playgroundQuery}
+                        onChange={(e) => setPlaygroundQuery(e.target.value)}
+                        onKeyDown={(e) => e.key === 'Enter' && handleTestPlayground()}
+                        className="flex-1 rounded-xl border border-border bg-surface-100 px-3.5 py-2.5 text-xs outline-none focus:border-sky-500 focus:bg-surface-card transition-all"
+                      />
+                      <button
+                        type="button"
+                        onClick={handleTestPlayground}
+                        disabled={playgroundTesting}
+                        className="px-5 py-2.5 rounded-xl bg-sky-600 hover:bg-sky-500 text-white text-xs font-semibold shrink-0 disabled:opacity-50 transition-all shadow-sm flex items-center gap-1.5"
                       >
-                        {/* 顶栏：信息与操作收口 */}
-                        <div className="flex items-center justify-between gap-3 flex-wrap">
-                          {/* 左侧：名称 + 版本号 + 状态点 + 规则模板 */}
-                          <div className="flex items-center gap-3 flex-wrap min-w-0">
-                            {renamingKbId === kb.kb_id ? (
-                              <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
-                                <input
-                                  type="text"
-                                  autoFocus
-                                  value={renamingValue}
-                                  onChange={(e) => setRenamingValue(e.target.value)}
-                                  onKeyDown={(e) => {
-                                    if (e.key === 'Enter') handleRenameKb(kb.kb_id, renamingValue);
-                                    if (e.key === 'Escape') setRenamingKbId(null);
-                                  }}
-                                  className="font-bold text-sm px-2 py-0.5 rounded border border-blue-500 bg-surface-100 text-foreground outline-none min-w-[200px]"
-                                />
+                        <Search className={`w-3.5 h-3.5 ${playgroundTesting ? 'animate-spin' : ''}`} />
+                        <span>{playgroundTesting ? '检索中...' : '测试命中'}</span>
+                      </button>
+                    </div>
+
+                    {/* 自然语言模拟检测回答与 Grounding 评估区 */}
+                    {playgroundTesting && (
+                      <div className="p-4 rounded-xl border border-sky-500/30 bg-sky-500/5 text-xs text-sky-600 dark:text-sky-400 flex items-center gap-2.5 animate-pulse">
+                        <Sparkles className="w-4 h-4 animate-spin text-sky-500" />
+                        <span>正在检索当前版本切片，并调用大模型模拟专家生成自然语言回答...</span>
+                      </div>
+                    )}
+
+                    {playgroundSimulatedAnswer && !playgroundTesting && (
+                      <div className="rounded-xl border border-primary/25 bg-surface-100/70 p-4 space-y-2.5 shadow-sm">
+                        <div className="flex items-center justify-between border-b border-border/60 pb-2">
+                          <div className="flex items-center gap-1.5">
+                            <MessageSquare className="w-4 h-4 text-primary" />
+                            <span className="text-xs font-semibold text-foreground">
+                              智能体专家模拟答复 (自然语言检测)
+                            </span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            {playgroundGroundingStatus && (
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-medium border ${playgroundGroundingStatus.is_grounded
+                                    ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                                    : 'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20'
+                                  }`}
+                              >
+                                {playgroundGroundingStatus.is_grounded
+                                  ? `事实依据充分 (召回 ${playgroundGroundingStatus.used_chunks_count ?? playgroundHits?.length ?? 0} 条切片)`
+                                  : '缺少明确依据 (知识库未充分覆盖)'}
+                              </span>
+                            )}
+                            <button
+                              type="button"
+                              onClick={() => handleCopyChunkText('simulated_answer', playgroundSimulatedAnswer)}
+                              className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-surface-200 transition"
+                              title="复制模拟回答"
+                            >
+                              {copiedChunkId === 'simulated_answer' ? (
+                                <Check className="w-3.5 h-3.5 text-emerald-500" />
+                              ) : (
+                                <Copy className="w-3.5 h-3.5" />
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                        <div className="text-xs text-foreground/90 leading-relaxed whitespace-pre-wrap bg-surface-card p-3 rounded-lg border border-border/50 select-text font-sans">
+                          {playgroundSimulatedAnswer}
+                        </div>
+                        <div className="flex items-center justify-between text-[11px] text-muted-foreground pt-1">
+                          <span>
+                            🎯 提示：检测结果满意后，请发布此版本；只有发布的知识库版本才能被外部专家正常调用。
+                          </span>
+                        </div>
+                      </div>
+                    )}
+
+                    {playgroundHits && (
+                      <div className="space-y-3 pt-3 border-t border-border">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-semibold text-foreground flex items-center gap-1.5">
+                            <FileText className="w-3.5 h-3.5 text-sky-500" />
+                            召回证据切片 ({playgroundHits.length})
+                          </span>
+                          <span className="text-[10px] text-muted-foreground">
+                            {isDevDebug ? '按综合置信度得分降序' : '按业务相关性排序'}
+                          </span>
+                        </div>
+
+                        {playgroundHits.length === 0 ? (
+                          <div className="py-12 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl">
+                            未检索到与查询匹配的相关规程切片，建议调整测试提问或检查该版本是否切片就绪
+                          </div>
+                        ) : (
+                          <div className="space-y-3 max-h-[520px] overflow-y-auto pr-1">
+                            {playgroundHits.map((h, i) => {
+                              const isExpanded = expandedHitIdx === i;
+                              return (
+                                <div
+                                  key={i}
+                                  className="p-3.5 rounded-xl bg-surface-100/60 border border-border text-xs space-y-2 hover:border-sky-500/40 transition-all"
+                                >
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span className="font-semibold text-foreground truncate max-w-md" title={h.title}>
+                                      {isDevDebug ? `[${i + 1}] ${h.title}` : `来源：${h.title}${h.section_path ? ` · ${h.section_path}` : ''}`}
+                                    </span>
+                                    <div className="flex items-center gap-1.5 shrink-0">
+                                      {isDevDebug && (
+                                        <span className="px-2 py-0.5 rounded text-[10px] font-mono bg-emerald-500/10 text-emerald-500 font-semibold border border-emerald-500/20 tabular-nums">
+                                          得分: {Number(h.final_score || h.score || 0).toFixed(3)} · {h.chunk_role || 'child'}
+                                        </span>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => handleCopyChunkText(`hit_${i}`, h.content)}
+                                        className="p-1 rounded text-muted-foreground hover:text-foreground hover:bg-surface-200 transition"
+                                        title="复制此切片原文"
+                                      >
+                                        {copiedChunkId === `hit_${i}` ? (
+                                          <Check className="w-3.5 h-3.5 text-emerald-500" />
+                                        ) : (
+                                          <Copy className="w-3.5 h-3.5" />
+                                        )}
+                                      </button>
+                                    </div>
+                                  </div>
+                                  <p
+                                    className={`text-muted-foreground text-[11px] leading-relaxed whitespace-pre-wrap ${isExpanded ? '' : 'line-clamp-4'
+                                      }`}
+                                  >
+                                    {h.content}
+                                  </p>
+                                  {h.content.length > 140 && (
+                                    <button
+                                      type="button"
+                                      onClick={() => setExpandedHitIdx(isExpanded ? null : i)}
+                                      className="text-[10px] text-sky-500 hover:text-sky-600 font-medium"
+                                    >
+                                      {isExpanded ? '收起原文 ↑' : '展开查看切片全文 ↓'}
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ========================================================= */}
+            {/* 第三部分：3、知识库云盘挂载                               */}
+            {/* ========================================================= */}
+            {activeSection === 'mount' && (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
+                {/* 左侧：添加挂载源配置表单 (7 列) */}
+                <div className="lg:col-span-7 space-y-5">
+                  <div className="rounded-2xl border border-border bg-surface-card p-5 md:p-6 shadow-sm space-y-5">
+                    <div className="flex items-center justify-between border-b border-border pb-3">
+                      <div>
+                        <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
+                          <Cloud className="w-4 h-4 text-sky-500" />
+                          挂接外部云端或本地存储
+                        </h2>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          支持将企业内部现有的文档空间或沙盒本地硬盘目录挂载到知识库源
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* 存储类型选择选项卡 */}
+                    <div>
+                      <label className="text-xs font-medium text-muted-foreground mb-2 block">
+                        选择存储数据源类型
+                      </label>
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProviderTab('wecom');
+                            setTestResult(null);
+                          }}
+                          className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${providerTab === 'wecom'
+                            ? 'border-sky-500 bg-sky-500/5 font-semibold text-foreground shadow-sm'
+                            : 'border-border bg-surface-100/60 text-muted-foreground hover:text-foreground hover:border-border/80'
+                            }`}
+                        >
+                          <Cloud className="w-5 h-5 text-sky-500 mb-1" />
+                          <span>企业微信微盘</span>
+                          <span className="text-[10px] text-muted-foreground mt-0.5">Corp API</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProviderTab('webdav');
+                            setTestResult(null);
+                          }}
+                          className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${providerTab === 'webdav'
+                            ? 'border-emerald-500 bg-emerald-500/5 font-semibold text-foreground shadow-sm'
+                            : 'border-border bg-surface-100/60 text-muted-foreground hover:text-foreground hover:border-border/80'
+                            }`}
+                        >
+                          <HardDrive className="w-5 h-5 text-emerald-500 mb-1" />
+                          <span>WebDAV</span>
+                          <span className="text-[10px] text-muted-foreground mt-0.5">Alist / NAS / 本地盘</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProviderTab('oss');
+                            setTestResult(null);
+                          }}
+                          className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${providerTab === 'oss'
+                            ? 'border-amber-500 bg-amber-500/5 font-semibold text-foreground shadow-sm'
+                            : 'border-border bg-surface-100/60 text-muted-foreground hover:text-foreground hover:border-border/80'
+                            }`}
+                        >
+                          <Database className="w-5 h-5 text-amber-500 mb-1" />
+                          <span>对象存储</span>
+                          <span className="text-[10px] text-muted-foreground mt-0.5">S3 / OSS / MinIO</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setProviderTab('sandbox');
+                            setTestResult(null);
+                          }}
+                          className={`flex flex-col items-center justify-center p-3 rounded-xl border text-xs transition-all ${providerTab === 'sandbox'
+                            ? 'border-violet-500 bg-violet-500/5 font-semibold text-foreground shadow-sm'
+                            : 'border-border bg-surface-100/60 text-muted-foreground hover:text-foreground hover:border-border/80'
+                            }`}
+                        >
+                          <FolderOpen className="w-5 h-5 text-violet-500 mb-1" />
+                          <span>沙盒空间</span>
+                          <span className="text-[10px] text-muted-foreground mt-0.5">绑定本地硬盘目录</span>
+                        </button>
+                      </div>
+                    </div>
+
+                    {/* 通用基础设置 */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-xs font-semibold text-foreground block mb-1">
+                          挂载展示名称 <span className="text-red-500">*</span>
+                        </label>
+                        <input
+                          type="text"
+                          placeholder="如: 击剑赛事技术规程库 / 财务制度"
+                          value={mountName}
+                          onChange={(e) => setMountName(e.target.value)}
+                          className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500 focus:bg-surface-card transition-all"
+                        />
+                      </div>
+
+                      <div>
+                        <label className="text-xs font-semibold text-foreground block mb-1">
+                          权威等级仲裁 (Authority Tier)
+                        </label>
+                        <select
+                          value={authorityTier}
+                          onChange={(e) => setAuthorityTier(Number(e.target.value))}
+                          className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-sky-500 focus:bg-surface-card transition-all"
+                        >
+                          <option value={1}>Tier 1: 正式发布库 / 定稿规程 (置信权重 1.25)</option>
+                          <option value={2}>Tier 2: 工作区日常参考库 (置信权重 1.00)</option>
+                          <option value={3}>Tier 3: 草稿与归档旧版 (置信权重 0.60)</option>
+                        </select>
+                      </div>
+                    </div>
+
+                    {/* 企微专有配置 */}
+                    {providerTab === 'wecom' && (
+                      <div className="rounded-xl border border-border/80 bg-surface-100/40 p-4 space-y-3.5">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <label className="text-xs font-medium text-muted-foreground block mb-1">
+                              CorpId (企业ID)
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="ww0b918f532c2838cb..."
+                              value={wecomForm.corpid}
+                              onChange={(e) => setWecomForm({ ...wecomForm, corpid: e.target.value })}
+                              className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-sky-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium text-muted-foreground block mb-1">
+                              CorpSecret (微盘自建应用密钥)
+                            </label>
+                            <input
+                              type="password"
+                              placeholder="••••••••••••••••"
+                              value={wecomForm.corpsecret}
+                              onChange={(e) => setWecomForm({ ...wecomForm, corpsecret: e.target.value })}
+                              className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-sky-500"
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-xs font-semibold text-foreground">
+                              微盘 SpaceId <span className="text-red-500">*</span>
+                            </label>
+                            <span className="text-[10px] text-amber-500 font-mono">必填</span>
+                          </div>
+                          <input
+                            type="text"
+                            placeholder="如 s.1970324948326374... 或直接粘贴空间分享链接"
+                            value={wecomForm.space_id}
+                            onChange={(e) => setWecomForm({ ...wecomForm, space_id: e.target.value })}
+                            className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-sky-500"
+                          />
+                          <p className="mt-1 text-[11px] text-muted-foreground">
+                            在企业微信电脑端打开微盘空间，右键点击“复制链接”即可直接粘贴，系统将自动识别提取 SpaceId。
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* WebDAV 专有配置 */}
+                    {providerTab === 'webdav' && (
+                      <div className="rounded-xl border border-border/80 bg-surface-100/40 p-4 space-y-3.5">
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-xs font-semibold text-foreground">
+                              WebDAV 端点 URL <span className="text-red-500">*</span>
+                            </label>
+                            <span className="text-[10px] text-muted-foreground">
+                              Alist 路径为 <code className="text-emerald-500 font-bold">/dav</code>（字母 a，非 dev）
+                            </span>
+                          </div>
+                          <input
+                            type="text"
+                            placeholder="http://127.0.0.1:5244/dav 或 https://nas.local:5006"
+                            value={webdavForm.base_url}
+                            onChange={(e) => setWebdavForm({ ...webdavForm, base_url: e.target.value })}
+                            className={`w-full rounded-lg border bg-surface-card px-2.5 py-1.5 text-xs outline-none transition-colors ${webdavForm.base_url.includes('/dev')
+                              ? 'border-amber-500 focus:border-amber-500'
+                              : 'border-border focus:border-emerald-500'
+                              }`}
+                          />
+                          {webdavForm.base_url.includes('/dev') && (
+                            <div className="mt-1.5 flex items-center justify-between p-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-600 dark:text-amber-400 text-[11px] animate-fade-in">
+                              <span className="flex items-center gap-1">
+                                <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                                检测到输入包含 <code>/dev</code>，Alist 等服务标准路径为 <code>/dav</code>（字母 a）
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => setWebdavForm({ ...webdavForm, base_url: webdavForm.base_url.replace('/dev', '/dav') })}
+                                className="px-2 py-0.5 rounded bg-amber-500 hover:bg-amber-600 text-white font-medium transition shrink-0 ml-2"
+                              >
+                                一键修正为 /dav
+                              </button>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <label className="text-xs font-medium text-muted-foreground block mb-1">用户名</label>
+                            <input
+                              type="text"
+                              placeholder="admin"
+                              value={webdavForm.username}
+                              onChange={(e) => setWebdavForm({ ...webdavForm, username: e.target.value })}
+                              className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-emerald-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium text-muted-foreground block mb-1">密码</label>
+                            <input
+                              type="password"
+                              placeholder="••••••••"
+                              value={webdavForm.password}
+                              onChange={(e) => setWebdavForm({ ...webdavForm, password: e.target.value })}
+                              className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-emerald-500"
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="text-xs font-medium text-muted-foreground block mb-1">根路径 (Root Path)</label>
+                          <input
+                            type="text"
+                            placeholder="/"
+                            value={webdavForm.root_path}
+                            onChange={(e) => setWebdavForm({ ...webdavForm, root_path: e.target.value })}
+                            className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-emerald-500"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 对象存储 OSS 专有配置 */}
+                    {providerTab === 'oss' && (
+                      <div className="rounded-xl border border-border/80 bg-surface-100/40 p-4 space-y-3.5">
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <label className="text-xs font-medium text-muted-foreground block mb-1">
+                              Endpoint 端点
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="https://oss-cn-beijing.aliyuncs.com"
+                              value={ossForm.endpoint}
+                              onChange={(e) => setOssForm({ ...ossForm, endpoint: e.target.value })}
+                              className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-amber-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium text-muted-foreground block mb-1">
+                              Bucket 桶名
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="yybasket"
+                              value={ossForm.bucket}
+                              onChange={(e) => setOssForm({ ...ossForm, bucket: e.target.value })}
+                              className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-amber-500"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <label className="text-xs font-medium text-muted-foreground block mb-1">
+                              AccessKey ID
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="LTAI5t..."
+                              value={ossForm.access_key}
+                              onChange={(e) => setOssForm({ ...ossForm, access_key: e.target.value })}
+                              className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-amber-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium text-muted-foreground block mb-1">
+                              SecretKey Secret
+                            </label>
+                            <input
+                              type="password"
+                              placeholder="••••••••••••••••"
+                              value={ossForm.secret_key}
+                              onChange={(e) => setOssForm({ ...ossForm, secret_key: e.target.value })}
+                              className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs outline-none focus:border-amber-500"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 沙盒空间（本地硬盘目录）专有配置 */}
+                    {providerTab === 'sandbox' && (
+                      <div className="rounded-xl border border-border/80 bg-surface-100/40 p-4 space-y-3.5">
+                        <div>
+                          <div className="flex items-center justify-between mb-1">
+                            <label className="text-xs font-semibold text-foreground">
+                              选择沙盒与项目空间 <span className="text-red-500">*</span>
+                            </label>
+                            <span className="text-[10px] text-violet-400">自动读取沙盒绑定的本地硬盘目录</span>
+                          </div>
+                          <select
+                            value={sandboxForm.workspace_id}
+                            onChange={(e) => {
+                              const wsId = e.target.value;
+                              const matched = sandboxWorkspaces.find((w) => w.id === wsId);
+                              setSandboxForm({
+                                ...sandboxForm,
+                                workspace_id: wsId,
+                                root_path: matched?.root_path || '',
+                              });
+                              if (matched && !mountName.trim()) {
+                                setMountName(matched.name.replace(/^\[沙盒\]\s*/, '').trim());
+                              }
+                            }}
+                            className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-2 text-xs outline-none focus:border-violet-500"
+                          >
+                            <option value="">-- 请选择一个沙盒或项目空间 --</option>
+                            {sandboxWorkspaces.map((ws) => (
+                              <option key={ws.id} value={ws.id}>
+                                {ws.name} {ws.root_path ? `(${ws.root_path})` : ''}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                          <div>
+                            <label className="text-xs font-medium text-muted-foreground block mb-1">
+                              绑定的本地硬盘路径（也可直接填入本地路径）
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="如 E:/work/my-docs"
+                              value={sandboxForm.root_path}
+                              onChange={(e) => setSandboxForm({ ...sandboxForm, root_path: e.target.value })}
+                              className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs font-mono outline-none focus:border-violet-500"
+                            />
+                          </div>
+                          <div>
+                            <label className="text-xs font-medium text-muted-foreground block mb-1">
+                              限定子文件夹（选填，留空则扫描整个沙盒）
+                            </label>
+                            <input
+                              type="text"
+                              placeholder="如 docs 或 规程"
+                              value={sandboxForm.sub_path}
+                              onChange={(e) => setSandboxForm({ ...sandboxForm, sub_path: e.target.value })}
+                              className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs font-mono outline-none focus:border-violet-500"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 连通性测试结果面板 */}
+                    {testResult && (
+                      <div
+                        className={`flex items-start gap-2.5 rounded-xl p-3 text-xs leading-relaxed transition-all ${testResult.success
+                          ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20'
+                          : 'bg-red-500/10 text-red-500 border border-red-500/20'
+                          }`}
+                      >
+                        {testResult.success ? (
+                          <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5" />
+                        ) : (
+                          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                        )}
+                        <div className="space-y-0.5">
+                          <div className="font-semibold">{testResult.success ? '连接测试成功' : '连接测试失败'}</div>
+                          <div className="text-[11px] opacity-90">{testResult.message}</div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 操作按键组 */}
+                    <div className="flex items-center justify-between pt-2 border-t border-border">
+                      <span className="text-[11px] text-muted-foreground">
+                        建议先测试服务连通性，确保权限校验无误后再行保存。
+                      </span>
+
+                      <div className="flex items-center gap-2.5">
+                        <button
+                          type="button"
+                          onClick={handleTestConnection}
+                          disabled={testing}
+                          className="flex items-center gap-1.5 rounded-xl border border-border px-4 py-2 text-xs font-medium text-foreground hover:bg-surface-200 transition-colors disabled:opacity-50"
+                        >
+                          <PlugZap className="w-3.5 h-3.5 text-sky-500" />
+                          {testing ? '正在测试连通性...' : '测试连通性'}
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={handleSaveMount}
+                          disabled={saving}
+                          className="flex items-center gap-1.5 rounded-xl bg-sky-600 hover:bg-sky-700 px-4 py-2 text-xs font-medium text-white shadow-sm transition-all disabled:opacity-50"
+                        >
+                          <Check className="w-3.5 h-3.5" />
+                          {saving ? '保存中...' : '保存挂载'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 右侧：已挂载的数据源列表与说明卡片 (5 列) */}
+                <div className="lg:col-span-5 space-y-5">
+                  <div className="rounded-2xl border border-border bg-surface-card p-5 shadow-sm space-y-4">
+                    <div className="flex items-center justify-between border-b border-border pb-3">
+                      <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                        <Layers className="w-4 h-4 text-sky-500" />
+                        已挂载的虚拟数据源 ({mountsList.length})
+                      </h3>
+                      <button
+                        onClick={loadMounts}
+                        disabled={loadingMounts}
+                        className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200 transition-colors"
+                        title="刷新列表"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${loadingMounts ? 'animate-spin' : ''}`} />
+                      </button>
+                    </div>
+
+                    <div className="space-y-3">
+                      {mountsList.length === 0 ? (
+                        <div className="py-12 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl space-y-2">
+                          <HardDrive className="w-8 h-8 text-muted-foreground/40 mx-auto" />
+                          <div>暂未挂载外部知识库源</div>
+                          <p className="text-[11px] text-muted-foreground/80 max-w-[240px] mx-auto">
+                            请在左侧表单中配置企业微信微盘、WebDAV 或对象存储
+                          </p>
+                        </div>
+                      ) : (
+                        mountsList.map((m) => (
+                          <div
+                            key={m.mount_id}
+                            className="rounded-xl border border-border bg-surface-100/50 p-3.5 text-xs hover:border-border/80 transition-all space-y-2.5"
+                          >
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="flex items-center gap-2 min-w-0">
+                                {m.provider_type === 'wecom' && (
+                                  <div className="p-1.5 rounded-lg bg-sky-500/10 text-sky-500">
+                                    <Cloud className="w-4 h-4" />
+                                  </div>
+                                )}
+                                {m.provider_type === 'webdav' && (
+                                  <div className="p-1.5 rounded-lg bg-emerald-500/10 text-emerald-500">
+                                    <HardDrive className="w-4 h-4" />
+                                  </div>
+                                )}
+                                {m.provider_type === 'oss' && (
+                                  <div className="p-1.5 rounded-lg bg-amber-500/10 text-amber-500">
+                                    <Database className="w-4 h-4" />
+                                  </div>
+                                )}
+                                {m.provider_type === 'sandbox' && (
+                                  <div className="p-1.5 rounded-lg bg-violet-500/10 text-violet-500">
+                                    <FolderOpen className="w-4 h-4" />
+                                  </div>
+                                )}
+                                <div className="min-w-0">
+                                  <h4 className="font-semibold text-foreground truncate">{m.mount_name}</h4>
+                                  <div className="flex items-center gap-1.5 mt-0.5">
+                                    <span className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] font-mono uppercase text-muted-foreground">
+                                      {m.provider_type}
+                                    </span>
+                                    <span
+                                      className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${m.authority_tier === 1
+                                        ? 'bg-sky-500/10 text-sky-500'
+                                        : m.authority_tier === 2
+                                          ? 'bg-surface-200 text-foreground'
+                                          : 'bg-amber-500/10 text-amber-500'
+                                        }`}
+                                    >
+                                      Tier {m.authority_tier}
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              <button
+                                onClick={() => handleDeleteMount(m.mount_id)}
+                                className="text-muted-foreground hover:text-red-500 p-1.5 rounded-lg hover:bg-surface-200 transition-colors"
+                                title="解除此挂载"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" />
+                              </button>
+                            </div>
+
+                            <div className="pt-2 border-t border-border/60 flex items-center justify-between text-[11px] text-muted-foreground">
+                              <span className="truncate max-w-[170px]">
+                                {m.provider_type === 'wecom' && `微盘 Space: ${m.config?.space_id || '未知'}`}
+                                {m.provider_type === 'webdav' && `URL: ${m.config?.base_url || '未知'}`}
+                                {m.provider_type === 'oss' && `Bucket: ${m.config?.bucket || '未知'}`}
+                                {m.provider_type === 'sandbox' && `沙盒路径: ${m.config?.root_path || m.config?.workspace_id || '本地目录'}`}
+                              </span>
+                              <div className="flex items-center gap-2.5 shrink-0">
                                 <button
                                   type="button"
-                                  onClick={() => handleRenameKb(kb.kb_id, renamingValue)}
-                                  className="p-1 rounded text-emerald-500 hover:bg-emerald-500/15 transition-colors border border-emerald-500/30"
-                                  title="保存新名称 (Enter)"
+                                  onClick={() => handleViewFiles(m)}
+                                  className="text-foreground hover:text-sky-500 font-medium flex items-center gap-1 hover:underline transition-colors"
+                                  title="实时查看空间内所有文件与目录"
                                 >
-                                  <Check className="w-3.5 h-3.5" />
+                                  <FolderOpen className="w-3.5 h-3.5 text-sky-500" />
+                                  <span>浏览文件</span>
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => setRenamingKbId(null)}
-                                  className="p-1 rounded text-muted-foreground hover:bg-surface-200 transition-colors border border-border"
-                                  title="取消 (Esc)"
+                                  onClick={() => {
+                                    setSelectedMountForTrain(m.mount_id);
+                                    setActiveSection('train');
+                                  }}
+                                  className="text-sky-500 hover:text-sky-600 font-medium flex items-center gap-0.5"
                                 >
-                                  <X className="w-3.5 h-3.5" />
+                                  <span>前往训练</span>
+                                  <ArrowRight className="w-3 h-3" />
                                 </button>
                               </div>
-                            ) : (
-                              <div className="flex items-center gap-1.5 group/title">
-                                <span className="font-bold text-sm text-foreground tracking-tight select-text" title={kb.name}>
-                                  {kb.name}
-                                </span>
+                            </div>
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </div>
+
+                  {/* 快速下一步引导卡片 */}
+                  <div className="rounded-2xl border border-sky-500/20 bg-sky-500/5 p-5 space-y-2.5">
+                    <div className="flex items-center gap-2 text-sky-600 dark:text-sky-400 font-semibold text-xs">
+                      <ShieldCheck className="w-4 h-4" />
+                      挂载与索引机制说明
+                    </div>
+                    <p className="text-xs text-muted-foreground leading-relaxed">
+                      挂载完成后，数据源即纳入本地虚拟文件系统（CloudVFS）。您可随时在“2、知识库训练”中触发增量切片与语义向量 Embedding 构建，规程文档将生成独立 SQLite 知识库，支持跨专家调用与高精度仲裁搜索。
+                    </p>
+                    <div className="pt-1">
+                      <button
+                        onClick={() => setActiveSection('train')}
+                        className="inline-flex items-center gap-1.5 text-xs text-sky-600 dark:text-sky-400 font-medium hover:underline"
+                      >
+                        立即切换到知识库训练 <ArrowRight className="w-3 h-3" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* ========================================================= */}
+            {/* 第二部分：2、知识库的训练与维护                           */}
+            {/* ========================================================= */}
+            {activeSection === 'train' && (
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 animate-fade-in">
+                {/* 全宽：训练调度与知识库资产维护中心 (12 列) */}
+                <div className="lg:col-span-12 space-y-6">
+                  {/* 训练操作面板 */}
+                  <div className="rounded-2xl border border-border bg-surface-card p-5 md:p-6 shadow-sm space-y-5">
+                    <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 border-b border-border pb-4">
+                      <div>
+                        <h2 className="text-base font-semibold text-foreground flex items-center gap-2">
+                          <Sparkles className="w-4 h-4 text-amber-500" />
+                          规程切片与向量索引训练
+                        </h2>
+                        <p className="text-xs text-muted-foreground mt-0.5">
+                          从挂载数据源拉取最新文档，执行自适应滑动窗口分块、向量 Embedding 及图谱三元组提取
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      <div>
+                        <label className="text-xs font-semibold text-foreground block mb-1">
+                          选择训练数据源
+                        </label>
+                        <select
+                          value={selectedMountForTrain}
+                          onChange={(e) => setSelectedMountForTrain(e.target.value)}
+                          className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs outline-none focus:border-amber-500"
+                        >
+                          <option value="all">全量同步 (所有已挂载数据源)</option>
+                          {mountsList.map((m) => (
+                            <option key={m.mount_id} value={m.mount_id}>
+                              {m.mount_name} ({m.provider_type})
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="text-xs font-semibold text-foreground block mb-1">
+                          切片算法策略
+                        </label>
+                        <div className="w-full rounded-xl border border-border bg-surface-100 px-3 py-2 text-xs text-muted-foreground flex items-center justify-between">
+                          <span>自适应 Markdown / 标题感知切片</span>
+                          <span className="font-mono text-[10px] text-amber-500">512~1024 Token</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div>
+                      <button
+                        type="button"
+                        onClick={() => handleTriggerTrain()}
+                        disabled={training || mountsList.length === 0}
+                        className={`relative w-full overflow-hidden flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-medium text-xs shadow-md transition-all ${training
+                            ? 'bg-transparent border border-emerald-500/60 text-foreground cursor-wait'
+                            : 'bg-emerald-600 hover:bg-emerald-700 text-white disabled:opacity-50'
+                          }`}
+                      >
+                        {training && (
+                          <div
+                            className="absolute inset-y-0 left-0 bg-emerald-500/80 transition-all duration-300 ease-out"
+                            style={{ width: `${Math.min(100, Math.max(0, trainProgress))}%` }}
+                          />
+                        )}
+                        <RefreshCw className={`w-4 h-4 relative z-10 ${training ? 'animate-spin' : ''}`} />
+                        <span className="relative z-10">
+                          {training
+                            ? `${trainStageText || '正在增量解析文档与生成向量索引...'} (${trainProgress.toFixed(1)}%)`
+                            : '一键启动知识库增量训练与切片'}
+                        </span>
+                      </button>
+                      {mountsList.length === 0 && (
+                        <p className="text-[11px] text-amber-500 mt-1.5 text-center">
+                          当前尚未添加任何挂载源，请先切换到“1、知识库挂载”添加文档源。
+                        </p>
+                      )}
+                    </div>
+
+                    {trainStatusMsg && (
+                      <div className="p-3.5 rounded-xl bg-surface-100 border border-border text-xs text-foreground leading-relaxed whitespace-pre-wrap font-mono">
+                        {trainStatusMsg}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 独立知识库资产清单 (KB Assets) */}
+                  <div className="space-y-3">
+                    {kbsList.length === 0 ? (
+                      <div className="py-12 text-center text-xs text-muted-foreground border border-dashed border-border rounded-xl space-y-2 bg-surface-card">
+                        <Database className="w-8 h-8 text-muted-foreground/40 mx-auto" />
+                        <div>暂无已训练的知识库资产</div>
+                        <p className="text-[11px] text-muted-foreground/80 max-w-[240px] mx-auto">
+                          请在上方点击“启动增量训练”生成第一个知识库，或直接点击上方“导入 .ahkb”
+                        </p>
+                      </div>
+                    ) : (
+                      kbsList.map((kb) => {
+                        const isSelected = selectedKbId === kb.kb_id;
+                        const extra = kbStatusMap[kb.kb_id];
+                        return (
+                          <div
+                            key={kb.kb_id}
+                            onClick={() => setSelectedKbId(kb.kb_id)}
+                            className={`rounded-xl border p-4 text-xs transition-all cursor-pointer space-y-3 relative ${isSelected
+                                ? 'border-emerald-500/50 bg-surface-card shadow-sm ring-1 ring-emerald-500/20'
+                                : 'border-border bg-surface-card hover:border-border/90'
+                              }`}
+                          >
+                            {/* 顶栏：信息与操作收口 */}
+                            <div className="flex items-center justify-between gap-3 flex-wrap">
+                              {/* 左侧：名称 + 版本号 + 状态点 + 规则模板 */}
+                              <div className="flex items-center gap-3 flex-wrap min-w-0">
+                                {renamingKbId === kb.kb_id ? (
+                                  <div className="flex items-center gap-1.5" onClick={(e) => e.stopPropagation()}>
+                                    <input
+                                      type="text"
+                                      autoFocus
+                                      value={renamingValue}
+                                      onChange={(e) => setRenamingValue(e.target.value)}
+                                      onKeyDown={(e) => {
+                                        if (e.key === 'Enter') handleRenameKb(kb.kb_id, renamingValue);
+                                        if (e.key === 'Escape') setRenamingKbId(null);
+                                      }}
+                                      className="font-bold text-sm px-2 py-0.5 rounded border border-blue-500 bg-surface-100 text-foreground outline-none min-w-[200px]"
+                                    />
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRenameKb(kb.kb_id, renamingValue)}
+                                      className="p-1 rounded text-emerald-500 hover:bg-emerald-500/15 transition-colors border border-emerald-500/30"
+                                      title="保存新名称 (Enter)"
+                                    >
+                                      <Check className="w-3.5 h-3.5" />
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => setRenamingKbId(null)}
+                                      className="p-1 rounded text-muted-foreground hover:bg-surface-200 transition-colors border border-border"
+                                      title="取消 (Esc)"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <div className="flex items-center gap-1.5 group/title">
+                                    <span className="font-bold text-sm text-foreground tracking-tight select-text" title={kb.name}>
+                                      {kb.name}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={(e) => {
+                                        e.stopPropagation();
+                                        setRenamingKbId(kb.kb_id);
+                                        setRenamingValue(kb.name);
+                                      }}
+                                      className="p-0.5 rounded text-muted-foreground/40 hover:text-foreground transition-colors opacity-0 group-hover/title:opacity-100"
+                                      title="修改知识库名称"
+                                    >
+                                      <Edit2 className="w-3 h-3" />
+                                    </button>
+                                  </div>
+                                )}
+
+                                {/* v1.0.0 纯等宽浅灰小字，点击呼出版本抽屉 */}
                                 <button
                                   type="button"
                                   onClick={(e) => {
                                     e.stopPropagation();
-                                    setRenamingKbId(kb.kb_id);
-                                    setRenamingValue(kb.name);
-                                  }}
-                                  className="p-0.5 rounded text-muted-foreground/40 hover:text-foreground transition-colors opacity-0 group-hover/title:opacity-100"
-                                  title="修改知识库名称"
-                                >
-                                  <Edit2 className="w-3 h-3" />
-                                </button>
-                              </div>
-                            )}
-
-                            {/* v1.0.0 纯等宽浅灰小字，点击呼出版本抽屉 */}
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setVersionDrawerKb(kb);
-                              }}
-                              className="font-mono text-xs text-muted-foreground hover:text-foreground hover:underline transition-colors flex items-center gap-0.5 cursor-pointer"
-                              title="点击打开版本管理与回滚抽屉"
-                            >
-                              <span>{kb.active_version || 'v1.0.0'}</span>
-                            </button>
-
-                            {/* 状态圆点 + 轻量文本 */}
-                            {kb.is_published ? (
-                              <span className="flex items-center gap-1.5 text-xs text-emerald-500 font-medium" title="已发布正式版：绑定的智能体专家即可检索调用">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
-                                <span>已发布</span>
-                              </span>
-                            ) : (
-                              <span className="flex items-center gap-1.5 text-xs text-amber-500 font-medium" title="未发布：仅限在召回测试中检测，外部专家暂停调用">
-                                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
-                                <span>未发布</span>
-                              </span>
-                            )}
-
-                            {/* 只读锁定态轻量提示 */}
-                            {(kb.ownership_type === 'subscribed_ro' || kb.ownership_type === 'frozen_snapshot') && (
-                              <span className="text-[11px] text-muted-foreground bg-surface-200 px-1.5 py-0.5 rounded">
-                                🔒 {kb.ownership_type === 'subscribed_ro' ? '订阅只读' : '离线快照'}
-                              </span>
-                            )}
-
-                            {/* 领域规程模板下拉框 */}
-                            <select
-                              value={kb.domain_type || 'general'}
-                              onClick={(e) => e.stopPropagation()}
-                              onChange={(e) => {
-                                e.stopPropagation();
-                                handleUpdateDomain(kb.kb_id, e.target.value);
-                              }}
-                              className="px-2 py-0.5 rounded text-[11px] bg-surface-100 border border-border/80 text-muted-foreground hover:text-foreground hover:border-border outline-none cursor-pointer transition-colors"
-                              title="切换此知识库关联的业务领域规则模板 (击剑/马术/橄榄球/通用规章)"
-                            >
-                              {DOMAIN_OPTIONS.map((opt) => (
-                                <option key={opt.id} value={opt.id}>
-                                  {opt.label}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-
-                          {/* 右侧：动作严格分级收口（2 显性 + 1 折叠菜单） */}
-                          <div className="flex items-center gap-2 shrink-0 ml-auto relative">
-                            {/* 1. 高频查看：管理内容 */}
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                handleViewKbChunks(kb, 1, '');
-                              }}
-                              className="px-2.5 py-1 text-xs rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-foreground font-medium transition-colors shadow-xs"
-                              title="管理规程切片明细与分块"
-                            >
-                              管理内容
-                            </button>
-
-                            {/* 2. 主操作：发布 / 取消发布（全卡片唯一主高亮色） */}
-                            {kb.is_published ? (
-                              <button
-                                type="button"
-                                disabled={togglingPublishKbId === kb.kb_id}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleTogglePublish(kb, kb.active_version, false);
-                                }}
-                                className="px-2.5 py-1 text-xs rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-muted-foreground hover:text-amber-500 font-medium transition-colors disabled:opacity-50"
-                                title="取消发布：转为未发布测试状态"
-                              >
-                                {togglingPublishKbId === kb.kb_id ? '处理中...' : '取消发布'}
-                              </button>
-                            ) : (
-                              <button
-                                type="button"
-                                disabled={togglingPublishKbId === kb.kb_id}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  handleTogglePublish(kb, kb.active_version, true);
-                                }}
-                                className="px-3 py-1 text-xs rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-xs transition-colors disabled:opacity-50"
-                                title="正式发布上线对外开放"
-                              >
-                                {togglingPublishKbId === kb.kb_id ? '发布中...' : '发布'}
-                              </button>
-                            )}
-
-                            {/* 3. 低频维护收口：[ ⋯ ] 折叠菜单 */}
-                            <button
-                              type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setActionMenuKbId(actionMenuKbId === kb.kb_id ? null : kb.kb_id);
-                              }}
-                              className={`p-1.5 rounded-lg border text-muted-foreground hover:text-foreground transition-colors ${
-                                actionMenuKbId === kb.kb_id
-                                  ? 'border-border bg-surface-200 text-foreground'
-                                  : 'border-border/80 bg-surface-100 hover:bg-surface-200'
-                              }`}
-                              title="更多维护操作"
-                            >
-                              <MoreHorizontal className="w-3.5 h-3.5" />
-                            </button>
-
-                            {/* 下拉折叠菜单 Popup */}
-                            {actionMenuKbId === kb.kb_id && (
-                              <div
-                                onClick={(e) => e.stopPropagation()}
-                                className="absolute right-0 top-full mt-1.5 w-48 rounded-xl border border-border bg-surface-100 p-1 shadow-xl z-30 text-xs animate-fade-in"
-                              >
-                                <button
-                                  type="button"
-                                  disabled={exportingKbId === kb.kb_id}
-                                  onClick={() => {
-                                    setActionMenuKbId(null);
-                                    handleExportBundle(kb);
-                                  }}
-                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
-                                >
-                                  <Download className="w-3.5 h-3.5 text-muted-foreground" />
-                                  <span>{exportingKbId === kb.kb_id ? '导出中...' : '导出知识包 (.ahkb)'}</span>
-                                </button>
-
-                                <button
-                                  type="button"
-                                  disabled={extractingGraphKbId === kb.kb_id}
-                                  onClick={() => {
-                                    setActionMenuKbId(null);
-                                    handleExtractGraph(kb.kb_id);
-                                  }}
-                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
-                                >
-                                  <Zap className="w-3.5 h-3.5 text-muted-foreground" />
-                                  <span>{extractingGraphKbId === kb.kb_id ? '提取中...' : '提取图谱三元组'}</span>
-                                </button>
-
-                                <button
-                                  type="button"
-                                  disabled={rebuildingHypeKbId === kb.kb_id}
-                                  onClick={() => {
-                                    setActionMenuKbId(null);
-                                    handleRebuildHype(kb);
-                                  }}
-                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
-                                >
-                                  <Sparkles className="w-3.5 h-3.5 text-muted-foreground" />
-                                  <span>{rebuildingHypeKbId === kb.kb_id ? '提炼中...' : '重构短口语'}</span>
-                                </button>
-
-                                <button
-                                  type="button"
-                                  disabled={cleaningGarbledKbId === kb.kb_id}
-                                  onClick={() => {
-                                    setActionMenuKbId(null);
-                                    handleCleanupGarbled(kb);
-                                  }}
-                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
-                                >
-                                  <ShieldAlert className="w-3.5 h-3.5 text-muted-foreground" />
-                                  <span>{cleaningGarbledKbId === kb.kb_id ? '清理中...' : '清理乱码切片'}</span>
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setActionMenuKbId(null);
-                                    handlePruneKb(kb.kb_id);
-                                  }}
-                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
-                                >
-                                  <Scissors className="w-3.5 h-3.5 text-muted-foreground" />
-                                  <span>数据库瘦身 (VACUUM)</span>
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    setActionMenuKbId(null);
                                     setVersionDrawerKb(kb);
                                   }}
-                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                  className="font-mono text-xs text-muted-foreground hover:text-foreground hover:underline transition-colors flex items-center gap-0.5 cursor-pointer"
+                                  title="点击打开版本管理与回滚抽屉"
                                 >
-                                  <History className="w-3.5 h-3.5 text-muted-foreground" />
-                                  <span>版本历史与回滚</span>
+                                  <span>{kb.active_version || 'v1.0.0'}</span>
                                 </button>
 
-                                {extra?.hierarchy?.needs_upgrade && (
+                                {/* 状态圆点 + 轻量文本 */}
+                                {kb.is_published ? (
+                                  <span className="flex items-center gap-1.5 text-xs text-emerald-500 font-medium" title="已发布正式版：绑定的智能体专家即可检索调用">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                                    <span>已发布</span>
+                                  </span>
+                                ) : (
+                                  <span className="flex items-center gap-1.5 text-xs text-amber-500 font-medium" title="未发布：仅限在召回测试中检测，外部专家暂停调用">
+                                    <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                                    <span>未发布</span>
+                                  </span>
+                                )}
+
+                                {/* 只读锁定态轻量提示 */}
+                                {(kb.ownership_type === 'subscribed_ro' || kb.ownership_type === 'frozen_snapshot') && (
+                                  <span className="text-[11px] text-muted-foreground bg-surface-200 px-1.5 py-0.5 rounded">
+                                    🔒 {kb.ownership_type === 'subscribed_ro' ? '订阅只读' : '离线快照'}
+                                  </span>
+                                )}
+
+                                {/* 领域规程模板下拉框 */}
+                                <select
+                                  value={kb.domain_type || 'general'}
+                                  onClick={(e) => e.stopPropagation()}
+                                  onChange={(e) => {
+                                    e.stopPropagation();
+                                    handleUpdateDomain(kb.kb_id, e.target.value);
+                                  }}
+                                  className="px-2 py-0.5 rounded text-[11px] bg-surface-100 border border-border/80 text-muted-foreground hover:text-foreground hover:border-border outline-none cursor-pointer transition-colors"
+                                  title="切换此知识库关联的业务领域规则模板 (击剑/马术/橄榄球/通用规章)"
+                                >
+                                  {DOMAIN_OPTIONS.map((opt) => (
+                                    <option key={opt.id} value={opt.id}>
+                                      {opt.label}
+                                    </option>
+                                  ))}
+                                </select>
+                              </div>
+
+                              {/* 右侧：动作严格分级收口（2 显性 + 1 折叠菜单） */}
+                              <div className="flex items-center gap-2 shrink-0 ml-auto relative">
+                                {/* 1. 高频查看：管理内容 */}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleViewKbChunks(kb, 1, '');
+                                  }}
+                                  className="px-2.5 py-1 text-xs rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-foreground font-medium transition-colors shadow-xs"
+                                  title="管理规程切片明细与分块"
+                                >
+                                  管理内容
+                                </button>
+
+                                {/* 2. 主操作：发布 / 取消发布（全卡片唯一主高亮色） */}
+                                {kb.is_published ? (
                                   <button
                                     type="button"
-                                    disabled={upgradingKbId === kb.kb_id}
-                                    onClick={() => {
-                                      setActionMenuKbId(null);
-                                      handleUpgradeHierarchy(kb);
+                                    disabled={togglingPublishKbId === kb.kb_id}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleTogglePublish(kb, kb.active_version, false);
                                     }}
-                                    className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-amber-500 hover:bg-surface-200 transition-colors text-left"
+                                    className="px-2.5 py-1 text-xs rounded-lg border border-border bg-surface-100 hover:bg-surface-200 text-muted-foreground hover:text-amber-500 font-medium transition-colors disabled:opacity-50"
+                                    title="取消发布：转为未发布测试状态"
                                   >
-                                    <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-                                    <span>重塑分层索引</span>
+                                    {togglingPublishKbId === kb.kb_id ? '处理中...' : '取消发布'}
+                                  </button>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    disabled={togglingPublishKbId === kb.kb_id}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleTogglePublish(kb, kb.active_version, true);
+                                    }}
+                                    className="px-3 py-1 text-xs rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-medium shadow-xs transition-colors disabled:opacity-50"
+                                    title="正式发布上线对外开放"
+                                  >
+                                    {togglingPublishKbId === kb.kb_id ? '发布中...' : '发布'}
                                   </button>
                                 )}
 
-                                <div className="my-1 border-t border-border" />
+                                {/* 2.5 单个知识库系统级定时同步开关（联动「已安排调度」） */}
+                                {kb.source_id && (
+                                  <div
+                                    className="inline-flex items-center gap-1"
+                                    onClick={(e) => e.stopPropagation()}
+                                  >
+                                    {kb.auto_sync_enabled ? (
+                                      <>
+                                        <select
+                                          value={kb.auto_sync_cron || '*/15 * * * *'}
+                                          disabled={togglingAutoSyncKbId === kb.kb_id}
+                                          onChange={(e) => handleToggleAutoSync(kb, true, e.target.value)}
+                                          title="调整定时同步频率（同步至已安排调度）"
+                                          className="px-1.5 py-1 text-[11px] rounded-lg border border-sky-500/35 bg-sky-500/10 text-sky-400 focus:outline-none cursor-pointer"
+                                        >
+                                          <option value="*/15 * * * *">每15分</option>
+                                          <option value="*/30 * * * *">每30分</option>
+                                          <option value="0 * * * *">每小时</option>
+                                          <option value="0 2 * * *">每天02:00</option>
+                                        </select>
+                                        <button
+                                          type="button"
+                                          disabled={togglingAutoSyncKbId === kb.kb_id}
+                                          onClick={() => handleToggleAutoSync(kb, false)}
+                                          className="px-2 py-1 text-[11px] rounded-lg border border-sky-500/35 bg-sky-500/15 hover:bg-red-500/15 hover:border-red-500/40 hover:text-red-400 text-sky-400 font-medium flex items-center gap-1 transition-colors disabled:opacity-50"
+                                          title="已开启定时同步（点击关闭并从已安排调度自动移除）"
+                                        >
+                                          <Clock className="w-3 h-3" />
+                                          <span>{togglingAutoSyncKbId === kb.kb_id ? '处理中' : '定时同步中'}</span>
+                                        </button>
+                                      </>
+                                    ) : (
+                                      <button
+                                        type="button"
+                                        disabled={togglingAutoSyncKbId === kb.kb_id}
+                                        onClick={() => handleToggleAutoSync(kb, true, '*/15 * * * *')}
+                                        className="px-2 py-1 text-[11px] rounded-lg border border-border bg-surface-100 hover:bg-sky-500/10 hover:border-sky-500/30 hover:text-sky-400 text-muted-foreground font-medium flex items-center gap-1 transition-colors disabled:opacity-50"
+                                        title="开启定时增量同步（将自动添加到左侧「已安排调度」）"
+                                      >
+                                        <Clock className="w-3 h-3" />
+                                        <span>{togglingAutoSyncKbId === kb.kb_id ? '开启中' : '开启定时'}</span>
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
 
+                                {/* 3. 低频维护收口：[ ⋯ ] 折叠菜单 */}
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    setActionMenuKbId(null);
-                                    handleDeleteKb(kb.kb_id, kb.name);
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setActionMenuKbId(actionMenuKbId === kb.kb_id ? null : kb.kb_id);
                                   }}
-                                  className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-rose-500 hover:bg-rose-500/10 transition-colors text-left"
+                                  className={`p-1.5 rounded-lg border text-muted-foreground hover:text-foreground transition-colors ${actionMenuKbId === kb.kb_id
+                                      ? 'border-border bg-surface-200 text-foreground'
+                                      : 'border-border/80 bg-surface-100 hover:bg-surface-200'
+                                    }`}
+                                  title="更多维护操作"
                                 >
-                                  <Trash2 className="w-3.5 h-3.5" />
-                                  <span>彻底销毁知识库</span>
+                                  <MoreHorizontal className="w-3.5 h-3.5" />
                                 </button>
+
+                                {/* 下拉折叠菜单 Popup */}
+                                {actionMenuKbId === kb.kb_id && (
+                                  <div
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="absolute right-0 top-full mt-1.5 w-48 rounded-xl border border-border bg-surface-100 p-1 shadow-xl z-30 text-xs animate-fade-in"
+                                  >
+                                    <button
+                                      type="button"
+                                      disabled={exportingKbId === kb.kb_id}
+                                      onClick={() => {
+                                        setActionMenuKbId(null);
+                                        handleExportBundle(kb);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                    >
+                                      <Download className="w-3.5 h-3.5 text-muted-foreground" />
+                                      <span>{exportingKbId === kb.kb_id ? '导出中...' : '导出知识包 (.ahkb)'}</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      disabled={extractingGraphKbId === kb.kb_id}
+                                      onClick={() => {
+                                        setActionMenuKbId(null);
+                                        handleExtractGraph(kb.kb_id);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                    >
+                                      <Zap className="w-3.5 h-3.5 text-muted-foreground" />
+                                      <span>{extractingGraphKbId === kb.kb_id ? '提取中...' : '提取图谱三元组'}</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      disabled={rebuildingHypeKbId === kb.kb_id}
+                                      onClick={() => {
+                                        setActionMenuKbId(null);
+                                        handleRebuildHype(kb);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                    >
+                                      <Sparkles className="w-3.5 h-3.5 text-muted-foreground" />
+                                      <span>{rebuildingHypeKbId === kb.kb_id ? '提炼中...' : '重构短口语'}</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      disabled={cleaningGarbledKbId === kb.kb_id}
+                                      onClick={() => {
+                                        setActionMenuKbId(null);
+                                        handleCleanupGarbled(kb);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                    >
+                                      <ShieldAlert className="w-3.5 h-3.5 text-muted-foreground" />
+                                      <span>{cleaningGarbledKbId === kb.kb_id ? '清理中...' : '清理乱码切片'}</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setActionMenuKbId(null);
+                                        handlePruneKb(kb.kb_id);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                    >
+                                      <Scissors className="w-3.5 h-3.5 text-muted-foreground" />
+                                      <span>数据库瘦身 (VACUUM)</span>
+                                    </button>
+
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setActionMenuKbId(null);
+                                        setVersionDrawerKb(kb);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-foreground hover:bg-surface-200 transition-colors text-left"
+                                    >
+                                      <History className="w-3.5 h-3.5 text-muted-foreground" />
+                                      <span>版本历史与回滚</span>
+                                    </button>
+
+                                    {extra?.hierarchy?.needs_upgrade && (
+                                      <button
+                                        type="button"
+                                        disabled={upgradingKbId === kb.kb_id}
+                                        onClick={() => {
+                                          setActionMenuKbId(null);
+                                          handleUpgradeHierarchy(kb);
+                                        }}
+                                        className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-amber-500 hover:bg-surface-200 transition-colors text-left"
+                                      >
+                                        <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                                        <span>重塑分层索引</span>
+                                      </button>
+                                    )}
+
+                                    <div className="my-1 border-t border-border" />
+
+                                    <button
+                                      type="button"
+                                      onClick={() => {
+                                        setActionMenuKbId(null);
+                                        handleDeleteKb(kb.kb_id, kb.name);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-2.5 py-1.5 rounded-lg text-rose-500 hover:bg-rose-500/10 transition-colors text-left"
+                                    >
+                                      <Trash2 className="w-3.5 h-3.5" />
+                                      <span>彻底销毁知识库</span>
+                                    </button>
+                                  </div>
+                                )}
                               </div>
-                            )}
-                          </div>
-                        </div>
+                            </div>
 
-                        {/* 底栏：细分割线下的 4 列等宽统计条 */}
-                        <div className="pt-2.5 border-t border-border/40 grid grid-cols-4 gap-2 text-xs">
-                          {/* 切片数 */}
-                          <div
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleViewKbChunks(kb, 1, '');
-                            }}
-                            className="cursor-pointer group/stat"
-                            title="点击查看所有规程切片明细"
-                          >
-                            <span className="text-muted-foreground text-[11px] block">正文切片</span>
-                            <span className="font-bold text-foreground font-mono group-hover/stat:text-sky-400 group-hover/stat:underline tabular-nums transition-colors">
-                              {kb.chunk_count.toLocaleString()}
-                            </span>
-                          </div>
-
-                          {/* 图谱三元组 */}
-                          <div
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleViewKbTriples(kb, 1, '');
-                            }}
-                            className="cursor-pointer group/stat"
-                            title="点击查看知识图谱实体与三元组资产"
-                          >
-                            <span className="text-muted-foreground text-[11px] block">图谱三元组</span>
-                            <span className="font-bold text-foreground font-mono group-hover/stat:text-amber-400 group-hover/stat:underline tabular-nums transition-colors">
-                              {kb.triple_count.toLocaleString()}
-                            </span>
-                          </div>
-
-                          {/* 口语增强进度 */}
-                          <div
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleOpenOralResults(kb);
-                            }}
-                            className="cursor-pointer group/stat"
-                            title="点击查看口语化问答与规则映射结果"
-                          >
-                            <span className="text-muted-foreground text-[11px] block">口语增强</span>
-                            {extra?.enhancement && extra.enhancement.total_parents > 0 ? (
-                              (extra.enhancement.hype_completed >= extra.enhancement.total_parents || extra.enhancement.status === 'completed') ? (
-                                <span className="text-emerald-500 font-semibold group-hover/stat:underline transition-colors">
-                                  就绪
+                            {/* 底栏：细分割线下的 4 列等宽统计条 */}
+                            <div className="pt-2.5 border-t border-border/40 grid grid-cols-4 gap-2 text-xs">
+                              {/* 切片数 */}
+                              <div
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleViewKbChunks(kb, 1, '');
+                                }}
+                                className="cursor-pointer group/stat"
+                                title="点击查看所有规程切片明细"
+                              >
+                                <span className="text-muted-foreground text-[11px] block">正文切片</span>
+                                <span className="font-bold text-foreground font-mono group-hover/stat:text-sky-400 group-hover/stat:underline tabular-nums transition-colors">
+                                  {kb.chunk_count.toLocaleString()}
                                 </span>
-                              ) : (
-                                <span className="text-purple-400 font-mono group-hover/stat:underline tabular-nums transition-colors">
-                                  {extra.enhancement.hype_completed}/{extra.enhancement.total_parents}
-                                </span>
-                              )
-                            ) : (
-                              <span className="text-muted-foreground/60 group-hover/stat:underline transition-colors">
-                                未提炼
-                              </span>
-                            )}
-                          </div>
+                              </div>
 
-                          {/* 数据库体积 */}
-                          <div
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handlePruneKb(kb.kb_id);
-                            }}
-                            className="cursor-pointer group/stat"
-                            title="点击执行数据库 VACUUM 瘦身清理"
-                          >
-                            <span className="text-muted-foreground text-[11px] block">体积</span>
-                            <span className="font-bold text-foreground font-mono group-hover/stat:text-purple-400 group-hover/stat:underline tabular-nums transition-colors">
-                              {(kb.disk_size_bytes / (1024 * 1024)).toFixed(2)} MB
-                            </span>
+                              {/* 图谱三元组 */}
+                              <div
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleViewKbTriples(kb, 1, '');
+                                }}
+                                className="cursor-pointer group/stat"
+                                title="点击查看知识图谱实体与三元组资产"
+                              >
+                                <span className="text-muted-foreground text-[11px] block">图谱三元组</span>
+                                <span className="font-bold text-foreground font-mono group-hover/stat:text-amber-400 group-hover/stat:underline tabular-nums transition-colors">
+                                  {kb.triple_count.toLocaleString()}
+                                </span>
+                              </div>
+
+                              {/* 口语增强进度 */}
+                              <div
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handleOpenOralResults(kb);
+                                }}
+                                className="cursor-pointer group/stat"
+                                title="点击查看口语化问答与规则映射结果"
+                              >
+                                <span className="text-muted-foreground text-[11px] block">口语增强</span>
+                                {extra?.enhancement && extra.enhancement.total_parents > 0 ? (
+                                  (extra.enhancement.hype_completed >= extra.enhancement.total_parents || extra.enhancement.status === 'completed') ? (
+                                    <span className="text-emerald-500 font-semibold group-hover/stat:underline transition-colors">
+                                      就绪
+                                    </span>
+                                  ) : (
+                                    <span className="text-purple-400 font-mono group-hover/stat:underline tabular-nums transition-colors">
+                                      {extra.enhancement.hype_completed}/{extra.enhancement.total_parents}
+                                    </span>
+                                  )
+                                ) : (
+                                  <span className="text-muted-foreground/60 group-hover/stat:underline transition-colors">
+                                    未提炼
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* 数据库体积 */}
+                              <div
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  handlePruneKb(kb.kb_id);
+                                }}
+                                className="cursor-pointer group/stat"
+                                title="点击执行数据库 VACUUM 瘦身清理"
+                              >
+                                <span className="text-muted-foreground text-[11px] block">体积</span>
+                                <span className="font-bold text-foreground font-mono group-hover/stat:text-purple-400 group-hover/stat:underline tabular-nums transition-colors">
+                                  {(kb.disk_size_bytes / (1024 * 1024)).toFixed(2)} MB
+                                </span>
+                              </div>
+                            </div>
                           </div>
-                        </div>
+                        );
+                      })
+                    )}
+
+                    {/* 底部弱化批量清空 */}
+                    {kbsList.length > 0 && (
+                      <div className="flex justify-end pt-3">
+                        <button
+                          type="button"
+                          onClick={handlePurgeAllKbs}
+                          className="text-xs text-muted-foreground/40 hover:text-rose-500 transition-colors flex items-center gap-1.5"
+                          title="清空并彻底物理销毁所有独立知识库资产"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          <span>批量清空全部知识库</span>
+                        </button>
                       </div>
-                    );
-                  })
-                )}
-
-                {/* 底部弱化批量清空 */}
-                {kbsList.length > 0 && (
-                  <div className="flex justify-end pt-3">
-                    <button
-                      type="button"
-                      onClick={handlePurgeAllKbs}
-                      className="text-xs text-muted-foreground/40 hover:text-rose-500 transition-colors flex items-center gap-1.5"
-                      title="清空并彻底物理销毁所有独立知识库资产"
-                    >
-                      <Trash2 className="w-3 h-3" />
-                      <span>批量清空全部知识库</span>
-                    </button>
+                    )}
                   </div>
-                )}
+                </div>
               </div>
-            </div>
+            )}
           </div>
-        )}
-      </div>
+        </div>
       )}
 
       {/* 空间文件列表浏览器模态框 */}
@@ -3504,7 +3845,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                     if (exportedModalInfo.downloadUrl) {
                       try {
                         window.URL.revokeObjectURL(exportedModalInfo.downloadUrl);
-                      } catch {}
+                      } catch { }
                     }
                     setExportedModalInfo(null);
                     setIsPathCopied(false);

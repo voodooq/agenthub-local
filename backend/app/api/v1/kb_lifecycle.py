@@ -290,6 +290,10 @@ async def delete_base(kb_id: str) -> dict[str, Any]:
         await conn.execute("UPDATE wiki_pages SET kb_id = '' WHERE kb_id = ?", (kb_id,))
         await conn.execute("DELETE FROM kb_versions WHERE kb_id = ?", (kb_id,))
         await conn.execute("DELETE FROM expert_kb_bindings WHERE kb_id = ?", (kb_id,))
+        await conn.execute(
+            "DELETE FROM scheduled_tasks WHERE id = ? OR prompt_template = ?",
+            (f"sched_kbsync_{kb_id}", f"__SYS_KB_SYNC__:{kb_id}"),
+        )
         await conn.execute("DELETE FROM knowledge_bases WHERE kb_id = ?", (kb_id,))
         await conn.commit()
 
@@ -457,6 +461,88 @@ async def toggle_kb_version_publish(kb_id: str, payload: PublishTogglePayload) -
     except Exception as e:
         logger.error(f"切换知识库发布状态异常: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+class AutoSyncTogglePayload(BaseModel):
+    enabled: bool = Field(..., description="True=开启并在已安排调度中创建定时任务, False=关闭并自动删除定时任务")
+    cron_expr: str = Field(default="*/15 * * * *", description="Cron 周期表达式，默认每 15 分钟")
+    workspace_id: str = Field(default="default", description="所属工作区 ID")
+
+
+@router.post("/bases/{kb_id}/auto-sync-toggle")
+@router.post("/{kb_id}/auto-sync-toggle")
+async def toggle_kb_auto_sync_schedule(kb_id: str, payload: AutoSyncTogglePayload) -> dict[str, Any]:
+    """为单个知识库开启或关闭系统级自动增量同步定时任务（联动已安排调度表）。"""
+    from datetime import datetime
+    from ...repository.db import db_manager
+    from ...scheduler.task_scheduler import CronExpression, TaskScheduler, compute_next_run_iso
+
+    kb = await KBLifecycleManager.get_kb(kb_id)
+    if not kb:
+        raise HTTPException(status_code=404, detail=f"知识库不存在: {kb_id}")
+
+    task_id = f"sched_kbsync_{kb_id}"
+    prompt_marker = f"__SYS_KB_SYNC__:{kb_id}"
+
+    if not payload.enabled:
+        async with db_manager.get_connection() as conn:
+            await conn.execute(
+                "DELETE FROM scheduled_tasks WHERE id = ? OR prompt_template = ?",
+                (task_id, prompt_marker),
+            )
+            await conn.commit()
+        return {
+            "success": True,
+            "kb_id": kb_id,
+            "auto_sync_enabled": False,
+            "auto_sync_task_id": None,
+            "message": f"已关闭【{kb['name']}】定时增量同步，并从「已安排调度」中自动移除。",
+        }
+
+    cron_expr = (payload.cron_expr or "*/15 * * * *").strip()
+    try:
+        CronExpression.parse(cron_expr)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"Cron 表达式无效: {e}")
+
+    TaskScheduler.get_instance().ensure_started()
+    now_dt = datetime.now()
+    now_iso = now_dt.isoformat()
+    next_run_at = compute_next_run_iso(cron_expr, now_dt)
+    task_name = f"知识库增量同步 · {kb['name']}"
+
+    async with db_manager.get_connection() as conn:
+        cur = await conn.execute("SELECT id FROM scheduled_tasks WHERE id = ?", (task_id,))
+        exists = (await cur.fetchone()) is not None
+        if exists:
+            await conn.execute(
+                """
+                UPDATE scheduled_tasks
+                SET name = ?, cron_expr = ?, prompt_template = ?, status = 'active', next_run_at = ?
+                WHERE id = ?
+                """,
+                (task_name, cron_expr, prompt_marker, next_run_at, task_id),
+            )
+        else:
+            await conn.execute(
+                """
+                INSERT INTO scheduled_tasks (
+                    id, workspace_id, name, cron_expr, prompt_template, agent_id, status, next_run_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, NULL, 'active', ?, ?)
+                """,
+                (task_id, payload.workspace_id or "default", task_name, cron_expr, prompt_marker, next_run_at, now_iso),
+            )
+        await conn.commit()
+
+    return {
+        "success": True,
+        "kb_id": kb_id,
+        "auto_sync_enabled": True,
+        "auto_sync_cron": cron_expr,
+        "auto_sync_task_id": task_id,
+        "next_run_at": next_run_at,
+        "message": f"已开启【{kb['name']}】定时增量同步（{cron_expr}），可在「已安排调度」中查看与管理。",
+    }
 
 
 @router.post("/bases/{kb_id}/playground")
@@ -1168,7 +1254,12 @@ async def _record_manual_oral_version_snapshot(
     def _count() -> tuple[int, int]:
         conn = sqlite3.connect(str(db_path))
         try:
-            cnt = int(conn.execute("SELECT COUNT(*) FROM hybrid_chunks").fetchone()[0] or 0)
+            cnt = int(
+                conn.execute(
+                    "SELECT COUNT(*) FROM hybrid_chunks WHERE chunk_role IN ('parent', 'child') OR chunk_role IS NULL"
+                ).fetchone()[0]
+                or 0
+            )
             return cnt, int(db_path.stat().st_size if db_path.exists() else 0)
         finally:
             conn.close()
@@ -1525,8 +1616,10 @@ async def cleanup_garbled_chunks(
                 except Exception:
                     pass
 
-            # 统计剩余数量
-            cur.execute("SELECT count(*) FROM hybrid_chunks")
+            # 统计剩余正文主切片数量（排除口语衍生与摘要切片）
+            cur.execute(
+                "SELECT count(*) FROM hybrid_chunks WHERE chunk_role IN ('parent', 'child') OR chunk_role IS NULL"
+            )
             rem_chunks = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM knowledge_triples")
             rem_triples = cur.fetchone()[0]

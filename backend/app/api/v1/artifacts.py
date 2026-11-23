@@ -519,11 +519,11 @@ def _build_artifact_preview_payload(
 
 @router.get("")
 async def list_artifacts(
-    workspace_id: str = Query(..., description="工作区 ID"),
+    workspace_id: str = Query(default="__all__", description="工作区 ID，传 __all__ 返回全部工作区资产"),
     file_type: str | None = Query(None, description="资产分类: document / code / media / report"),
 ):
-    """获取指定工作区的资产列表（自动物理增量巡检）"""
-    items = await ArtifactRepository.list_artifacts(workspace_id, file_type, auto_sync=True)
+    """获取指定工作区或全部工作区的资产列表"""
+    items = await ArtifactRepository.list_artifacts(workspace_id, file_type, auto_sync=(workspace_id != "__all__"))
     return {"artifacts": items, "total": len(items)}
 
 

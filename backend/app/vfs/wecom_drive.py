@@ -141,62 +141,78 @@ class WeComDriveProvider(CloudVFSProvider):
 
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
+                visited_folders: set[str] = set()
                 while folder_queue:
                     cur_father = folder_queue.pop(0)
+                    if cur_father in visited_folders:
+                        continue
+                    visited_folders.add(cur_father)
+
                     url = f"{self.API_BASE}/wedrive/file_list?access_token={token}"
-                    payload = {
-                        "spaceid": self.space_id,
-                        "fatherid": cur_father,
-                        "sort_type": 1,
-                        "start": 0,
-                        "limit": 100,
-                    }
+                    start = 0
+                    while True:
+                        payload = {
+                            "spaceid": self.space_id,
+                            "fatherid": cur_father,
+                            "sort_type": 1,
+                            "start": start,
+                            "limit": 100,
+                        }
 
-                    resp = await client.post(url, json=payload)
-                    data = resp.json()
-                    errcode = data.get("errcode", 0)
-                    if errcode != 0:
-                        errmsg = data.get("errmsg", "")
-                        if errcode == 640001:
-                            logger.warning(f"微盘遍历失败: 空间不存在 (space not exist)。请检查 SpaceId ({self.space_id}) 是否准确。")
-                        elif errcode == 640021:
-                            logger.warning(f"微盘遍历失败: 无效目录 (invalid fatherid: {cur_father})。")
-                        elif errcode in (2000002, 640002, 640003, 640004):
-                            logger.warning("微盘遍历失败: 无空间权限。请在企微信微盘中将当前应用添加为空间成员。")
-                        else:
-                            logger.warning(f"微盘遍历失败: {errmsg} (code: {errcode})")
-                        break
+                        resp = await client.post(url, json=payload)
+                        data = resp.json()
+                        errcode = data.get("errcode", 0)
+                        if errcode != 0:
+                            errmsg = data.get("errmsg", "")
+                            if errcode == 640001:
+                                logger.warning(f"微盘遍历失败: 空间不存在 (space not exist)。请检查 SpaceId ({self.space_id}) 是否准确。")
+                            elif errcode == 640021:
+                                logger.warning(f"微盘遍历失败: 无效目录 (invalid fatherid: {cur_father})。")
+                            elif errcode in (2000002, 640002, 640003, 640004):
+                                logger.warning("微盘遍历失败: 无空间权限。请在企微信微盘中将当前应用添加为空间成员。")
+                            else:
+                                logger.warning(f"微盘遍历失败: {errmsg} (code: {errcode})")
+                            break
 
-                    file_list = data.get("file_list", {}).get("item", [])
-                    for item in file_list:
-                        fileid = item.get("fileid", "")
-                        title = item.get("file_name", "")
-                        size = item.get("file_size", 0)
-                        mtime = float(item.get("mtime", time.time()))
-                        # 企微 API 标准定义: file_type 1=目录/文件夹, 2=普通文件, 3=微文档, 4=微表格, 5=微白板
-                        file_type = item.get("file_type", 2)
-                        is_dir = (file_type == 1)
+                        file_list = data.get("file_list", {}).get("item", [])
+                        for item in file_list:
+                            fileid = item.get("fileid", "")
+                            title = item.get("file_name", "")
+                            size = item.get("file_size", 0)
+                            mtime = float(item.get("mtime", time.time()))
+                            # 企微 API 标准定义: file_type 1=目录/文件夹, 2=普通文件, 3=微文档, 4=微表格, 5=微白板
+                            file_type = item.get("file_type", 2)
+                            is_dir = (file_type == 1)
 
-                        if is_dir and recursive:
-                            folder_queue.append(fileid)
+                            if is_dir and recursive and fileid not in visited_folders:
+                                folder_queue.append(fileid)
 
-                        remote_uri = f"wecom://{self.space_id}/{fileid}"
-                        ext = item.get("file_ext", "")
-                        if not ext and "." in title:
-                            ext = title.split(".")[-1].lower()
+                            remote_uri = f"wecom://{self.space_id}/{fileid}"
+                            ext = item.get("file_ext", "")
+                            if not ext and "." in title:
+                                ext = title.split(".")[-1].lower()
 
-                        files.append(
-                            CloudFileMeta(
-                                remote_uri=remote_uri,
-                                title=title,
-                                size=size,
-                                etag=item.get("sha") or item.get("md5") or fileid,
-                                mtime=mtime,
-                                mime_type=ext,
-                                is_dir=is_dir,
-                                authority_tier=self.authority_tier,
+                            files.append(
+                                CloudFileMeta(
+                                    remote_uri=remote_uri,
+                                    title=title,
+                                    size=size,
+                                    etag=item.get("sha") or item.get("md5") or fileid,
+                                    mtime=mtime,
+                                    mime_type=ext,
+                                    is_dir=is_dir,
+                                    authority_tier=self.authority_tier,
+                                )
                             )
-                        )
+
+                        has_more = bool(data.get("has_more"))
+                        next_start = data.get("next_start")
+                        if not has_more or not file_list:
+                            break
+                        if isinstance(next_start, int) and next_start > start:
+                            start = next_start
+                        else:
+                            start += len(file_list)
         except Exception as e:
             logger.warning(f"微盘请求异常: {e}")
 

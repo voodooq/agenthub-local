@@ -327,6 +327,12 @@ def _row_to_agent_dict(row: Any) -> dict[str, Any]:
     item["min_relevance_score"] = float(item.get("min_relevance_score") or 0.42)
     item["api_service_enabled"] = int(item.get("api_service_enabled") or 0)
     item["api_model_slug"] = item.get("api_model_slug") or ""
+    item["allow_biz_sql"] = int(item.get("allow_biz_sql") or 0)
+    try:
+        raw_ws = json.loads(item.get("bound_wiki_spaces_json") or "[]")
+        item["bound_wiki_spaces"] = [str(x).strip() for x in raw_ws if str(x).strip()] if isinstance(raw_ws, list) else []
+    except Exception:
+        item["bound_wiki_spaces"] = []
     return item
 
 
@@ -358,6 +364,8 @@ class AgentProfileRepository:
                     ("min_relevance_score", "REAL NOT NULL DEFAULT 0.42"),
                     ("api_service_enabled", "INTEGER NOT NULL DEFAULT 0"),
                     ("api_model_slug", "TEXT NOT NULL DEFAULT ''"),
+                    ("allow_biz_sql", "INTEGER NOT NULL DEFAULT 0"),
+                    ("bound_wiki_spaces_json", "TEXT NOT NULL DEFAULT '[]'"),
                 ]:
                     if new_col not in cols:
                         try:
@@ -489,6 +497,12 @@ class AgentProfileRepository:
         min_relevance_score = float(data.get("min_relevance_score") if data.get("min_relevance_score") is not None else 0.42)
         api_service_enabled = int(data.get("api_service_enabled") or 0)
         api_model_slug = str(data.get("api_model_slug") or "").strip()
+        allow_biz_sql = int(data.get("allow_biz_sql") or 0)
+        raw_wiki_spaces = data.get("bound_wiki_spaces")
+        bound_wiki_spaces_json = json.dumps(
+            [str(x).strip() for x in raw_wiki_spaces if str(x).strip()] if isinstance(raw_wiki_spaces, list) else [],
+            ensure_ascii=False,
+        )
 
         async with db_manager.get_connection() as conn:
             await conn.execute(
@@ -497,10 +511,10 @@ class AgentProfileRepository:
                     id, name, description, base_model, context_prompt,
                     skill_ids_json, allowed_tools_json, allowed_write_dirs_json,
                     grounding_config_json, kb_isolation_mode, strict_grounding,
-                    min_relevance_score, api_service_enabled, api_model_slug,
-                    tools_count, ownership, status, created_at, updated_at
+                    min_relevance_score, api_service_enabled, api_model_slug, allow_biz_sql,
+                    bound_wiki_spaces_json, tools_count, ownership, status, created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'custom', ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'custom', ?, ?, ?)
                 """,
                 (
                     agent_id,
@@ -517,6 +531,8 @@ class AgentProfileRepository:
                     min_relevance_score,
                     api_service_enabled,
                     api_model_slug,
+                    allow_biz_sql,
+                    bound_wiki_spaces_json,
                     tools_count,
                     status,
                     now,
@@ -617,6 +633,19 @@ class AgentProfileRepository:
             if "api_model_slug" in data and data["api_model_slug"] is not None
             else existing["api_model_slug"]
         )
+        allow_biz_sql = (
+            int(data["allow_biz_sql"])
+            if "allow_biz_sql" in data and data["allow_biz_sql"] is not None
+            else int(existing.get("allow_biz_sql") or 0)
+        )
+        if "bound_wiki_spaces" in data and data["bound_wiki_spaces"] is not None:
+            raw_ws = data["bound_wiki_spaces"]
+            bound_wiki_spaces_json = json.dumps(
+                [str(x).strip() for x in raw_ws if str(x).strip()] if isinstance(raw_ws, list) else [],
+                ensure_ascii=False,
+            )
+        else:
+            bound_wiki_spaces_json = existing.get("bound_wiki_spaces_json") or "[]"
         now = _utc_now_iso()
 
         async with db_manager.get_connection() as conn:
@@ -627,7 +656,7 @@ class AgentProfileRepository:
                     skill_ids_json = ?, allowed_tools_json = ?, allowed_write_dirs_json = ?,
                     grounding_config_json = ?, kb_isolation_mode = ?, strict_grounding = ?,
                     min_relevance_score = ?, api_service_enabled = ?, api_model_slug = ?,
-                    tools_count = ?, status = ?, updated_at = ?
+                    allow_biz_sql = ?, bound_wiki_spaces_json = ?, tools_count = ?, status = ?, updated_at = ?
                 WHERE id = ? AND ownership = 'custom'
                 """,
                 (
@@ -644,6 +673,8 @@ class AgentProfileRepository:
                     min_relevance_score,
                     api_service_enabled,
                     api_model_slug,
+                    allow_biz_sql,
+                    bound_wiki_spaces_json,
                     tools_count,
                     status,
                     now,

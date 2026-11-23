@@ -52,19 +52,26 @@ async def parse_schedule_intent(req: ScheduleParseRequest):
 
 
 @router.get("")
-async def list_scheduled_tasks(workspace_id: str = Query(..., description="工作区 ID")):
+async def list_scheduled_tasks(workspace_id: str | None = Query(default=None, description="工作区 ID（不传或传 __all__ 返回全部）")):
     """
-    获取指定工作区下的所有计划任务（含最近状态、耗时与下次计划运行时间）
+    获取计划任务列表（默认返回全部全局与各沙盒计划任务，也可按工作区过滤）
     """
     TaskScheduler.get_instance().ensure_started()
     now_dt = datetime.now()
     now_iso = now_dt.isoformat()
+    show_all = not workspace_id or workspace_id == "__all__"
 
     async with db_manager.get_connection() as conn:
-        async with conn.execute(
-            "SELECT * FROM scheduled_tasks WHERE workspace_id = ? ORDER BY created_at DESC;",
-            (workspace_id,),
-        ) as cursor:
+        if show_all:
+            cursor = await conn.execute(
+                "SELECT * FROM scheduled_tasks ORDER BY created_at DESC;"
+            )
+        else:
+            cursor = await conn.execute(
+                "SELECT * FROM scheduled_tasks WHERE workspace_id = ? OR id LIKE 'sched_kbsync_%' ORDER BY created_at DESC;",
+                (workspace_id,),
+            )
+        async with cursor:
             rows = await cursor.fetchall()
             task_list = [dict(r) for r in rows]
 

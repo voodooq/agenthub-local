@@ -976,6 +976,56 @@ class ToolProtocolAdapter:
                 },
             },
             {
+                "name": "read_wiki_ontology_guides",
+                "description": "读取本地已发布的业务数据口径指南、物理表映射与 SQL 关联红线（如金额分转元、pid=0 父订单过滤、audit_status_code 等）。在调用 query_biz_data_via_ontology 之前应先读取对应领域口径。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "keyword": {
+                            "type": "string",
+                            "description": "可选过滤关键词（如 订单、金额、教练、报名；留空则返回全部核心口径）。",
+                        },
+                        "wiki_space_id": {
+                            "type": "string",
+                            "description": "可选指定 Wiki 空间 ID。",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "search_biz_ontology_terms",
+                "description": "检索已对接的 Auto Ontology 业务语义本体术语，确认英文实体名、表名与字段口径。若本地 Wiki 已有明确口径则无需调用；单轮最多调用 1 次，优先传空字符串或英文关键词。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "keyword": {
+                            "type": "string",
+                            "description": "要查找的英文业务术语或表关键词（如 Coach、Athlete；留空则返回核心术语概览）。",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "query_biz_data_via_ontology",
+                "description": "通过已对接的 Auto Ontology 业务数据网关执行自然语言只读查询，返回业务答案、SQL 与结果行（单次耗时约 10~25s）。必须在提问中显式带上英文物理表名；同一主体的多个指标应合并为 1 次查询，但涉及多个独立业务主体（如运动员、教练员、裁判员、代表团）跨表对比统计时，严禁把所有主体塞进同一次查询导致超时，必须拆成独立单主体查询（每次只查 1 个主体及其关联维度表），最后由你汇总成一张表。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "清晰的自然语言业务数据查询问题（包含时间、赛事或组别条件）。",
+                        },
+                        "conversation_id": {
+                            "type": "string",
+                            "description": "可选的多轮上下文会话 ID，用于连续追问同一业务指标。",
+                        },
+                    },
+                    "required": ["question"],
+                },
+            },
+            {
                 "name": "read_cloud_wiki_section",
                 "description": "按需精读云端知识库特定章节原文（优先命中 24 小时本地 LRU 缓存）。",
                 "parameters": {

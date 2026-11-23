@@ -46,6 +46,21 @@ export function formatToolNaturalDescription({
     const ent = entMatch?.[1]?.trim();
     return ent ? `查询知识图谱实体关系（${ent}）` : '查询知识图谱关系网络';
   }
+  if (fn === 'read_wiki_ontology_guides') {
+    const kwMatch = cmd.match(/^read_wiki_ontology_guides\((.*)\)$/);
+    const kw = kwMatch?.[1]?.trim();
+    return kw ? `读取本地 Wiki 业务口径（${kw}）` : '读取本地 Wiki 业务口径与红线';
+  }
+  if (fn === 'search_biz_ontology_terms') {
+    const kwMatch = cmd.match(/^search_biz_ontology_terms\((.*)\)$/);
+    const kw = kwMatch?.[1]?.trim();
+    return kw ? `检索业务本体术语（${kw}）` : '检索业务本体术语表';
+  }
+  if (fn === 'query_biz_data_via_ontology') {
+    const qMatch = cmd.match(/^query_biz_data_via_ontology\((.*)\)$/);
+    const q = qMatch?.[1]?.trim();
+    return q ? `查询实时业务库：${q.slice(0, 36)}` : '查询实时业务数据库';
+  }
   if (fn === 'execute_sql' || fn.includes('sql')) {
     return '查询业务数据库记录';
   }

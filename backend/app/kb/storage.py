@@ -152,6 +152,90 @@ class KBStorageManager:
             raise ValueError("切片正文残留旧版【文档来源】标记，已拦截入库")
 
     @classmethod
+    def delete_chunks_by_remote_uris(
+        cls,
+        kb_id: str,
+        remote_uris: list[str],
+        version: str = "v1.0.0",
+    ) -> int:
+        """按 remote_uri 批量清理已删除或待覆盖文件的旧切片、FTS 索引与图谱三元组，并刷新 manifest。"""
+        clean_uris = [str(u).strip() for u in (remote_uris or []) if str(u).strip()]
+        if not clean_uris:
+            return 0
+        db_path = cls.get_version_db_path(kb_id, version)
+        if not db_path.exists():
+            return 0
+
+        conn = sqlite3.connect(str(db_path))
+        deleted_chunks = 0
+        try:
+            with conn:
+                cur = conn.cursor()
+                has_hc = cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hybrid_chunks'"
+                ).fetchone()
+                if not has_hc:
+                    return 0
+
+                placeholders = ",".join("?" for _ in clean_uris)
+                cur.execute(
+                    f"SELECT id FROM hybrid_chunks WHERE remote_uri IN ({placeholders})",
+                    clean_uris,
+                )
+                chunk_ids = [str(r[0]) for r in cur.fetchall() if r[0]]
+                if not chunk_ids:
+                    return 0
+
+                # 分批清理避免超过 SQLite 999 变量上限
+                for i in range(0, len(chunk_ids), 400):
+                    batch = chunk_ids[i : i + 400]
+                    q_marks = ",".join("?" for _ in batch)
+                    res_cur = cur.execute(
+                        f"DELETE FROM hybrid_chunks WHERE id IN ({q_marks})",
+                        batch,
+                    )
+                    deleted_chunks += int(res_cur.rowcount or 0)
+                    try:
+                        cur.execute(
+                            f"DELETE FROM hybrid_chunks_fts WHERE chunk_id IN ({q_marks})",
+                            batch,
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        cur.execute(
+                            f"DELETE FROM knowledge_triples WHERE chunk_id IN ({q_marks})",
+                            batch,
+                        )
+                    except Exception:
+                        pass
+
+                # 统计最新正文切片数并更新 manifest.json
+                row_cnt = cur.execute(
+                    "SELECT COUNT(*) FROM hybrid_chunks WHERE chunk_role IN ('parent', 'child') OR chunk_role IS NULL OR chunk_role = ''"
+                ).fetchone()
+                remaining_cnt = int(row_cnt[0] or 0) if row_cnt else 0
+                try:
+                    triple_cnt = int(cur.execute("SELECT COUNT(*) FROM knowledge_triples").fetchone()[0] or 0)
+                except Exception:
+                    triple_cnt = 0
+
+            old_manifest = cls.read_manifest(kb_id, version) or {}
+            cls.write_manifest(
+                kb_id=kb_id,
+                version=version,
+                embedding_model=str(old_manifest.get("embedding_model") or "null_offline_lexical"),
+                embedding_dim=int(old_manifest.get("embedding_dim") or 768),
+                chunk_count=remaining_cnt,
+                triple_count=triple_cnt,
+                changelog=f"增量清理已删除或待覆盖文件旧切片 ({deleted_chunks} 条)",
+                extra_meta=old_manifest.get("extra") if isinstance(old_manifest.get("extra"), dict) else None,
+            )
+            return deleted_chunks
+        finally:
+            conn.close()
+
+    @classmethod
     def upsert_chunks_to_version_db(
         cls,
         kb_id: str,
@@ -336,7 +420,8 @@ class KBStorageManager:
                     tier = item.get("authority_tier", 2)
                     mtime = item.get("mtime", now)
                     etag = item.get("etag", "")
-                    blob = item.get("embedding_blob")
+                    from .embedding_codec import ensure_f16_blob
+                    blob = ensure_f16_blob(item.get("embedding_blob"))
                     parent_chunk_id = item.get("parent_chunk_id")
                     doc_priority_type = item.get("doc_priority_type") or "normal"
                     effective_ts = int(item.get("effective_ts") or 0)
@@ -588,7 +673,9 @@ class KBStorageManager:
                         placeholders = ",".join("?" for _ in sub_ids)
                         cur.execute(f"UPDATE hybrid_chunks SET graph_extracted = 1 WHERE id IN ({placeholders})", sub_ids)
 
-                cur.execute("SELECT count(*) FROM hybrid_chunks")
+                cur.execute(
+                    "SELECT count(*) FROM hybrid_chunks WHERE chunk_role IN ('parent', 'child') OR chunk_role IS NULL"
+                )
                 total_chunks = cur.fetchone()[0]
                 cur.execute("SELECT count(*) FROM knowledge_triples")
                 total_triples = cur.fetchone()[0]
@@ -688,7 +775,9 @@ class KBStorageManager:
                 except Exception:
                     pass
 
-            cur.execute("SELECT count(*) FROM hybrid_chunks")
+            cur.execute(
+                "SELECT count(*) FROM hybrid_chunks WHERE chunk_role IN ('parent', 'child') OR chunk_role IS NULL"
+            )
             remaining_chunks = cur.fetchone()[0]
             cur.execute("SELECT count(*) FROM knowledge_triples")
             remaining_triples = cur.fetchone()[0]
@@ -723,6 +812,8 @@ class KBStorageManager:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(str(db_path))
         try:
+            # 新库初始化使用 16KB 页大小，避免向量字段跨 4KB 页产生 2 倍溢出空间浪费
+            conn.execute("PRAGMA page_size = 16384;")
             conn.execute("PRAGMA journal_mode = WAL;")
             conn.execute("PRAGMA synchronous = NORMAL;")
             conn.executescript("""
@@ -752,6 +843,7 @@ class KBStorageManager:
 
             CREATE TRIGGER IF NOT EXISTS trg_hc_ai AFTER INSERT ON hybrid_chunks
             BEGIN
+                DELETE FROM hybrid_chunks_fts WHERE chunk_id = new.id;
                 INSERT INTO hybrid_chunks_fts(rowid, content, title, chunk_id, remote_uri)
                 VALUES (new.rowid, new.content, new.title, new.id, new.remote_uri);
             END;
@@ -961,6 +1053,26 @@ class KBStorageManager:
         if src_manifest.exists():
             shutil.copy2(str(src_manifest), str(tgt_dir / "manifest.json"))
         return True
+
+    @classmethod
+    def get_body_chunk_count(cls, kb_id: str, version: str) -> int | None:
+        """统计指定知识库版本的正文主切片数量（排除口语衍生/摘要切片）。"""
+        db_path = cls.get_version_db_path(kb_id, version)
+        if not db_path.exists():
+            return None
+        try:
+            with sqlite3.connect(str(db_path)) as conn:
+                has_tbl = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hybrid_chunks'"
+                ).fetchone()
+                if not has_tbl:
+                    return None
+                row = conn.execute(
+                    "SELECT COUNT(*) FROM hybrid_chunks WHERE chunk_role IN ('parent', 'child') OR chunk_role IS NULL"
+                ).fetchone()
+                return int(row[0] or 0) if row else 0
+        except Exception:
+            return None
 
     @classmethod
     def get_kb_disk_size(cls, kb_id: str) -> int:

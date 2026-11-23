@@ -38,7 +38,16 @@ SCRUB_CHAR_THRESHOLD = 600
 # 1. EXPLICIT_COMMAND_TOOLS：终端命令 / 脚本运行 / MCP 工具（极易产出数千行安装/构建/全盘扫描刷屏日志，适合积极脱水）
 _COMMAND_NOISE_TOOLS = {"execute_local_command", "run_shell", "run_skill_tool"}
 # 2. ACTIVE_READ_TOOLS：模型主动点名要查看正文内容的读取工具（只要通道窗口装得下就应一步给全，避免逼模型反复 read_tool_ref 翻页浪费 Token）
-_ACTIVE_READ_TOOLS = {"read_local_file", "read_file", "web_fetch", "search_memory_history", "search_skill_knowledge"}
+_ACTIVE_READ_TOOLS = {
+    "read_local_file",
+    "read_file",
+    "web_fetch",
+    "search_memory_history",
+    "search_skill_knowledge",
+    "query_biz_data_via_ontology",
+    "read_wiki_ontology_guides",
+    "search_biz_ontology_terms",
+}
 # 3. EXEMPT_SCRUB_TOOLS：技能规程指令与切片回查自身（豁免常规脱水，仅防极端数十 KB 异常）
 _EXEMPT_SCRUB_TOOLS = {"load_skill_detail", "read_tool_ref", "update_working_memory", "save_long_term_memory"}
 

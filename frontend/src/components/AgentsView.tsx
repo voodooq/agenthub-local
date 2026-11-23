@@ -33,6 +33,7 @@ import {
 } from 'lucide-react';
 import { Workspace, SkillItem, AgentItem, GroundingConfig } from '@/types';
 import { SkillCategoryTabs, ALL_CATEGORY, filterSkillsByCategory } from './SkillCategoryTabs';
+import { MountedEntitiesSelector } from './agents/MountedEntitiesSelector';
 import { ExpertKnowledgeAndApiPanel, BoundKBItem } from './ExpertKnowledgeAndApiPanel';
 import { ModelOption } from '@/components/ModelSelector';
 import { apiFetch } from '@/utils/apiClient';
@@ -206,6 +207,12 @@ export function AgentsView({
   const [formMinRelevanceScore, setFormMinRelevanceScore] = useState<number>(0.42);
   const [formApiServiceEnabled, setFormApiServiceEnabled] = useState<boolean>(false);
   const [formApiModelSlug, setFormApiModelSlug] = useState<string>('');
+  const [formAllowBizSql, setFormAllowBizSql] = useState<boolean>(false);
+  const [allSchemaProfiles, setAllSchemaProfiles] = useState<Array<{ id: string; name: string; entity_count: number }>>([]);
+  const [formSchemaProfileId, setFormSchemaProfileId] = useState<string>('');
+  const [formMountedEntitiesText, setFormMountedEntitiesText] = useState<string>('*');
+  const [allWikiSpaces, setAllWikiSpaces] = useState<Array<{ wiki_space_id: string; name: string; published_count?: number; inbox_count?: number }>>([]);
+  const [formBoundWikiSpaces, setFormBoundWikiSpaces] = useState<string[]>([]);
   const [formBoundKbs, setFormBoundKbs] = useState<BoundKBItem[]>([]);
 
   // 初始化拉取系统真实技能
@@ -333,9 +340,31 @@ export function AgentsView({
     setFormMinRelevanceScore(0.42);
     setFormApiServiceEnabled(false);
     setFormApiModelSlug('');
+    setFormAllowBizSql(false);
+    setFormSchemaProfileId('');
+    setFormMountedEntitiesText('*');
+    setFormBoundWikiSpaces([]);
     setFormBoundKbs([]);
     setIsGroundingPanelOpen(true);
     setIsModalOpen(true);
+
+    apiFetch('/api/v1/profiles')
+      .then(async (res) => {
+        if (res.ok) {
+          const json = await res.json();
+          setAllSchemaProfiles(json.data || []);
+        }
+      })
+      .catch(() => {});
+
+    apiFetch('/api/v1/wiki/spaces')
+      .then(async (res) => {
+        if (res.ok) {
+          const json = await res.json();
+          setAllWikiSpaces(json.data || []);
+        }
+      })
+      .catch(() => {});
   };
 
   // 幂等注入防幻觉与事实基准规范模版
@@ -460,7 +489,44 @@ export function AgentsView({
     setFormMinRelevanceScore(typeof (agent as any).min_relevance_score === 'number' ? (agent as any).min_relevance_score : 0.42);
     setFormApiServiceEnabled(Boolean((agent as any).api_service_enabled));
     setFormApiModelSlug((agent as any).api_model_slug || '');
+    setFormAllowBizSql(Boolean((agent as any).allow_biz_sql));
     setFormBoundKbs([]);
+    setFormBoundWikiSpaces(Array.isArray((agent as any).bound_wiki_spaces) ? (agent as any).bound_wiki_spaces : []);
+    setFormSchemaProfileId('');
+    setFormMountedEntitiesText('*');
+
+    apiFetch('/api/v1/profiles')
+      .then(async (res) => {
+        if (res.ok) {
+          const json = await res.json();
+          setAllSchemaProfiles(json.data || []);
+        }
+      })
+      .catch(() => {});
+
+    apiFetch('/api/v1/wiki/spaces')
+      .then(async (res) => {
+        if (res.ok) {
+          const json = await res.json();
+          setAllWikiSpaces(json.data || []);
+        }
+      })
+      .catch(() => {});
+
+    apiFetch(`/api/v1/agents/${encodeURIComponent(agent.id)}/binding`)
+      .then(async (res) => {
+        if (res.ok) {
+          const json = await res.json();
+          const primary = (json.data || [])[0];
+          if (primary?.profile_id) {
+            setFormSchemaProfileId(primary.profile_id);
+            setFormMountedEntitiesText(
+              Array.isArray(primary.mounted_entities) ? primary.mounted_entities.join(', ') : '*'
+            );
+          }
+        }
+      })
+      .catch(() => {});
 
     // 异步拉取已绑定的知识库
     apiFetch(`/api/v1/agents/${encodeURIComponent(agent.id)}/knowledge-bases`)
@@ -550,6 +616,8 @@ export function AgentsView({
               min_relevance_score: formMinRelevanceScore,
               api_service_enabled: formApiServiceEnabled ? 1 : 0,
               api_model_slug: formApiModelSlug.trim() || undefined,
+              allow_biz_sql: formAllowBizSql ? 1 : 0,
+              bound_wiki_spaces: formBoundWikiSpaces,
             }),
           });
           if (res.ok) {
@@ -606,6 +674,8 @@ export function AgentsView({
               min_relevance_score: formMinRelevanceScore,
               api_service_enabled: formApiServiceEnabled ? 1 : 0,
               api_model_slug: formApiModelSlug.trim() || undefined,
+              allow_biz_sql: formAllowBizSql ? 1 : 0,
+              bound_wiki_spaces: formBoundWikiSpaces,
             }),
           });
           if (res.ok) {
@@ -686,12 +756,32 @@ export function AgentsView({
               min_relevance_score: formMinRelevanceScore,
               api_service_enabled: formApiServiceEnabled ? 1 : 0,
               api_model_slug: formApiModelSlug.trim() || undefined,
+              allow_biz_sql: formAllowBizSql ? 1 : 0,
+              bound_wiki_spaces: formBoundWikiSpaces,
             }),
           });
           if (!kbRes.ok) {
             const errJson = await kbRes.json().catch(() => ({}));
             setBannerNotice(errJson?.detail || '同步专家知识底座配置失败：所选知识库可能尚未发布');
           }
+          // 同步保存专家绑定的 Schema Profile 与子集表
+          const rawTables = formMountedEntitiesText.trim();
+          const mountedEntities =
+            !rawTables || rawTables === '*'
+              ? '*'
+              : rawTables
+                  .split(/[,，\n]/)
+                  .map((t) => t.trim())
+                  .filter(Boolean);
+          await apiFetch(`/api/v1/agents/${encodeURIComponent(savedTargetId)}/binding`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              bindings: formSchemaProfileId
+                ? [{ profile_id: formSchemaProfileId, is_primary: true, mounted_entities: mountedEntities }]
+                : [],
+            }),
+          });
         } catch (kbSyncErr) {
           console.error('同步专家知识底座配置失败:', kbSyncErr);
         }
@@ -1400,6 +1490,75 @@ export function AgentsView({
                 onChangeBoundKbs={setFormBoundKbs}
               />
 
+              {/* 百科工作台（Wiki Spaces）资源绑定 */}
+              <div className="p-3 rounded-xl bg-surface-100 border border-border space-y-2">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <div className="text-xs font-semibold text-foreground">
+                      百科工作台 · 关联百科空间 (Wiki Spaces)
+                    </div>
+                    <div className="text-[10.5px] text-muted-foreground mt-0.5">
+                      勾选该专家可检索的百科空间；未勾选任何空间时默认不限制（可读取全部百科空间口径）
+                    </div>
+                  </div>
+                  {formBoundWikiSpaces.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setFormBoundWikiSpaces([])}
+                      className="text-[10.5px] text-muted-foreground hover:text-foreground underline"
+                    >
+                      清空 ({formBoundWikiSpaces.length})
+                    </button>
+                  )}
+                </div>
+                {allWikiSpaces.length === 0 ? (
+                  <div className="text-[11px] text-muted-foreground py-1">
+                    暂无可用百科空间，请先在 LLMWiki 百科工作台创建空间
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 max-h-36 overflow-y-auto pr-1">
+                    {allWikiSpaces.map((sp) => {
+                      const checked = formBoundWikiSpaces.includes(sp.wiki_space_id);
+                      return (
+                        <label
+                          key={sp.wiki_space_id}
+                          className={`flex items-center justify-between px-2.5 py-1.5 rounded-lg border text-xs cursor-pointer transition-colors ${
+                            checked
+                              ? 'bg-emerald-500/10 border-emerald-500/40 text-foreground'
+                              : 'bg-background border-border text-muted-foreground hover:text-foreground'
+                          }`}
+                        >
+                          <span className="truncate font-medium mr-2" title={sp.name}>
+                            {sp.name}
+                          </span>
+                          <span className="flex items-center space-x-2 shrink-0">
+                            <span className="text-[10px] text-muted-foreground">
+                              {sp.published_count ?? 0} 篇
+                            </span>
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) => {
+                                if (e.target.checked) {
+                                  setFormBoundWikiSpaces((prev) =>
+                                    prev.includes(sp.wiki_space_id) ? prev : [...prev, sp.wiki_space_id]
+                                  );
+                                } else {
+                                  setFormBoundWikiSpaces((prev) =>
+                                    prev.filter((id) => id !== sp.wiki_space_id)
+                                  );
+                                }
+                              }}
+                              className="rounded border-border text-emerald-500 accent-emerald-500"
+                            />
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+
               {/* 真实基座模型选择器 */}
               <div>
                 <label className="block text-xs font-semibold text-foreground mb-1 flex items-center justify-between">
@@ -1711,6 +1870,52 @@ export function AgentsView({
                     className="w-full px-3 py-1.5 rounded-xl bg-surface-100 border border-border text-xs font-mono text-foreground placeholder:text-muted-foreground focus:outline-none focus:border-foreground/40"
                   />
                 </div>
+
+                <label className="flex items-center justify-between p-2.5 rounded-xl bg-surface-100 border border-border cursor-pointer">
+                  <div>
+                    <div className="text-xs font-semibold text-foreground">
+                      允许查询实时业务数据（Auto Ontology）
+                    </div>
+                    <div className="text-[10.5px] text-muted-foreground mt-0.5">
+                      开启后，该专家在 Task 模式下可调用业务术语与只读 SQL 查询工具
+                    </div>
+                  </div>
+                  <input
+                    type="checkbox"
+                    checked={formAllowBizSql}
+                    onChange={(e) => setFormAllowBizSql(e.target.checked)}
+                    className="rounded border-border text-emerald-500 accent-emerald-500"
+                  />
+                </label>
+
+                {formAllowBizSql && (
+                  <div className="p-2.5 rounded-xl bg-surface-100 border border-border space-y-2">
+                    <div>
+                      <label className="block text-[11px] font-semibold text-foreground mb-1">
+                        数据工作台 · 关联数据结构图谱 (Schema Profile)
+                      </label>
+                      <select
+                        value={formSchemaProfileId}
+                        onChange={(e) => setFormSchemaProfileId(e.target.value)}
+                        className="w-full px-2.5 py-1.5 rounded-lg bg-background border border-border text-xs text-foreground"
+                      >
+                        <option value="">不限定（读取全局默认口径）</option>
+                        {allSchemaProfiles.map((p) => (
+                          <option key={p.id} value={p.id}>
+                            {p.name} ({p.entity_count} 表)
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    {formSchemaProfileId && (
+                      <MountedEntitiesSelector
+                        profileId={formSchemaProfileId}
+                        valueText={formMountedEntitiesText}
+                        onChangeText={setFormMountedEntitiesText}
+                      />
+                    )}
+                  </div>
+                )}
               </div>
 
               {!editingAgent && (

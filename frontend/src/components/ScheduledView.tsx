@@ -50,6 +50,7 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
   const { t } = useLanguage();
   const [tasks, setTasks] = useState<ScheduledTaskItem[]>([]);
   const [filterStatus, setFilterStatus] = useState<'all' | 'active' | 'paused'>('all');
+  const [scopeMode, setScopeMode] = useState<'all' | 'workspace'>('all');
   const [loading, setLoading] = useState(false);
   const [isDialogOpen, setIsDialogOpen] = useState(false);
   const [runningTaskId, setRunningTaskId] = useState<string | null>(null);
@@ -61,10 +62,13 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
 
   const fetchTasks = async () => {
-    if (!workspace) return;
     setLoading(true);
     try {
-      const res = await apiFetch(`/api/v1/scheduled?workspace_id=${workspace.id}`);
+      const qs =
+        scopeMode === 'workspace' && workspace?.id
+          ? `?workspace_id=${encodeURIComponent(workspace.id)}`
+          : '';
+      const res = await apiFetch(`/api/v1/scheduled${qs}`);
       if (res.ok) {
         const data = await res.json();
         const nextTasks: ScheduledTaskItem[] = data.tasks || [];
@@ -101,7 +105,7 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
 
   useEffect(() => {
     fetchTasks();
-  }, [workspace?.id]);
+  }, [workspace?.id, scopeMode]);
 
   const handleOpenDetail = (task: ScheduledTaskItem) => {
     setDetailTask(task);
@@ -244,7 +248,15 @@ export function ScheduledView({ workspace }: ScheduledViewProps) {
           <span>
             {tasks.filter((t) => t.status === 'active').length} 个活跃中 ·{' '}
             {tasks.filter((t) => t.status === 'paused').length} 个已暂停
-            {workspace && ` · 当前工作区：${workspace.name}`}
+            {' · '}
+            <button
+              type="button"
+              onClick={() => setScopeMode((prev) => (prev === 'all' ? 'workspace' : 'all'))}
+              className="underline decoration-dotted hover:text-foreground transition-colors"
+              title="点击在「全局全部任务」与「仅当前沙盒」之间切换"
+            >
+              {scopeMode === 'all' ? '全局总览（全部沙盒与系统任务）' : `仅当前沙盒：${workspace?.name || 'default'}`}
+            </button>
           </span>
         </div>
 

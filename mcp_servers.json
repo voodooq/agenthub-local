@@ -26,6 +26,26 @@
       "download_origins": [
         "http://127.0.0.1:3100"
       ]
+    },
+    "filesystem-example": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "."
+      ],
+      "env": {},
+      "description": "官方本地文件系统 MCP 示例（按需开启）",
+      "enabled": true
+    },
+    "nvidia-app": {
+      "transport": "streamable-http",
+      "url": "http://127.0.0.1:13508/mcp",
+      "headers": {},
+      "timeout_seconds": 60.0,
+      "description": "NVIDIA App 本地 MCP 服务",
+      "enabled": true
     }
   }
 }

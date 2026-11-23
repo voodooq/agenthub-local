@@ -517,6 +517,24 @@ class KBLifecycleManager:
         # 日常查询仅检查是否有尚未注册到主库的新挂载源，避免每次触发全量纳管扫描
         await cls.auto_adopt_mounted_kbs(only_missing=True)
         async with db_manager.get_connection() as conn:
+            # 预读取已开启的知识库系统级定时同步任务状态
+            sync_sched_map: dict[str, dict[str, str]] = {}
+            try:
+                sched_cur = await conn.execute(
+                    "SELECT id, cron_expr, status, prompt_template FROM scheduled_tasks WHERE id LIKE 'sched_kbsync_%'"
+                )
+                for sr in await sched_cur.fetchall():
+                    pt = str(sr["prompt_template"] or "")
+                    if pt.startswith("__SYS_KB_SYNC__:"):
+                        target_kb_id = pt.split(":", 1)[1].strip()
+                        sync_sched_map[target_kb_id] = {
+                            "task_id": str(sr["id"]),
+                            "cron_expr": str(sr["cron_expr"] or "*/15 * * * *"),
+                            "status": str(sr["status"] or "active"),
+                        }
+            except Exception:
+                pass
+
             async with conn.execute("""
                 SELECT kb.*, ds.name as source_name, ds.source_type
                 FROM knowledge_bases kb
@@ -530,7 +548,11 @@ class KBLifecycleManager:
                     if published_only and not is_pub:
                         continue
                     kb_id = r["kb_id"]
+                    active_ver = r["active_version"] or "v1.0.0"
                     real_disk = KBStorageManager.get_kb_disk_size(kb_id)
+                    body_chunks = KBStorageManager.get_body_chunk_count(kb_id, active_ver)
+                    display_chunks = body_chunks if body_chunks is not None else r["chunk_count"]
+                    sched_info = sync_sched_map.get(kb_id)
                     kbs.append({
                         "kb_id": kb_id,
                         "name": r["name"],
@@ -543,11 +565,14 @@ class KBLifecycleManager:
                         "staging_version": r["staging_version"],
                         "embedding_model": r["embedding_model"],
                         "embedding_dim": r["embedding_dim"],
-                        "chunk_count": r["chunk_count"],
+                        "chunk_count": display_chunks,
                         "triple_count": r["triple_count"],
                         "disk_size_bytes": real_disk,
                         "share_repo_uri": r["share_repo_uri"],
                         "is_published": is_pub,
+                        "auto_sync_enabled": bool(sched_info),
+                        "auto_sync_cron": sched_info["cron_expr"] if sched_info else "*/15 * * * *",
+                        "auto_sync_task_id": sched_info["task_id"] if sched_info else None,
                         "created_at": r["created_at"],
                         "updated_at": r["updated_at"],
                     })

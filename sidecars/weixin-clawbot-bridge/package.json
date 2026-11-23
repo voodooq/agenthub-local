@@ -1,0 +1,11 @@
+{
+  "name": "agenthub-weixin-clawbot-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "AgentHub 个人微信 ClawBot 轻量 Sidecar 桥接进程：负责扫码长连接保活，并与 AgentHub /api/v1/dialogue-wiki/ingress 双向通信。",
+  "scripts": {
+    "start": "node index.mjs"
+  }
+}
+

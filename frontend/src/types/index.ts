@@ -216,6 +216,22 @@ export interface Conversation {
   branched_from_turn_id?: number | null;
 }
 
+export interface FollowupSuggestionItem {
+  label: string;
+  prompt?: string;
+  force_live?: boolean;
+}
+
+export interface StatsSnapshotOffer {
+  agent_id: string;
+  title: string;
+  query_scope: string;
+  verified_sqls: string[];
+  profile_id?: string;
+  has_audit_alert: boolean;
+  audit_alerts?: string[];
+}
+
 export interface Message {
   id?: number;
   conversation_id: string;
@@ -263,6 +279,8 @@ export interface Message {
     tool_input: Record<string, any>;
     status?: 'pending' | 'approved' | 'rejected';
   };
+  followup_suggestions?: FollowupSuggestionItem[];
+  stats_snapshot_offer?: StatsSnapshotOffer;
   token_stats?: TurnTokenMetrics | null;
   agent_id?: string | null;
   agent_name?: string | null;

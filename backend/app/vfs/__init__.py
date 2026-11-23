@@ -5,6 +5,7 @@ from .base import CloudFileMeta, CloudVFSProvider, CloudVFSSyncManager
 from .wecom_drive import WeComDriveProvider
 from .webdav_provider import WebDAVProvider
 from .oss_provider import OSSProvider
+from .sandbox_provider import SandboxVFSProvider
 from .document_extractor import DocumentStreamExtractor, CloudWikiLRUCache
 
 __all__ = [
@@ -14,6 +15,7 @@ __all__ = [
     "WeComDriveProvider",
     "WebDAVProvider",
     "OSSProvider",
+    "SandboxVFSProvider",
     "DocumentStreamExtractor",
     "CloudWikiLRUCache",
 ]

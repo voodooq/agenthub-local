@@ -59,6 +59,34 @@ class WorkspaceRepository:
         """
         async with db_manager.get_connection() as conn:
             await WorkspaceRepository._ensure_agent_id_column(conn)
+            # 自动同步已创建的 IM 渠道机器人专属沙盒，并将历史落在 default 的 im_* 会话归集过去
+            try:
+                tbl_cur = await conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='dialogue_channel_links'"
+                )
+                if await tbl_cur.fetchone():
+                    links_cur = await conn.execute(
+                        "SELECT link_id, target_user_label, expert_id FROM dialogue_channel_links"
+                    )
+                    im_links = await links_cur.fetchall()
+                else:
+                    im_links = []
+            except Exception:
+                im_links = []
+
+        for lnk in im_links:
+            try:
+                from ..channels.gateway import channel_gateway
+
+                await channel_gateway.ensure_im_link_workspace(
+                    link_id=str(lnk["link_id"]),
+                    target_user_label=str(lnk["target_user_label"] or ""),
+                    expert_id=str(lnk["expert_id"] or ""),
+                )
+            except Exception:
+                pass
+
+        async with db_manager.get_connection() as conn:
             cursor = await conn.execute(query)
             rows = await cursor.fetchall()
             results = []

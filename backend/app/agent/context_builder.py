@@ -232,6 +232,15 @@ class ContextBuilder:
                 protocol_prompt = ToolProtocolAdapter.build_xml_protocol_prompt(tools)
                 if protocol_prompt:
                     zone1_static_parts.append(protocol_prompt)
+                tool_names_set = {str(t.get("name") or "") for t in tools if isinstance(t, dict)}
+                if "query_biz_data_via_ontology" in tool_names_set:
+                    zone1_static_parts.append(
+                        "### 🗄️ 实时业务数据库查询能力（Auto Ontology 已连接）：\n"
+                        "你已被授权访问已连接的实时业务数据库（通过 `search_biz_ontology_terms` 与 `query_biz_data_via_ontology` 工具）。\n"
+                        "当用户询问人员/教练员花名册、人数统计、报名记录、缴费流水、赛事安排等**动态业务数据**时：\n"
+                        "1. 若知识库规程手册仅包含文字规则而不含实时名单/统计，**必须先调用 `search_biz_ontology_terms` 一次性看清相关表与字段口径，再合并为一个明确问题调用 `query_biz_data_via_ontology` 查询实时业务数据库**（单次查询耗时约 30~120 秒，避免拆成多次零散查询）；\n"
+                        "2. **严禁**在未调用 `query_biz_data_via_ontology` 的情况下声称“未接入业务系统/人员登记簿”。"
+                    )
             if mcp_catalog_prompt and mcp_catalog_prompt.strip():
                 zone1_static_parts.append(
                     "### 🔌 可用 MCP 扩展能力目录（默认仅挂载目录摘要；如需使用某服务，请先调用 `discover_mcp_tools(server_names=[...])` 按需加载其完整参数 Schema）：\n"
@@ -262,20 +271,24 @@ class ContextBuilder:
         matched_skills: list[dict[str, Any]] = []
         matched_skill: dict[str, Any] | None = None
 
-        # 先解析技能命中元信息（供外层日志与展示），文本块在无 frozen_tail_prompt 时写入 Zone 3
-        try:
-            matched_skills = await asyncio.to_thread(skill_loader.resolve_slash_commands, user_query, current_cwd)
-            matched_skill = matched_skills[0] if matched_skills else None
-        except Exception:
-            matched_skills = []
-            matched_skill = None
+        # IM 渠道会话（im_*）严禁注入桌面端斜杠命令（/excel, /gen-ui, /win-ops 等）与本地 CWD 路径
+        is_im_session = str(conversation_id or "").startswith("im_")
+
+        # 先解析技能命中元信息（供外层日志与展示），IM 会话直接跳过桌面斜杠命令解析
+        if not is_im_session:
+            try:
+                matched_skills = await asyncio.to_thread(skill_loader.resolve_slash_commands, user_query, current_cwd)
+                matched_skill = matched_skills[0] if matched_skills else None
+            except Exception:
+                matched_skills = []
+                matched_skill = None
 
         if frozen_tail_prompt is not None:
             # 同一 Turn 内 ReAct step_idx >= 1：严格锁死 step_idx == 0 生成的 Zone 3 尾注，守护轮内 KV Cache
             tail_injection_prompt = frozen_tail_prompt
         else:
             zone3_parts: list[str] = []
-            if current_cwd:
+            if current_cwd and not is_im_session:
                 zone3_parts.append(f"当前本地终端持久化工作目录 (CWD): `{current_cwd}`")
 
             # 原生蜂群协作规约（仅在 swarm_mode=True 或角色为 Swarm 成员时按需注入，绝不污染普通模式）
@@ -501,16 +514,17 @@ class ContextBuilder:
                             "### 🔎 相关早期历史片段召回 (冷区检索仅供参考)：\n" + "\n".join(cold_lines)
                         )
 
-            # 按需专业技能摘要与激活规程（四元组开发规范仅在命中技能/MCP 开发意图时按需注入）
-            include_dev_spec = _should_inject_skill_dev_spec(user_query)
-            skills_summary = await asyncio.to_thread(
-                skill_loader.get_skills_summary_prompt,
-                include_dev_spec=include_dev_spec,
-            )
-            if skills_summary:
-                zone3_parts.append(skills_summary)
+            # 按需专业技能摘要与激活规程（IM 渠道严格跳过桌面端斜杠技能清单，避免向微信用户输出无用的 /命令）
+            if not is_im_session:
+                include_dev_spec = _should_inject_skill_dev_spec(user_query)
+                skills_summary = await asyncio.to_thread(
+                    skill_loader.get_skills_summary_prompt,
+                    include_dev_spec=include_dev_spec,
+                )
+                if skills_summary:
+                    zone3_parts.append(skills_summary)
 
-            if current_cwd:
+            if current_cwd and not is_im_session:
                 def _list_ws_skills() -> list[dict[str, Any]]:
                     svc = SkillService(workspace_root=current_cwd)
                     return [s for s in svc.list_all_skills(include_content=False) if s.get("scope") == "workspace"]

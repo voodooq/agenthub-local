@@ -152,10 +152,13 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
     发起 SSE 流式对话端点（由微内核 AgentRuntime 驱动：支持三层记忆、ReAct 工具闭环与多账号 429 自动故障转移）
     """
     async def event_generator():
+        from ...schema.intent_router import FollowupStreamBuffer
+
         ForegroundChatTracker.enter()
         completed = False
         active_conv_id = req.conversation_id
         queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue()
+        followup_stream_buf = FollowupStreamBuffer(hold_chars=32)
 
         stripped_msg = (req.message or "").strip()
         is_slash_swarm = stripped_msg.lower().startswith("/swarm")
@@ -194,6 +197,10 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                         agent_id=req.agent_id or (req.target_agent_ids[0] if req.target_agent_ids else None),
                         grounding_config=req.grounding_config,
                         is_retry=req.is_retry,
+                        force_live=req.force_live,
+                        caller_channel=req.caller_channel,
+                        simulated_role=req.simulated_role,
+                        simulated_scope=req.simulated_scope,
                     ):
                         await queue.put(("event", event))
                     await queue.put(("done", None))
@@ -393,6 +400,17 @@ async def chat_stream(req: ChatStreamRequest, request: Request):
                 event = payload
                 if event.get("type") == "conv_init" and event.get("conversation_id"):
                     active_conv_id = str(event["conversation_id"])
+                # 流式尾部滑窗缓冲：杜绝 <!-- FOLLOWUP_SUGGESTIONS: [...] --> 闪烁给前端
+                ev_type = event.get("type")
+                if ev_type == "chunk" and isinstance(event.get("content"), str):
+                    safe_chunk = followup_stream_buf.feed(event["content"])
+                    if not safe_chunk:
+                        continue
+                    event = {**event, "content": safe_chunk}
+                elif ev_type in ("start", "stream_reset", "done"):
+                    flushed_text, _ = followup_stream_buf.flush()
+                    if flushed_text and ev_type == "done":
+                        yield f"data: {json.dumps({'type': 'chunk', 'content': flushed_text}, ensure_ascii=False)}\n\n"
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
         finally:
             ForegroundChatTracker.exit()

@@ -14,7 +14,8 @@ interface ApprovalCardProps {
 
 export function ApprovalCard({ loopId, approvalCall, onResolved }: ApprovalCardProps) {
   const { t } = useLanguage();
-  const [timeLeft, setTimeLeft] = useState(15);
+  const TOTAL_SECONDS = 20;
+  const [timeLeft, setTimeLeft] = useState(TOTAL_SECONDS);
   const [isModifying, setIsModifying] = useState(false);
   const [isRejecting, setIsRejecting] = useState(false);
   const [modifiedArgsJson, setModifiedArgsJson] = useState(
@@ -28,7 +29,7 @@ export function ApprovalCard({ loopId, approvalCall, onResolved }: ApprovalCardP
   const submittingRef = useRef(false);
   submittingRef.current = submitting;
 
-  // 15 秒倒计时：未操作时自动触发封锁与驳回
+  // 20 秒倒计时：未操作时自动触发封锁与驳回
   useEffect(() => {
     if (timeLeft <= 0) {
       if (!submittingRef.current && !isAutoBlocked) {
@@ -67,7 +68,7 @@ export function ApprovalCard({ loopId, approvalCall, onResolved }: ApprovalCardP
         }
       } else if (action === 'reject') {
         bodyPayload.user_guidance = isAutoTimeout
-          ? t('【15秒超时自动封锁】审批卡未在时限内做出决定，安全网关已自动封锁该高危操作。')
+          ? t('【20秒超时自动封锁】审批卡未在时限内做出决定，安全网关已自动封锁该高危操作。')
           : userGuidance.trim() || t('用户已拒绝该项高危操作');
       }
 
@@ -87,155 +88,134 @@ export function ApprovalCard({ loopId, approvalCall, onResolved }: ApprovalCardP
     }
   };
 
+  // 精简提炼关键操作参数，方便 20 秒内一眼看清
+  const compactArgsPreview = React.useMemo(() => {
+    const args = approvalCall.arguments || {};
+    const cmd = args.command || args.cmd || args.path || args.file_path || args.url || args.question;
+    if (typeof cmd === 'string' && cmd.trim()) {
+      return cmd.trim();
+    }
+    const raw = JSON.stringify(args);
+    return raw.length > 220 ? `${raw.slice(0, 220)}...` : raw;
+  }, [approvalCall.arguments]);
+
   return (
-    <div className="w-full my-4 rounded-xl border border-zinc-700 bg-zinc-900/90 text-zinc-100 shadow-xl p-4 sm:p-5 select-text transition relative overflow-hidden">
-      {/* 顶部 15 秒倒计时扁平微进度条 */}
-      <div className="absolute top-0 left-0 right-0 h-0.5 bg-zinc-800">
+    <div className="w-full my-3 rounded-xl border border-rose-500/45 bg-rose-500/10 text-foreground shadow-lg p-3.5 sm:p-4 select-text transition relative overflow-hidden">
+      {/* 顶部 20 秒红色倒计时进度条 */}
+      <div className="absolute top-0 left-0 right-0 h-1 bg-rose-500/15">
         <div
-          className="h-full bg-zinc-400 transition-all duration-1000 ease-linear"
-          style={{ width: `${Math.max(0, (timeLeft / 15) * 100)}%` }}
+          className="h-full bg-rose-500 transition-all duration-1000 ease-linear"
+          style={{ width: `${Math.max(0, (timeLeft / TOTAL_SECONDS) * 100)}%` }}
         />
       </div>
 
-      <div className="flex items-start justify-between gap-3">
-        <div className="flex items-center space-x-2.5 min-w-0">
-          <div className="p-1.5 rounded-lg bg-zinc-800 border border-zinc-700 text-zinc-200 shrink-0">
-            <ShieldAlert className="w-4 h-4" />
-          </div>
-          <div className="min-w-0">
-            <h4 className="text-sm font-semibold text-zinc-100 tracking-tight flex items-center gap-2">
-              <span>{t('高危操作拦截 · 需要人工审批')}</span>
-              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300">
-                {approvalCall.policy_level || 'L2'}
-              </span>
-            </h4>
-          </div>
+      <div className="flex items-center justify-between gap-2 pt-0.5">
+        <div className="flex items-center gap-2 min-w-0">
+          <ShieldAlert className="w-4 h-4 text-rose-500 shrink-0 animate-pulse" />
+          <span className="text-xs sm:text-sm font-semibold text-rose-500 truncate">
+            {t('安全风控拦截 · 请确认是否放行')}
+          </span>
+          <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-rose-500/15 border border-rose-500/30 text-rose-400 shrink-0">
+            {approvalCall.tool_name}
+          </span>
         </div>
 
-        {/* 倒计时单色状态指示 */}
-        <div className="flex items-center space-x-1.5 text-xs font-mono px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 shrink-0">
+        <div className="flex items-center gap-1 text-xs font-mono px-2 py-0.5 rounded-md bg-rose-500/15 border border-rose-500/35 text-rose-400 shrink-0">
           <Clock className="w-3.5 h-3.5" />
-          {timeLeft > 0 ? (
-            <span>{t('倒计时')} {timeLeft}s {t('自动封锁')}</span>
-          ) : (
-            <span className="text-zinc-400">{t('已自动封锁')}</span>
-          )}
+          {timeLeft > 0 ? <span>{timeLeft}s</span> : <span>{t('已封锁')}</span>}
         </div>
       </div>
 
-      {/* 风险原因 */}
-      <div className="mt-3 p-3 rounded-lg bg-zinc-950/70 border border-zinc-800 text-xs text-zinc-300 leading-relaxed font-sans">
-        <span className="text-zinc-400 font-medium mr-1.5">{t('拦截原因')}:</span>
-        {approvalCall.risk_reason}
+      {/* 精简核心风险说明 + 拟执行内容 */}
+      <div className="mt-2.5 space-y-1.5 text-xs">
+        <div className="text-foreground/90 leading-relaxed">
+          <span className="font-semibold text-rose-400 mr-1.5">{t('风险操作')}:</span>
+          <span>{approvalCall.risk_reason}</span>
+        </div>
+        <div className="px-2.5 py-1.5 rounded-lg bg-black/25 border border-rose-500/25 font-mono text-[11px] text-foreground/85 break-all line-clamp-3">
+          {compactArgsPreview}
+        </div>
       </div>
 
-      {approvalCall.snapshot_path && (
-        <div className="mt-2 text-[11px] text-zinc-400 flex items-center gap-1.5">
-          <span>{t('安全快照已自动备份至')}:</span>
-          <code className="text-zinc-200 bg-zinc-800/80 px-1.5 py-0.5 rounded font-mono border border-zinc-700 text-[10px]">
-            {approvalCall.snapshot_path}
-          </code>
+      {isModifying && (
+        <div className="mt-2.5 space-y-1.5">
+          <textarea
+            value={modifiedArgsJson}
+            onChange={(e) => setModifiedArgsJson(e.target.value)}
+            className="w-full text-xs font-mono p-2.5 rounded-lg bg-black/30 border border-rose-500/35 text-foreground focus:outline-none min-h-[100px]"
+          />
+          {jsonError && <p className="text-xs text-rose-400 font-mono">{jsonError}</p>}
         </div>
       )}
 
-      {/* 拟调用工具与参数预览 / 改参编辑区 */}
-      <div className="mt-3.5">
-        <div className="text-[11px] text-zinc-400 font-medium mb-1.5 flex items-center justify-between">
-          <span>
-            {t('拟调用工具')}: <span className="text-zinc-100 font-mono font-semibold">{approvalCall.tool_name}</span>
-          </span>
-          {isModifying && (
-            <span className="text-[10px] text-zinc-400 font-mono">{t('编辑 JSON 参数后放行')}</span>
-          )}
-        </div>
-
-        {!isModifying ? (
-          <pre className="text-xs font-mono p-3 rounded-lg bg-zinc-950 border border-zinc-800 text-zinc-300 overflow-x-auto max-h-44">
-            {JSON.stringify(approvalCall.arguments, null, 2)}
-          </pre>
-        ) : (
-          <div className="space-y-1.5">
-            <textarea
-              value={modifiedArgsJson}
-              onChange={(e) => setModifiedArgsJson(e.target.value)}
-              className="w-full text-xs font-mono p-3 rounded-lg bg-zinc-950 border border-zinc-700 text-zinc-200 focus:outline-none focus:border-zinc-400 min-h-[130px]"
-            />
-            {jsonError && <p className="text-xs text-zinc-400 font-mono">{jsonError}</p>}
-          </div>
-        )}
-      </div>
-
       {isRejecting && (
-        <div className="mt-3">
-          <label className="block text-[11px] text-zinc-400 mb-1">
-            {t('改道引导建议 (指引 AI 采用何种替代安全方案)')}:
-          </label>
+        <div className="mt-2.5">
           <input
             type="text"
             value={userGuidance}
             onChange={(e) => setUserGuidance(e.target.value)}
-            placeholder={t('例如：请将输出文件写入工作区 output/ 目录，避免跨目录修改...')}
-            className="w-full text-xs px-3 py-2 rounded-lg bg-zinc-950 border border-zinc-700 text-zinc-200 focus:outline-none focus:border-zinc-400"
+            placeholder={t('可选：输入替代指引建议...')}
+            className="w-full text-xs px-2.5 py-1.5 rounded-lg bg-black/30 border border-rose-500/35 text-foreground focus:outline-none"
           />
         </div>
       )}
 
-      {/* 四按键操作区 (单色扁平化设计) */}
-      <div className="mt-4 pt-3 border-t border-zinc-800 flex flex-wrap items-center gap-2">
+      {/* 精简三主按钮：放行本次 / 沙盒全放行白名单 / 拒绝 */}
+      <div className="mt-3 pt-2.5 border-t border-rose-500/25 flex flex-wrap items-center gap-2">
         <button
           onClick={() => handleAction('approve_once')}
           disabled={submitting || timeLeft <= 0}
-          className="text-xs font-medium px-3.5 py-1.5 rounded-lg bg-zinc-100 hover:bg-white text-zinc-900 border border-zinc-200 shadow-sm transition disabled:opacity-40 flex items-center space-x-1.5"
+          className="text-xs font-semibold px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition disabled:opacity-40 flex items-center gap-1"
         >
           <Check className="w-3.5 h-3.5" />
-          <span>{t('批准本次')}</span>
+          <span>{t('放行本次')}</span>
         </button>
 
         <button
           onClick={() => handleAction('approve_all')}
           disabled={submitting || timeLeft <= 0}
-          className="text-xs font-medium px-3.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition disabled:opacity-40 flex items-center space-x-1.5"
-          title={t('在本次任务后续执行中，不再重复拦截该工具')}
+          className="text-xs font-medium px-3 py-1.5 rounded-lg bg-rose-500/15 hover:bg-rose-500/25 text-rose-300 border border-rose-500/35 transition disabled:opacity-40 flex items-center gap-1"
+          title={t('加入当前沙盒白名单，后续同类操作自动放行')}
         >
           <BookmarkPlus className="w-3.5 h-3.5" />
-          <span>{t('本任务白名单')}</span>
+          <span>{t('沙盒全放行白名单')}</span>
         </button>
 
         {!isModifying ? (
           <button
             onClick={() => setIsModifying(true)}
             disabled={submitting || timeLeft <= 0}
-            className="text-xs font-medium px-3.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 border border-zinc-700 transition disabled:opacity-40 flex items-center space-x-1.5"
+            className="text-[11px] px-2.5 py-1.5 rounded-lg border border-border/70 bg-surface-100/40 hover:bg-surface-200 text-muted-foreground hover:text-foreground transition disabled:opacity-40 flex items-center gap-1"
           >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            <span>{t('改参另存为')}</span>
+            <SlidersHorizontal className="w-3 h-3" />
+            <span>{t('改参')}</span>
           </button>
         ) : (
           <button
             onClick={() => handleAction('modify_args')}
             disabled={submitting || timeLeft <= 0}
-            className="text-xs font-medium px-3.5 py-1.5 rounded-lg bg-zinc-200 hover:bg-white text-zinc-900 border border-zinc-300 transition disabled:opacity-40"
+            className="text-xs font-medium px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-black transition disabled:opacity-40"
           >
-            {t('确认以新参数放行')}
+            {t('按新参数放行')}
           </button>
         )}
 
         {!isRejecting ? (
           <button
-            onClick={() => setIsRejecting(true)}
+            onClick={() => handleAction('reject')}
             disabled={submitting || timeLeft <= 0}
-            className="text-xs font-medium px-3.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-300 border border-zinc-700 transition disabled:opacity-40 ml-auto flex items-center space-x-1.5"
+            className="text-xs font-medium px-3 py-1.5 rounded-lg bg-surface-200/70 hover:bg-rose-600 hover:text-white text-foreground border border-rose-500/30 transition disabled:opacity-40 ml-auto flex items-center gap-1"
           >
             <Ban className="w-3.5 h-3.5" />
-            <span>{t('拒绝并改道')}</span>
+            <span>{t('拒绝拦截')}</span>
           </button>
         ) : (
           <button
             onClick={() => handleAction('reject')}
             disabled={submitting || timeLeft <= 0}
-            className="text-xs font-medium px-3.5 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-100 border border-zinc-600 transition disabled:opacity-40 ml-auto"
+            className="text-xs font-medium px-3 py-1.5 rounded-lg bg-rose-600 text-white transition disabled:opacity-40 ml-auto"
           >
-            {t('确认驳回并改道')}
+            {t('确认拒绝')}
           </button>
         )}
       </div>

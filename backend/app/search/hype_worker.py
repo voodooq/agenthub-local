@@ -432,15 +432,11 @@ class HyPEQuestionWorker:
             conn = sqlite3.connect(str(db_path))
             try:
                 with conn:
+                    from ..kb.embedding_codec import encode_embedding_f16
                     for idx, c in enumerate(hype_chunks_to_insert):
                         blob_data = None
                         if embeddings is not None and idx < len(embeddings):
-                            vec = embeddings[idx]
-                            if HAS_NUMPY and np is not None and hasattr(vec, "astype"):
-                                blob_data = vec.astype(np.float32).tobytes()
-                            else:
-                                import array
-                                blob_data = array.array("f", (float(x) for x in vec)).tobytes()
+                            blob_data = encode_embedding_f16(embeddings[idx])
 
                         conn.execute(
                             """

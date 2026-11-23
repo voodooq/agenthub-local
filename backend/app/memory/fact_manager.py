@@ -260,16 +260,18 @@ class FactManager:
         合并规则：同名 fact_key 下，具体 workspace_id 契约严格覆盖 GLOBAL 全局偏好。
         输出顺序按 (category, fact_key) 稳定排序，利于系统提示词前缀缓存命中。
         """
+        is_all = str(workspace_id or "").strip() == "__all__"
         norm_ws = cls.normalize_workspace_id(workspace_id)
         conditions = ["valid_to IS NULL"]
         params: list[Any] = []
 
-        if norm_ws == "GLOBAL" or not include_global:
-            conditions.append("workspace_id = ?")
-            params.append(norm_ws)
-        else:
-            conditions.append("workspace_id IN (?, 'GLOBAL')")
-            params.append(norm_ws)
+        if not is_all:
+            if norm_ws == "GLOBAL" or not include_global:
+                conditions.append("workspace_id = ?")
+                params.append(norm_ws)
+            else:
+                conditions.append("workspace_id IN (?, 'GLOBAL')")
+                params.append(norm_ws)
 
         if category:
             conditions.append("category = ?")
@@ -326,6 +328,7 @@ class FactManager:
                 category=category,
             )
 
+        is_all = str(workspace_id or "").strip() == "__all__"
         norm_ws = cls.normalize_workspace_id(workspace_id)
         conditions: list[str] = []
         params: list[Any] = []
@@ -333,12 +336,13 @@ class FactManager:
         if not include_history:
             conditions.append("valid_to IS NULL")
 
-        if norm_ws == "GLOBAL" or not include_global:
-            conditions.append("workspace_id = ?")
-            params.append(norm_ws)
-        else:
-            conditions.append("workspace_id IN (?, 'GLOBAL')")
-            params.append(norm_ws)
+        if not is_all:
+            if norm_ws == "GLOBAL" or not include_global:
+                conditions.append("workspace_id = ?")
+                params.append(norm_ws)
+            else:
+                conditions.append("workspace_id IN (?, 'GLOBAL')")
+                params.append(norm_ws)
 
         if category:
             conditions.append("category = ?")

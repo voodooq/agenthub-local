@@ -34,6 +34,22 @@ class PolicyDecision:
         self.require_approval = require_approval
 
 
+_WORKSPACE_WHITELISTS: dict[str, set[str]] = {}
+
+
+def add_workspace_whitelist(workspace_id: str, tool_name: str) -> None:
+    """将指定工具加入沙盒工作区级全放行白名单（跨会话生效）。"""
+    ws_key = (workspace_id or "default").strip() or "default"
+    _WORKSPACE_WHITELISTS.setdefault(ws_key, set()).add(tool_name)
+    logger.info(f"安全网关已将操作加入沙盒 [{ws_key}] 全放行白名单: {tool_name}")
+
+
+def is_workspace_whitelisted(workspace_id: str, tool_name: str) -> bool:
+    """检查工具是否已在该沙盒工作区全放行白名单中。"""
+    ws_key = (workspace_id or "default").strip() or "default"
+    return tool_name in _WORKSPACE_WHITELISTS.get(ws_key, set())
+
+
 class PolicyInterceptor:
     """
     执行策略拦截网关
@@ -235,7 +251,7 @@ class ApprovalResult:
 
 class ApprovalEventManager:
     """
-    负责在协程层面实现 HITL 审批挂起与 15s 倒计时自动封锁
+    负责在协程层面实现 HITL 审批挂起与 20s 倒计时自动封锁
     """
 
     def __init__(self):
@@ -252,9 +268,9 @@ class ApprovalEventManager:
             self._loop_to_call[loop_id] = call_id
         return event
 
-    async def wait_for_decision(self, call_id: str, timeout_seconds: float = 15.0) -> ApprovalResult:
+    async def wait_for_decision(self, call_id: str, timeout_seconds: float = 20.0) -> ApprovalResult:
         """
-        异步挂起等待人工四键决策；若在指定时限（默认 15 秒）内未收到操作，自动封锁驳回。
+        异步挂起等待人工决策；若在指定时限（默认 20 秒）内未收到操作，自动封锁驳回。
         """
         event = self._waiters.get(call_id)
         if not event:
@@ -267,7 +283,7 @@ class ApprovalEventManager:
             logger.warning(f"[ApprovalEventManager] 审批卡调用 {call_id} 超过 {timeout_seconds} 秒未响应，自动封锁！")
             return ApprovalResult(
                 action="reject",
-                user_guidance="【15秒超时自动封锁】未在时限内收到操作，安全网关已自动封锁该高危操作并阻止执行。",
+                user_guidance="【20秒超时自动封锁】未在时限内收到操作，安全网关已自动封锁该高危操作并阻止执行。",
                 is_timeout=True,
             )
         finally:

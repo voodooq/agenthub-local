@@ -56,22 +56,29 @@ class MultiKBRetrievalRouter:
             if targets:
                 return targets
 
-        # 2. 其次使用专家绑定（本地沙盒对话与外部 @专家 均正常检索绑定知识库）
+        # 2. 其次使用专家绑定（严格执行发布门控：未发布知识库仅限后台测试，严禁前台专家读取）
         if expert_id:
             bound = await KBLifecycleManager.get_expert_kbs(expert_id)
             if bound:
-                return [
-                    {
-                        "kb_id": b["kb_id"],
-                        "name": b["name"],
-                        "version": b["effective_version"],
-                        "priority_rank": b["priority_rank"],
-                        "domain_type": b.get("domain_type") or "general",
-                        "rule_profile_json": b.get("rule_profile_json") or "",
-                        "is_published": bool(b.get("is_published", True)),
-                    }
-                    for b in bound
-                ]
+                published_bound: list[dict[str, Any]] = []
+                for b in bound:
+                    if not b.get("is_published"):
+                        logger.info(
+                            f"[MultiKBRouter] 专家绑定知识库 [{b.get('name')}] 未发布，已严格拦截前台读取"
+                        )
+                        continue
+                    published_bound.append(
+                        {
+                            "kb_id": b["kb_id"],
+                            "name": b["name"],
+                            "version": b["effective_version"],
+                            "priority_rank": b["priority_rank"],
+                            "domain_type": b.get("domain_type") or "general",
+                            "rule_profile_json": b.get("rule_profile_json") or "",
+                            "is_published": True,
+                        }
+                    )
+                return published_bound
 
         return []
 
@@ -435,15 +442,15 @@ class MultiKBRetrievalRouter:
                         except Exception:
                             pass
 
-                    # 向量打分
+                    # 向量打分（兼容 float16 半精度与旧版 float32 向量）
                     cosine_sim = 0.0
                     blob = r["embedding_blob"]
                     if blob and q_list and q_len > 0:
                         try:
-                            arr = array.array("f")
-                            arr.frombytes(blob)
-                            if len(arr) == q_len:
-                                dot = sum(a * b for a, b in zip(arr, q_list))
+                            from ..kb.embedding_codec import decode_embedding
+                            arr = decode_embedding(blob, q_len)
+                            if arr is not None and len(arr) == q_len:
+                                dot = sum(float(a) * b for a, b in zip(arr, q_list))
                                 cosine_sim = max(0.0, float(dot))
                                 # 融合向量得分
                                 base_score = 0.5 * base_score + 0.5 * cosine_sim

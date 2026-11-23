@@ -136,3 +136,29 @@ class CloudVFSSyncManager:
                     "DELETE FROM cloud_vfs_sync_state WHERE mount_id = ?",
                     (mount_id,),
                 )
+
+    def find_removed_uris(
+        self, mount_id: str, current_files: list[CloudFileMeta]
+    ) -> list[str]:
+        """比对本地水位线与当前源端文件列表，找出已被删除的远端 URI 列表。"""
+        active_uris = {f.remote_uri for f in (current_files or []) if not f.is_dir and f.remote_uri}
+        with closing(self._get_connection()) as conn:
+            rows = conn.execute(
+                "SELECT remote_uri FROM cloud_vfs_sync_state WHERE mount_id = ?",
+                (mount_id,),
+            ).fetchall()
+        return [str(r["remote_uri"]) for r in rows if str(r["remote_uri"]) not in active_uris]
+
+    def delete_sync_state_uris(self, mount_id: str, remote_uris: list[str]) -> int:
+        """删除指定 remote_uri 列表对应的增量同步水位线记录。"""
+        clean_uris = [u for u in (remote_uris or []) if u]
+        if not clean_uris:
+            return 0
+        placeholders = ",".join("?" for _ in clean_uris)
+        with closing(self._get_connection()) as conn:
+            with conn:
+                cur = conn.execute(
+                    f"DELETE FROM cloud_vfs_sync_state WHERE mount_id = ? AND remote_uri IN ({placeholders})",
+                    [mount_id, *clean_uris],
+                )
+                return int(cur.rowcount or 0)

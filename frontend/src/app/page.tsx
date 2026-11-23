@@ -48,6 +48,8 @@ import { useDeviceProfile } from '@/hooks/useDeviceProfile';
 import { groupMessagesByTurn } from '@/utils/turnTimeline';
 import { MobileShell } from '@/components/mobile/MobileShell';
 import { SaveToWikiModal } from '@/components/wiki/SaveToWikiModal';
+import { SchemaWarningCard } from '@/components/chat/SchemaWarningCard';
+import { FollowupAndSnapshotBar } from '@/components/chat/FollowupAndSnapshotBar';
 
 import { Sidebar, MainNavHub } from '@/components/Sidebar';
 import { AgentsView, AgentItem } from '@/components/AgentsView';
@@ -256,6 +258,40 @@ function DesktopWorkbench() {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [activeWorkspaceId, setActiveWorkspaceId] = useState<string>('default');
   const [activeNavHub, setActiveNavHub] = useState<MainNavHub>('chat');
+  const activeNavHubRef = useRef<MainNavHub>('chat');
+  activeNavHubRef.current = activeNavHub;
+  const [runningConvIds, setRunningConvIds] = useState<string[]>([]);
+  const [unreadConvIds, setUnreadConvIds] = useState<string[]>([]);
+
+  const markConvRunning = useCallback((cid: string, running: boolean) => {
+    if (!cid) return;
+    setRunningConvIds((prev) => {
+      const exists = prev.includes(cid);
+      if (running && !exists) return [...prev, cid];
+      if (!running && exists) return prev.filter((x) => x !== cid);
+      return prev;
+    });
+    if (running) {
+      setUnreadConvIds((prev) => (prev.includes(cid) ? prev.filter((x) => x !== cid) : prev));
+    }
+  }, []);
+
+  const markConvUnread = useCallback((cid: string, unread: boolean) => {
+    if (!cid) return;
+    setUnreadConvIds((prev) => {
+      const exists = prev.includes(cid);
+      if (unread && !exists) return [...prev, cid];
+      if (!unread && exists) return prev.filter((x) => x !== cid);
+      return prev;
+    });
+  }, []);
+
+  // 当用户回到对话视图并查看某会话时，自动清除该会话的未读结果提醒圆点
+  useEffect(() => {
+    if (activeNavHub === 'chat' && activeConvId) {
+      markConvUnread(activeConvId, false);
+    }
+  }, [activeNavHub, activeConvId, markConvUnread]);
   const [saveFileToast, setSaveFileToast] = useState<string | null>(null);
   const [saveFileToastType, setSaveFileToastType] = useState<'success' | 'warning' | 'error' | 'info'>('success');
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -1605,6 +1641,7 @@ function DesktopWorkbench() {
       isRetry?: boolean;
       retryRound?: number;
       overrideSceneMode?: SceneMode;
+      forceLive?: boolean;
     }
   ) => {
     handleSendMessageRef.current = handleSendMessage;
@@ -1813,6 +1850,7 @@ function DesktopWorkbench() {
     activeStreamMetaRef.current = streamMeta;
     if (activeConvId) {
       activeStreamsMapRef.current.set(activeConvId, streamMeta);
+      markConvRunning(activeConvId, true);
     }
     lastStreamErrorNoticeRef.current = null;
 
@@ -2106,9 +2144,15 @@ function DesktopWorkbench() {
           inquiry_action: options?.inquiryAction || null,
           swarm_mode: effectiveSwarmMode,
           target_agent_ids: targetAgentIds.length > 0 ? targetAgentIds : undefined,
-          agent_id: targetAgentIds.length > 0 ? targetAgentIds[0] : undefined,
+          agent_id:
+            targetAgentIds.length > 0
+              ? targetAgentIds[0]
+              : (workspaces.find((w) => w.id === activeWorkspaceId)?.agent_id ||
+                 workspaces.find((w) => w.id === activeWorkspaceId)?.bound_agent_id ||
+                 undefined),
           swarm_id: effectiveSwarmMode ? (activeSwarmId || null) : null,
           is_retry: isRetry,
+          force_live: Boolean(options?.forceLive),
           attachments: currentAttachments.map((a) => ({
             name: a.name,
             file_path: a.filePath,
@@ -2191,6 +2235,7 @@ function DesktopWorkbench() {
               boundConvId = newCid;
               streamMeta.convId = newCid;
               activeStreamsMapRef.current.set(newCid, streamMeta);
+              markConvRunning(newCid, true);
               convMessagesCacheRef.current.set(newCid, currentConvMessages);
               if (activeConvIdRef.current === null || activeConvIdRef.current === newCid) {
                 activeConvIdRef.current = newCid;
@@ -2721,6 +2766,38 @@ function DesktopWorkbench() {
               auto_continue: Boolean(parsed.auto_continue),
               continue_prompt: parsed.continue_prompt ? String(parsed.continue_prompt) : undefined,
             };
+          } else if (parsed.type === 'followup_suggestions' && Array.isArray(parsed.suggestions)) {
+            updateStreamMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                updated[updated.length - 1] = {
+                  ...last,
+                  followup_suggestions: parsed.suggestions,
+                };
+              }
+              return updated;
+            });
+          } else if (parsed.type === 'stats_snapshot_offer' && parsed.agent_id) {
+            updateStreamMessages((prev) => {
+              const updated = [...prev];
+              const last = updated[updated.length - 1];
+              if (last && last.role === 'model') {
+                updated[updated.length - 1] = {
+                  ...last,
+                  stats_snapshot_offer: {
+                    agent_id: String(parsed.agent_id),
+                    title: String(parsed.title || '业务统计快照'),
+                    query_scope: String(parsed.query_scope || ''),
+                    verified_sqls: Array.isArray(parsed.verified_sqls) ? parsed.verified_sqls : [],
+                    profile_id: parsed.profile_id ? String(parsed.profile_id) : undefined,
+                    has_audit_alert: Boolean(parsed.has_audit_alert),
+                    audit_alerts: Array.isArray(parsed.audit_alerts) ? parsed.audit_alerts : [],
+                  },
+                };
+              }
+              return updated;
+            });
           } else if (parsed.type === 'done') {
             receivedUsefulChunk = true;
             if (autoRetryStateRef.current) {
@@ -2965,13 +3042,15 @@ function DesktopWorkbench() {
       const finalCid = effectiveConvId || activeConvId;
       if (finalCid) {
         activeStreamsMapRef.current.delete(finalCid);
+        markConvRunning(finalCid, false);
       }
       if (activeStreamMetaRef.current === streamMeta) {
         activeStreamMetaRef.current = null;
       }
       const isViewingThisConv =
-        Boolean(finalCid && activeConvIdRef.current === finalCid) ||
-        (!finalCid && !activeConvIdRef.current);
+        activeNavHubRef.current === 'chat' &&
+        (Boolean(finalCid && activeConvIdRef.current === finalCid) ||
+          (!finalCid && !activeConvIdRef.current));
 
       const isWaitingAutoRetry = Boolean(autoRetryStateRef.current?.isWaiting);
 
@@ -2985,7 +3064,10 @@ function DesktopWorkbench() {
         await fetchActiveLoop();
         setTimeout(() => scrollToBottom(true), 60);
       } else {
-        // 用户已切换至其它会话，后台执行自然落盘，静默刷新侧边栏标题与时间
+        // 用户已切换至其它会话或其它页面：后台完成并标记为未读新结果（显示提醒圆点）
+        if (finalCid && !isWaitingAutoRetry) {
+          markConvUnread(finalCid, true);
+        }
         fetchConversations();
         const currentStillActive = activeConvIdRef.current
           ? activeStreamsMapRef.current.has(activeConvIdRef.current)
@@ -3541,6 +3623,8 @@ function DesktopWorkbench() {
         conversations={conversations}
         collapseSignal={sidebarAutoCollapseSignal}
         activeConvId={activeConvId}
+        runningConvIds={runningConvIds}
+        unreadConvIds={unreadConvIds}
         workspaces={workspaces}
         activeWorkspaceId={activeWorkspaceId}
         activeNavHub={activeNavHub}
@@ -3574,6 +3658,7 @@ function DesktopWorkbench() {
           fetchConversations();
         }}
         onSelectConv={(id) => {
+          markConvUnread(id, false);
           switchConversation(id);
         }}
         onNewChat={(targetWsId) => {
@@ -3855,14 +3940,6 @@ function DesktopWorkbench() {
                     loop={activeLoop}
                     onRefresh={fetchActiveLoop}
                   />
-                  {activeLoop.loop_status === 'waiting_approval' &&
-                    activeLoop.pending_approval_call && (
-                      <ApprovalCard
-                        loopId={activeLoop.id}
-                        approvalCall={activeLoop.pending_approval_call}
-                        onResolved={fetchActiveLoop}
-                      />
-                    )}
                 </div>
               )}
 
@@ -4437,6 +4514,64 @@ function DesktopWorkbench() {
                         />
                       )}
 
+                      {/* 数据结构红线审计告警一键沉淀卡（按规则类型去重，同类只显示 1 条，不同类型分别显示） */}
+                      {!isUser &&
+                        !isProcessStep &&
+                        (() => {
+                          const dedupedWarnings = new Map<string, { text: string; count: number }>();
+                          for (const ev of aggregatedToolEvents) {
+                            if (
+                              ev.name !== 'query_biz_data_via_ontology' ||
+                              typeof ev.output !== 'string' ||
+                              !ev.output.includes('数据结构红线审计告警')
+                            ) {
+                              continue;
+                            }
+                            const m = ev.output.match(
+                              /数据结构红线审计告警[\s\S]*?：\s*\n([\s\S]*?)(?=\n###|$)/
+                            );
+                            const warnBlock = (m?.[1] || ev.output || '').trim();
+                            // 按行拆分，支持单次返回多条不同规则（如 R002 + R005）
+                            const lines = warnBlock
+                              .split(/\r?\n/)
+                              .map((l) => l.trim())
+                              .filter(Boolean);
+                            for (const line of lines) {
+                              const codeMatch = line.match(/\[(R\d{3})\b/);
+                              const dedupKey = codeMatch ? codeMatch[1] : line;
+                              const prev = dedupedWarnings.get(dedupKey);
+                              if (prev) {
+                                prev.count += 1;
+                              } else {
+                                dedupedWarnings.set(dedupKey, { text: line, count: 1 });
+                              }
+                            }
+                          }
+                          return Array.from(dedupedWarnings.entries()).map(([k, item]) => (
+                            <SchemaWarningCard
+                              key={k}
+                              warningText={item.count > 1 ? `${item.text}（本轮同类提醒共合并 ${item.count} 次）` : item.text}
+                            />
+                          ));
+                        })()}
+
+                      {/* 回答底部：统计快照一键沉淀 + 下一步追问引导卡片（点击即自动发问，重查卡片透传原问题 + forceLive） */}
+                      {!isUser && !isProcessStep && !isCurrentStreamingMsg && (
+                        <FollowupAndSnapshotBar
+                          messageContent={msg.content || ''}
+                          suggestions={msg.followup_suggestions}
+                          snapshotOffer={msg.stats_snapshot_offer}
+                          disabled={isStreaming}
+                          onSelectFollowup={(item) => {
+                            const targetPrompt = (item.prompt || item.label || '').trim();
+                            if (!targetPrompt) return;
+                            void handleSendMessage(targetPrompt, undefined, undefined, undefined, {
+                              forceLive: Boolean(item.force_live),
+                            });
+                          }}
+                        />
+                      )}
+
                       {/* 单行轻量 Token 与 KV Cache 水表：仅开启「调试视图」时直接外显，平时收进 ··· 更多菜单 */}
                       {!isUser && msg.token_stats && isDevDebug && (
                         <TokenMetricsFooterBar
@@ -4536,15 +4671,55 @@ function DesktopWorkbench() {
                                 : undefined
                             }
                             onModifyTone={handleModifyTone}
-                            onSaveToWiki={() =>
-                              setSaveWikiTarget({
-                                content: msg.content,
-                                sourceType:
-                                  msg.content.includes('|---') || msg.content.includes('| ---')
-                                    ? 'sql_snapshot'
-                                    : 'chat_decision',
-                              })
-                            }
+                            onSaveToWiki={async () => {
+                              const ontologyEvents = aggregatedToolEvents.filter(
+                                (ev) => ev.name === 'query_biz_data_via_ontology' && ev.output
+                              );
+                              let snapshotContent = msg.content;
+                              if (ontologyEvents.length > 0) {
+                                const sqlBlocks = ontologyEvents
+                                  .map((ev) => {
+                                    const match = String(ev.output || '').match(/### 执行 SQL\s*```sql\s*([\s\S]*?)```/i);
+                                    return match?.[1]?.trim() || '';
+                                  })
+                                  .filter(Boolean);
+                                const tsLabel = new Date().toLocaleString('zh-CN', { hour12: false });
+                                const sqlSection = sqlBlocks.length
+                                  ? `\n\n---\n### 溯源查询信息（${tsLabel}）\n\`\`\`sql\n${sqlBlocks.join('\n\n-- next query --\n\n')}\n\`\`\``
+                                  : `\n\n---\n> 查询时间：${tsLabel}`;
+                                snapshotContent = `${msg.content}${sqlSection}`;
+                              }
+                              const activeWsObj = workspaces.find((w) => w.id === activeWorkspaceId);
+                              const boundAgentId =
+                                activeWsObj?.agent_id || activeWsObj?.bound_agent_id || '';
+                              showFloatingToast('正在自动识别来源并存入当前沙盒 Wiki 空间...', 'info', 2200);
+                              try {
+                                const res = await apiFetch('/api/v1/wiki/quick-save', {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({
+                                    content: snapshotContent,
+                                    workspace_id: activeWorkspaceId || 'default',
+                                    workspace_name: activeWsObj?.name || '默认工作区',
+                                    agent_id: boundAgentId,
+                                    has_sql: ontologyEvents.length > 0,
+                                  }),
+                                });
+                                const json = await res.json();
+                                if (!res.ok) {
+                                  showFloatingToast(json.detail || '存入 Wiki 失败', 'error', 4000);
+                                  return;
+                                }
+                                const d = json.data || {};
+                                showFloatingToast(
+                                  `已存入【${d.wiki_space_name || '当前沙盒百科空间'}】（自动识别：${d.source_type_label || '对话决策'} · 《${d.page_title || '新词条'}》）`,
+                                  'success',
+                                  4500
+                                );
+                              } catch (err: any) {
+                                showFloatingToast(err?.message || '存入 Wiki 发生网络异常', 'error', 4000);
+                              }
+                            }}
                             onBranchFromHere={
                               !isProcessStep && activeConvId
                                 ? () => handleBranchConversation(msg.id, msg.turn_id)
@@ -4569,6 +4744,20 @@ function DesktopWorkbench() {
                   );
                 })
               )}
+              {/* 安全风控审批卡：直接内嵌在对话内容区末尾，红色框醒目提醒（20s 倒计时） */}
+              {activeConvId &&
+                activeLoop &&
+                activeLoop.conversation_id === activeConvId &&
+                activeLoop.loop_status === 'waiting_approval' &&
+                activeLoop.pending_approval_call && (
+                  <div className="max-w-4xl mx-auto w-full px-1">
+                    <ApprovalCard
+                      loopId={activeLoop.id}
+                      approvalCall={activeLoop.pending_approval_call}
+                      onResolved={fetchActiveLoop}
+                    />
+                  </div>
+                )}
               <div ref={messagesEndRef} />
                 </div>
             </div>
