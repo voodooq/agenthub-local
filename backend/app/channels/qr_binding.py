@@ -55,9 +55,21 @@ async def ensure_clawbot_sidecar_running(
     if not node_bin:
         return False, "本机未检测到 Node.js 环境，无法自动启动微信桥接服务"
 
-    # 定位项目根目录下的 sidecars/weixin-clawbot-bridge/index.mjs
-    project_root = Path(__file__).resolve().parents[3]
-    script_path = project_root / "sidecars" / "weixin-clawbot-bridge" / "index.mjs"
+    # 兼容本地开发目录 (parents[3]/sidecars) 与 Docker 容器挂载目录 (/app/sidecars)
+    resolved_here = Path(__file__).resolve()
+    candidate_roots = [
+        resolved_here.parents[3],
+        resolved_here.parents[2],
+        Path("/app"),
+    ]
+    script_path = next(
+        (
+            root / "sidecars" / "weixin-clawbot-bridge" / "index.mjs"
+            for root in candidate_roots
+            if (root / "sidecars" / "weixin-clawbot-bridge" / "index.mjs").exists()
+        ),
+        resolved_here.parents[3] / "sidecars" / "weixin-clawbot-bridge" / "index.mjs",
+    )
     if not script_path.exists():
         return False, f"未找到桥接脚本: {script_path}"
 

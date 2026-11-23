@@ -12,6 +12,7 @@ services:
       # 移除 :ro 只读限制，以支持容器内自动更新时同步覆盖宿主机源码、静态前端与 version.json
       - ./backend:/app
       - ./frontend/out:/app/static
+      - ./sidecars:/app/sidecars
       - ./version.json:/app/version.json
       - ./data:/app/data
       # 挂载宿主机 CLI 账号隔离目录与默认 ~/.gemini 登录态（兼容 Linux HOME 与 Windows USERPROFILE）
