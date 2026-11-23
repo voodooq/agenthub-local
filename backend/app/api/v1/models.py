@@ -257,12 +257,12 @@ async def _get_candidates_for_account(
 
     discovered = await discover_cli_models(cli_home_dir, force_refresh=force_refresh)
     if discovered:
-        filtered = [ModelMeta(**item) for item in discovered if not _is_deprecated_gemini_model(item.get("id", ""))]
-        if filtered:
-            if not any(m.is_default for m in filtered):
-                filtered[0].is_default = True
-            return filtered
-    # NOTE: 若 discover 返回空列表或过滤后为空，以静态内置基准列表兜底
+        all_discovered = [ModelMeta(**item) for item in discovered if item.get("id")]
+        if all_discovered:
+            if not any(m.is_default for m in all_discovered):
+                all_discovered[0].is_default = True
+            return all_discovered
+    # NOTE: 若 discover 返回空列表，以静态内置基准列表兜底
     return [m.model_copy(deep=True) for m in CLI_MODELS]
 
 
@@ -554,8 +554,24 @@ class ActiveModelSelectionPayload(BaseModel):
 
 @router.get("/active-selection")
 async def get_current_active_model_selection():
-    """获取当前系统全局选择的模型与思考等级（支持 Web 与微信 IM 统一感知）"""
+    """获取当前系统全局选择的模型与思考等级（自动校验并匹配用户当前实际可用模型）"""
     m, tl = get_global_active_model()
+    try:
+        active_resp = await _build_active_models_response()
+        available_models = list(active_resp.models or [])
+        if available_models:
+            matched = next(
+                (item for item in available_models if item.id == m or item.name == m),
+                None,
+            )
+            if matched:
+                m = matched.id
+            else:
+                default_item = next((item for item in available_models if item.is_default), available_models[0])
+                m = default_item.id
+                set_global_active_model(m, tl)
+    except Exception as e:
+        logger.debug(f"自动校准全局活跃模型跳过: {e}")
     return {"model": m, "thinking_level": tl}
 
 

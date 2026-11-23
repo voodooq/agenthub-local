@@ -280,7 +280,7 @@ class TaskScheduler:
                 return str(m.id)
         if active_ids:
             return active_ids[0]
-        return "4 Argon"
+        return ""
 
     async def _execute_headless_agent(
         self,

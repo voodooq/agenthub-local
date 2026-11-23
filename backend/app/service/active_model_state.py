@@ -49,10 +49,8 @@ def get_global_active_model() -> tuple[str, str]:
         except Exception as e:
             logger.debug(f"读取 active_model_selection.json 提示: {e}")
 
-    # 兜底回退为当前系统主流首选
-    _GLOBAL_ACTIVE_MODEL = "Gemini 3.8 Flash"
-    _GLOBAL_THINKING_LEVEL = "high"
-    return _GLOBAL_ACTIVE_MODEL, _GLOBAL_THINKING_LEVEL
+    # 未曾手动持久化时保持为空字符串，交由算力调度层按用户当前实际启用的通道自动选择
+    return "", _GLOBAL_THINKING_LEVEL or "high"
 
 
 def set_global_active_model(model: str, thinking_level: str = "high") -> tuple[str, str]:

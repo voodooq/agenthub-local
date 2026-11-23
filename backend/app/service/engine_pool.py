@@ -45,10 +45,9 @@ class EnginePoolService:
             from ..core.provider_adapter import provider_adapter
 
             providers = await provider_adapter.get_enabled_providers_for_role("primary")
-            for prov in providers:
+            schedulable = [p for p in providers if p.get("provider_type") != "google_pool"]
+            for prov in schedulable:
                 ptype = prov.get("provider_type")
-                if ptype == "google_pool":
-                    continue
                 prov_models = prov.get("models") or []
                 is_auto_primary = (model_name in ("", "default")) and bool(prov_models)
                 if (
@@ -68,6 +67,11 @@ class EnginePoolService:
                         "model_name": model_name or "default",
                         "account_name": cand.name,
                     }
+
+            # 若无可用 Google 账号，自动回退到用户已启用的首个自定义算力通道
+            for prov in schedulable:
+                if prov.get("models"):
+                    return prov
         except Exception:
             pass
         return None
@@ -369,6 +373,12 @@ class EnginePoolService:
             exact_custom_match = bool(model_name) and any(
                 model_name in (p.get("models") or []) for p in schedulable_custom
             )
+            has_available_google_account = False
+            if task_role == "primary" and schedulable_custom and not exact_custom_match:
+                try:
+                    has_available_google_account = (await AccountRepository.get_active_candidate()) is not None
+                except Exception:
+                    has_available_google_account = False
             prev_failed_prov_name = None
 
             for prov in schedulable_custom:
@@ -384,8 +394,11 @@ class EnginePoolService:
                 )
                 is_auto_primary = (
                     task_role == "primary"
-                    and (model_name in ("", "default"))
                     and bool(prov_models)
+                    and (
+                        model_name in ("", "default")
+                        or (not exact_custom_match and not has_available_google_account)
+                    )
                 )
 
                 # 当模型名显式匹配、或为后台轻量通配/空占位回退/OAuth/高优通道时，优先路由多协议供应商

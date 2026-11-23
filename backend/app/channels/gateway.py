@@ -409,14 +409,37 @@ class ChannelGateway:
                             selected_expert_id = cand_id
                             expert_row = cand_row
 
-                # 动态自适应模型：优先使用机器人专属配置/绑定专家单独指定模型，否则自动继承当前系统的全局活跃模型
+                # 动态自适应模型：根据用户当前实际启用的模型池自动匹配，绝不硬编码固定模型
                 global_active_model, global_active_tl = get_global_active_model()
-                im_model_name = (
-                    str(link.get("model_preference") or link.get("model_name") or "").strip()
-                    or str((expert_row or {}).get("base_model") or "").strip()
-                    or global_active_model
-                    or "Gemini 3.8 Flash"
-                )
+                preferred_candidates = [
+                    str(link.get("model_preference") or link.get("model_name") or "").strip(),
+                    str((expert_row or {}).get("base_model") or "").strip(),
+                    str(global_active_model or "").strip(),
+                ]
+                im_model_name = next((c for c in preferred_candidates if c), "")
+                try:
+                    from ..api.v1.models import _build_active_models_response
+
+                    active_resp = await _build_active_models_response()
+                    user_models = list(active_resp.models or [])
+                    if user_models:
+                        matched_user_model = None
+                        for cand_m in preferred_candidates:
+                            if not cand_m:
+                                continue
+                            matched_user_model = next(
+                                (um for um in user_models if um.id == cand_m or um.name == cand_m),
+                                None,
+                            )
+                            if matched_user_model:
+                                break
+                        if matched_user_model:
+                            im_model_name = matched_user_model.id
+                        else:
+                            default_um = next((um for um in user_models if um.is_default), user_models[0])
+                            im_model_name = default_um.id
+                except Exception as _m_err:
+                    logger.debug(f"[IMGateway] 动态匹配用户可用模型回退自动调度: {_m_err}")
                 im_thinking_level = (
                     str(link.get("thinking_level") or "").strip().lower()
                     or global_active_tl

@@ -1058,17 +1058,26 @@ function DesktopWorkbench() {
     try {
       const url = forceRefresh ? '/api/v1/models/active?refresh=true' : '/api/v1/models/active';
       const res = await apiFetch(url);
+      let loadedModels: ModelMeta[] = [];
       if (res.ok) {
         const data: ActiveModelsState = await res.json();
+        loadedModels = Array.isArray(data.models) ? data.models : [];
         applyActiveModelsState(data);
       }
       try {
         const selRes = await apiFetch('/api/v1/models/active-selection');
         if (selRes.ok) {
           const selData = await selRes.json();
-          if (selData.model) {
+          const matchedModel =
+            selData.model && loadedModels.length > 0
+              ? loadedModels.find((m) => m.id === selData.model || m.name === selData.model)
+              : null;
+          if (matchedModel) {
             hasUserSelectedModelRef.current = true;
-            setCurrentModel(selData.model);
+            setCurrentModel(matchedModel.id);
+          } else if (loadedModels.length > 0) {
+            const autoDefault = loadedModels.find((m) => m.is_default) || loadedModels[0];
+            setCurrentModel(autoDefault.id);
           }
           if (selData.thinking_level) {
             setThinkingLevel(selData.thinking_level);
