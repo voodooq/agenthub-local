@@ -155,6 +155,10 @@ export function DialogueWikiView() {
           if (st.connected || st.qr_status === 'confirmed') {
             setQrLiveStatus('confirmed');
             await loadLinkBindings(qrModalLink.link_id);
+            // 扫码绑定成功，通知左侧菜单栏立即浮现专属沙盒
+            if (typeof window !== 'undefined') {
+              window.dispatchEvent(new CustomEvent('agenthub:workspaces-updated'));
+            }
           } else if (st.qr_status === 'scaned') {
             setQrLiveStatus('scaned');
           } else if (st.qr_status === 'expired') {
@@ -189,6 +193,9 @@ export function DialogueWikiView() {
       if (linksRes.ok) {
         const linksJson = await linksRes.json();
         setLinks(linksJson.data || []);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('agenthub:workspaces-updated'));
+        }
       }
     } catch {
       // 忽略网络瞬时异常
@@ -319,6 +326,9 @@ export function DialogueWikiView() {
       setBoundScope('');
       setNotice({ ok: true, text: '已生成渠道专用对接链接（已服务端锁定权限角色与作用域）。' });
       setActiveSubTab('links');
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agenthub:workspaces-updated'));
+      }
     } catch (err: any) {
       setNotice({ ok: false, text: err?.message || '生成链接时发生网络错误' });
     } finally {
@@ -343,6 +353,9 @@ export function DialogueWikiView() {
       });
       if (res.ok) {
         setLinks((prev) => prev.filter((item) => item.link_id !== linkId));
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('agenthub:workspaces-updated'));
+        }
       }
     } catch {
       // 忽略异常
@@ -410,6 +423,9 @@ export function DialogueWikiView() {
       }
       setNotice({ ok: true, text: json.message || '机器人配置已更新并实时生效。' });
       setEditingLink(null);
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('agenthub:workspaces-updated'));
+      }
     } catch (err: any) {
       setNotice({ ok: false, text: err?.message || '保存修改时发生网络错误' });
     } finally {
@@ -543,6 +559,10 @@ export function DialogueWikiView() {
       if (ticketRes.ok) {
         const json = await ticketRes.json();
         setQrTicketData(json.data || null);
+        // 打开扫码绑定弹窗后，立即触发左侧菜单栏刷新以显示专属沙盒
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('agenthub:workspaces-updated'));
+        }
       }
     } catch {
       setNotice({ ok: false, text: '生成扫码绑定二维码失败' });
@@ -1407,6 +1427,9 @@ export function DialogueWikiView() {
                 onClick={() => {
                   setQrModalLink(null);
                   setQrTicketData(null);
+                  if (typeof window !== 'undefined') {
+                    window.dispatchEvent(new CustomEvent('agenthub:workspaces-updated'));
+                  }
                 }}
                 className="p-1 rounded-lg text-muted-foreground hover:text-foreground hover:bg-surface-200"
               >

@@ -1103,6 +1103,14 @@ function DesktopWorkbench() {
     fetchStatusPill();
     fetchActiveModels();
     prefetchExtensionSkills();
+
+    // 监听全局工作区变动事件（如 IM 渠道扫码绑定成功、机器人创建与编辑），自动实时刷新侧边栏
+    const handleWorkspacesUpdated = () => {
+      fetchWorkspaces();
+      fetchConversations();
+    };
+    window.addEventListener('agenthub:workspaces-updated', handleWorkspacesUpdated);
+
     const pillTimer = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       void fetchStatusPill();
@@ -1116,6 +1124,7 @@ function DesktopWorkbench() {
     return () => {
       clearInterval(pillTimer);
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('agenthub:workspaces-updated', handleWorkspacesUpdated);
     };
   }, []);
 

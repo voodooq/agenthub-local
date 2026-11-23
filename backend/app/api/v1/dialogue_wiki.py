@@ -772,6 +772,19 @@ async def get_dialogue_link_status(link_id: str) -> dict[str, Any]:
     if not adapter:
         return {"success": True, "data": {"connected": False}}
     status_info = await adapter.get_connection_status(link)
+
+    # 微信扫码登录成功或在线时，确保独立工作沙盒已就绪
+    if status_info.get("connected") or status_info.get("qr_status") == "confirmed":
+        try:
+            from ...channels.gateway import channel_gateway
+            await channel_gateway.ensure_im_link_workspace(
+                link_id=link["link_id"],
+                target_user_label=str(link.get("target_user_label") or ""),
+                expert_id=str(link.get("expert_id") or ""),
+            )
+        except Exception:
+            pass
+
     return {"success": True, "data": status_info}
 
 
@@ -874,6 +887,24 @@ async def create_link_qr_ticket(
     async with db_manager.get_connection() as conn:
         await _ensure_dialogue_wiki_tables(conn)
     try:
+        # 打开扫码弹窗/获取扫码二维码时，确保独立工作沙盒已建立
+        try:
+            from ...channels.gateway import channel_gateway
+            async with db_manager.get_connection() as conn:
+                cur = await conn.execute(
+                    "SELECT target_user_label, expert_id FROM dialogue_channel_links WHERE link_id = ? LIMIT 1",
+                    (link_id,),
+                )
+                lrow = await cur.fetchone()
+                if lrow:
+                    await channel_gateway.ensure_im_link_workspace(
+                        link_id=link_id,
+                        target_user_label=str(lrow["target_user_label"] or ""),
+                        expert_id=str(lrow["expert_id"] or ""),
+                    )
+        except Exception:
+            pass
+
         res = await create_bind_ticket(
             link_id=link_id,
             base_url=str(request.base_url),
@@ -914,6 +945,23 @@ async def claim_link_bind_ticket(ticket: str, payload: ClaimBindTicketRequest) -
             external_user_id=payload.external_user_id,
             external_user_name=payload.external_user_name,
         )
+        if res and res.get("link_id"):
+            try:
+                from ...channels.gateway import channel_gateway
+                async with db_manager.get_connection() as conn:
+                    cur = await conn.execute(
+                        "SELECT target_user_label, expert_id FROM dialogue_channel_links WHERE link_id = ? LIMIT 1",
+                        (res["link_id"],),
+                    )
+                    lrow = await cur.fetchone()
+                    if lrow:
+                        await channel_gateway.ensure_im_link_workspace(
+                            link_id=res["link_id"],
+                            target_user_label=str(lrow["target_user_label"] or ""),
+                            expert_id=str(lrow["expert_id"] or ""),
+                        )
+            except Exception:
+                pass
         return {"success": True, "data": res}
     except ValueError as ve:
         raise HTTPException(status_code=400, detail=str(ve))
