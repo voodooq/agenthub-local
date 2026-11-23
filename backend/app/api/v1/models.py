@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from ...core.logging_config import logger
 from ...repository.account_repository import AccountRepository
 from ...service.agent_runner import discover_cli_models, test_cli_model_availability
+from ...service.active_model_state import get_global_active_model, set_global_active_model
 from ...service.gemini_client import GeminiClient
 from ...service.oauth_service import oauth_service
 from ...service.audit_service import audit_service
@@ -83,7 +84,7 @@ CLI_MODELS: List[ModelMeta] = [
         description="Google 最新第 4 代 Argon 旗舰深度推理引擎 · 超深思维链与复杂架构推演",
         badge="CLI 旗舰 · 4.0 Argon",
         has_thinking=True,
-        is_default=True,
+        is_default=False,
         supported_auth_types=["gemini_cli"],
     ),
     ModelMeta(
@@ -113,7 +114,7 @@ CLI_MODELS: List[ModelMeta] = [
         description="宿主机 CLI 原生高推理极速引擎 · 兼顾响应速度与全能系统工具调度",
         badge="CLI 原生 · 3.8 极速",
         has_thinking=True,
-        is_default=False,
+        is_default=True,
         supported_auth_types=["gemini_cli"],
     ),
     ModelMeta(
@@ -624,6 +625,25 @@ async def get_active_account_models(
     根据当前活跃账号属性，返回自动匹配的可用模型列表、候选全集及历史测试详情。
     """
     return await _build_active_models_response(force_refresh=refresh)
+
+
+class ActiveModelSelectionPayload(BaseModel):
+    model: str = Field(..., description="选定的模型名称或标识符")
+    thinking_level: str = Field(default="high", description="思考等级 (low | medium | high)")
+
+
+@router.get("/active-selection")
+async def get_current_active_model_selection():
+    """获取当前系统全局选择的模型与思考等级（支持 Web 与微信 IM 统一感知）"""
+    m, tl = get_global_active_model()
+    return {"model": m, "thinking_level": tl}
+
+
+@router.post("/active-selection")
+async def update_current_active_model_selection(payload: ActiveModelSelectionPayload):
+    """更新当前系统全局选择的模型与思考等级"""
+    m, tl = set_global_active_model(payload.model, payload.thinking_level)
+    return {"success": True, "model": m, "thinking_level": tl}
 
 
 async def _probe_single_model(account, model_meta: ModelMeta) -> Dict[str, Any]:

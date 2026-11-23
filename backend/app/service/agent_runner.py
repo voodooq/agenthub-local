@@ -561,38 +561,55 @@ async def discover_cli_models(
             return [dict(m) for m in cached["models"]] if cached and cached.get("models") else []
 
 
+# agy CLI 官方标准模型全名集合与别名规范化映射
+_AGY_CANONICAL_MODELS: list[str] = [
+    "Gemini 3.8 Flash (High)",
+    "Gemini 3.8 Flash (Medium)",
+    "Gemini 3.8 Flash (Low)",
+    "Claude Sonnet 4.6 (Thinking)",
+    "Claude Opus 4.6 (Thinking)",
+    "GPT-OSS 120B (Medium)",
+]
+
+
 def resolve_agy_model_flag(model: str | None, thinking_level: str | None = None) -> str:
     """
     将前端模型标识与思考等级解析为 Antigravity CLI (agy) 支持的真实 --model 参数。
-    优先匹配动态识别出的账号模型变体表，未知/离线场景自动回退至兼容规则。
+    自动适配当前 CLI 真实开通的 6 大模型，并将未开通或历史旧模型无缝平滑自适应至最佳可用引擎。
     """
     level = (thinking_level or "high").lower()
     if level not in ("low", "medium", "high", "xhigh"):
         level = "high"
 
+    flash_effort = "High" if level in ("high", "xhigh") else ("Medium" if level == "medium" else "Low")
+
     if not model:
-        return "gemini-3.8-flash"
+        return f"Gemini 3.8 Flash ({flash_effort})"
 
     m_raw = model.strip()
+
+    # 0. 若传入的已是完全匹配的合法全名，直接原样返回
+    for canon in _AGY_CANONICAL_MODELS:
+        if m_raw.lower() == canon.lower():
+            return canon
+
     m_lower = m_raw.lower()
 
+    # 1. 优先查动态识别的多档位变体表（支持未来 CLI 自动上线新系列模型）
     explicit_suffix = None
     base_candidate = m_lower
     sfx_match = _THINKING_SUFFIX_RE.match(m_lower)
     if sfx_match:
         base_candidate = sfx_match.group(1)
         explicit_suffix = sfx_match.group(2).lower()
-
     effective_level = level if thinking_level else (explicit_suffix or level)
 
-    # 1. 优先查动态识别的多档位变体表（支持未来 CLI 自动上线新系列模型）
     if base_candidate in _DYNAMIC_VARIANT_MAP:
         variants = _DYNAMIC_VARIANT_MAP[base_candidate]
         desired = f"{base_candidate}-{effective_level}"
         for v in variants:
             if v.lower() == desired:
                 return v
-        # 若账号对该模型只开放了部分档位（例如无 high 仅 medium），按合理优先级自动回退
         for fallback_lvl in ("medium", "high", "low", "xhigh"):
             fb_target = f"{base_candidate}-{fallback_lvl}"
             for v in variants:
@@ -601,35 +618,50 @@ def resolve_agy_model_flag(model: str | None, thinking_level: str | None = None)
         if variants:
             return variants[0]
 
-    # 2. 优先查动态识别的真实模型原始 ID（如 gemini-3.8-flash, claude-sonnet-4-6, gpt-oss-120b-medium）
+    # 2. 优先查动态识别的真实模型原始 ID
     if base_candidate in _DYNAMIC_RAW_IDS:
         return _DYNAMIC_RAW_IDS[base_candidate]
     if m_lower in _DYNAMIC_RAW_IDS:
         return _DYNAMIC_RAW_IDS[m_lower]
 
-    # 3. 离线/首次冷启动兜底兼容规则（注意 orchestrator 必须先于 argon 判断，避免展示名中括号含 Argon 被误匹配）
-    if "gpt" in m_lower or "120b" in m_lower:
-        return "gpt-oss-120b-medium"
-    if "orchestrator" in m_lower or "g1-pro" in m_lower:
-        return "gemini-pro-orchestrator-g1-pro"
-    if "sonnet-4-6" in m_lower or "sonnet-4.6" in m_lower or "sonnet-4" in m_lower:
-        return "claude-sonnet-4-6"
-    if "opus-4-6" in m_lower or "opus-4.6" in m_lower or "opus-4" in m_lower:
-        return "claude-opus-4-6-thinking"
-    if "hydrogen" in m_lower:
-        return f"gemini-4-hydrogen-{effective_level}"
-    if "carbon" in m_lower:
-        return f"gemini-4-carbon-{effective_level}"
-    if "argon" in m_lower or "2.5-pro" in m_lower or "3.1-pro" in m_lower:
-        return f"gemini-4-argon-{effective_level}"
-    if "opus" in m_lower:
-        return f"claude-opus-5-5-{effective_level}"
+    # 3. Claude 系列映射
     if "sonnet" in m_lower:
-        return f"claude-sonnet-5-5-{effective_level}"
-    if "3.8-flash" in m_lower or "flash" in m_lower:
-        return "gemini-3.8-flash"
+        return "Claude Sonnet 4.6 (Thinking)"
+    if "opus" in m_lower:
+        return "Claude Opus 4.6 (Thinking)"
 
-    return m_raw
+    # 4. 开源大模型映射
+    if "gpt" in m_lower or "120b" in m_lower or "oss" in m_lower:
+        return "GPT-OSS 120B (Medium)"
+
+    # 5. Flash 系列显式映射（带档位）
+    if "3.8-flash" in m_lower or "3.8 flash" in m_lower or "flash" in m_lower:
+        if "(high)" in m_lower or "-high" in m_lower:
+            return "Gemini 3.8 Flash (High)"
+        if "(medium)" in m_lower or "-medium" in m_lower:
+            return "Gemini 3.8 Flash (Medium)"
+        if "(low)" in m_lower or "-low" in m_lower:
+            return "Gemini 3.8 Flash (Low)"
+        return f"Gemini 3.8 Flash ({flash_effort})"
+
+    # 6. 未开通或历史旧模型（如 4 Argon / 4 Hydrogen / 2.5 Pro / 3.1 Pro / Orchestrator）：
+    # 自动安全降级至当前机器最高阶可用主力推理引擎 Gemini 3.8 Flash (High)，防止触发 invalid model selection
+    if (
+        "argon" in m_lower
+        or "hydrogen" in m_lower
+        or "orchestrator" in m_lower
+        or "carbon" in m_lower
+        or "pro" in m_lower
+        or "2.5" in m_lower
+        or "3.5" in m_lower
+    ):
+        logger.info(
+            f"[Model Adapter] 请求模型 '{m_raw}' (level={level}) 自动平滑适配至当前可用最高阶 CLI 引擎: "
+            f"Gemini 3.8 Flash ({flash_effort})"
+        )
+        return f"Gemini 3.8 Flash ({flash_effort})"
+
+    return f"Gemini 3.8 Flash ({flash_effort})"
 
 
 async def test_cli_model_availability(

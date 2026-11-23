@@ -1062,6 +1062,21 @@ function DesktopWorkbench() {
         const data: ActiveModelsState = await res.json();
         applyActiveModelsState(data);
       }
+      try {
+        const selRes = await apiFetch('/api/v1/models/active-selection');
+        if (selRes.ok) {
+          const selData = await selRes.json();
+          if (selData.model) {
+            hasUserSelectedModelRef.current = true;
+            setCurrentModel(selData.model);
+          }
+          if (selData.thinking_level) {
+            setThinkingLevel(selData.thinking_level);
+          }
+        }
+      } catch (e) {
+        // 忽略非关键错误
+      }
     } catch (e) {
       console.warn('获取当前账号可用模型失败:', e);
     }
@@ -5364,8 +5379,20 @@ function DesktopWorkbench() {
                         onSelectModel={(m) => {
                           hasUserSelectedModelRef.current = true;
                           setCurrentModel(m);
+                          apiFetch('/api/v1/models/active-selection', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ model: m, thinking_level: thinkingLevel }),
+                          }).catch(() => {});
                         }}
-                        onSelectThinking={(tl) => setThinkingLevel(tl)}
+                        onSelectThinking={(tl) => {
+                          setThinkingLevel(tl);
+                          apiFetch('/api/v1/models/active-selection', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ model: currentModel, thinking_level: tl }),
+                          }).catch(() => {});
+                        }}
                         onOpenModelTest={() => {
                           setSettingsInitialTab('models');
                           setIsSettingsOpen(true);

@@ -358,6 +358,7 @@ class ChannelGateway:
                 # 多专家路由：严格只在当前链接授权勾选的 expert_ids 集合内按问题内容挑选最匹配的专家
                 from ..repository.agent_repository import AgentProfileRepository
                 from ..kb.manager import KBLifecycleManager
+                from ..service.active_model_state import get_global_active_model
                 import re as _re
 
                 authorized_experts: list[str] = link.get("expert_ids") or [link["expert_id"]]
@@ -390,7 +391,19 @@ class ChannelGateway:
                             selected_expert_id = cand_id
                             expert_row = cand_row
 
-                im_model_name = str((expert_row or {}).get("base_model") or "").strip() or "4 Argon"
+                # 动态自适应模型：优先使用机器人专属配置/绑定专家单独指定模型，否则自动继承当前系统的全局活跃模型
+                global_active_model, global_active_tl = get_global_active_model()
+                im_model_name = (
+                    str(link.get("model_preference") or link.get("model_name") or "").strip()
+                    or str((expert_row or {}).get("base_model") or "").strip()
+                    or global_active_model
+                    or "Gemini 3.8 Flash"
+                )
+                im_thinking_level = (
+                    str(link.get("thinking_level") or "").strip().lower()
+                    or global_active_tl
+                    or "high"
+                )
                 bot_display_name = str(link.get("target_user_label") or "").strip()
                 expert_name = str((expert_row or {}).get("name") or link.get("expert_name") or "数字专家").strip()
                 expert_sys_prompt = str((expert_row or {}).get("system_prompt") or "").strip()
@@ -411,7 +424,7 @@ class ChannelGateway:
                     conversation_id=conv_id,
                     user_message=inbound.text,
                     model_name=im_model_name,
-                    thinking_level="low",
+                    thinking_level=im_thinking_level,
                     context_rounds=4,
                     system_override=full_im_system_prompt,
                     scene_mode="agent",
