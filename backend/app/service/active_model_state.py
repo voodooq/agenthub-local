@@ -86,3 +86,4 @@ def set_global_active_model(model: str, thinking_level: str = "high") -> tuple[s
             logger.warning(f"持久化 active_model_selection.json 失败: {e}")
 
     return _GLOBAL_ACTIVE_MODEL, _GLOBAL_THINKING_LEVEL
+

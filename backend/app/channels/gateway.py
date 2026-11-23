@@ -363,26 +363,44 @@ class ChannelGateway:
 
                 authorized_experts: list[str] = link.get("expert_ids") or [link["expert_id"]]
                 selected_expert_id = authorized_experts[0]
-                expert_row = await AgentProfileRepository.get_agent(selected_expert_id)
+                expert_row: dict[str, Any] | None = None
+                authorized_profiles: list[dict[str, Any]] = []
 
-                if len(authorized_experts) > 1:
-                    q_norm = _re.sub(r"[\s，。！？、,.!?]+", "", inbound.text.lower())
-                    q_bi = {q_norm[i : i + 2] for i in range(max(0, len(q_norm) - 1))}
-                    best_score = -1
-                    for cand_id in authorized_experts:
-                        cand_row = await AgentProfileRepository.get_agent(cand_id)
-                        if not cand_row:
-                            continue
-                        kb_names = ""
-                        try:
-                            kbs = await KBLifecycleManager.get_expert_kbs(cand_id)
-                            kb_names = " ".join(str(k.get("name") or "") for k in kbs if k.get("is_published"))
-                        except Exception:
-                            pass
+                q_norm = _re.sub(r"[\s，。！？、,.!?]+", "", inbound.text.lower())
+                q_bi = {q_norm[i : i + 2] for i in range(max(0, len(q_norm) - 1))}
+                best_score = -1
+
+                for cand_id in authorized_experts:
+                    cand_row = await AgentProfileRepository.get_agent(cand_id)
+                    if not cand_row:
+                        continue
+                    kb_names_list: list[str] = []
+                    try:
+                        kbs = await KBLifecycleManager.get_expert_kbs(cand_id)
+                        kb_names_list = [str(k.get("name") or "").strip() for k in kbs if k.get("is_published") and k.get("name")]
+                    except Exception:
+                        pass
+                    kb_names_str = " ".join(kb_names_list)
+
+                    authorized_profiles.append(
+                        {
+                            "id": cand_id,
+                            "name": str(cand_row.get("name") or cand_id).strip(),
+                            "description": str(cand_row.get("description") or "").strip(),
+                            "kb_names": "、".join(kb_names_list),
+                            "row": cand_row,
+                        }
+                    )
+
+                    if expert_row is None:
+                        selected_expert_id = cand_id
+                        expert_row = cand_row
+
+                    if len(authorized_experts) > 1:
                         profile_txt = _re.sub(
                             r"[\s，。！？、,.!?]+",
                             "",
-                            f"{cand_row.get('name', '')}{cand_row.get('description', '')}{kb_names}".lower(),
+                            f"{cand_row.get('name', '')}{cand_row.get('description', '')}{kb_names_str}".lower(),
                         )
                         p_bi = {profile_txt[i : i + 2] for i in range(max(0, len(profile_txt) - 1))}
                         score = len(q_bi & p_bi)
@@ -408,15 +426,43 @@ class ChannelGateway:
                 expert_name = str((expert_row or {}).get("name") or link.get("expert_name") or "数字专家").strip()
                 expert_sys_prompt = str((expert_row or {}).get("system_prompt") or "").strip()
 
-                identity_header = (
-                    f"### 🪪 你的专属身份与名字设定（最高优先级）\n"
-                    f"- **你的名字**：你叫 **「{bot_display_name or expert_name}」**"
-                    + (f"（定位：{expert_name}）" if bot_display_name and bot_display_name != expert_name else "")
-                    + "。\n"
-                    f"- **身份回答铁律**：当用户问“你叫什么名字”“你是谁”时，**必须直接以「{bot_display_name or expert_name}」自称**（例如：“我叫{bot_display_name or expert_name}，是您的{expert_name}”），**严禁自称 Antigravity、Gemini、Google DeepMind 或提及任何底层模型/厂商名称**。\n"
-                )
-                if expert_sys_prompt:
-                    identity_header += f"\n### 🎯 绑定专家角色职责\n{expert_sys_prompt}\n"
+                if len(authorized_profiles) > 1:
+                    self_name = bot_display_name or "综合数字助手"
+                    cap_lines: list[str] = []
+                    for idx, prof in enumerate(authorized_profiles, 1):
+                        p_desc = prof["description"].replace("\n", " ")[:90]
+                        line = f"{idx}. **{prof['name']}**"
+                        if p_desc:
+                            line += f"：{p_desc}"
+                        if prof["kb_names"]:
+                            line += f"（知识库：{prof['kb_names']}）"
+                        cap_lines.append(line)
+                    cap_matrix_text = "\n".join(cap_lines)
+
+                    identity_header = (
+                        f"### 🪪 你的专属身份与综合能力设定（最高优先级）\n"
+                        f"- **你的名字**：你叫 **「{self_name}」**。\n"
+                        f"- **你的综合定位**：你是一个融合了 **{len(authorized_profiles)} 项专家技能** 的全能综合数字助手，**绝不仅仅局限于其中某一个单一头衔**。\n"
+                        f"- **自我介绍与能力提炼铁律**：\n"
+                        f"  1. 当用户问“你叫什么名字”“你是谁”“自我介绍一下”“你能干嘛”“除了XX还能干嘛”时，**必须直接以「{self_name}」自称**，并且**必须自动提炼、归纳概括下方全部 {len(authorized_profiles)} 项能力矩阵**（例如归类为：办公报表与演示、技术开发与设计、深度研究与数据审计、赛事规程与财务咨询等），**严禁只报出第一个专家名字**！\n"
+                        f"  2. **严禁自称 Antigravity、Gemini、Google DeepMind 或提及任何底层模型/厂商名称**。\n"
+                        f"  3. 日常连续对话请直接自然回答问题，**不要每条回复开头都机械重复“我叫{self_name}……”**。\n"
+                        f"\n### 🧩 已授权综合能力矩阵（共 {len(authorized_profiles)} 项，回答自我介绍/能力咨询时请全面提炼）\n"
+                        f"{cap_matrix_text}\n"
+                    )
+                    if expert_sys_prompt and best_score > 0:
+                        identity_header += f"\n### 🎯 当前匹配主责专家（{expert_name}）业务规范\n{expert_sys_prompt}\n"
+                else:
+                    self_name = bot_display_name or expert_name
+                    identity_header = (
+                        f"### 🪪 你的专属身份与名字设定（最高优先级）\n"
+                        f"- **你的名字**：你叫 **「{self_name}」**"
+                        + (f"（定位：{expert_name}）" if bot_display_name and bot_display_name != expert_name else "")
+                        + "。\n"
+                        f"- **身份回答铁律**：当用户问“你叫什么名字”“你是谁”时，**必须直接以「{self_name}」自称**（例如：“我叫{self_name}，是您的{expert_name}”），**严禁自称 Antigravity、Gemini、Google DeepMind 或提及任何底层模型/厂商名称**；日常连续追问请直接回答，不要每条消息开头都机械重复自报家门。\n"
+                    )
+                    if expert_sys_prompt:
+                        identity_header += f"\n### 🎯 绑定专家角色职责\n{expert_sys_prompt}\n"
 
                 full_im_system_prompt = f"{identity_header}\n{im_concise_prompt}"
 

@@ -127,7 +127,8 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [webdavForm, setWebdavForm] = useState({ base_url: '', username: '', password: '', root_path: '/' });
   const [ossForm, setOssForm] = useState({ endpoint: '', bucket: '', access_key: '', secret_key: '', prefix: '' });
   const [sandboxForm, setSandboxForm] = useState({ workspace_id: '', root_path: '', sub_path: '' });
-  const [sandboxWorkspaces, setSandboxWorkspaces] = useState<Array<{ id: string; name: string; root_path?: string }>>([]);
+  const [sandboxWorkspaces, setSandboxWorkspaces] = useState<Array<{ id: string; name: string; type?: string; root_path?: string }>>([]);
+  const [pickingSandboxFolder, setPickingSandboxFolder] = useState(false);
 
   // ── 训练部分状态 ──
   const [training, setTraining] = useState(false);
@@ -137,6 +138,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
   const [kbsList, setKbsList] = useState<KnowledgeBaseItem[]>([]);
   const [loadingKbs, setLoadingKbs] = useState(false);
   const [selectedMountForTrain, setSelectedMountForTrain] = useState<string>('all');
+  const [turboMode, setTurboMode] = useState<boolean>(false);
   const [playgroundQuery, setPlaygroundQuery] = useState('');
   const [playgroundTesting, setPlaygroundTesting] = useState(false);
   const [playgroundHits, setPlaygroundHits] = useState<any[] | null>(null);
@@ -504,17 +506,37 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     }
   };
 
+  const loadPhysicalWorkspaces = useCallback(async () => {
+    try {
+      const res = await apiFetch('/api/v1/workspaces');
+      if (!res.ok) return;
+      const data = await res.json();
+      const allList: any[] = Array.isArray(data) ? data : data?.workspaces || data?.data || [];
+      // 仅保留本地挂载的物理文件夹 (type === 'physical')，严格排除内部虚拟沙盒
+      const physicalOnly = allList.filter((w) => {
+        if (!w || w.id === 'default') return false;
+        if (w.type !== 'physical') return false;
+        const normPath = String(w.root_path || '').replace(/\\/g, '/').toLowerCase();
+        return !normPath.includes('/data/workspaces/');
+      });
+      setSandboxWorkspaces(physicalOnly);
+    } catch {
+      // 忽略瞬时拉取异常
+    }
+  }, []);
+
   useEffect(() => {
     loadMounts();
     loadKBs();
-    apiFetch('/api/v1/workspaces')
-      .then((res) => (res.ok ? res.json() : null))
-      .then((data) => {
-        const list = Array.isArray(data) ? data : data?.workspaces || data?.data || [];
-        setSandboxWorkspaces(list);
-      })
-      .catch(() => { });
-  }, [workspace?.id]);
+    loadPhysicalWorkspaces();
+    const handleWsUpdated = () => {
+      void loadPhysicalWorkspaces();
+    };
+    window.addEventListener('agenthub:workspaces-updated', handleWsUpdated);
+    return () => {
+      window.removeEventListener('agenthub:workspaces-updated', handleWsUpdated);
+    };
+  }, [workspace?.id, loadPhysicalWorkspaces]);
 
   // 切走页面再切回「LLMWiki」时，自动向后端查询是否有正在运行中的训练任务，无缝恢复进度条与轮询
   useEffect(() => {
@@ -810,10 +832,48 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
     }
   };
 
+  // 浏览并选择本地物理文件夹（用于沙盒空间数据源）
+  const handlePickSandboxLocalFolder = async () => {
+    setPickingSandboxFolder(true);
+    try {
+      const res = await apiFetch('/api/v1/workspaces/select-folder', { method: 'POST' });
+      if (!res.ok) {
+        alert('唤起本地文件夹选择器失败，请手动输入本地路径');
+        return;
+      }
+      const data = await res.json();
+      if (data?.headless_remote) {
+        alert(data.message || '当前为远程无界面环境，请直接输入服务器本地文件夹路径');
+        return;
+      }
+      if (data?.selected_path) {
+        const pickedPath = String(data.selected_path);
+        setSandboxForm((prev) => ({
+          ...prev,
+          workspace_id: '',
+          root_path: pickedPath,
+        }));
+        setTestResult(null);
+        if (!mountName.trim()) {
+          const parts = pickedPath.split(/[\\/]/).filter(Boolean);
+          setMountName(parts[parts.length - 1] || '本地文档库');
+        }
+      }
+    } catch (e: any) {
+      alert(e?.message || '选择本地文件夹失败');
+    } finally {
+      setPickingSandboxFolder(false);
+    }
+  };
+
   // 保存挂载源
   const handleSaveMount = async () => {
     if (!mountName.trim()) {
       alert('请输入挂载展示名称');
+      return;
+    }
+    if (providerTab === 'sandbox' && !sandboxForm.workspace_id && !sandboxForm.root_path.trim()) {
+      alert('请选择已挂载的本地文件夹，或浏览选择本地硬盘目录路径');
       return;
     }
     setSaving(true);
@@ -888,6 +948,7 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
           workspace_root: workspace?.root_path || '.',
           mount_id: finalMountId || null,
           task_id: taskId,
+          turbo_mode: turboMode,
         }),
       });
       const data = await resp.json();
@@ -1827,8 +1888,8 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                             }`}
                         >
                           <FolderOpen className="w-5 h-5 text-violet-500 mb-1" />
-                          <span>沙盒空间</span>
-                          <span className="text-[10px] text-muted-foreground mt-0.5">绑定本地硬盘目录</span>
+                          <span>本地挂载空间</span>
+                          <span className="text-[10px] text-muted-foreground mt-0.5">仅限本地硬盘文件夹</span>
                         </button>
                       </div>
                     </div>
@@ -2049,15 +2110,15 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                       </div>
                     )}
 
-                    {/* 沙盒空间（本地硬盘目录）专有配置 */}
+                    {/* 本地挂载空间（仅限本地硬盘物理文件夹）专有配置 */}
                     {providerTab === 'sandbox' && (
                       <div className="rounded-xl border border-border/80 bg-surface-100/40 p-4 space-y-3.5">
                         <div>
                           <div className="flex items-center justify-between mb-1">
                             <label className="text-xs font-semibold text-foreground">
-                              选择沙盒与项目空间 <span className="text-red-500">*</span>
+                              选择已挂载的本地文件夹 <span className="text-red-500">*</span>
                             </label>
-                            <span className="text-[10px] text-violet-400">自动读取沙盒绑定的本地硬盘目录</span>
+                            <span className="text-[10px] text-violet-400">仅列出本地挂载的物理文件夹（已排除系统虚拟沙盒）</span>
                           </div>
                           <select
                             value={sandboxForm.workspace_id}
@@ -2069,13 +2130,18 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                                 workspace_id: wsId,
                                 root_path: matched?.root_path || '',
                               });
+                              setTestResult(null);
                               if (matched && !mountName.trim()) {
                                 setMountName(matched.name.replace(/^\[沙盒\]\s*/, '').trim());
                               }
                             }}
                             className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-2 text-xs outline-none focus:border-violet-500"
                           >
-                            <option value="">-- 请选择一个沙盒或项目空间 --</option>
+                            <option value="">
+                              {sandboxWorkspaces.length > 0
+                                ? '-- 请选择一个已挂载的本地文件夹 --'
+                                : '-- 暂无已挂载的本地文件夹（请在下方浏览选择本地目录） --'}
+                            </option>
                             {sandboxWorkspaces.map((ws) => (
                               <option key={ws.id} value={ws.id}>
                                 {ws.name} {ws.root_path ? `(${ws.root_path})` : ''}
@@ -2087,19 +2153,37 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                           <div>
                             <label className="text-xs font-medium text-muted-foreground block mb-1">
-                              绑定的本地硬盘路径（也可直接填入本地路径）
+                              本地硬盘文件夹路径（也可点击右侧浏览选择）
                             </label>
-                            <input
-                              type="text"
-                              placeholder="如 E:/work/my-docs"
-                              value={sandboxForm.root_path}
-                              onChange={(e) => setSandboxForm({ ...sandboxForm, root_path: e.target.value })}
-                              className="w-full rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs font-mono outline-none focus:border-violet-500"
-                            />
+                            <div className="flex items-center gap-1.5">
+                              <input
+                                type="text"
+                                placeholder="如 E:/work/my-docs"
+                                value={sandboxForm.root_path}
+                                onChange={(e) =>
+                                  setSandboxForm({
+                                    ...sandboxForm,
+                                    workspace_id: '',
+                                    root_path: e.target.value,
+                                  })
+                                }
+                                className="flex-1 min-w-0 rounded-lg border border-border bg-surface-card px-2.5 py-1.5 text-xs font-mono outline-none focus:border-violet-500"
+                              />
+                              <button
+                                type="button"
+                                onClick={handlePickSandboxLocalFolder}
+                                disabled={pickingSandboxFolder}
+                                className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-violet-500/40 bg-violet-500/10 hover:bg-violet-500/20 text-violet-400 text-xs font-medium transition-colors disabled:opacity-50"
+                                title="浏览并选择本地硬盘文件夹"
+                              >
+                                <FolderOpen className="w-3.5 h-3.5" />
+                                <span>{pickingSandboxFolder ? '打开中...' : '浏览文件夹'}</span>
+                              </button>
+                            </div>
                           </div>
                           <div>
                             <label className="text-xs font-medium text-muted-foreground block mb-1">
-                              限定子文件夹（选填，留空则扫描整个沙盒）
+                              限定子文件夹（选填，留空则扫描整个目录）
                             </label>
                             <input
                               type="text"
@@ -2324,6 +2408,37 @@ export function LLMWikiView({ workspace, onOpenChat }: LLMWikiViewProps) {
                         <p className="text-xs text-muted-foreground mt-0.5">
                           从挂载数据源拉取最新文档，执行自适应滑动窗口分块、向量 Embedding 及图谱三元组提取
                         </p>
+                      </div>
+
+                      {/* 资源调度模式切换器：普通温和模式 vs 全力增强模式 */}
+                      <div className="flex items-center gap-1.5 bg-surface-100 border border-border rounded-xl p-1 shrink-0">
+                        <button
+                          type="button"
+                          disabled={training}
+                          onClick={() => setTurboMode(false)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all ${
+                            !turboMode
+                              ? 'bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 shadow-sm'
+                              : 'text-muted-foreground hover:text-foreground'
+                          } disabled:opacity-60`}
+                          title="单路温和切片，预留充足 CPU 给前台对话与微信 IM 业务"
+                        >
+                          普通模式 (低占用)
+                        </button>
+                        <button
+                          type="button"
+                          disabled={training}
+                          onClick={() => setTurboMode(true)}
+                          className={`px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all flex items-center gap-1 ${
+                            turboMode
+                              ? 'bg-amber-500/15 text-amber-400 border border-amber-500/30 shadow-sm'
+                              : 'text-muted-foreground hover:text-foreground'
+                          } disabled:opacity-60`}
+                          title="4 路并发全速解析切片，适合空闲时段大批量初次建库"
+                        >
+                          <Zap className="w-3 h-3" />
+                          <span>增强模式 (全力)</span>
+                        </button>
                       </div>
                     </div>
 

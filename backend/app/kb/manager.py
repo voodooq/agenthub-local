@@ -468,8 +468,10 @@ class KBLifecycleManager:
                 else:
                     summary_item["hierarchy"] = "already_hierarchical"
 
-                # 2. 自动抽取构建知识图谱三元组
-                new_triples, total_triples = KBStorageManager.extract_and_save_triples_for_kb(kid, active_ver)
+                # 2. 自动抽取构建知识图谱三元组（放到线程池中执行，避免阻塞异步事件循环）
+                new_triples, total_triples = await asyncio.to_thread(
+                    KBStorageManager.extract_and_save_triples_for_kb, kid, active_ver
+                )
                 summary_item["new_triples"] = new_triples
                 summary_item["total_triples"] = total_triples
                 logger.info(f"[AutoPipeline] 知识库 [{kid}] 自动图谱抽取完成: 新增/印证 {new_triples} 条，总计 {total_triples} 条三元组")

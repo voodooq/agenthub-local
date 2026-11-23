@@ -1,5 +1,13 @@
 import sys
 import os
+
+# 限制底层 OpenMP / MKL / OpenBLAS / ONNX 线程池上限，避免单次文档解析或向量推理吃满宿主机全部核心
+os.environ.setdefault("OMP_NUM_THREADS", "2")
+os.environ.setdefault("MKL_NUM_THREADS", "2")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
+os.environ.setdefault("VECLIB_MAXIMUM_THREADS", "2")
+os.environ.setdefault("NUMEXPR_NUM_THREADS", "2")
+
 import socket
 import asyncio
 import secrets

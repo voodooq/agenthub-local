@@ -105,17 +105,43 @@ class SandboxVFSProvider(CloudVFSProvider):
         results.sort(key=lambda x: x.as_posix().lower())
         return results
 
+    @staticmethod
+    def _is_internal_virtual_dir(target_dir: Path) -> bool:
+        """判断目标路径是否属于系统内部虚拟工作区目录（data/workspaces/...）。"""
+        norm = target_dir.as_posix().lower().rstrip("/")
+        return "/data/workspaces/" in f"{norm}/" or norm.endswith("/data/workspaces")
+
+    async def _validate_physical_workspace_only(self) -> str | None:
+        """校验所选沙盒或路径是否为本地挂载的物理文件夹，拒绝系统内部虚拟沙盒。"""
+        if self.workspace_id and not self.raw_root_path:
+            try:
+                from ..repository.workspace_repository import WorkspaceRepository
+
+                ws = await WorkspaceRepository.get_by_id(self.workspace_id)
+                if not ws:
+                    return "所选工作区不存在，请重新选择本地挂载文件夹"
+                if ws.get("type") != "physical":
+                    return "知识库仅支持挂载「本地物理文件夹」，不支持系统内部虚拟沙盒"
+            except Exception:
+                pass
+        return None
+
     async def test_connection(self) -> tuple[bool, str]:
-        """校验沙盒本地硬盘目录是否可读，并统计可训练文档数。"""
+        """校验本地挂载文件夹是否可读，并统计可训练文档数。"""
+        ws_err = await self._validate_physical_workspace_only()
+        if ws_err:
+            return False, ws_err
         target_dir = await self._resolve_target_dir()
         if not target_dir:
-            return False, "请选择有效的沙盒空间或填写本地目录路径"
+            return False, "请选择已挂载的本地文件夹，或通过「浏览文件夹」选择本地目录路径"
+        if self._is_internal_virtual_dir(target_dir):
+            return False, "不支持挂载系统内部虚拟沙盒目录（data/workspaces），请选择真实的本地文档文件夹"
         if not target_dir.exists():
-            return False, f"沙盒绑定的本地路径不存在: {target_dir}"
+            return False, f"绑定的本地路径不存在: {target_dir}"
         if not target_dir.is_dir():
             return False, f"目标路径不是有效文件夹: {target_dir}"
         docs = self._iter_valid_files(target_dir, recursive=True)
-        return True, f"沙盒空间连接成功！在 {target_dir} 下共发现 {len(docs)} 个可训练文档。"
+        return True, f"本地文件夹连接成功！在 {target_dir} 下共发现 {len(docs)} 个可训练文档。"
 
     async def list_files(self, recursive: bool = True) -> list[CloudFileMeta]:
         """扫描沙盒空间下的所有支持切片的文档。"""

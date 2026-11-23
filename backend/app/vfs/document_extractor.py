@@ -46,13 +46,13 @@ _ocr_engine_instance = None
 
 
 def get_ocr_engine():
-    """获取 RapidOCR 单例实例（纯 ONNX 运行，零显存消耗，CPU 毫秒级识别）。"""
+    """获取 RapidOCR 单例实例（限制 2 线程温和运行，避免扫描件 PDF OCR 吃满宿主机全部 CPU）。"""
     global _ocr_engine_instance
     if _ocr_engine_instance is None:
         try:
             from rapidocr_onnxruntime import RapidOCR
-            _ocr_engine_instance = RapidOCR()
-            logger.info("RapidOCR 离线 OCR 引擎初始化成功")
+            _ocr_engine_instance = RapidOCR(intra_op_num_threads=2, inter_op_num_threads=1)
+            logger.info("RapidOCR 离线 OCR 引擎初始化成功 (intra_op_num_threads=2)")
         except Exception as e:
             logger.debug(f"RapidOCR 初始化跳过: {e}")
             _ocr_engine_instance = False

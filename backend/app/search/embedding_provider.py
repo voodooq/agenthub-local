@@ -592,9 +592,8 @@ class VramAwareOnnxProvider(BaseEmbeddingProvider):
         import onnxruntime as ort
 
         opts = ort.SessionOptions()
-        # 限制线程数避免争抢主线程与前台推理
-        cpu_cores = os.cpu_count() or 4
-        opts.intra_op_num_threads = min(4, max(1, cpu_cores // 2))
+        # 温和限制线程数为 2，给前台对话与系统其他业务留足 CPU 余量
+        opts.intra_op_num_threads = 2
         opts.inter_op_num_threads = 1
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
@@ -669,6 +668,8 @@ class VramAwareOnnxProvider(BaseEmbeddingProvider):
         selected_providers.append("CPUExecutionProvider")
 
         opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 2
+        opts.inter_op_num_threads = 1
         opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
 
         try:

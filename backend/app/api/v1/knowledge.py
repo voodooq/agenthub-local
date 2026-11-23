@@ -103,6 +103,10 @@ class SyncRequest(BaseModel):
     workspace_root: str = Field(default=".", description="当前工作区路径")
     mount_id: str | None = Field(default=None, description="指定挂载源 ID，若为空则同步全部")
     task_id: str | None = Field(default=None, description="前端传入的任务 ID，用于轮询实时训练进度")
+    turbo_mode: bool = Field(
+        default=False,
+        description="是否开启全力极速模式；默认 False 采用温和低占用模式，为其他业务预留充足 CPU 与 I/O 资源",
+    )
 
 
 # 知识库增量训练实时进度追踪（内存态，毫秒级轮询读取）
@@ -283,14 +287,125 @@ async def delete_cloud_mount(mount_id: str) -> dict[str, Any]:
     return {"success": True, "message": f"挂载源 {mount_id} 已移除"}
 
 
+async def _resolve_kb_active_version(kb_id: str) -> str:
+    """获取指定知识库当前激活的物理版本号（未建库时默认 v1.0.0）。"""
+    try:
+        from ...repository.db import db_manager
+
+        async with db_manager.get_connection() as conn:
+            cur = await conn.execute(
+                "SELECT active_version, current_version FROM knowledge_bases WHERE kb_id = ? LIMIT 1",
+                (kb_id,),
+            )
+            row = await cur.fetchone()
+            if row:
+                ver = str(row["active_version"] or row["current_version"] or "").strip()
+                if ver:
+                    return ver
+    except Exception:
+        pass
+    return "v1.0.0"
+
+
+async def _prepare_incremental_version(kb_id: str, has_changes: bool) -> tuple[str, str | None]:
+    """为增量训练准备目标版本号；已有库且存在文件变更时自动复制快照并递增版本号。"""
+    current_ver = await _resolve_kb_active_version(kb_id)
+    if not has_changes:
+        return current_ver, None
+
+    from ...kb.storage import KBStorageManager
+    from ...kb.version_helper import get_next_version
+    from ...repository.db import db_manager
+
+    cur_db = KBStorageManager.get_version_db_path(kb_id, current_ver)
+    if not cur_db.exists() or (KBStorageManager.get_body_chunk_count(kb_id, current_ver) or 0) <= 0:
+        return current_ver, None
+
+    existing_versions: list[str] = [current_ver]
+    try:
+        vers_dir = KBStorageManager.get_kb_dir(kb_id) / "versions"
+        if vers_dir.exists():
+            for d in vers_dir.iterdir():
+                if d.is_dir() and d.name.startswith("v"):
+                    existing_versions.append(d.name)
+        async with db_manager.get_connection() as conn:
+            cur = await conn.execute("SELECT version FROM kb_versions WHERE kb_id = ?", (kb_id,))
+            for r in await cur.fetchall():
+                if r["version"]:
+                    existing_versions.append(str(r["version"]))
+    except Exception:
+        pass
+
+    next_ver = get_next_version(existing_versions, bump="patch")
+    KBStorageManager.copy_version_snapshot(kb_id, source_version=current_ver, target_version=next_ver)
+    return next_ver, current_ver
+
+
+async def _commit_incremental_version(
+    kb_id: str,
+    new_ver: str,
+    prev_ver: str,
+    new_chunks_cnt: int,
+    removed_chunks_cnt: int,
+) -> None:
+    """增量变更落盘成功后，原子切换 active_version 并登记历史版本记录。"""
+    from ...kb.storage import KBStorageManager
+    from ...repository.db import db_manager
+    import uuid as _uuid
+
+    changelog = f"增量同步：新增/更新 {new_chunks_cnt} 个切片，清理 {removed_chunks_cnt} 个旧切片"
+    now_ts = time.time()
+    body_cnt = KBStorageManager.get_body_chunk_count(kb_id, new_ver) or 0
+    disk_sz = KBStorageManager.get_kb_disk_size(kb_id)
+
+    try:
+        async with db_manager.get_connection() as conn:
+            await conn.execute(
+                """
+                UPDATE knowledge_bases
+                SET active_version = ?, current_version = ?, chunk_count = ?, disk_size_bytes = ?, updated_at = ?
+                WHERE kb_id = ?
+                """,
+                (new_ver, new_ver, body_cnt, disk_sz, now_ts, kb_id),
+            )
+            await conn.execute(
+                """
+                INSERT OR REPLACE INTO kb_versions (
+                    kb_id, version, status, changelog, chunk_count, triple_count,
+                    disk_size_bytes, created_by, created_at, is_published
+                ) VALUES (?, ?, 'active', ?, ?, 0, ?, 'auto_sync', ?, 1)
+                """,
+                (kb_id, new_ver, changelog, body_cnt, disk_sz, now_ts),
+            )
+            await conn.commit()
+        # 同步登记到版本快照表 kb_version_snapshots，供「版本管理与回滚」抽屉实时展示、比对与回滚
+        try:
+            from ...kb.exchange import KBExchangeEngine
+
+            await KBExchangeEngine.create_snapshot(
+                kb_id=kb_id,
+                version_tag=new_ver,
+                snapshot_type="release",
+                change_summary=changelog,
+                parent_version_tag=prev_ver,
+            )
+        except Exception as snap_err:
+            logger.debug(f"[KBSync] 生成增量快照记录 {kb_id} ({new_ver}) 跳过: {snap_err}")
+
+        logger.info(f"[KBSync] 知识库 {kb_id} 增量训练完成，版本已自动递增: {prev_ver} -> {new_ver}")
+    except Exception as exc:
+        logger.warning(f"[KBSync] 提交增量版本指针 {kb_id} ({new_ver}) 异常: {exc}")
+
+
 async def run_incremental_sync(
     *,
     mount_id: str | None = None,
     workspace_root: str = ".",
     task_id: str | None = None,
     source_tag: str = "manual",
+    turbo_mode: bool = False,
 ) -> dict[str, Any]:
-    """执行挂载源增量同步（支持新增、修改重切与已删除文件切片自动清理，带并发锁保护）。"""
+    """执行挂载源增量同步（默认温和节流保护 CPU/I/O，仅在显式开启 turbo_mode 时全力并发）。"""
     eff_task_id = task_id or f"sync_{int(time.time() * 1000)}"
     if _SYNC_LOCK.locked() and source_tag == "auto":
         return {"success": True, "skipped": True, "message": "已有同步任务正在执行，跳过本次自动巡检"}
@@ -319,17 +434,11 @@ async def run_incremental_sync(
         sync_warnings: list[str] = []
         affected_kb_ids: set[str] = set()
 
-        # 阶段 1：扫描所有挂载源，识别新增/修改文件（modified）与已删除文件（removed_uris）
+        # 阶段 1：温和控制挂载源扫描并发（默认 2 并发，全力模式 4 并发），避免瞬间打满网络与 CPU
         mount_plans: list[tuple[dict[str, Any], Any, list[Any], list[str]]] = []
-        total_mounts = max(1, len(mounts))
+        scan_sem = asyncio.Semaphore(4 if turbo_mode else 2)
 
-        for m_idx, m in enumerate(mounts):
-            _update_sync_progress(
-                eff_task_id,
-                running=True,
-                percent=2.0 + 10.0 * (m_idx / total_mounts),
-                stage=f"正在扫描挂载源：{m['mount_name']}...",
-            )
+        async def _scan_single_mount(m: dict[str, Any]) -> tuple[dict[str, Any], Any, list[Any], list[str]] | None:
             m_cfg = m.get("config", {})
             if m["provider_type"] == "wecom" and not m_cfg.get("space_id"):
                 sync_warnings.append(f"【{m['mount_name']}】未配置微盘 SpaceId，企微无法识别目标空间。")
@@ -342,45 +451,45 @@ async def run_incremental_sync(
                 authority_tier=m.get("authority_tier", 1),
             )
             if not provider:
-                continue
+                return None
 
-            try:
-                files = await provider.list_files(recursive=True)
-                if not files:
-                    if m["provider_type"] == "wecom":
-                        sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请检查 SpaceId 是否正确且自建应用拥有该空间权限。")
-                    elif m["provider_type"] == "webdav":
-                        sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请确认挂载根路径下是否存在支持切片的文档 (PDF/DOCX/TXT/MD)。")
-                    elif m["provider_type"] == "oss":
-                        sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请检查存储桶与前缀配置。")
-                    elif m["provider_type"] == "sandbox":
-                        sync_warnings.append(f"【{m['mount_name']}】沙盒目录下未扫描到支持切片的文档 (PDF/DOCX/TXT/MD/CSV/XLSX)。")
-                # NOTE: 过滤纯目录条目后再执行去重兜底，防止目录或重复路径条目干扰文档计数
-                dedup_seen: set[tuple[str, int]] = set()
-                deduped_files: list = []
-                for _f in files:
-                    if getattr(_f, "is_dir", False) or not str(getattr(_f, "title", "") or "").strip():
-                        continue
-                    _fp = (_f.title.lower(), _f.size)
-                    if _fp not in dedup_seen:
-                        dedup_seen.add(_fp)
-                        deduped_files.append(_f)
-                    else:
-                        logger.warning(f"训练去重：跳过重复文件 [{_f.title}] size={_f.size}")
-                files = deduped_files
+            async with scan_sem:
+                try:
+                    files = await provider.list_files(recursive=True)
+                    if not files:
+                        if m["provider_type"] == "wecom":
+                            sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请检查 SpaceId 是否正确且自建应用拥有该空间权限。")
+                        elif m["provider_type"] == "webdav":
+                            sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请确认挂载根路径下是否存在支持切片的文档 (PDF/DOCX/TXT/MD)。")
+                        elif m["provider_type"] == "oss":
+                            sync_warnings.append(f"【{m['mount_name']}】未读取到文件，请检查存储桶与前缀配置。")
+                        elif m["provider_type"] == "sandbox":
+                            sync_warnings.append(f"【{m['mount_name']}】沙盒目录下未扫描到支持切片的文档 (PDF/DOCX/TXT/MD/CSV/XLSX)。")
 
-                modified = sync_mgr.filter_modified_files(m["mount_id"], files)
-                # 仅在 list_files 正常返回时才检测被删除文件，防止接口异常误删
-                removed_uris = sync_mgr.find_removed_uris(m["mount_id"], files)
+                    dedup_seen: set[tuple[str, int]] = set()
+                    deduped_files: list = []
+                    for _f in files:
+                        if getattr(_f, "is_dir", False) or not str(getattr(_f, "title", "") or "").strip():
+                            continue
+                        _fp = (_f.title.lower(), _f.size)
+                        if _fp not in dedup_seen:
+                            dedup_seen.add(_fp)
+                            deduped_files.append(_f)
+                        else:
+                            logger.warning(f"训练去重：跳过重复文件 [{_f.title}] size={_f.size}")
+                    files = deduped_files
 
-                # 防呆自愈：若独立知识库目录/切片已被物理清空或尚未建库，但水位线仍残留导致 modified 为空，则自动重置水位线并全量重训
-                if files and not modified:
-                    from ...kb.storage import KBStorageManager
-                    kb_id_chk = f"kb_{m['mount_id']}"
-                    kb_dir_chk = KBStorageManager.get_kb_dir(kb_id_chk) / "versions"
-                    has_any_chunks = False
-                    if kb_dir_chk.exists():
-                        for ver_db in kb_dir_chk.glob("*/index.db"):
+                    modified = sync_mgr.filter_modified_files(m["mount_id"], files)
+                    removed_uris = sync_mgr.find_removed_uris(m["mount_id"], files)
+
+                    # 防呆自愈：若当前激活版本独立知识库目录/切片已被物理清空或尚未建库，自动重置水位线全量重建
+                    if files and not modified:
+                        from ...kb.storage import KBStorageManager
+                        kb_id_chk = f"kb_{m['mount_id']}"
+                        target_ver_chk = await _resolve_kb_active_version(kb_id_chk)
+                        ver_db = KBStorageManager.get_version_db_path(kb_id_chk, target_ver_chk)
+                        has_any_chunks = False
+                        if ver_db.exists():
                             try:
                                 import sqlite3 as _s3
                                 with _s3.connect(str(ver_db)) as _c:
@@ -389,19 +498,28 @@ async def run_incremental_sync(
                                     ).fetchone()
                                     if _tbl and int(_c.execute("SELECT COUNT(*) FROM hybrid_chunks").fetchone()[0] or 0) > 0:
                                         has_any_chunks = True
-                                        break
                             except Exception:
                                 pass
-                    if not has_any_chunks:
-                        logger.info(f"挂载源 [{m['mount_name']}] 目标知识库为空/已销毁，自动重置同步水位线以执行全量重建")
-                        sync_mgr.clear_sync_state(m["mount_id"])
-                        modified = list(files)
-                        removed_uris = []
+                        if not has_any_chunks:
+                            logger.info(f"挂载源 [{m['mount_name']}] 目标知识库 ({target_ver_chk}) 为空/已销毁，自动重置同步水位线以执行全量重建")
+                            sync_mgr.clear_sync_state(m["mount_id"])
+                            modified = list(files)
+                            removed_uris = []
 
-                mount_plans.append((m, provider, modified, removed_uris))
-            except Exception as prov_err:
-                logger.warning(f"挂载源 {m['mount_name']} 增量拉取失败: {prov_err}")
-                sync_warnings.append(f"【{m['mount_name']}】拉取异常: {prov_err}")
+                    return (m, provider, modified, removed_uris)
+                except Exception as prov_err:
+                    logger.warning(f"挂载源 {m['mount_name']} 增量拉取失败: {prov_err}")
+                    sync_warnings.append(f"【{m['mount_name']}】拉取异常: {prov_err}")
+                    return None
+
+        _update_sync_progress(
+            eff_task_id,
+            running=True,
+            percent=4.0,
+            stage=f"正在并发扫描 {len(mounts)} 个挂载源目录...",
+        )
+        scan_results = await asyncio.gather(*[_scan_single_mount(m) for m in mounts])
+        mount_plans = [r for r in scan_results if r is not None]
 
         # 阶段 2：先清理已删除/待覆盖文件的旧切片，再执行新增与变更文件的切片向量化（12.0% -> 86.0%）
         total_files = sum(len(mod) for _, _, mod, _ in mount_plans)
@@ -411,19 +529,23 @@ async def run_incremental_sync(
 
         for m, provider, modified, removed_uris in mount_plans:
             kb_id = f"kb_{m['mount_id']}"
+            has_mount_changes = bool(modified or removed_uris)
+            target_ver, prev_ver = await _prepare_incremental_version(kb_id, has_mount_changes)
+            mount_removed_cnt = 0
             # 2.1 清理已在源端删除的文件切片与水位线
             if removed_uris:
                 removed_cnt = KBStorageManager.delete_chunks_by_remote_uris(
                     kb_id=kb_id,
                     remote_uris=removed_uris,
-                    version="v1.0.0",
+                    version=target_ver,
                 )
                 sync_mgr.delete_sync_state_uris(m["mount_id"], removed_uris)
                 total_removed_files += len(removed_uris)
                 total_removed_chunks += removed_cnt
+                mount_removed_cnt += removed_cnt
                 affected_kb_ids.add(kb_id)
                 logger.info(
-                    f"[KBSync] 挂载源 [{m['mount_name']}] 检测到 {len(removed_uris)} 个文件已删除，已同步清理 {removed_cnt} 个旧切片"
+                    f"[KBSync] 挂载源 [{m['mount_name']}] 检测到 {len(removed_uris)} 个文件已删除，已同步清理 {target_ver} 的 {removed_cnt} 个旧切片"
                 )
 
             # 2.2 对内容有变化的文件先删旧切片再重切写入，防止文档变短后尾部残留旧切片
@@ -432,70 +554,104 @@ async def run_incremental_sync(
                 KBStorageManager.delete_chunks_by_remote_uris(
                     kb_id=kb_id,
                     remote_uris=modified_uris,
-                    version="v1.0.0",
+                    version=target_ver,
                 )
 
             mount_new_chunks: list[dict[str, Any]] = []
-            for f in modified:
-                current_pct = 12.0 + (74.0 * (processed_files / total_files) if total_files > 0 else 74.0)
-                _update_sync_progress(
-                    eff_task_id,
-                    running=True,
-                    percent=current_pct,
-                    stage=f"正在切片与向量化 ({processed_files + 1}/{total_files})",
-                    current_file=f.title,
-                    processed_files=processed_files,
-                    total_files=total_files,
-                    new_chunks=total_new_chunks,
-                )
-                try:
-                    stream = await provider.download_stream(f.remote_uri)
-                    chunks = DocumentStreamExtractor.extract_chunks(stream, f.title, f.remote_uri, authority_tier=f.authority_tier)
-                    if chunks:
-                        await engine.upsert_chunks(chunks)
-                        mount_new_chunks.extend(chunks)
-                        total_new_chunks += len(chunks)
-                    sync_mgr.update_sync_state(m["mount_id"], f)
-                except Exception as file_err:
-                    logger.warning(f"同步单个文件失败 ({f.title}): {file_err}")
-                finally:
+            if modified:
+                # 温和模式严格限制单文件流式解析 + 礼让 CPU 时间片，全力模式才放开 4 并发
+                file_sem = asyncio.Semaphore(4 if turbo_mode else 1)
+
+                async def _process_single_file(f: Any) -> tuple[Any, list[dict[str, Any]]]:
+                    async with file_sem:
+                        try:
+                            stream = await provider.download_stream(f.remote_uri)
+                            chunks = await asyncio.to_thread(
+                                DocumentStreamExtractor.extract_chunks,
+                                stream,
+                                f.title,
+                                f.remote_uri,
+                                authority_tier=f.authority_tier,
+                            )
+                            if not turbo_mode:
+                                # 主动让出 80ms 时间片，确保前台对话/IM/Web 接口随时响应流畅不卡顿
+                                await asyncio.sleep(0.08)
+                            return f, chunks or []
+                        except Exception as file_err:
+                            logger.warning(f"同步单个文件失败 ({f.title}): {file_err}")
+                            return f, []
+
+                tasks = [asyncio.create_task(_process_single_file(f)) for f in modified]
+                mode_label = "全力并发" if turbo_mode else "温和节能"
+                for fut in asyncio.as_completed(tasks):
+                    f_obj, f_chunks = await fut
+                    if f_chunks:
+                        mount_new_chunks.extend(f_chunks)
+                        total_new_chunks += len(f_chunks)
+                    sync_mgr.update_sync_state(m["mount_id"], f_obj)
                     processed_files += 1
-                    done_pct = 12.0 + (74.0 * (processed_files / total_files) if total_files > 0 else 74.0)
+                    done_pct = 12.0 + (78.0 * (processed_files / total_files) if total_files > 0 else 78.0)
                     _update_sync_progress(
                         eff_task_id,
                         running=True,
                         percent=done_pct,
-                        stage=f"正在切片与向量化 ({processed_files}/{total_files})",
-                        current_file=f.title,
+                        stage=f"正在{mode_label}切片与入库 ({processed_files}/{total_files})",
+                        current_file=f_obj.title,
                         processed_files=processed_files,
                         total_files=total_files,
                         new_chunks=total_new_chunks,
                     )
 
+                if mount_new_chunks:
+                    await engine.upsert_chunks(mount_new_chunks)
+
             if mount_new_chunks:
                 affected_kb_ids.add(kb_id)
                 KBStorageManager.upsert_chunks_to_version_db(
                     kb_id=kb_id,
-                    version="v1.0.0",
+                    version=target_ver,
                     chunks=mount_new_chunks,
                 )
 
-        # 阶段 3：若有新增、变更或删除，触发元数据同步与后处理增强（86.0% -> 98.0%）
+            if prev_ver:
+                if mount_new_chunks or mount_removed_cnt > 0:
+                    await _commit_incremental_version(
+                        kb_id=kb_id,
+                        new_ver=target_ver,
+                        prev_ver=prev_ver,
+                        new_chunks_cnt=len(mount_new_chunks),
+                        removed_chunks_cnt=mount_removed_cnt,
+                    )
+                else:
+                    # 若待更新文件均未产生有效切片且未删除任何切片，清理空副本保持原版本不动
+                    try:
+                        import shutil as _shutil
+
+                        empty_dir = KBStorageManager.get_version_dir(kb_id, target_ver)
+                        if empty_dir.exists() and target_ver != prev_ver:
+                            _shutil.rmtree(empty_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+
+        # 阶段 3：若有新增、变更或删除，轻量纳管主库并把重度图谱/口语增强移入后台异步执行，主流程立即完成
         if total_new_chunks > 0 or total_removed_chunks > 0 or affected_kb_ids:
             _update_sync_progress(
                 eff_task_id,
                 running=True,
-                percent=88.0,
-                stage="正在更新知识库索引与图谱增强...",
+                percent=94.0,
+                stage="正在更新知识库版本索引并调度后台图谱增强...",
                 processed_files=processed_files,
                 total_files=total_files,
                 new_chunks=total_new_chunks,
             )
             try:
                 from ...kb.manager import KBLifecycleManager
-                await KBLifecycleManager.auto_adopt_mounted_kbs()
-                if total_new_chunks > 0:
-                    await KBLifecycleManager.auto_post_process_trained_kbs(list(affected_kb_ids))
+
+                await KBLifecycleManager.auto_adopt_mounted_kbs(only_missing=True)
+                if total_new_chunks > 0 and affected_kb_ids:
+                    asyncio.create_task(
+                        KBLifecycleManager.auto_post_process_trained_kbs(list(affected_kb_ids))
+                    )
             except Exception as e:
                 logger.debug(f"同步后自动增强流水线: {e}")
 
@@ -538,6 +694,7 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
         workspace_root=req.workspace_root,
         task_id=req.task_id,
         source_tag="manual",
+        turbo_mode=req.turbo_mode,
     )
 
 

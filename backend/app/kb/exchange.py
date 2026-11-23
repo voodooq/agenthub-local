@@ -760,10 +760,6 @@ class KBExchangeEngine:
 
                     results.append(d)
 
-                # 若所有快照版本号都未精准匹配到 active_ver，但列表不为空，则将最新的第一条标记为 is_active
-                if not active_assigned and results:
-                    results[0]["is_active"] = True
-
                 return results
 
     @classmethod
