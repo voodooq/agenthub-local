@@ -12,7 +12,8 @@ from __future__ import annotations
 import asyncio
 import secrets
 import time
-from typing import Any
+from datetime import datetime
+from typing import Any, TypedDict
 
 from ..core.logging_config import logger
 from ..repository.db import db_manager
@@ -23,6 +24,23 @@ from .registry import channel_registry
 
 # 保护后台异步任务并发上限，防止长耗时 Ontology 查询堆积拖垮进程
 _MAX_CONCURRENT_IM_TASKS = 8
+# 连发消息动态防抖窗口（纯文本 1.5s，含图片/附件 4.5s）
+_DEBOUNCE_TEXT_SECONDS = 1.5
+_DEBOUNCE_MEDIA_SECONDS = 4.5
+# 单一微信窗口静默超 2 小时自动开启全新短期上下文，防止多话题串台
+_SESSION_SOFT_SPLIT_SECONDS = 7200.0
+
+
+class _DebounceBuffer(TypedDict):
+    texts: list[str]
+    attachments: list[Any]
+    quote_texts: list[str]
+    msg_ids: list[str]
+    last_inbound: InboundMessage
+    link: dict[str, Any]
+    caller: CallerIdentity
+    adapter: Any
+    timer: asyncio.Task[Any] | None
 
 
 class ChannelGateway:
@@ -31,6 +49,10 @@ class ChannelGateway:
     def __init__(self) -> None:
         self._sem = asyncio.Semaphore(_MAX_CONCURRENT_IM_TASKS)
         self._bg_tasks: set[asyncio.Task[Any]] = set()
+        self._session_locks: dict[str, asyncio.Lock] = {}
+        self._debounce_buffers: dict[str, _DebounceBuffer] = {}
+        self._active_session_conv: dict[str, str] = {}
+        self._session_workdirs: dict[str, str] = {}
 
     @staticmethod
     async def _ensure_gateway_tables(conn: Any) -> None:
@@ -198,25 +220,35 @@ class ChannelGateway:
 
     async def _get_or_create_session_conv_id(
         self, *, link_id: str, channel_type: str, sender_id: str, chat_id: str
-    ) -> str:
-        """为每个 (link_id, channel, chat_id, sender_id) 维护隔离且稳定的 conversation_id。"""
+    ) -> tuple[str, bool]:
+        """为每个 (link_id, channel, chat_id, sender_id) 维护隔离会话，静默超 2 小时自动软切分新上下文。"""
         session_key = f"{channel_type}:{link_id}:{chat_id}:{sender_id}"
         now_ts = time.time()
         async with db_manager.get_connection() as conn:
             await self._ensure_gateway_tables(conn)
             cur = await conn.execute(
-                "SELECT conversation_id FROM dialogue_channel_sessions WHERE session_key = ? LIMIT 1",
+                "SELECT conversation_id, updated_at FROM dialogue_channel_sessions WHERE session_key = ? LIMIT 1",
                 (session_key,),
             )
             row = await cur.fetchone()
             if row and row["conversation_id"]:
+                prev_updated = float(row["updated_at"] or 0)
+                if prev_updated > 0 and (now_ts - prev_updated) > _SESSION_SOFT_SPLIT_SECONDS:
+                    new_conv_id = f"im_{secrets.token_hex(8)}"
+                    await conn.execute(
+                        "UPDATE dialogue_channel_sessions SET conversation_id = ?, updated_at = ? WHERE session_key = ?",
+                        (new_conv_id, now_ts, session_key),
+                    )
+                    await conn.commit()
+                    return new_conv_id, True
+
                 conv_id = str(row["conversation_id"])
                 await conn.execute(
                     "UPDATE dialogue_channel_sessions SET updated_at = ? WHERE session_key = ?",
                     (now_ts, session_key),
                 )
                 await conn.commit()
-                return conv_id
+                return conv_id, False
 
             conv_id = f"im_{secrets.token_hex(8)}"
             await conn.execute(
@@ -228,7 +260,31 @@ class ChannelGateway:
                 (session_key, link_id, channel_type, sender_id, chat_id, conv_id, now_ts),
             )
             await conn.commit()
-            return conv_id
+            return conv_id, False
+
+    async def _reset_session_conv_id(
+        self, *, link_id: str, channel_type: str, sender_id: str, chat_id: str
+    ) -> str:
+        """响应 /new 指令强制切换新短期对话 ID，保留历史库与长期记忆。"""
+        session_key = f"{channel_type}:{link_id}:{chat_id}:{sender_id}"
+        now_ts = time.time()
+        new_conv_id = f"im_{secrets.token_hex(8)}"
+        async with db_manager.get_connection() as conn:
+            await self._ensure_gateway_tables(conn)
+            await conn.execute(
+                """
+                INSERT INTO dialogue_channel_sessions (
+                    session_key, link_id, channel_type, sender_id, chat_id, conversation_id, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(session_key) DO UPDATE SET
+                    conversation_id = excluded.conversation_id,
+                    updated_at = excluded.updated_at
+                """,
+                (session_key, link_id, channel_type, sender_id, chat_id, new_conv_id, now_ts),
+            )
+            await conn.commit()
+        self._active_session_conv[session_key] = new_conv_id
+        return new_conv_id
 
     async def _save_dialogue_record(
         self,
@@ -303,35 +359,72 @@ class ChannelGateway:
 
             typing_task = asyncio.create_task(_typing_heartbeat())
             try:
-                conv_id = await self._get_or_create_session_conv_id(
+                conv_id, is_soft_split = await self._get_or_create_session_conv_id(
                     link_id=link["link_id"],
                     channel_type=inbound.channel_type,
                     sender_id=inbound.sender_id,
                     chat_id=inbound.chat_id,
                 )
+                session_key = f"{inbound.channel_type}:{link['link_id']}:{inbound.chat_id}:{inbound.sender_id}"
+                self._active_session_conv[session_key] = conv_id
                 im_ws_id = await self.ensure_im_link_workspace(
                     link_id=link["link_id"],
                     target_user_label=str(link.get("target_user_label") or ""),
                     expert_id=str(link.get("expert_id") or ""),
                 )
+
+                from ..service.personal_assistant_service import personal_assistant_service
+
+                now_dt = datetime.now()
+                weekday_names = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"]
+                now_str = f"{now_dt.strftime('%Y-%m-%d %H:%M:%S')} {weekday_names[now_dt.weekday()]}"
+                session_stats = await personal_assistant_service.get_session_stats(
+                    link_id=link["link_id"], sender_id=inbound.sender_id
+                )
+                split_note = (
+                    "- **跨时段新话题切分**：距离上一条对话已超过 2 小时，系统已自动为你开启全新短期上下文；如需查找此前记录，请调用 `search_im_chat_history` 或 `manage_personal_notes`。\n"
+                    if is_soft_split
+                    else ""
+                )
+                last_time_line = (
+                    f"- **上一条历史消息时间**：`{session_stats['last_msg_time_str']}`（请据此准确区分昨天、昨晚与今天，绝不可把已过一夜的事情继续当成“明天”）\n"
+                    if session_stats.get("last_msg_time_str")
+                    else ""
+                )
+                first_time_line = (
+                    f"- **首次互动时间 / 累计轮数**：`{session_stats['first_msg_time_str']}` / 共 `{session_stats['total_rounds']}` 轮\n"
+                    if session_stats.get("first_msg_time_str")
+                    else ""
+                )
+                runtime_ctx_header = (
+                    "### ⏱️ 当前实时时间与会话状态（最高基准事实）\n"
+                    f"- **当前准确时间**：`{now_str}`\n"
+                    f"{last_time_line}"
+                    f"{first_time_line}"
+                    f"{split_note}"
+                    "- **记忆事实区分规则**：提示词中若出现过往记忆、用户画像或备忘档案，均是系统替你持久化保留的历史记忆，绝非用户刚贴出来的“系统环境信息”；请自然承接，不要反问用户为什么贴出这些信息。\n"
+                )
+
                 chunks_acc: list[str] = []
                 stream_buf = ""
                 streamed_segments: list[str] = []
                 has_tool_in_stream = False
                 final_content = ""
                 im_concise_prompt = (
-                    "### 💬 当前为手机微信 / IM 实时聊天场景（严格遵守精简口语与渠道边界规范）\n"
-                    "1. **简短直给结论**：像熟悉业务的同事在微信里回复一样，自然口语化、直接说重点，常规问题控制在 2~5 句话（150~250 字以内）；\n"
-                    "2. **禁止公文与代码噪音**：不要写背景铺垫、长篇报告、免责声明、多级标题（###）、复杂 Markdown 表格或代码块；\n"
-                    "3. **严格遵守 IM 渠道能力边界**：\n"
-                    "   - **严禁输出任何斜杠命令**（如 `/excel`、`/gen-ui`、`/brand`、`/win-ops`、`/spec`、`/task` 等）；\n"
-                    "   - **严禁提及桌面端或底层技术概念**（如「切换任务模式 / Task Mode」「Web 界面」「`output/` 目录」「`write_local_file` 权限」「MCP」「Docker」等）；\n"
-                    "   - 被问“你能干嘛”时，仅介绍当前专家在微信里的真实能力（业务规程与百科咨询、授权范围内的数据核实、文字方案与思路梳理）；\n"
-                    "   - 遇到微信端无法直接完成的需求（如直接生成图片/画画、导出本机文件、操作电脑软件），只需一句话礼貌说明“目前微信端主要支持文字问答与业务咨询，暂不支持直接出图或操作电脑文件”，不要诱导用户发指令或切模式；\n"
-                    "4. **禁止播报检索过程与泄露后台信息**：\n"
-                    "   - 调用知识库工具查资料时请静默查询，**严禁输出“我将读取……”“我先帮您查……”“正在读取第 X 切片……”等中间过程旁白**；\n"
-                    "   - 引用来源时只需自然说出规程或文档名称（如“根据《昆明D赛竞赛规程》”），**严禁带 `.pdf`/`.docx`/`.xlsx` 等文件扩展名**，也**严禁出现 `doc_id`、`tool_ref`、切片编号（第 X 至 Y 切片）等任何后台技术信息**；\n"
-                    "5. **关键事实必须准**：电话、时间、费用、人数等核心数字务必准确；明细很多时先报汇总，再补一句「需要看详细清单可以告诉我」。"
+                    "### 💬 当前为手机微信私人助理与实时对话场景（高情商、靠谱、不推诿）\n"
+                    "1. **主动调用真实能力，严禁虚假拒答**：\n"
+                    "   - 当用户让你**记备忘 / 添加待办 / 查看备忘**：必须主动调用 `manage_personal_notes`（或 `save_long_term_memory`）持久化落库，并明确回复“已帮你记下”，**严禁说“我记不住 / 下次就忘了 / 建议你自己记在笔记里”**；\n"
+                    "   - 当用户让你**查以前的聊天记录 / 核对以前说过的话**：主动调用 `search_im_chat_history` 查真实落库记录并准确作答；\n"
+                    "   - 当用户让你**设置定时提醒 / 到点叫我**：主动调用 `create_im_reminder`（或用 `list_or_cancel_im_reminders` 查看取消），到点时系统会真正主动往微信发通知；\n"
+                    "   - 当用户询问**天气或最新实时资讯**：主动调用 `get_weather` / `web_search` 获取真实数据后直给结论，**严禁回复“我没有时钟 / 我查不到天气 / 你自己打开手机 App 看”**；\n"
+                    "   - 当用户询问**写程序 / 脚本 / 技术排错**：可以直接在微信里给出精简清晰的核心代码片段、排错脚本或技术方案思路，仅在需要整库构建或操作本机桌面软件时简短建议回到电脑端协同。\n"
+                    "2. **温暖干练口语化（去掉冷漠客服腔）**：\n"
+                    "   - 像一位贴身靠谱的资深私人助理兼同事在微信上聊天，自然、有温度、不机械道歉，日常回答控制精炼（常规 2~6 句话，150~300 字内；代码/方案除外）；\n"
+                    "   - 不堆砌多级标题、背景铺垫或免责声明；\n"
+                    "3. **静默查库、严禁泄露后台技术字眼**：\n"
+                    "   - 调用任何工具查询时保持静默，**严禁输出“我将读取……”“我先查一下……”“正在读取第 X 切片……”等中间过程旁白**；\n"
+                    "   - 引用规程或文档时只报名称，**严禁带 `.pdf`/`.docx`/`.xlsx` 扩展名、`doc_id`、`tool_ref`、切片号等内部字段**；\n"
+                    "4. **关键事实务必准确**：时间、日期、数字与统计口径务必核实清楚后再回复。"
                 )
 
                 async def _flush_stream_segment(seg_raw: str) -> None:
@@ -414,7 +507,7 @@ class ChannelGateway:
                 preferred_candidates = [
                     str(link.get("model_preference") or link.get("model_name") or "").strip(),
                     str((expert_row or {}).get("base_model") or "").strip(),
-                    str(global_active_model or "").strip(),
+                    (global_active_model or "").strip(),
                 ]
                 im_model_name = next((c for c in preferred_candidates if c), "")
                 try:
@@ -487,20 +580,61 @@ class ChannelGateway:
                     if expert_sys_prompt:
                         identity_header += f"\n### 🎯 绑定专家角色职责\n{expert_sys_prompt}\n"
 
-                full_im_system_prompt = f"{identity_header}\n{im_concise_prompt}"
+                is_owner_mode = int(link.get("owner_mode") or 0) == 1 and caller.role == "hq_admin"
+                if is_owner_mode:
+                    im_concise_prompt += (
+                        "\n5. **主人全能控制台模式（已启用）**：\n"
+                        "   - 你可以直接调用 `list_managed_servers`、`inspect_server_health`、`run_remote_ssh_command`、`execute_local_command`、`write_local_file`、`replace_in_file`、`git_workspace_safe_ops`、`save_inbox_item`、`generate_daily_briefing` 等与电脑端对等的工具；\n"
+                        "   - 修改任何代码前先调用 `git_workspace_safe_ops(action='checkpoint')` 保护现场，修改后尽量运行测试再汇报精简 Diff；\n"
+                        "   - 若某高危或敏感操作触发 L2 安全门禁挂起并生成 4 位确认码，立即把确认信息原样清晰转达给主人等待确认。"
+                    )
+
+                # 多模态与引用消息预处理（无 GPU 纯 CPU 语音转写 + RapidOCR 识图 + Vision 载荷透传）
+                from .media_processor import media_processor
+                from ..service.personal_workflow_service import personal_workflow_service
+
+                media_res = await media_processor.process_inbound_media(inbound.raw_payload)
+                media_attachments = list(media_res.get("image_attachments") or [])
+                prompt_sections: list[str] = []
+                quote_txt = str((inbound.raw_payload or {}).get("quote_text") or "").strip()
+                if quote_txt:
+                    prompt_sections.append(f"[引用历史消息]: {quote_txt[:400]}")
+                if media_res.get("transcripts"):
+                    prompt_sections.append("[语音转写]: " + "\n".join(media_res["transcripts"]))
+                if media_res.get("ocr_texts"):
+                    prompt_sections.append("[图片文字提取(OCR)]: " + "\n".join(media_res["ocr_texts"])[:1500])
+                if inbound.text and inbound.text not in ("[收到图片消息]", "[收到语音消息]", "[收到媒体附件]"):
+                    prompt_sections.append(inbound.text)
+                elif not prompt_sections:
+                    prompt_sections.append(inbound.text)
+                eff_user_msg = "\n\n".join(prompt_sections)
+
+                preferred_wd = getattr(self, "_session_workdirs", {}).get(session_key, "")
+                if preferred_wd and is_owner_mode:
+                    runtime_ctx_header += f"- **当前指定工作目录 (/cd)**：`{preferred_wd}`\n"
+
+                full_im_system_prompt = f"{runtime_ctx_header}\n{identity_header}\n{im_concise_prompt}"
 
                 async for ev in agent_runtime.chat_stream(
                     conversation_id=conv_id,
-                    user_message=inbound.text,
+                    user_message=eff_user_msg,
                     model_name=im_model_name,
                     thinking_level=im_thinking_level,
-                    context_rounds=4,
+                    context_rounds=12,
+                    attachments=media_attachments or None,
                     system_override=full_im_system_prompt,
                     scene_mode="agent",
                     workspace_id=im_ws_id,
                     agent_id=selected_expert_id,
                     caller_channel="im_bot",
                     endpoint_token=inbound.endpoint_token,
+                    im_context={
+                        "link_id": str(link["link_id"]),
+                        "channel_type": inbound.channel_type,
+                        "sender_id": inbound.sender_id,
+                        "chat_id": inbound.chat_id,
+                    },
+                    owner_mode=is_owner_mode,
                 ):
                     ev_type = ev.get("type")
                     if ev_type in ("tool_start", "tool_end", "start"):
@@ -575,6 +709,21 @@ class ChannelGateway:
                     raw_reply, max_chunk_chars=getattr(adapter, "max_chunk_chars", 1500)
                 )
 
+                # 若未分片流式推送且正文超过 500 字，自动提炼移动端摘要并生成 24h 临时阅读短链
+                if not streamed_segments and len(formatted_text) > 500:
+                    rep = await personal_workflow_service.create_shared_report(
+                        title=f"{self_name} 详报 ({datetime.now().strftime('%m-%d %H:%M')})",
+                        content_md=raw_reply,
+                        link_id=link["link_id"],
+                        sender_id=inbound.sender_id,
+                    )
+                    compact_summary = formatted_text[:420].rstrip() + "..."
+                    formatted_text = (
+                        f"{compact_summary}\n\n"
+                        f"📄 完整详报较长（共 {len(raw_reply)} 字），已生成 24 小时临时阅读页：{rep['path']}"
+                    )
+                    out_chunks = [formatted_text]
+
                 # 若前面已流式推送过部分段落，仅补发尚未推送的尾段；否则整段推送
                 if streamed_segments:
                     if stream_buf.strip():
@@ -637,6 +786,422 @@ class ChannelGateway:
                 except Exception:
                     pass
 
+    def _get_session_lock(self, session_key: str) -> asyncio.Lock:
+        """获取按会话隔离的串行锁，防止连发消息并发复读或流式串台。"""
+        lock = self._session_locks.get(session_key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_locks[session_key] = lock
+        return lock
+
+    async def _send_fast_reply(
+        self,
+        *,
+        inbound: InboundMessage,
+        link: dict[str, Any],
+        text: str,
+        adapter: Any,
+    ) -> dict[str, Any]:
+        """向 IM 通道即时返回零延迟文本消息（无需经过 LLM）。"""
+        fmt_text, out_chunks = format_for_im_channel(
+            text, max_chunk_chars=getattr(adapter, "max_chunk_chars", 1500)
+        )
+        outbound = OutboundMessage(
+            raw_markdown=text,
+            formatted_text=fmt_text,
+            chunks=out_chunks or [fmt_text],
+            metadata={"fast_command": True},
+        )
+        push_res = await adapter.send_reply(inbound=inbound, outbound=outbound, link_config=link)
+        return {
+            "status": "completed",
+            "fast_command": True,
+            "reply_text": fmt_text,
+            "reply_chunks": out_chunks,
+            "push_result": push_res,
+        }
+
+    async def _try_handle_slash_command(
+        self,
+        *,
+        inbound: InboundMessage,
+        link: dict[str, Any],
+        caller: CallerIdentity,
+        adapter: Any,
+    ) -> dict[str, Any] | None:
+        """在网关前置拦截 L2 确认回复、高频零延迟快捷指令与纯转发收藏链接。"""
+        import re as _re
+        from ..agent.runtime import agent_runtime
+        from ..service.personal_assistant_service import personal_assistant_service
+        from ..service.personal_workflow_service import personal_workflow_service
+        from ..service.server_ops_service import server_ops_service
+
+        raw = (inbound.text or "").strip()
+        if not raw:
+            return None
+
+        session_key = f"{inbound.channel_type}:{link['link_id']}:{inbound.chat_id}:{inbound.sender_id}"
+        low = raw.lower()
+        is_owner_mode = int(link.get("owner_mode") or 0) == 1 and caller.role == "hq_admin"
+        reply_text: str | None = None
+
+        # 0. 优先拦截主人对 L2 高危操作的二次确认或取消回复
+        if is_owner_mode:
+            apr_res = await server_ops_service.resolve_approval_reply(
+                sender_id=inbound.sender_id, link_id=link["link_id"], text=raw
+            )
+            if apr_res and apr_res.get("handled"):
+                reply_text = str(apr_res.get("reply_text") or "已处理确认操作。")
+
+        # 1. /stop 或 停/取消任务/中止 -> 秒级中止当前运行并清理挂起防抖队列
+        if reply_text is None and low in ("/stop", "停", "停止", "取消任务", "中止"):
+            buf = self._debounce_buffers.pop(session_key, None)
+            if buf and buf.get("timer") and not buf["timer"].done():
+                buf["timer"].cancel()
+            conv_id = self._active_session_conv.get(session_key, "")
+            if not conv_id:
+                conv_id, _ = await self._get_or_create_session_conv_id(
+                    link_id=link["link_id"],
+                    channel_type=inbound.channel_type,
+                    sender_id=inbound.sender_id,
+                    chat_id=inbound.chat_id,
+                )
+            cancelled = agent_runtime.cancel_session_stream(conv_id)
+            reply_text = (
+                "已为你中止当前正在处理的任务。"
+                if cancelled
+                else "当前没有正在运行中的任务，随时告诉我下一步要做什么。"
+            )
+            if buf and buf.get("msg_ids"):
+                for mid in buf["msg_ids"]:
+                    await self._finish_dedup_slot(
+                        channel_type=inbound.channel_type,
+                        external_msg_id=mid,
+                        status="completed",
+                        reply_preview=reply_text,
+                    )
+
+        # 2. /new 或 /reset -> 开启新短期上下文（保留长期记忆）
+        elif reply_text is None and low in ("/new", "/reset"):
+            await self._reset_session_conv_id(
+                link_id=link["link_id"],
+                channel_type=inbound.channel_type,
+                sender_id=inbound.sender_id,
+                chat_id=inbound.chat_id,
+            )
+            reply_text = "已开启全新短期对话上下文，之前的备忘、待办和长期记忆都完整保留着。"
+
+        # 3. /memo <内容> -> 秒存持久化备忘
+        elif reply_text is None and low.startswith("/memo"):
+            content = raw[5:].strip()
+            if not content:
+                notes = await personal_assistant_service.list_notes(
+                    sender_id=inbound.sender_id, category="memo", limit=8
+                )
+                if not notes:
+                    reply_text = "当前还没有备忘记录。发送 `/memo 备忘内容` 即可立刻记下。"
+                else:
+                    lines = [f"最近 {len(notes)} 条备忘："]
+                    for idx, n in enumerate(notes, 1):
+                        lines.append(f"{idx}. [{n['created_at_str']}] {n['content']}")
+                    reply_text = "\n".join(lines)
+            else:
+                saved = await personal_assistant_service.add_note(
+                    sender_id=inbound.sender_id,
+                    content=content,
+                    category="memo",
+                    link_id=link["link_id"],
+                )
+                reply_text = f"已记下备忘（{saved['created_at_str']}）：{saved['content']}"
+
+        # 4. /todo 或 /todo <内容> -> 秒查或新增待办
+        elif reply_text is None and low.startswith("/todo"):
+            content = raw[5:].strip()
+            if not content:
+                todos = await personal_assistant_service.list_notes(
+                    sender_id=inbound.sender_id, category="todo", limit=10
+                )
+                if not todos:
+                    reply_text = "当前没有未完成的待办事项。发送 `/todo 待办内容` 即可添加。"
+                else:
+                    lines = [f"当前共有 {len(todos)} 条待办："]
+                    for idx, n in enumerate(todos, 1):
+                        lines.append(f"{idx}. [{n['created_at_str']}] {n['content']}")
+                    reply_text = "\n".join(lines)
+            else:
+                saved = await personal_assistant_service.add_note(
+                    sender_id=inbound.sender_id,
+                    content=content,
+                    category="todo",
+                    link_id=link["link_id"],
+                )
+                reply_text = f"已添加待办：{saved['content']}"
+
+        # 5. /reminders -> 查看当前定时提醒；/remind <时间> <内容> -> 秒设提醒
+        elif reply_text is None and low in ("/reminders", "/remind"):
+            rems = await personal_assistant_service.list_im_reminders(
+                link_id=link["link_id"], target_user_id=inbound.sender_id
+            )
+            if not rems:
+                reply_text = "当前没有活跃定时提醒。示例：`/remind 10分钟后 喝水` 或 `/remind 每天早上8:30 发我日程`。"
+            else:
+                lines = [f"活跃定时提醒（{len(rems)} 条）："]
+                for idx, r in enumerate(rems, 1):
+                    lines.append(f"{idx}. {r['display_content']}（下次：{r.get('next_run_at') or '-'}）")
+                reply_text = "\n".join(lines)
+
+        elif reply_text is None and low.startswith("/remind "):
+            rest = raw[8:].strip()
+            parts = rest.split(None, 1)
+            if len(parts) < 2:
+                reply_text = "格式：`/remind <时间> <内容>`，例如：`/remind 30分钟后 检查服务器`。"
+            else:
+                try:
+                    ws_id = await self.ensure_im_link_workspace(
+                        link_id=link["link_id"],
+                        target_user_label=str(link.get("target_user_label") or ""),
+                        expert_id=str(link.get("expert_id") or ""),
+                    )
+                    rem = await personal_assistant_service.create_im_reminder(
+                        workspace_id=ws_id,
+                        link_id=link["link_id"],
+                        channel_type=inbound.channel_type,
+                        target_user_id=inbound.sender_id,
+                        trigger_expr=parts[0],
+                        content=parts[1],
+                    )
+                    reply_text = f"已设置提醒「{rem['content']}」，将于 {rem['schedule_desc']} 微信通知你。"
+                except ValueError as ve:
+                    reply_text = str(ve)
+
+        # 6. /status [别名] -> 主人模式下零延迟服务器健康体检
+        elif reply_text is None and low.startswith("/status"):
+            if not is_owner_mode:
+                reply_text = "该渠道链接未开启主人控制台模式，暂不支持查看服务器运维状态。"
+            else:
+                srv_alias = raw[7:].strip()
+                h_res = await server_ops_service.inspect_server_health(alias=srv_alias)
+                reply_text = str(h_res.get("summary") or "服务器体检完成")
+
+        # 7. /brief [城市] -> 秒出今日私人晨报
+        elif reply_text is None and low.startswith("/brief"):
+            city_arg = raw[6:].strip() or "北京"
+            reply_text = await personal_workflow_service.build_daily_briefing(
+                sender_id=inbound.sender_id, city=city_arg
+            )
+
+        # 8. /cd <目录或工作区> -> 切换代码工作区偏好
+        elif reply_text is None and low.startswith("/cd"):
+            if not is_owner_mode:
+                reply_text = "该渠道未开启主人控制台模式，无法切换服务器工作区目录。"
+            else:
+                target_wd = raw[3:].strip()
+                if not target_wd:
+                    cur_wd = getattr(self, "_session_workdirs", {}).get(session_key) or "默认工作区"
+                    reply_text = f"当前工作区偏好：`{cur_wd}`。发送 `/cd 路径` 可切换。"
+                else:
+                    if not hasattr(self, "_session_workdirs"):
+                        self._session_workdirs = {}
+                    self._session_workdirs[session_key] = target_wd
+                    reply_text = f"已切换当前会话首选工作区/项目目录为：`{target_wd}`"
+
+        # 9. /inbox <链接或关键词> 或纯转发 URL -> 自动入碎片收藏箱
+        elif reply_text is None and (
+            low.startswith("/inbox") or bool(_re.fullmatch(r"https?://\S+", raw))
+        ):
+            arg = raw if raw.startswith("http") else raw[6:].strip()
+            if arg.startswith(("http://", "https://")):
+                inb = await personal_workflow_service.save_inbox_item(
+                    sender_id=inbound.sender_id, link_id=link["link_id"], url=arg
+                )
+                reply_text = (
+                    f"📥 已收录至个人碎片收藏箱（{'/'.join(inb['tags'])}）：\n"
+                    f"**{inb['title']}**\n"
+                    f"{inb['summary']}"
+                )
+            else:
+                hits = await personal_workflow_service.search_inbox_items(
+                    sender_id=inbound.sender_id, keyword=arg, limit=6
+                )
+                if not hits:
+                    reply_text = "收藏箱暂无匹配内容，直接把文章链接转发给我就行。"
+                else:
+                    lines = [f"收藏箱最近 {len(hits)} 条："]
+                    for idx, it in enumerate(hits, 1):
+                        lines.append(f"{idx}. [{it['created_at_str']}] {it['title']}\n   {it['summary'][:90]}")
+                    reply_text = "\n".join(lines)
+
+        # 10. /help -> 快捷指令清单
+        elif reply_text is None and low == "/help":
+            reply_text = (
+                "常用零延迟快捷指令：\n"
+                "- `/memo 内容`：秒存备忘（发 `/memo` 查列表）\n"
+                "- `/todo 内容`：添加或查看待办\n"
+                "- `/remind 时间 内容`：设微信主动提醒（如 `/remind 10分钟后 喝水`）\n"
+                "- `/brief [城市]`：生成今日天气+待办+服务器晨报\n"
+                "- `/inbox [链接或词]` 或直接转发文章链接：收入收藏箱/检索\n"
+                "- `/status [服务器]`：服务器一键体检（主人模式）\n"
+                "- `/cd 目录`：切换代码工作目录（主人模式）\n"
+                "- `/new`：开启新话题；`/stop` 或 `停`：立刻中止当前任务"
+            )
+
+        if reply_text is None:
+            return None
+
+        res = await self._send_fast_reply(inbound=inbound, link=link, text=reply_text, adapter=adapter)
+        await self._finish_dedup_slot(
+            channel_type=inbound.channel_type,
+            external_msg_id=inbound.external_msg_id,
+            status="completed",
+            reply_preview=reply_text,
+        )
+        return res
+
+    async def _enqueue_debounced_turn(
+        self,
+        *,
+        inbound: InboundMessage,
+        link: dict[str, Any],
+        caller: CallerIdentity,
+        adapter: Any,
+    ) -> None:
+        """连发消息防抖合并：短时间内同一用户的碎片消息合并为一次推理，超过 8 秒转入后台并立即释放主会话锁。"""
+        session_key = f"{inbound.channel_type}:{link['link_id']}:{inbound.chat_id}:{inbound.sender_id}"
+        has_media = bool(
+            (inbound.raw_payload or {}).get("attachments")
+            or (inbound.raw_payload or {}).get("has_media")
+            or str((inbound.raw_payload or {}).get("msg_type") or "").lower() in ("image", "file", "voice")
+        )
+        delay = _DEBOUNCE_MEDIA_SECONDS if has_media else _DEBOUNCE_TEXT_SECONDS
+
+        existing_buf = self._debounce_buffers.get(session_key)
+        if existing_buf is not None:
+            prev_timer = existing_buf["timer"]
+            if prev_timer is not None and not prev_timer.done():
+                prev_timer.cancel()
+            buf = existing_buf
+        else:
+            buf: _DebounceBuffer = {
+                "texts": [],
+                "attachments": [],
+                "quote_texts": [],
+                "msg_ids": [],
+                "last_inbound": inbound,
+                "link": link,
+                "caller": caller,
+                "adapter": adapter,
+                "timer": None,
+            }
+            self._debounce_buffers[session_key] = buf
+
+        if inbound.text and inbound.text not in ("[收到图片消息]", "[收到语音消息]", "[收到媒体附件]"):
+            buf["texts"].append(inbound.text)
+        elif inbound.text and not (inbound.raw_payload or {}).get("attachments"):
+            buf["texts"].append(inbound.text)
+        raw_atts = (inbound.raw_payload or {}).get("attachments") or []
+        if isinstance(raw_atts, list) and raw_atts:
+            buf["attachments"].extend(raw_atts)
+        q_txt = str((inbound.raw_payload or {}).get("quote_text") or "").strip()
+        if q_txt:
+            buf["quote_texts"].append(q_txt)
+        buf["msg_ids"].append(inbound.external_msg_id)
+        buf["last_inbound"] = inbound
+        buf["link"] = link
+        buf["caller"] = caller
+        buf["adapter"] = adapter
+
+        async def _flush_after_delay() -> None:
+            try:
+                await asyncio.sleep(delay)
+            except asyncio.CancelledError:
+                return
+
+            cur_buf = self._debounce_buffers.pop(session_key, None)
+            if not cur_buf:
+                return
+            merged_text = "\n".join(t for t in cur_buf["texts"] if t).strip()
+            base_in: InboundMessage = cur_buf["last_inbound"]
+            if not merged_text:
+                merged_text = base_in.text
+            merged_raw = dict(base_in.raw_payload or {})
+            if cur_buf["attachments"]:
+                merged_raw["attachments"] = cur_buf["attachments"]
+            if cur_buf["quote_texts"]:
+                merged_raw["quote_text"] = "\n".join(cur_buf["quote_texts"])
+
+            msg_ids: list[str] = list(cur_buf["msg_ids"])
+            merged_inbound = InboundMessage(
+                channel_type=base_in.channel_type,
+                endpoint_token=base_in.endpoint_token,
+                external_msg_id=base_in.external_msg_id,
+                sender_id=base_in.sender_id,
+                sender_name=base_in.sender_name,
+                chat_id=base_in.chat_id,
+                text=merged_text,
+                reply_context=base_in.reply_context,
+                raw_payload=merged_raw,
+            )
+
+            exec_task = asyncio.create_task(
+                self._execute_turn(
+                    inbound=merged_inbound,
+                    link=cur_buf["link"],
+                    caller=cur_buf["caller"],
+                    adapter=cur_buf["adapter"],
+                )
+            )
+            lock = self._get_session_lock(session_key)
+            await lock.acquire()
+            detached_to_bg = False
+            try:
+                done_set, _ = await asyncio.wait({exec_task}, timeout=8.0)
+                if not done_set:
+                    detached_to_bg = True
+                    try:
+                        await self._send_fast_reply(
+                            inbound=merged_inbound,
+                            link=cur_buf["link"],
+                            text="⏳ 正在处理耗时任务，已转为后台继续执行（发 `停` 可随时中止，你可以继续发其他消息）。",
+                            adapter=cur_buf["adapter"],
+                        )
+                    except Exception:
+                        pass
+            finally:
+                if lock.locked():
+                    lock.release()
+
+            async def _finalize_task(t: asyncio.Task[Any]) -> None:
+                try:
+                    res = await t
+                    reply_preview = str(res.get("reply_text") or "")
+                    for mid in msg_ids:
+                        await self._finish_dedup_slot(
+                            channel_type=merged_inbound.channel_type,
+                            external_msg_id=mid,
+                            status="completed",
+                            reply_preview=reply_preview,
+                        )
+                except Exception as err:
+                    for mid in msg_ids:
+                        await self._finish_dedup_slot(
+                            channel_type=merged_inbound.channel_type,
+                            external_msg_id=mid,
+                            status="failed",
+                            reply_preview=str(err),
+                        )
+
+            if detached_to_bg:
+                bg_fin = asyncio.create_task(_finalize_task(exec_task))
+                self._bg_tasks.add(bg_fin)
+                bg_fin.add_done_callback(self._bg_tasks.discard)
+            else:
+                await _finalize_task(exec_task)
+
+        timer_task = asyncio.create_task(_flush_after_delay())
+        buf["timer"] = timer_task
+        self._bg_tasks.add(timer_task)
+        timer_task.add_done_callback(self._bg_tasks.discard)
+
     async def handle_inbound(
         self,
         *,
@@ -646,7 +1211,7 @@ class ChannelGateway:
         headers: dict[str, str] | None = None,
         mode: str | None = None,
     ) -> dict[str, Any]:
-        """统一入站处理入口：支持 sync_reply（同步等待结果）与 async_push（立即 ACK 后台回推）。"""
+        """统一入站处理入口：支持快捷指令秒回、连发防抖合并、sync_reply 同步与 async_push 异步回推。"""
         # 确保默认适配器已注册
         from . import adapters as _adapters  # noqa: F401
 
@@ -683,26 +1248,33 @@ class ChannelGateway:
             channel="im_bot",
             endpoint_token=endpoint_token,
         )
+
+        # 高频快捷指令与 L2 确认零延迟直达执行（不走防抖与大模型）
+        fast_res = await self._try_handle_slash_command(
+            inbound=inbound, link=link, caller=caller, adapter=adapter
+        )
+        if fast_res is not None:
+            return fast_res
         eff_mode = (mode or payload.get("mode") or adapter.default_mode or "sync_reply").strip()
 
         if eff_mode == "async_push":
-            task = asyncio.create_task(
-                self._execute_turn(inbound=inbound, link=link, caller=caller, adapter=adapter)
+            await self._enqueue_debounced_turn(
+                inbound=inbound, link=link, caller=caller, adapter=adapter
             )
-            self._bg_tasks.add(task)
-            task.add_done_callback(self._bg_tasks.discard)
             return {
                 "status": "accepted",
                 "mode": "async_push",
                 "external_msg_id": inbound.external_msg_id,
                 "caller_role": caller.role,
                 "caller_scope": caller.scope,
-                "message": "已接收消息并进入后台异步处理队列。",
+                "message": "已接收消息并进入防抖合并与后台串行处理队列。",
             }
 
-        return await self._execute_turn(
-            inbound=inbound, link=link, caller=caller, adapter=adapter
-        )
+        session_key = f"{inbound.channel_type}:{link['link_id']}:{inbound.chat_id}:{inbound.sender_id}"
+        async with self._get_session_lock(session_key):
+            return await self._execute_turn(
+                inbound=inbound, link=link, caller=caller, adapter=adapter
+            )
 
 
 channel_gateway = ChannelGateway()

@@ -1058,7 +1058,7 @@ function DesktopWorkbench() {
     try {
       const url = forceRefresh ? '/api/v1/models/active?refresh=true' : '/api/v1/models/active';
       const res = await apiFetch(url);
-      let loadedModels: ModelMeta[] = [];
+      let loadedModels: ActiveModelsState['models'] = [];
       if (res.ok) {
         const data: ActiveModelsState = await res.json();
         loadedModels = Array.isArray(data.models) ? data.models : [];

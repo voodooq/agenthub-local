@@ -121,19 +121,84 @@ function sendJson(res, statusCode, data) {
   res.end(JSON.stringify(data));
 }
 
-function extractTextFromIlinkMsg(msg) {
-  if (!msg) return '';
-  if (typeof msg.text === 'string' && msg.text.trim()) return msg.text.trim();
+function extractMessagePayloadFromIlinkMsg(msg) {
+  const result = {
+    text: '',
+    msg_type: 'text',
+    attachments: [],
+    quote_text: '',
+    has_media: false,
+  };
+  if (!msg) return result;
+
+  if (typeof msg.text === 'string' && msg.text.trim()) {
+    result.text = msg.text.trim();
+  }
+  const refObj = msg.ref_msg || msg.quote_msg;
+  if (refObj) {
+    result.quote_text = String(
+      refObj.content || refObj.title || refObj.text || refObj?.text_item?.text || ''
+    ).trim();
+  }
+
   const items = Array.isArray(msg.item_list) ? msg.item_list : [];
+  const textParts = result.text ? [result.text] : [];
+
   for (const item of items) {
-    if (item?.type === 1 && item?.text_item?.text) {
-      return String(item.text_item.text).trim();
+    if (!item) continue;
+    if (item.ref_msg && !result.quote_text) {
+      result.quote_text = String(item.ref_msg.content || item.ref_msg.title || '').trim();
     }
-    if (typeof item?.text === 'string' && item.text.trim()) {
-      return item.text.trim();
+    if (item.type === 1 && item.text_item?.text) {
+      textParts.push(String(item.text_item.text).trim());
+    } else if (typeof item.text === 'string' && item.text.trim()) {
+      textParts.push(item.text.trim());
+    } else if (item.type === 2 || item.image_item) {
+      const img = item.image_item || item;
+      const imgUrl = String(img.url || img.pic_url || img.cdn_url || img.aeskey_url || '').trim();
+      result.attachments.push({
+        kind: 'image',
+        mime_type: 'image/jpeg',
+        name: String(img.file_name || img.name || 'wechat_image.jpg'),
+        url: imgUrl,
+        base64: String(img.base64 || img.data || '').trim(),
+      });
+      result.msg_type = 'image';
+      result.has_media = true;
+    } else if (item.type === 3 || item.voice_item) {
+      const vc = item.voice_item || item;
+      const voiceUrl = String(vc.url || vc.voice_url || vc.cdn_url || '').trim();
+      const voiceText = String(vc.text || vc.asr_text || vc.transcript || '').trim();
+      result.attachments.push({
+        kind: 'voice',
+        mime_type: String(vc.mime_type || 'audio/silk'),
+        name: String(vc.file_name || 'wechat_voice.silk'),
+        url: voiceUrl,
+        base64: String(vc.base64 || vc.data || '').trim(),
+        text: voiceText,
+      });
+      if (voiceText) textParts.push(voiceText);
+      result.msg_type = 'voice';
+      result.has_media = true;
+    } else if (item.type === 4 || item.file_item) {
+      const fl = item.file_item || item;
+      result.attachments.push({
+        kind: 'file',
+        mime_type: String(fl.mime_type || 'application/octet-stream'),
+        name: String(fl.file_name || fl.name || 'wechat_file'),
+        url: String(fl.url || fl.cdn_url || '').trim(),
+      });
+      result.msg_type = 'file';
+      result.has_media = true;
     }
   }
-  return '';
+
+  result.text = textParts.filter(Boolean).join('\n').trim();
+  return result;
+}
+
+function extractTextFromIlinkMsg(msg) {
+  return extractMessagePayloadFromIlinkMsg(msg).text;
 }
 
 async function getTypingTicket(userId) {
@@ -243,8 +308,8 @@ async function startGetUpdatesLoop() {
       const msgs = Array.isArray(data.msgs) ? data.msgs : [];
       for (const m of msgs) {
         const fromUser = String(m.from_user_id || '').trim();
-        const text = extractTextFromIlinkMsg(m);
-        if (!fromUser || !text) continue;
+        const extracted = extractMessagePayloadFromIlinkMsg(m);
+        if (!fromUser || (!extracted.text && extracted.attachments.length === 0)) continue;
         if (m.context_token) {
           state.context_tokens.set(fromUser, String(m.context_token));
         }
@@ -253,14 +318,18 @@ async function startGetUpdatesLoop() {
         const ingress = state.active_session?.ingress_url || state.ingress_url;
         if (ingress) {
           state.rx_count += 1;
-          state.last_rx_text = text.slice(0, 60);
+          state.last_rx_text = (extracted.text || `[${extracted.msg_type}]`).slice(0, 60);
           const fwdHeaders = { 'Content-Type': 'application/json' };
           if (state.access_token) fwdHeaders['X-Access-Token'] = state.access_token;
           fetch(ingress, {
             method: 'POST',
             headers: fwdHeaders,
             body: JSON.stringify({
-              text,
+              text: extracted.text,
+              msg_type: extracted.msg_type,
+              attachments: extracted.attachments,
+              quote_text: extracted.quote_text,
+              has_media: extracted.has_media,
               from_wxid: fromUser,
               sender_id: fromUser,
               sender_name: fromUser,

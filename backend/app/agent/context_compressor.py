@@ -116,15 +116,25 @@ def estimate_tokens(text: str | None) -> int:
     cjk_count = len(_CJK_CHAR_RE.findall(text))
     non_cjk_count = max(0, total_chars - cjk_count)
     est = cjk_count * 1.15 + non_cjk_count * 0.28
-    return max(1, int(math.ceil(est)))
+    return max(1, math.ceil(est))
 
 
 def estimate_messages_tokens(messages: list[dict[str, Any]]) -> int:
-    """估算结构化消息数组的 Token 总数（含每条消息 +8 tokens 角色与模板封装开销）"""
+    """估算结构化消息数组的 Token 总数（兼容多模态列表内容块）"""
     total = 0
     for msg in messages:
-        content = str(msg.get("content") or "")
-        total += estimate_tokens(content) + 8
+        raw_c = msg.get("content")
+        if isinstance(raw_c, list):
+            parts_txt = [
+                str(part.get("text") or "")
+                for part in raw_c
+                if isinstance(part, dict) and part.get("type") == "text"
+            ]
+            # 每张附带图片按约 256 tokens 开销占位统计，避免误将 Base64 字节计入上下文溢出
+            img_count = sum(1 for part in raw_c if isinstance(part, dict) and part.get("type") == "image_url")
+            total += estimate_tokens("\n".join(parts_txt)) + img_count * 256 + 8
+        else:
+            total += estimate_tokens(str(raw_c or "")) + 8
     return total
 
 
@@ -211,15 +221,15 @@ def save_user_context_limit_config(
     global _USER_CONTEXT_LIMIT_CACHE
     clean_models: dict[str, int] = {}
     for k, v in (model_overrides or {}).items():
-        clean_k = str(k or "").strip().lower()
-        val_int = max(0, int(v or 0))
+        clean_k = (k or "").strip().lower()
+        val_int = max(0, v or 0)
         if clean_k and val_int > 0:
             clean_models[clean_k] = val_int
 
     sanitized = {
-        "global_override": max(0, int(global_override or 0)),
+        "global_override": max(0, global_override or 0),
         "model_overrides": clean_models,
-        "rollover_watermark_pct": min(98, max(50, int(rollover_watermark_pct or 90))),
+        "rollover_watermark_pct": min(98, max(50, rollover_watermark_pct or 90)),
     }
     cfg_path = _get_context_limits_config_path()
     cfg_path.write_text(json.dumps(sanitized, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -250,11 +260,11 @@ def infer_context_limit(provider_info: dict[str, Any] | None, model_name: str = 
     model_overrides: dict[str, int] = user_cfg.get("model_overrides") or {}
     if low_model:
         if low_model in model_overrides:
-            return int(model_overrides[low_model])
+            return model_overrides[low_model]
         # 支持不带厂商前缀的短名匹配（如配置了 nemotron-3.5-super 匹配 nvidia/nemotron-3.5-super...）
         for cfg_key, cfg_limit in model_overrides.items():
             if cfg_key and cfg_key in low_model:
-                return int(cfg_limit)
+                return cfg_limit
 
     global_override = int(user_cfg.get("global_override") or 0)
     if global_override > 0:
@@ -294,7 +304,7 @@ def resolve_compression_policy(
     else:
         # 云端大窗口模式：引入 36,000 经济软上限与 8 轮热区判定，解决云端 1M 窗口下分块坍缩恒为 0 的问题
         trigger_ratio = 0.65
-        base_retain = max(3, int(context_rounds_override)) if context_rounds_override else 3
+        base_retain = max(3, context_rounds_override) if context_rounds_override else 3
         hot_retain_turns = base_retain
         max_window_turns = max(8, hot_retain_turns + 5)
         default_batch_turns = 5
@@ -380,8 +390,8 @@ def read_ephemeral_tool_ref(
             "content": snippet,
         }
 
-    s_line = max(1, min(int(start_line or 1), total_lines))
-    e_line = max(s_line, min(int(end_line or (s_line + 119)), total_lines))
+    s_line = max(1, min(start_line or 1, total_lines))
+    e_line = max(s_line, min(end_line or (s_line + 119), total_lines))
     if (e_line - s_line + 1) > MAX_SLICE_LINES:
         e_line = s_line + MAX_SLICE_LINES - 1
     out_lines: list[str] = []
@@ -504,7 +514,7 @@ class LocalContextCompressor:
                     return True
                 return False
             seen_paths.add(fp)
-            if current_turn_id is not None and msg_turn < (int(current_turn_id) - 1):
+            if current_turn_id is not None and msg_turn < (current_turn_id - 1):
                 orig_content = args_dict.get("content")
                 if isinstance(orig_content, str) and len(orig_content) > stale_write_char_threshold:
                     args_dict["content"] = (
@@ -647,7 +657,7 @@ class LocalContextCompressor:
                 "policy": dict,
             }
         """
-        anchor_turn = int(collapse_anchor_turn_id or 0)
+        anchor_turn = collapse_anchor_turn_id or 0
         summary_text = (anchored_summary or "").strip()
 
         # 向后兼容存量老会话：首次进入时从 session_summaries 或 rolling_summary 原地平滑对齐
@@ -682,7 +692,7 @@ class LocalContextCompressor:
             {
                 int(m.get("turn_id") or 1)
                 for m in active_msgs
-                if int(m.get("turn_id") or 1) < int(current_turn_id)
+                if int(m.get("turn_id") or 1) < current_turn_id
             }
         )
 
@@ -740,7 +750,7 @@ class LocalContextCompressor:
         )
 
         hit_turn_limit = len(completed_turns) >= int(policy["max_window_turns"])
-        hit_cli_char_limit = bool(is_cli_provider and active_chars >= cli_char_budget)
+        hit_cli_char_limit = is_cli_provider and active_chars >= cli_char_budget
         hit_token_limit = (total_tokens >= trigger_token_budget) or hit_cli_char_limit
 
         if not hit_turn_limit and not hit_token_limit:
@@ -872,6 +882,7 @@ class LocalContextCompressor:
         草稿纸进度、报错卡点），轻模型不可用或超时时平滑降级为确定性规则蒸馏，确保关键上下文零丢失。
         """
         from ..memory.policy_guard import MemoryPolicyGuard
+        from ..repository.message_repository import MessageRepository
         from ..service.attachment_service import attachment_service
         from ..service.engine_pool import engine_pool
 
@@ -903,19 +914,19 @@ class LocalContextCompressor:
         # 收集去重后的关键文件路径、确定性事实与报错卡点
         dedup_artifacts: list[str] = []
         for item in produced_artifacts or []:
-            clean = str(item or "").strip()
+            clean = (item or "").strip()
             if clean and clean not in dedup_artifacts:
                 dedup_artifacts.append(clean)
 
         dedup_facts: list[str] = []
         for f_item in confirmed_facts or []:
-            safe_f, _ = MemoryPolicyGuard.sanitize_text(str(f_item or "").strip())
+            safe_f, _ = MemoryPolicyGuard.sanitize_text((f_item or "").strip())
             if safe_f and safe_f not in dedup_facts:
                 dedup_facts.append(safe_f[:240])
 
         dedup_errors: list[str] = []
         for err_item in recent_errors or []:
-            safe_e, _ = MemoryPolicyGuard.sanitize_text(str(err_item or "").strip())
+            safe_e, _ = MemoryPolicyGuard.sanitize_text((err_item or "").strip())
             if safe_e and safe_e not in dedup_errors:
                 dedup_errors.append(safe_e[:240])
 
@@ -1224,7 +1235,7 @@ class LocalContextCompressor:
             await ToolRefRepository.create_ref(
                 ref_id=ref_id,
                 conversation_id=conversation_id,
-                turn_id=int(turn_id),
+                turn_id=turn_id,
                 tool_name=tool_name,
                 raw_content=raw,
                 raw_tokens_est=raw_tokens,

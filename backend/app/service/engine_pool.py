@@ -433,10 +433,14 @@ class EnginePoolService:
                         }
                     else:
                         yield {"type": "start", "account": prov_name, "model": target_m}
+                    image_blobs = [
+                        b for b in inline_blobs if str(b.get("mime_type") or "").lower().startswith("image/") and b.get("data")
+                    ]
+                    supports_oai_vision = ptype in ("openai_compat", "ollama", "llama_server") and bool(image_blobs)
                     non_multimodal_note = (
                         "\n\n[通道提示: 当前使用纯文本兼容协议接口，图片/PDF 二进制视觉字节流未直接传输；"
                         "若需直接识图或读取扫描版 PDF，请切换至原生多模态 Gemini 模型，或在任务模式按上方磁盘绝对路径调用本地工具读取。]"
-                        if has_visual_or_pdf
+                        if has_visual_or_pdf and not supports_oai_vision
                         else ""
                     )
                     sanitized_history = [
@@ -448,7 +452,20 @@ class EnginePoolService:
                         }
                         for hm in effective_history_dicts
                     ]
-                    custom_msgs = sanitized_history + [{"role": "user", "content": prompt_with_attachments + non_multimodal_note}]
+                    if supports_oai_vision:
+                        user_oai_content: Any = [
+                            {"type": "text", "text": prompt_with_attachments + non_multimodal_note},
+                            *[
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{b['mime_type']};base64,{b['data']}"},
+                                }
+                                for b in image_blobs
+                            ],
+                        ]
+                    else:
+                        user_oai_content = prompt_with_attachments + non_multimodal_note
+                    custom_msgs = sanitized_history + [{"role": "user", "content": user_oai_content}]
                     est_prompt_tokens = (
                         estimate_tokens(system_instruction)
                         + (8 if system_instruction else 0)

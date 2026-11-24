@@ -1117,6 +1117,273 @@ class ToolProtocolAdapter:
                     "required": ["entity"],
                 },
             },
+            {
+                "name": "manage_personal_notes",
+                "description": (
+                    "持久化管理用户的个人备忘录与待办事项（写入本地 SQLite 并同步至长期记忆）。"
+                    "当用户说“帮我记住某事/做个备忘/添加待办/查看备忘/待办/标记完成”时必须主动调用，绝不可推脱“记不住”。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["add", "list", "done", "delete"],
+                            "description": "操作类型：add(新增)、list(查询列表)、done(标记完成)、delete(删除)。",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "备忘或待办的具体正文内容（action=add 时必填）。",
+                        },
+                        "category": {
+                            "type": "string",
+                            "enum": ["memo", "todo"],
+                            "description": "分类：memo(备忘/笔记，默认) 或 todo(待办事项)。",
+                            "default": "memo",
+                        },
+                        "keyword": {
+                            "type": "string",
+                            "description": "list/done/delete 时用于检索或匹配目标的关键词或 ID。",
+                        },
+                        "due_at": {
+                            "type": "string",
+                            "description": "可选截止日期或提醒时间说明（如 2026-11-25 09:00）。",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "search_im_chat_history",
+                "description": "检索用户在微信/IM 渠道的真实历史对话记录（返回准确日期时间、提问与回复内容），用于回溯过往对话。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "keyword": {
+                            "type": "string",
+                            "description": "可选检索关键词，留空则按时间倒序返回最近对话记录。",
+                        },
+                        "date_from": {
+                            "type": "string",
+                            "description": "可选起始日期（YYYY-MM-DD）。",
+                        },
+                        "date_to": {
+                            "type": "string",
+                            "description": "可选结束日期（YYYY-MM-DD）。",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "返回条数上限（默认 10）。",
+                            "default": 10,
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "create_im_reminder",
+                "description": (
+                    "创建支持到点自动向用户微信/IM 主动推送通知的定时提醒任务。"
+                    "当用户说“提醒我…”“明天早上叫我…”“每天几点发我…”时必须调用。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "content": {
+                            "type": "string",
+                            "description": "提醒的具体事项内容。",
+                        },
+                        "trigger_time": {
+                            "type": "string",
+                            "description": "触发时间表达式，支持如 '2分钟后'、'1小时后'、'明早8点'、'今晚22:30'、'每天早上8:30' 或标准 Cron（如 '30 8 * * *'）。",
+                        },
+                        "run_as_agent": {
+                            "type": "boolean",
+                            "description": "若为 true 表示到点时先让 AI 执行检索/汇总（如每日天气+待办简报）再推送；默认 false 为纯文本定时提醒。",
+                            "default": False,
+                        },
+                    },
+                    "required": ["content", "trigger_time"],
+                },
+            },
+            {
+                "name": "list_or_cancel_im_reminders",
+                "description": "查看用户当前活跃的定时提醒列表，或按 ID/关键词取消某个提醒。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["list", "cancel"],
+                            "description": "list(查看所有活跃提醒) 或 cancel(取消指定提醒)。",
+                        },
+                        "identifier": {
+                            "type": "string",
+                            "description": "action=cancel 时必填：提醒任务 ID 或提醒内容关键词。",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "get_weather",
+                "description": "免 API Key 联网查询指定城市的实时天气与未来几天天气预报。询问天气时必须直接调用此工具获取真实预报。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description": "城市名称（如 北京、上海、深圳；若用户未明确城市可结合长期记忆中的常驻城市或默认填 北京）。",
+                        },
+                        "days": {
+                            "type": "integer",
+                            "description": "预报天数（1~7，默认 3）。",
+                            "default": 3,
+                        },
+                    },
+                    "required": ["city"],
+                },
+            },
+            {
+                "name": "web_search",
+                "description": "联网搜索公开网页实时资讯与百科信息，返回标题、链接与摘要。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "检索关键词或问句。",
+                        },
+                        "max_results": {
+                            "type": "integer",
+                            "description": "返回结果数量上限（1~10，默认 5）。",
+                            "default": 5,
+                        },
+                    },
+                    "required": ["query"],
+                },
+            },
+            {
+                "name": "list_managed_servers",
+                "description": "列出系统内已注册托管的所有服务器资产（别名、主机、环境分级、默认工作区与是否允许写操作，不含明文凭证）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": [],
+                },
+            },
+            {
+                "name": "inspect_server_health",
+                "description": "一键体检指定别名或全部托管服务器的硬件配置、负载、CPU、内存、磁盘空间与 Docker 容器运行状态（若未配置 SSH 资产则体检当前节点）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "alias": {
+                            "type": "string",
+                            "description": "可选目标服务器别名，留空则体检全部托管服务器。",
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "run_remote_ssh_command",
+                "description": "通过 SSH 在指定托管服务器上执行排查或运维命令（如查日志、查进程、性能分析；高危或生产写操作会自动触发主人微信二次确认）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "alias": {
+                            "type": "string",
+                            "description": "目标托管服务器别名。",
+                        },
+                        "command": {
+                            "type": "string",
+                            "description": "要在目标服务器上执行的 Shell 命令。",
+                        },
+                        "workdir": {
+                            "type": "string",
+                            "description": "可选工作目录，留空使用服务器默认工作区。",
+                        },
+                    },
+                    "required": ["alias", "command"],
+                },
+            },
+            {
+                "name": "save_inbox_item",
+                "description": "微信碎片收集箱：抓取用户发来的文章/技术文档 URL 正文并提炼摘要与标签存入个人收藏箱，方便日后检索回顾。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": {
+                            "type": "string",
+                            "description": "网页或文章 URL。",
+                        },
+                        "user_note": {
+                            "type": "string",
+                            "description": "可选用户附加备注。",
+                        },
+                    },
+                    "required": ["url"],
+                },
+            },
+            {
+                "name": "search_inbox_items",
+                "description": "按关键词检索个人碎片收藏箱中已保存的文章、链接摘要与笔记。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "keyword": {
+                            "type": "string",
+                            "description": "搜索关键词，留空返回最近收藏列表。",
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "返回条数上限（默认 10）。",
+                            "default": 10,
+                        },
+                    },
+                    "required": [],
+                },
+            },
+            {
+                "name": "git_workspace_safe_ops",
+                "description": "远程代码优化安全工作流：修改代码前创建 Git 隔离分支检查点 (checkpoint)、生成手机端精简 Diff (diff) 或安全回滚未提交修改 (rollback)。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["checkpoint", "diff", "rollback"],
+                            "description": "操作类型：checkpoint / diff / rollback。",
+                        },
+                        "workdir": {
+                            "type": "string",
+                            "description": "目标 Git 仓库目录路径（留空使用当前工作区）。",
+                        },
+                        "branch_label": {
+                            "type": "string",
+                            "description": "checkpoint 时新建隔离分支前缀，默认 im-opt。",
+                            "default": "im-opt",
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
+            {
+                "name": "generate_daily_briefing",
+                "description": "生成当日私人晨报/复盘（融合实时天气预报 + 今日待办 Top 5 + 托管服务器健康状况）。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                            "description": "天气查询城市名称，默认 北京。",
+                            "default": "北京",
+                        },
+                    },
+                    "required": [],
+                },
+            },
         ]
 
     @staticmethod

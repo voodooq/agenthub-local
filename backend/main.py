@@ -68,6 +68,7 @@ class LocalOnlyMiddleware(BaseHTTPMiddleware):
             or path.startswith("/api/v1/chat/uploads/")
             or path.startswith("/api/v1/dialogue-wiki/ingress/")
             or path.startswith("/api/v1/dialogue-wiki/bind/")
+            or path.startswith("/api/v1/personal-assistant/reports/")
         ):
             return await call_next(request)
 

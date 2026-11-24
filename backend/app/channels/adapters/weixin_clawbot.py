@@ -35,8 +35,17 @@ class WeixinClawbotAdapter(BaseChannelAdapter):
         link_config: dict[str, Any] | None = None,
     ) -> InboundMessage:
         text = str(payload.get("text") or payload.get("message") or payload.get("content") or "").strip()
-        if not text:
-            raise ValueError("微信入站消息文本不能为空")
+        attachments = payload.get("attachments") or []
+        if not text and not attachments:
+            raise ValueError("微信入站消息文本与媒体附件不能同时为空")
+        if not text and attachments:
+            kinds = {str(a.get("kind") or "") for a in attachments if isinstance(a, dict)}
+            if "voice" in kinds:
+                text = "[收到语音消息]"
+            elif "image" in kinds:
+                text = "[收到图片消息]"
+            else:
+                text = "[收到媒体附件]"
 
         sender_id = str(payload.get("sender_id") or payload.get("from_wxid") or "wx_peer").strip()
         sender_name = str(

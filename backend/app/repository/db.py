@@ -200,6 +200,10 @@ class DatabaseManager:
             "last_conversation_id": "TEXT",
             "last_triggered_minute": "TEXT",
             "agent_id": "TEXT",
+            "notify_channel": "TEXT",
+            "notify_link_id": "TEXT",
+            "notify_target_user_id": "TEXT",
+            "one_shot": "INTEGER DEFAULT 0",
         }
         for col, col_type in new_columns.items():
             if col not in columns:
@@ -558,6 +562,119 @@ class DatabaseManager:
             """)
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_sched_runs_task_started ON scheduled_task_runs(task_id, started_at DESC);"
+            )
+
+            # 14c. 私人助理备忘与待办表 (personal_notes)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS personal_notes (
+                id TEXT PRIMARY KEY,
+                link_id TEXT NOT NULL DEFAULT '',
+                sender_id TEXT NOT NULL DEFAULT 'default',
+                category TEXT NOT NULL DEFAULT 'memo',
+                content TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active',
+                due_at TEXT,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_personal_notes_owner ON personal_notes(sender_id, status, created_at DESC);"
+            )
+
+            # 14d. IM 主动推送失败重试队列表 (im_outbox_retries)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS im_outbox_retries (
+                id TEXT PRIMARY KEY,
+                channel_type TEXT NOT NULL,
+                link_id TEXT NOT NULL,
+                target_user_id TEXT NOT NULL,
+                text_content TEXT NOT NULL,
+                retry_count INTEGER NOT NULL DEFAULT 0,
+                max_retries INTEGER NOT NULL DEFAULT 5,
+                next_retry_at REAL NOT NULL,
+                last_error TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'pending',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_im_outbox_status_next ON im_outbox_retries(status, next_retry_at);"
+            )
+
+            # 14e. 托管服务器资产表 (server_assets - SSH 加密凭证与环境分级)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS server_assets (
+                id TEXT PRIMARY KEY,
+                alias TEXT NOT NULL UNIQUE,
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 22,
+                username TEXT NOT NULL DEFAULT 'root',
+                auth_type TEXT NOT NULL DEFAULT 'key_path',
+                credential_enc TEXT NOT NULL DEFAULT '',
+                key_path TEXT NOT NULL DEFAULT '',
+                env_tier TEXT NOT NULL DEFAULT 'prod',
+                default_workdir TEXT NOT NULL DEFAULT '',
+                allow_write INTEGER NOT NULL DEFAULT 0,
+                notes TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """)
+
+            # 14f. IM 高危操作微信二次确认挂起表 (im_pending_approvals)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS im_pending_approvals (
+                id TEXT PRIMARY KEY,
+                code TEXT NOT NULL,
+                link_id TEXT NOT NULL DEFAULT '',
+                sender_id TEXT NOT NULL,
+                channel_type TEXT NOT NULL DEFAULT 'weixin_clawbot',
+                risk_level TEXT NOT NULL DEFAULT 'L2',
+                tool_name TEXT NOT NULL,
+                action_summary TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                expires_at REAL NOT NULL,
+                created_at REAL NOT NULL,
+                updated_at REAL NOT NULL
+            );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_im_approvals_sender ON im_pending_approvals(sender_id, status, expires_at DESC);"
+            )
+
+            # 14g. IM 长输出临时鉴权分享报告表 (im_shared_reports)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS im_shared_reports (
+                token TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                content_md TEXT NOT NULL,
+                link_id TEXT NOT NULL DEFAULT '',
+                sender_id TEXT NOT NULL DEFAULT '',
+                expires_at REAL NOT NULL,
+                created_at REAL NOT NULL
+            );
+            """)
+
+            # 14h. 微信碎片收藏箱 (im_inbox_items)
+            await conn.execute("""
+            CREATE TABLE IF NOT EXISTS im_inbox_items (
+                id TEXT PRIMARY KEY,
+                sender_id TEXT NOT NULL DEFAULT 'default',
+                link_id TEXT NOT NULL DEFAULT '',
+                source_url TEXT NOT NULL DEFAULT '',
+                title TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                content_md TEXT NOT NULL DEFAULT '',
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                created_at REAL NOT NULL
+            );
+            """)
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_im_inbox_owner ON im_inbox_items(sender_id, created_at DESC);"
             )
 
             # 15. 追加式原始事件账本表 (event_ledger - Append-Only 黑匣子事件轨迹)

@@ -373,6 +373,17 @@ class AgentRuntime:
         "search_skill_knowledge",
         "load_skill_detail",
         "web_fetch",
+        "get_weather",
+        "web_search",
+        "manage_personal_notes",
+        "search_im_chat_history",
+        "create_im_reminder",
+        "list_or_cancel_im_reminders",
+        "list_managed_servers",
+        "inspect_server_health",
+        "save_inbox_item",
+        "search_inbox_items",
+        "generate_daily_briefing",
         "update_working_memory",
         "search_cloud_wiki",
         "read_cloud_wiki_section",
@@ -953,6 +964,8 @@ class AgentRuntime:
         endpoint_token: str | None = None,
         simulated_role: str | None = None,
         simulated_scope: dict[str, Any] | str | None = None,
+        im_context: dict[str, str] | None = None,
+        owner_mode: bool = False,
     ) -> AsyncGenerator[dict[str, Any], None]:
         """
         执行双层循环流式推理与工具编排，向外输出标准化 SSE 字典事件流。
@@ -1389,7 +1402,7 @@ class AgentRuntime:
             try:
                 conv_meta = await ConversationRepository.get_by_id(conv_id)
                 if conv_meta:
-                    conv_collapse_anchor = int(getattr(conv_meta, "collapse_anchor_turn_id", 0) or 0)
+                    conv_collapse_anchor = getattr(conv_meta, "collapse_anchor_turn_id", 0) or 0
             except Exception:
                 conv_collapse_anchor = 0
 
@@ -1558,7 +1571,7 @@ class AgentRuntime:
                     collapse_anchor_turn_id=conv_collapse_anchor,
                     allowed_tools=effective_allowed_tools,
                     include_swarm=include_swarm_tools,
-                    skip_mcp=(caller_channel == "im_bot"),
+                    skip_mcp=(caller_channel == "im_bot" and not owner_mode),
                 )
 
             if not allow_biz_sql_for_run:
@@ -1596,6 +1609,7 @@ class AgentRuntime:
         lock_high_thinking = False
         session_file_read_cache = self._session_file_read_cache_by_conv.setdefault(conv_id, {})
         turn_tool_sig_cache: dict[tuple[str, str], int] = {}
+        tainted_by_untrusted_source = False
         failed_attempt_counts: dict[tuple[str, str], int] = {}
         consecutive_err_fp: dict[str, Any] = {"fp": "", "count": 0}
         last_executed_shell_cmd: str = ""
@@ -3173,8 +3187,100 @@ class AgentRuntime:
                             "compressed": compressed,
                         }
 
+                    if not s10_intercepted and func_name in ("web_fetch", "web_search"):
+                        tainted_by_untrusted_source = True
+
+                    # 🛡️ IM 渠道主人模式硬门控 + 三层 L2 二次确认挂起拦截（工具级 + 路径级 + 命令级 + 提示词注入）
+                    im_gate_intercepted = False
+                    if not s10_intercepted and caller_channel == "im_bot":
+                        restricted_im_tools = {
+                            "run_remote_ssh_command",
+                            "execute_local_command",
+                            "write_local_file",
+                            "replace_in_file",
+                            "start_background_process",
+                            "stop_background_process",
+                            "git_workspace_safe_ops",
+                        }
+                        if not owner_mode and func_name in restricted_im_tools:
+                            im_gate_intercepted = True
+                            tool_output = (
+                                f"Denied: [IM 访客模式隔离] 当前渠道未开启「主人控制台模式」，禁止执行 `{func_name}`。"
+                            )
+                            compressed = f"[IM 非主人模式拒绝执行 `{func_name}`]"
+                            yield {
+                                "type": "tool_end",
+                                "call_id": call_id,
+                                "name": func_name,
+                                "command": func_name,
+                                "reason": "IM 非主人权限隔离拦截",
+                                "status": "denied",
+                                "output": tool_output,
+                                "compressed": compressed,
+                            }
+                        elif owner_mode and func_name in {
+                            "run_remote_ssh_command",
+                            "execute_local_command",
+                            "write_local_file",
+                            "replace_in_file",
+                        }:
+                            from ..service.server_ops_service import server_ops_service
+
+                            srv_tier = ""
+                            srv_allow_write = False
+                            if func_name == "run_remote_ssh_command":
+                                srv_info = await server_ops_service.get_server(str(args.get("alias") or ""))
+                                if srv_info:
+                                    srv_tier = str(srv_info.get("env_tier") or "prod")
+                                    srv_allow_write = bool(srv_info.get("allow_write"))
+                            ws_root_str = str(target_cwd or ctx.get("current_cwd") or "")
+                            risk_lvl, risk_reason = server_ops_service.evaluate_action_risk(
+                                func_name,
+                                args,
+                                workspace_root=ws_root_str,
+                                server_env_tier=srv_tier,
+                                server_allow_write=srv_allow_write,
+                                tainted_by_untrusted=tainted_by_untrusted_source,
+                            )
+                            if risk_lvl == "L2":
+                                im_gate_intercepted = True
+                                im_ctx_g = im_context or {}
+                                cmd_preview = str(
+                                    args.get("command") or args.get("file_path") or args.get("path") or func_name
+                                )[:120]
+                                summary_txt = f"{func_name}: {cmd_preview}"
+                                apr_payload = dict(args)
+                                if func_name == "execute_local_command" and ws_root_str:
+                                    apr_payload.setdefault("cwd", ws_root_str)
+                                apr = await server_ops_service.create_pending_approval(
+                                    link_id=im_ctx_g.get("link_id") or "",
+                                    sender_id=im_ctx_g.get("sender_id") or caller_identity.caller_id or "",
+                                    channel_type=im_ctx_g.get("channel_type") or "weixin_clawbot",
+                                    tool_name=func_name,
+                                    action_summary=summary_txt,
+                                    payload=apr_payload,
+                                )
+                                tool_output = (
+                                    f"PausedForApproval: [触发 L2 安全门禁挂起] {risk_reason}。\n"
+                                    f"请立即停止后续执行，并用简洁清晰的中文向主人展示确认卡片：\n"
+                                    f"- 待执行操作：`{summary_txt}`\n"
+                                    f"- 拦截原因：{risk_reason}\n"
+                                    f"- 确认方式：请在 3 分钟内直接回复 **确认执行** 或 **确认 {apr['code']}** 放行（回复 **取消** 作废）。"
+                                )
+                                compressed = f"[L2 高危挂起审批: 确认码 {apr['code']}]"
+                                yield {
+                                    "type": "tool_end",
+                                    "call_id": call_id,
+                                    "name": func_name,
+                                    "command": summary_txt,
+                                    "reason": f"触发 L2 安全二次确认 ({risk_reason})",
+                                    "status": "denied",
+                                    "output": tool_output,
+                                    "compressed": compressed,
+                                }
+
                     # ── 工具 1: 受控本地终端命令 (execute_local_command) ──
-                    if s10_intercepted:
+                    if s10_intercepted or im_gate_intercepted:
                         pass
                     elif func_name == "execute_local_command":
                         cmd_str = str(args.get("command", "")).strip()
@@ -4573,6 +4679,511 @@ class AgentRuntime:
                             "name": func_name,
                             "command": f"web_fetch({target_url})",
                             "reason": f"抓取网络正文: {target_url}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 实时天气预报 (get_weather) ──
+                    elif func_name == "get_weather":
+                        city_name = str(args.get("city", "") or "北京").strip()
+                        days_val = int(args.get("days", 3) or 3)
+                        from ..extensions.web_tools import web_tools
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"get_weather({city_name}, days={days_val})",
+                            "reason": f"查询城市天气预报: {city_name}",
+                            "security": "SAFE",
+                        }
+                        w_res = await web_tools.get_weather(city_name, days=days_val)
+                        tool_output = str(w_res.get("summary_text") or w_res.get("error") or w_res)
+                        compressed = f"[天气查询({city_name}): {'成功' if w_res.get('success') else '失败'}]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"get_weather({city_name})",
+                            "reason": f"查询天气: {city_name}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 联网搜索 (web_search) ──
+                    elif func_name == "web_search":
+                        q_str = str(args.get("query", "")).strip()
+                        max_res = int(args.get("max_results", 5) or 5)
+                        from ..extensions.web_tools import web_tools
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"web_search({q_str[:40]})",
+                            "reason": f"联网检索实时信息: {q_str[:40]}",
+                            "security": "SAFE",
+                        }
+                        s_res = await web_tools.web_search(q_str, max_results=max_res)
+                        tool_output = str(s_res.get("formatted") or s_res.get("error") or s_res)
+                        compressed = f"[联网搜索 `{q_str[:30]}`: {len(s_res.get('results') or [])} 条]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"web_search({q_str[:40]})",
+                            "reason": f"联网搜索: {q_str[:40]}",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 个人备忘与待办管理 (manage_personal_notes) ──
+                    elif func_name == "manage_personal_notes":
+                        act = str(args.get("action", "list")).strip().lower()
+                        note_content = str(args.get("content", "")).strip()
+                        note_cat = str(args.get("category", "memo")).strip().lower()
+                        note_kw = str(args.get("keyword", "")).strip()
+                        note_due = str(args.get("due_at", "")).strip() or None
+                        im_ctx = im_context or {}
+                        owner_sender = im_ctx.get("sender_id") or caller_identity.caller_id or "local_owner".strip()
+                        owner_link = (im_ctx.get("link_id") or "").strip()
+                        from ..service.personal_assistant_service import personal_assistant_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"manage_personal_notes(action={act})",
+                            "reason": "读写个人持久化备忘与待办",
+                            "security": "SAFE",
+                        }
+                        if act == "add":
+                            if not note_content:
+                                tool_output = "保存失败：content 不能为空。"
+                            else:
+                                saved = await personal_assistant_service.add_note(
+                                    sender_id=owner_sender,
+                                    content=note_content,
+                                    category=note_cat,
+                                    link_id=owner_link,
+                                    due_at=note_due,
+                                )
+                                tool_output = f"已持久化保存 ({saved['category']} / ID={saved['id']} / 时间={saved['created_at_str']}): {saved['content']}"
+                        elif act in ("done", "delete"):
+                            target_st = "deleted" if act == "delete" else "done"
+                            res = await personal_assistant_service.update_note_status(
+                                sender_id=owner_sender,
+                                identifier=note_kw or note_content,
+                                status=target_st,
+                            )
+                            tool_output = str(res.get("message") or res)
+                        else:
+                            notes = await personal_assistant_service.list_notes(
+                                sender_id=owner_sender,
+                                category=(note_cat if note_cat in ("memo", "todo") and args.get("category") else None),
+                                keyword=note_kw,
+                                limit=20,
+                            )
+                            if not notes:
+                                tool_output = "当前暂无匹配的个人备忘或待办记录。"
+                            else:
+                                lines = [f"共查到 {len(notes)} 条活跃记录："]
+                                for idx, n in enumerate(notes, 1):
+                                    tag = "待办" if n.get("category") == "todo" else "备忘"
+                                    lines.append(f"{idx}. [{tag}][{n.get('created_at_str')}] {n.get('content')} (ID:{n.get('id')})")
+                                tool_output = "\n".join(lines)
+                        compressed = f"[个人备忘({act}): 已处理]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"manage_personal_notes(action={act})",
+                            "reason": "个人备忘与待办管理",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 历史 IM 对话检索 (search_im_chat_history) ──
+                    elif func_name == "search_im_chat_history":
+                        kw = str(args.get("keyword", "")).strip()
+                        d_from = str(args.get("date_from", "")).strip()
+                        d_to = str(args.get("date_to", "")).strip()
+                        lim = int(args.get("limit", 10) or 10)
+                        im_ctx = im_context or {}
+                        from ..service.personal_assistant_service import personal_assistant_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"search_im_chat_history(keyword={kw[:20]})",
+                            "reason": "检索真实历史对话记录",
+                            "security": "SAFE",
+                        }
+                        hits = await personal_assistant_service.search_im_chat_history(
+                            link_id=im_ctx.get("link_id") or "",
+                            sender_id=im_ctx.get("sender_id") or "",
+                            keyword=kw,
+                            date_from=d_from,
+                            date_to=d_to,
+                            limit=lim,
+                        )
+                        if not hits:
+                            tool_output = "未检索到符合条件的历史聊天记录。"
+                        else:
+                            lines = [f"检索到 {len(hits)} 条历史对话（按时间倒序）："]
+                            for i, h in enumerate(hits, 1):
+                                lines.append(
+                                    f"{i}. [{h['time_str']}]\n   用户: {h['user_message'][:240]}\n   助手: {h['assistant_reply'][:240]}"
+                                )
+                            tool_output = "\n".join(lines)
+                        compressed = f"[历史对话检索: 命中 {len(hits)} 条]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"search_im_chat_history(keyword={kw[:20]})",
+                            "reason": "检索历史聊天记录",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 创建定时主动微信提醒 (create_im_reminder) ──
+                    elif func_name == "create_im_reminder":
+                        rem_content = str(args.get("content", "")).strip()
+                        rem_trigger = str(args.get("trigger_time", "")).strip()
+                        run_agent_flag = bool(args.get("run_as_agent", False))
+                        im_ctx = im_context or {}
+                        from ..service.personal_assistant_service import personal_assistant_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"create_im_reminder({rem_trigger})",
+                            "reason": f"设置定时提醒: {rem_trigger}",
+                            "security": "SAFE",
+                        }
+                        try:
+                            rem = await personal_assistant_service.create_im_reminder(
+                                workspace_id=ws_id,
+                                link_id=im_ctx.get("link_id") or "",
+                                channel_type=im_ctx.get("channel_type") or "",
+                                target_user_id=im_ctx.get("sender_id") or "",
+                                content=rem_content,
+                                trigger_expr=rem_trigger,
+                                run_as_agent=run_agent_flag,
+                            )
+                            mode_txt = "单次提醒" if rem["one_shot"] else "周期重复提醒"
+                            tool_output = (
+                                f"定时提醒已创建成功（{mode_txt}，ID={rem['id']}）。\n"
+                                f"- 提醒内容：{rem['content']}\n"
+                                f"- 触发计划：{rem['schedule_desc']}（下次触发：{rem['next_run_at']}）"
+                            )
+                        except ValueError as ve:
+                            tool_output = f"创建提醒失败：{ve}"
+                        compressed = f"[定时提醒创建: {rem_trigger}]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"create_im_reminder({rem_trigger})",
+                            "reason": "创建定时提醒",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 查看或取消定时提醒 (list_or_cancel_im_reminders) ──
+                    elif func_name == "list_or_cancel_im_reminders":
+                        act = str(args.get("action", "list")).strip().lower()
+                        ident = str(args.get("identifier", "")).strip()
+                        im_ctx = im_context or {}
+                        from ..service.personal_assistant_service import personal_assistant_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"list_or_cancel_im_reminders(action={act})",
+                            "reason": "查询或取消定时提醒",
+                            "security": "SAFE",
+                        }
+                        if act == "cancel":
+                            c_res = await personal_assistant_service.cancel_im_reminder(
+                                link_id=im_ctx.get("link_id") or "",
+                                target_user_id=im_ctx.get("sender_id") or "",
+                                identifier=ident,
+                            )
+                            tool_output = str(c_res.get("message") or c_res)
+                        else:
+                            rems = await personal_assistant_service.list_im_reminders(
+                                link_id=im_ctx.get("link_id") or "",
+                                target_user_id=im_ctx.get("sender_id") or "",
+                            )
+                            if not rems:
+                                tool_output = "当前没有运行中的定时提醒。"
+                            else:
+                                lines = [f"共有 {len(rems)} 条活跃提醒："]
+                                for i, r in enumerate(rems, 1):
+                                    kind = "单次" if r.get("one_shot") else "周期"
+                                    lines.append(f"{i}. [{kind}] {r.get('display_content')}（下次：{r.get('next_run_at')}，ID：{r.get('id')}）")
+                                tool_output = "\n".join(lines)
+                        compressed = f"[定时提醒({act})]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"list_or_cancel_im_reminders(action={act})",
+                            "reason": "管理定时提醒",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 列出托管服务器资产 (list_managed_servers) ──
+                    elif func_name == "list_managed_servers":
+                        from ..service.server_ops_service import server_ops_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": "list_managed_servers()",
+                            "reason": "查询已托管服务器资产列表",
+                            "security": "SAFE",
+                        }
+                        srvs = await server_ops_service.list_servers()
+                        if not srvs:
+                            tool_output = "当前暂未配置远程 SSH 服务器资产（可在 IM 对话 Wiki 页顶部「服务器资产池」添加，或直接用 inspect_server_health 查看当前节点状态）。"
+                        else:
+                            lines = [f"共托管 {len(srvs)} 台服务器："]
+                            for i, s in enumerate(srvs, 1):
+                                rw = "读写开放" if s.get("allow_write") else "只读保护"
+                                lines.append(
+                                    f"{i}. {s['alias']} ({s['username']}@{s['host']}:{s['port']}, 环境={s['env_tier']}, {rw}, 目录={s.get('default_workdir') or '-'})"
+                                )
+                            tool_output = "\n".join(lines)
+                        compressed = f"[托管服务器列表: {len(srvs)} 台]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": "list_managed_servers()",
+                            "reason": "查询托管服务器资产",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 一键服务器健康体检 (inspect_server_health) ──
+                    elif func_name == "inspect_server_health":
+                        srv_alias = str(args.get("alias", "")).strip()
+                        from ..service.server_ops_service import server_ops_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"inspect_server_health({srv_alias or 'all'})",
+                            "reason": "执行服务器硬件与服务健康体检",
+                            "security": "SAFE",
+                        }
+                        h_res = await server_ops_service.inspect_server_health(alias=srv_alias)
+                        tool_output = str(h_res.get("summary") or h_res)
+                        compressed = f"[服务器体检({srv_alias or 'all'}): 告警={h_res.get('has_alert')}]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"inspect_server_health({srv_alias or 'all'})",
+                            "reason": "服务器健康体检",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: SSH 远程命令 (run_remote_ssh_command，L2 高危由前置门禁拦截) ──
+                    elif func_name == "run_remote_ssh_command":
+                        srv_alias = str(args.get("alias", "")).strip()
+                        ssh_cmd = str(args.get("command", "")).strip()
+                        ssh_dir = str(args.get("workdir", "")).strip()
+                        from ..service.server_ops_service import server_ops_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"ssh({srv_alias}): {ssh_cmd[:60]}",
+                            "reason": f"远程服务器执行: {srv_alias}",
+                            "security": "AUTO_CONFIRMED",
+                        }
+                        ssh_res = await server_ops_service.run_remote_command(
+                            alias=srv_alias, command=ssh_cmd, workdir=ssh_dir
+                        )
+                        if ssh_res.get("success"):
+                            tool_output = str(ssh_res.get("stdout") or "命令执行成功（无输出）")
+                        else:
+                            tool_output = (
+                                f"退出码 {ssh_res.get('exit_code', -1)}: "
+                                f"{ssh_res.get('stderr') or ssh_res.get('error') or ssh_res.get('stdout') or '执行失败'}"
+                            )
+                        compressed = f"[SSH({srv_alias}): exit={ssh_res.get('exit_code')}]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"ssh({srv_alias}): {ssh_cmd[:60]}",
+                            "reason": "远程 SSH 命令执行",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 碎片收藏箱写入 (save_inbox_item) ──
+                    elif func_name == "save_inbox_item":
+                        u_url = str(args.get("url", "")).strip()
+                        u_note = str(args.get("user_note", "")).strip()
+                        im_ctx = im_context or {}
+                        from ..service.personal_workflow_service import personal_workflow_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"save_inbox_item({u_url[:40]})",
+                            "reason": "抓取文章并存入碎片收集箱",
+                            "security": "SAFE",
+                        }
+                        inb = await personal_workflow_service.save_inbox_item(
+                            sender_id=im_ctx.get("sender_id") or caller_identity.caller_id or "local_owner",
+                            link_id=im_ctx.get("link_id") or "",
+                            url=u_url,
+                            user_note=u_note,
+                        )
+                        tool_output = (
+                            f"已收藏至碎片收集箱（ID={inb['id']}，标签：{'/'.join(inb['tags'])}）：\n"
+                            f"- 标题：{inb['title']}\n- 摘要：{inb['summary']}"
+                        )
+                        compressed = f"[收藏箱入库: {inb['title'][:30]}]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"save_inbox_item({u_url[:40]})",
+                            "reason": "文章摘要入收藏箱",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 碎片收藏箱检索 (search_inbox_items) ──
+                    elif func_name == "search_inbox_items":
+                        kw = str(args.get("keyword", "")).strip()
+                        lim = int(args.get("limit", 10) or 10)
+                        im_ctx = im_context or {}
+                        from ..service.personal_workflow_service import personal_workflow_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"search_inbox_items({kw[:25]})",
+                            "reason": "检索个人碎片收集箱",
+                            "security": "SAFE",
+                        }
+                        items = await personal_workflow_service.search_inbox_items(
+                            sender_id=im_ctx.get("sender_id") or caller_identity.caller_id or "local_owner",
+                            keyword=kw,
+                            limit=lim,
+                        )
+                        if not items:
+                            tool_output = "收藏箱中暂无匹配的条目。"
+                        else:
+                            lines = [f"收藏箱命中 {len(items)} 条："]
+                            for i, it in enumerate(items, 1):
+                                lines.append(
+                                    f"{i}. [{it['created_at_str']}] {it['title']} ({','.join(it['tags'])})\n   链接：{it['source_url']}\n   摘要：{it['summary']}"
+                                )
+                            tool_output = "\n".join(lines)
+                        compressed = f"[收藏箱检索: 命中 {len(items)} 条]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"search_inbox_items({kw[:25]})",
+                            "reason": "检索收藏箱",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: Git 代码优化安全工作流 (git_workspace_safe_ops) ──
+                    elif func_name == "git_workspace_safe_ops":
+                        act = str(args.get("action", "diff")).strip().lower()
+                        wd = str(args.get("workdir", "")).strip() or str(target_cwd or os.getcwd())
+                        lbl = str(args.get("branch_label", "im-opt")).strip()
+                        from ..service.personal_workflow_service import personal_workflow_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"git_workspace_safe_ops({act})",
+                            "reason": f"执行 Git 安全工作流: {act}",
+                            "security": "AUTO_CONFIRMED",
+                        }
+                        g_res = await personal_workflow_service.git_safe_ops(
+                            action=act, workdir=wd, branch_label=lbl
+                        )
+                        if not g_res.get("success"):
+                            tool_output = str(g_res.get("error") or g_res)
+                        elif act == "diff":
+                            tool_output = f"分支 `{g_res['branch']}` 状态：\n{g_res['status_short']}\n\nDiff 统计：\n{g_res['diff_stat']}"
+                        else:
+                            tool_output = str(g_res.get("message") or g_res)
+                        compressed = f"[Git({act}): {'成功' if g_res.get('success') else '失败'}]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"git_workspace_safe_ops({act})",
+                            "reason": "Git 安全操作",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 生成每日晨报 (generate_daily_briefing) ──
+                    elif func_name == "generate_daily_briefing":
+                        city_name = str(args.get("city", "北京") or "北京").strip()
+                        im_ctx = im_context or {}
+                        from ..service.personal_workflow_service import personal_workflow_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"generate_daily_briefing({city_name})",
+                            "reason": "聚合生成每日晨报简报",
+                            "security": "SAFE",
+                        }
+                        tool_output = await personal_workflow_service.build_daily_briefing(
+                            sender_id=im_ctx.get("sender_id") or caller_identity.caller_id or "local_owner",
+                            city=city_name,
+                        )
+                        compressed = f"[每日晨报({city_name}): 已生成]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"generate_daily_briefing({city_name})",
+                            "reason": "生成每日晨报",
                             "status": "completed",
                             "output": tool_output,
                             "compressed": compressed,

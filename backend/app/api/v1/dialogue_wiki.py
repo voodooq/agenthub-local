@@ -40,6 +40,7 @@ class DialogueLinkCreateRequest(BaseModel):
     bound_scope: str = Field(default="", max_length=300, description="服务端锁定数据作用域（如 region_code=310000 或 delegation_id=1052）")
     memory_extract_enabled: bool = Field(default=True, description="是否开启自动提炼记忆存储")
     vector_train_enabled: bool = Field(default=True, description="是否开启对话记录向量化训练")
+    owner_mode: bool = Field(default=False, description="是否开启主人全能模式（仅限 hq_admin，解锁运维/研发并在高危时需二次确认）")
 
 
 class DialogueLinkUpdateRequest(BaseModel):
@@ -52,6 +53,7 @@ class DialogueLinkUpdateRequest(BaseModel):
     bound_scope: str | None = Field(default=None, max_length=300, description="服务端锁定数据作用域 RLS")
     memory_extract_enabled: bool | None = Field(default=None, description="是否开启自动提炼记忆")
     vector_train_enabled: bool | None = Field(default=None, description="是否开启向量化训练")
+    owner_mode: bool | None = Field(default=None, description="是否开启主人全能模式（仅 hq_admin 允许启用）")
     status: str | None = Field(default=None, description="状态: active | paused")
 
 
@@ -92,6 +94,8 @@ async def _ensure_dialogue_wiki_tables(conn: Any) -> None:
         await conn.execute("ALTER TABLE dialogue_channel_links ADD COLUMN expert_ids_json TEXT NOT NULL DEFAULT '[]'")
     if "expert_names_json" not in existing_cols:
         await conn.execute("ALTER TABLE dialogue_channel_links ADD COLUMN expert_names_json TEXT NOT NULL DEFAULT '[]'")
+    if "owner_mode" not in existing_cols:
+        await conn.execute("ALTER TABLE dialogue_channel_links ADD COLUMN owner_mode INTEGER NOT NULL DEFAULT 0")
     await conn.execute(
         """
         CREATE TABLE IF NOT EXISTS dialogue_wiki_records (
@@ -164,6 +168,7 @@ async def list_dialogue_links(request: Request, expert_id: str | None = None) ->
         item["bound_scope"] = parse_scope_input(item.get("bound_scope_json"))
         item["memory_extract_enabled"] = bool(item.get("memory_extract_enabled"))
         item["vector_train_enabled"] = bool(item.get("vector_train_enabled"))
+        item["owner_mode"] = bool(item.get("owner_mode"))
         items.append(item)
 
     return {"success": True, "data": items}
@@ -195,6 +200,7 @@ async def create_dialogue_link(
         raise HTTPException(status_code=400, detail="请至少选择一位数字专家")
 
     bound_role = payload.bound_role.strip() if payload.bound_role in VALID_ROLES else "guest"
+    owner_mode_val = 1 if (payload.owner_mode and bound_role == "hq_admin") else 0
     bound_scope_dict = parse_scope_input(payload.bound_scope)
     bound_scope_json = _json.dumps(bound_scope_dict, ensure_ascii=False)
 
@@ -227,9 +233,9 @@ async def create_dialogue_link(
                 link_id, expert_id, expert_name, expert_ids_json, expert_names_json,
                 channel_type, target_user_label, target_user_id, endpoint_token,
                 bound_role, bound_scope_json,
-                memory_extract_enabled, vector_train_enabled,
+                memory_extract_enabled, vector_train_enabled, owner_mode,
                 status, message_count, memory_count, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, 0, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 0, 0, ?)
             """,
             (
                 link_id,
@@ -245,6 +251,7 @@ async def create_dialogue_link(
                 bound_scope_json,
                 1 if payload.memory_extract_enabled else 0,
                 1 if payload.vector_train_enabled else 0,
+                owner_mode_val,
                 now_ts,
             ),
         )
@@ -280,6 +287,7 @@ async def create_dialogue_link(
             "endpoint_url": _build_endpoint_url(request, payload.channel_type, endpoint_token),
             "memory_extract_enabled": payload.memory_extract_enabled,
             "vector_train_enabled": payload.vector_train_enabled,
+            "owner_mode": bool(owner_mode_val),
             "status": "active",
             "message_count": 0,
             "memory_count": 0,
@@ -381,6 +389,12 @@ async def update_dialogue_link(
             if payload.vector_train_enabled is not None
             else int(row.get("vector_train_enabled") or 0)
         )
+        raw_owner_mode = (
+            bool(payload.owner_mode)
+            if payload.owner_mode is not None
+            else bool(int(row.get("owner_mode") or 0))
+        )
+        new_owner_mode = 1 if (raw_owner_mode and new_role == "hq_admin") else 0
         new_status = (
             payload.status.strip()
             if payload.status in ("active", "paused")
@@ -400,6 +414,7 @@ async def update_dialogue_link(
                 bound_scope_json = ?,
                 memory_extract_enabled = ?,
                 vector_train_enabled = ?,
+                owner_mode = ?,
                 status = ?
             WHERE link_id = ?
             """,
@@ -414,6 +429,7 @@ async def update_dialogue_link(
                 new_scope_json,
                 new_mem,
                 new_vec,
+                new_owner_mode,
                 new_status,
                 link_id,
             ),
@@ -453,6 +469,7 @@ async def update_dialogue_link(
             "endpoint_url": _build_endpoint_url(request, channel_type, endpoint_token),
             "memory_extract_enabled": bool(new_mem),
             "vector_train_enabled": bool(new_vec),
+            "owner_mode": bool(new_owner_mode),
             "status": new_status,
             "message_count": int(row.get("message_count") or 0),
             "memory_count": int(row.get("memory_count") or 0),

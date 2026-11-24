@@ -379,12 +379,18 @@ class TaskScheduler:
                 if not task:
                     return {"success": False, "message": "任务不存在"}
 
-        original_status = task["status"] if task["status"] in ("active", "paused") else "active"
-        workspace_id = task["workspace_id"]
-        task_name = task["name"]
-        prompt = task["prompt_template"]
-        cron_expr = task["cron_expr"]
-        bound_agent_id = task.get("agent_id") if isinstance(task, dict) else (task["agent_id"] if "agent_id" in task.keys() else None)
+        task_row = dict(task)
+        original_status = task_row["status"] if task_row["status"] in ("active", "paused") else "active"
+        workspace_id = task_row["workspace_id"]
+        task_name = task_row["name"]
+        prompt = task_row["prompt_template"]
+        cron_expr = task_row["cron_expr"]
+        bound_agent_id = task_row.get("agent_id")
+        notify_channel = str(task_row.get("notify_channel") or "").strip()
+        notify_link_id = str(task_row.get("notify_link_id") or "").strip()
+        notify_target_user_id = str(task_row.get("notify_target_user_id") or "").strip()
+        is_one_shot = bool(int(task_row.get("one_shot") or 0))
+        should_push_im = bool(notify_channel and notify_link_id and notify_target_user_id)
 
         run_id = f"run_{uuid.uuid4().hex[:12]}"
         started_dt = datetime.now()
@@ -419,6 +425,32 @@ class TaskScheduler:
                 output_text = str(sync_res.get("message") or "知识库增量同步巡检完成")
                 error_message = None if final_status == "success" else output_text
                 conversation_id = None
+            elif str(prompt or "").startswith("__IM_REMINDER__:"):
+                reminder_body = str(prompt).split(":", 1)[1].strip()
+                final_status = "success"
+                output_text = f"⏰ 定时提醒：{reminder_body}"
+                error_message = None
+                conversation_id = None
+            elif str(prompt or "").startswith("__IM_DAILY_BRIEFING__:"):
+                city_arg = str(prompt).split(":", 1)[1].strip() or "北京"
+                from ..service.personal_workflow_service import personal_workflow_service
+
+                output_text = await personal_workflow_service.build_daily_briefing(
+                    sender_id=notify_target_user_id or "default",
+                    city=city_arg,
+                )
+                final_status = "success"
+                error_message = None
+                conversation_id = None
+            elif str(prompt or "").startswith("__IM_SERVER_WATCH__:"):
+                from ..service.personal_workflow_service import personal_workflow_service
+
+                watch_res = await personal_workflow_service.run_server_health_watch()
+                final_status = "success"
+                output_text = str(watch_res.get("summary") or "")
+                should_push_im = should_push_im and bool(watch_res.get("has_alert"))
+                error_message = None
+                conversation_id = None
             else:
                 exec_result = await self._execute_headless_agent(workspace_id, prompt, agent_id=bound_agent_id)
                 final_status = "success" if exec_result.get("success") else "failed"
@@ -440,7 +472,8 @@ class TaskScheduler:
         finished_dt = datetime.now()
         finished_at = finished_dt.isoformat()
         duration_ms = max(0, int((finished_dt - started_dt).total_seconds() * 1000))
-        next_run_at = compute_next_run_iso(cron_expr, finished_dt) if original_status == "active" else None
+        final_task_status = "paused" if (is_one_shot and final_status == "success") else original_status
+        next_run_at = compute_next_run_iso(cron_expr, finished_dt) if final_task_status == "active" else None
         last_output_value = output_text if final_status == "success" else (output_text or error_message or "")
 
         async with db_manager.get_connection() as conn:
@@ -455,12 +488,12 @@ class TaskScheduler:
             await conn.execute(
                 """
                 UPDATE scheduled_tasks
-                SET status = ?, last_run_at = ?, next_run_at = COALESCE(?, next_run_at),
+                SET status = ?, last_run_at = ?, next_run_at = ?,
                     last_status = ?, last_output = ?, last_duration_ms = ?, last_error = ?, last_conversation_id = ?
                 WHERE id = ?;
                 """,
                 (
-                    original_status,
+                    final_task_status,
                     finished_at,
                     next_run_at,
                     final_status,
@@ -472,6 +505,22 @@ class TaskScheduler:
                 ),
             )
             await conn.commit()
+
+        # 若绑定了 IM 主动通知目标（且非无告警巡检），通过个人助理服务回推（失败自动入队重试）
+        if should_push_im:
+            push_body = output_text if final_status == "success" else f"⚠️ 定时任务「{task_name}」执行失败：{error_message or '未知错误'}"
+            if push_body:
+                try:
+                    from ..service.personal_assistant_service import personal_assistant_service
+
+                    await personal_assistant_service.push_im_proactive_message(
+                        channel_type=notify_channel,
+                        link_id=notify_link_id,
+                        target_user_id=notify_target_user_id,
+                        text=push_body,
+                    )
+                except Exception as push_err:
+                    logger.warning(f"计划任务 [{task_name}] IM 主动推送异常: {push_err}")
 
         if final_status == "success":
             toast_msg = (output_text[:120] + "...") if len(output_text) > 120 else output_text
@@ -545,6 +594,17 @@ class TaskScheduler:
                     )
 
             await conn.commit()
+
+        # 巡检 IM 失败重试队列、微信 Sidecar 心跳与 7 天媒体临时文件 GC（异常绝不影响主调度）
+        try:
+            from ..channels.media_processor import media_processor
+            from ..service.personal_assistant_service import personal_assistant_service
+
+            await personal_assistant_service.process_im_outbox_retries()
+            await personal_assistant_service.check_weixin_sidecar_heartbeat()
+            media_processor.cleanup_expired_media(max_age_days=7)
+        except Exception as im_tick_err:
+            logger.debug(f"IM 推送重试与 Sidecar 心检跳过: {im_tick_err}")
 
         return dispatched_ids
 

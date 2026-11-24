@@ -19,6 +19,9 @@ import {
   Users,
   X,
   Pencil,
+  Server,
+  Crown,
+  Activity,
 } from 'lucide-react';
 import { apiFetch } from '@/utils/apiClient';
 
@@ -45,6 +48,7 @@ interface DialogueLinkItem {
   endpoint_url: string;
   memory_extract_enabled: boolean;
   vector_train_enabled: boolean;
+  owner_mode?: boolean;
   status: string;
   message_count: number;
   memory_count: number;
@@ -100,7 +104,25 @@ export function DialogueWikiView() {
   const [boundScope, setBoundScope] = useState<string>('');
   const [memoryExtractEnabled, setMemoryExtractEnabled] = useState<boolean>(true);
   const [vectorTrainEnabled, setVectorTrainEnabled] = useState<boolean>(true);
+  const [ownerMode, setOwnerMode] = useState<boolean>(false);
   const [creating, setCreating] = useState<boolean>(false);
+  // 服务器资产池 (SSH) 管理弹窗状态
+  const [showServerModal, setShowServerModal] = useState<boolean>(false);
+  const [servers, setServers] = useState<Array<any>>([]);
+  const [loadingServers, setLoadingServers] = useState<boolean>(false);
+  const [inspectResult, setInspectResult] = useState<string>('');
+  const [srvForm, setSrvForm] = useState({
+    alias: '',
+    host: '',
+    port: 22,
+    username: 'root',
+    auth_type: 'key_path',
+    credential: '',
+    key_path: '',
+    env_tier: 'prod',
+    default_workdir: '',
+    allow_write: false,
+  });
   const [notice, setNotice] = useState<{ ok: boolean; text: string } | null>(null);
   const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
   const [trainingLinkId, setTrainingLinkId] = useState<string | null>(null);
@@ -138,7 +160,64 @@ export function DialogueWikiView() {
   const [editBoundScope, setEditBoundScope] = useState<string>('');
   const [editMemoryExtract, setEditMemoryExtract] = useState<boolean>(true);
   const [editVectorTrain, setEditVectorTrain] = useState<boolean>(true);
+  const [editOwnerMode, setEditOwnerMode] = useState<boolean>(false);
   const [savingEdit, setSavingEdit] = useState<boolean>(false);
+
+  const loadServers = useCallback(async () => {
+    setLoadingServers(true);
+    try {
+      const res = await apiFetch('/api/v1/personal-assistant/servers');
+      if (res.ok) {
+        const json = await res.json();
+        setServers(Array.isArray(json.data) ? json.data : []);
+      }
+    } finally {
+      setLoadingServers(false);
+    }
+  }, []);
+
+  const handleSaveServer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!srvForm.alias.trim() || !srvForm.host.trim()) return;
+    const res = await apiFetch('/api/v1/personal-assistant/servers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(srvForm),
+    });
+    if (res.ok) {
+      setSrvForm({
+        alias: '',
+        host: '',
+        port: 22,
+        username: 'root',
+        auth_type: 'key_path',
+        credential: '',
+        key_path: '',
+        env_tier: 'prod',
+        default_workdir: '',
+        allow_write: false,
+      });
+      await loadServers();
+    }
+  };
+
+  const handleInspectServer = async (alias: string) => {
+    setInspectResult('正在通过 SSH / 节点探针体检...');
+    const res = await apiFetch(`/api/v1/personal-assistant/servers/${encodeURIComponent(alias)}/inspect`, {
+      method: 'POST',
+    });
+    const json = await res.json();
+    setInspectResult(json?.data?.summary || json?.detail || '体检完成');
+  };
+
+  const handleDeleteServer = async (alias: string) => {
+    const res = await apiFetch(`/api/v1/personal-assistant/servers/${encodeURIComponent(alias)}`, {
+      method: 'DELETE',
+    });
+    if (res.ok) {
+      await loadServers();
+    }
+  };
 
   // 打开个人微信 ClawBot 二维码弹窗时，自动每 2 秒轮询扫码确认状态并自动刷新绑定列表
   useEffect(() => {
@@ -313,6 +392,7 @@ export function DialogueWikiView() {
           bound_scope: boundScope.trim(),
           memory_extract_enabled: memoryExtractEnabled,
           vector_train_enabled: vectorTrainEnabled,
+          owner_mode: boundRole === 'hq_admin' ? ownerMode : false,
         }),
       });
       const json = await res.json();
@@ -382,6 +462,7 @@ export function DialogueWikiView() {
     setEditBoundScope(scopeStr);
     setEditMemoryExtract(Boolean(link.memory_extract_enabled));
     setEditVectorTrain(Boolean(link.vector_train_enabled));
+    setEditOwnerMode(Boolean(link.owner_mode));
   };
 
   const handleSaveEditLink = async (e: React.FormEvent) => {
@@ -409,6 +490,7 @@ export function DialogueWikiView() {
           bound_scope: editBoundScope.trim(),
           memory_extract_enabled: editMemoryExtract,
           vector_train_enabled: editVectorTrain,
+          owner_mode: editBoundRole === 'hq_admin' ? editOwnerMode : false,
         }),
       });
       const json = await res.json();
@@ -602,14 +684,27 @@ export function DialogueWikiView() {
                 为指定数字专家配置外部 IM 渠道与目标用户/群组的专用对接链接；后续接入真实 IM 消息后，自动沉淀历史对话记录、提炼记忆并执行向量化训练。
               </p>
             </div>
-            <button
-              type="button"
-              onClick={loadInitialData}
-              className="px-3 py-1.5 rounded-lg text-xs border border-border bg-background hover:bg-surface-200 text-foreground flex items-center gap-1.5 transition-colors"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loadingLinks ? 'animate-spin' : ''}`} />
-              <span>刷新</span>
-            </button>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowServerModal(true);
+                  loadServers();
+                }}
+                className="px-3 py-1.5 rounded-lg text-xs border border-sky-500/40 bg-sky-500/10 hover:bg-sky-500/20 text-sky-400 flex items-center gap-1.5 transition-colors"
+              >
+                <Server className="w-3.5 h-3.5" />
+                <span>服务器资产池 (SSH)</span>
+              </button>
+              <button
+                type="button"
+                onClick={loadInitialData}
+                className="px-3 py-1.5 rounded-lg text-xs border border-border bg-background hover:bg-surface-200 text-foreground flex items-center gap-1.5 transition-colors"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingLinks ? 'animate-spin' : ''}`} />
+                <span>刷新</span>
+              </button>
+            </div>
           </div>
 
           <form onSubmit={handleCreateLink} className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end">
@@ -752,6 +847,18 @@ export function DialogueWikiView() {
               />
               <span>对话记录增量向量化训练（预留）</span>
             </label>
+            {boundRole === 'hq_admin' && (
+              <label className="flex items-center gap-2 cursor-pointer text-amber-400 font-medium">
+                <input
+                  type="checkbox"
+                  checked={ownerMode}
+                  onChange={(e) => setOwnerMode(e.target.checked)}
+                  className="rounded border-border accent-amber-500"
+                />
+                <Crown className="w-3.5 h-3.5" />
+                <span>开启主人全能模式（高危需二次确认）</span>
+              </label>
+            )}
           </div>
 
           {notice && (
@@ -851,6 +958,12 @@ export function DialogueWikiView() {
                       {item.bound_role && (
                         <span className="px-2 py-0.5 rounded-md bg-emerald-500/10 text-emerald-400 border border-emerald-500/25 text-[11px] font-medium">
                           {item.bound_role_label || item.bound_role}
+                        </span>
+                      )}
+                      {item.owner_mode && (
+                        <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-amber-500/15 text-amber-400 border border-amber-500/30 text-[11px] font-medium">
+                          <Crown className="w-3 h-3" />
+                          主人控制台
                         </span>
                       )}
                       {item.bound_scope && Object.keys(item.bound_scope).length > 0 && (
@@ -1739,6 +1852,18 @@ export function DialogueWikiView() {
                   />
                   <span>对话记录增量向量化训练</span>
                 </label>
+                {editBoundRole === 'hq_admin' && (
+                  <label className="flex items-center gap-2 cursor-pointer text-amber-400 font-medium">
+                    <input
+                      type="checkbox"
+                      checked={editOwnerMode}
+                      onChange={(e) => setEditOwnerMode(e.target.checked)}
+                      className="rounded border-border accent-amber-500"
+                    />
+                    <Crown className="w-3.5 h-3.5" />
+                    <span>开启主人全能控制台（解锁运维与改代码，高危操作需微信二次确认）</span>
+                  </label>
+                )}
               </div>
 
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-border">
@@ -1758,6 +1883,164 @@ export function DialogueWikiView() {
                   {savingEdit ? '保存中...' : '保存并立即生效'}
                 </button>
               </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 服务器资产池 (SSH) 管理弹窗 */}
+      {showServerModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-surface-card border border-border rounded-2xl max-w-2xl w-full p-5 space-y-4 shadow-xl max-h-[88vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b border-border pb-3">
+              <h3 className="text-sm font-semibold text-foreground flex items-center gap-2">
+                <Server className="w-4 h-4 text-sky-400" />
+                <span>托管服务器资产池（SSH 密钥隔离通道）</span>
+              </h3>
+              <button
+                type="button"
+                onClick={() => setShowServerModal(false)}
+                className="text-muted-foreground hover:text-foreground"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="flex items-center justify-between text-xs text-muted-foreground">
+              <span>私钥与密码均使用 Fernet 对称加密存储，前端绝不回显明文。</span>
+              <button
+                type="button"
+                onClick={() => handleInspectServer('all')}
+                className="px-2.5 py-1 rounded-lg bg-sky-500/15 text-sky-400 hover:bg-sky-500/25 flex items-center gap-1"
+              >
+                <Activity className="w-3.5 h-3.5" />
+                <span>一键巡检全部</span>
+              </button>
+            </div>
+
+            {inspectResult && (
+              <pre className="p-3 rounded-xl bg-background border border-border text-[11px] whitespace-pre-wrap text-foreground">
+                {inspectResult}
+              </pre>
+            )}
+
+            <div className="space-y-2">
+              {loadingServers ? (
+                <div className="text-xs text-muted-foreground py-2">加载服务器列表中...</div>
+              ) : servers.length === 0 ? (
+                <div className="text-xs text-muted-foreground py-2">暂无托管 SSH 服务器，请通过下方表单添加。</div>
+              ) : (
+                servers.map((srv) => (
+                  <div
+                    key={srv.id}
+                    className="p-3 rounded-xl bg-background border border-border flex items-center justify-between gap-3 text-xs"
+                  >
+                    <div>
+                      <div className="font-semibold text-foreground flex items-center gap-2">
+                        <span>{srv.alias}</span>
+                        <span className="px-1.5 py-0.5 rounded bg-surface-200 text-[10px]">{srv.env_tier}</span>
+                        <span className="text-[10px] text-muted-foreground">
+                          {srv.allow_write ? '读写开放' : '只读白名单保护'}
+                        </span>
+                      </div>
+                      <div className="text-[11px] text-muted-foreground font-mono mt-0.5">
+                        {srv.username}@{srv.host}:{srv.port} {srv.default_workdir ? `· ${srv.default_workdir}` : ''}
+                      </div>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <button
+                        type="button"
+                        onClick={() => handleInspectServer(srv.alias)}
+                        className="px-2 py-1 rounded-lg bg-surface-200 hover:bg-surface-300 text-foreground"
+                      >
+                        体检
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteServer(srv.alias)}
+                        className="p-1.5 rounded-lg text-red-400 hover:bg-red-500/10"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+
+            <form onSubmit={handleSaveServer} className="grid grid-cols-2 md:grid-cols-3 gap-2.5 pt-3 border-t border-border text-xs">
+              <input
+                type="text"
+                required
+                placeholder="别名 (如 prod / host)"
+                value={srvForm.alias}
+                onChange={(e) => setSrvForm((p) => ({ ...p, alias: e.target.value }))}
+                className="px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground"
+              />
+              <input
+                type="text"
+                required
+                placeholder="主机 IP 或域名"
+                value={srvForm.host}
+                onChange={(e) => setSrvForm((p) => ({ ...p, host: e.target.value }))}
+                className="px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground"
+              />
+              <input
+                type="text"
+                placeholder="用户名 (默认 root)"
+                value={srvForm.username}
+                onChange={(e) => setSrvForm((p) => ({ ...p, username: e.target.value }))}
+                className="px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground"
+              />
+              <select
+                value={srvForm.auth_type}
+                onChange={(e) => setSrvForm((p) => ({ ...p, auth_type: e.target.value }))}
+                className="px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground"
+              >
+                <option value="key_path">私钥文件路径</option>
+                <option value="private_key_enc">加密存储私钥内容</option>
+                <option value="password_enc">加密存储 SSH 密码</option>
+              </select>
+              {srvForm.auth_type === 'key_path' ? (
+                <input
+                  type="text"
+                  placeholder="私钥路径 (/root/.ssh/id_ed25519)"
+                  value={srvForm.key_path}
+                  onChange={(e) => setSrvForm((p) => ({ ...p, key_path: e.target.value }))}
+                  className="px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground"
+                />
+              ) : (
+                <input
+                  type="password"
+                  placeholder="密码或私钥内容（加密存储）"
+                  value={srvForm.credential}
+                  onChange={(e) => setSrvForm((p) => ({ ...p, credential: e.target.value }))}
+                  className="px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground"
+                />
+              )}
+              <select
+                value={srvForm.env_tier}
+                onChange={(e) => setSrvForm((p) => ({ ...p, env_tier: e.target.value }))}
+                className="px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground"
+              >
+                <option value="prod">prod（生产只读门禁）</option>
+                <option value="host">host（宿主机）</option>
+                <option value="staging">staging（预发）</option>
+                <option value="dev">dev（开发）</option>
+              </select>
+              <input
+                type="text"
+                placeholder="默认项目路径（选填）"
+                value={srvForm.default_workdir}
+                onChange={(e) => setSrvForm((p) => ({ ...p, default_workdir: e.target.value }))}
+                className="px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground col-span-2"
+              />
+              <button
+                type="submit"
+                className="px-3 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white font-medium"
+              >
+                保存托管服务器
+              </button>
             </form>
           </div>
         </div>

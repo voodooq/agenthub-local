@@ -602,15 +602,19 @@ class ProviderAdapter:
         else:
             endpoint = effective_base
 
-        oai_messages: list[dict[str, str]] = []
+        oai_messages: list[dict[str, Any]] = []
         if system_instruction:
             oai_messages.append({"role": "system", "content": system_instruction})
 
         for m in messages:
             r = m.get("role", "user")
             role_mapped = "assistant" if r in ("model", "assistant") else "user"
-            prefix = "[工具输出]: " if r == "tool" else ""
-            oai_messages.append({"role": role_mapped, "content": f"{prefix}{m.get('content', '')}"})
+            raw_c = m.get("content", "")
+            if isinstance(raw_c, list):
+                oai_messages.append({"role": role_mapped, "content": raw_c})
+            else:
+                prefix = "[工具输出]: " if r == "tool" else ""
+                oai_messages.append({"role": role_mapped, "content": f"{prefix}{raw_c}"})
 
         headers = {"Content-Type": "application/json"}
         if api_key:
@@ -896,6 +900,31 @@ class ProviderAdapter:
                 logger.debug(f"后台轻量模型 [{prov.get('name')}] 调用跳过: {e}")
                 continue
         return None
+
+    @classmethod
+    async def transcribe_audio_openai_compatible(
+        cls,
+        *,
+        base_url: str,
+        api_key: str,
+        model_name: str,
+        audio_bytes: bytes,
+        filename: str = "audio.wav",
+    ) -> str:
+        """调用标准 OpenAI 兼容语音转文字接口 (/v1/audio/transcriptions)。"""
+        eff_base = (base_url or "https://api.openai.com/v1").rstrip("/")
+        endpoint = eff_base if eff_base.endswith("/audio/transcriptions") else f"{eff_base}/audio/transcriptions"
+        headers = {}
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+        files = {"file": (filename or "audio.wav", audio_bytes, "audio/wav")}
+        data = {"model": model_name or "FunAudioLLM/SenseVoiceSmall"}
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(endpoint, headers=headers, data=data, files=files)
+            if resp.status_code == 200:
+                res_json = resp.json()
+                return str(res_json.get("text") or "").strip()
+            raise RuntimeError(f"云端 ASR 返回 HTTP {resp.status_code}: {resp.text[:200]}")
 
 
 provider_adapter = ProviderAdapter()
