@@ -200,7 +200,11 @@ async def create_dialogue_link(
         raise HTTPException(status_code=400, detail="请至少选择一位数字专家")
 
     bound_role = payload.bound_role.strip() if payload.bound_role in VALID_ROLES else "guest"
-    owner_mode_val = 1 if (payload.owner_mode and bound_role == "hq_admin") else 0
+    owner_mode_val = (
+        1
+        if (payload.owner_mode and (channel_type == "weixin_clawbot" or bound_role == "hq_admin"))
+        else 0
+    )
     bound_scope_dict = parse_scope_input(payload.bound_scope)
     bound_scope_json = _json.dumps(bound_scope_dict, ensure_ascii=False)
 
@@ -394,7 +398,12 @@ async def update_dialogue_link(
             if payload.owner_mode is not None
             else bool(int(row.get("owner_mode") or 0))
         )
-        new_owner_mode = 1 if (raw_owner_mode and new_role == "hq_admin") else 0
+        link_ch_type = str(row.get("channel_type") or "")
+        new_owner_mode = (
+            1
+            if (raw_owner_mode and (link_ch_type == "weixin_clawbot" or new_role == "hq_admin"))
+            else 0
+        )
         new_status = (
             payload.status.strip()
             if payload.status in ("active", "paused")

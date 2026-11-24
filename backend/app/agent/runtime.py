@@ -385,6 +385,7 @@ class AgentRuntime:
         "save_inbox_item",
         "search_inbox_items",
         "generate_daily_briefing",
+        "export_and_send_document",
         "update_working_memory",
         "search_cloud_wiki",
         "read_cloud_wiki_section",
@@ -1559,6 +1560,7 @@ class AgentRuntime:
                 "save_inbox_item",
                 "search_inbox_items",
                 "generate_daily_briefing",
+                "export_and_send_document",
                 "save_long_term_memory",
                 "search_memory_history",
                 "update_working_memory",
@@ -1652,6 +1654,12 @@ class AgentRuntime:
         biz_ontology_query_count = 0
         circuit_breaker_triggered = False
         produced_artifacts: list[str] = []
+        im_export_files: list[dict[str, str]] = []
+        is_weixin_claw_owner = (
+            caller_channel == "im_bot"
+            and owner_mode
+            and str((im_context or {}).get("channel_type") or "") == "weixin_clawbot"
+        )
         has_workspace_mutations = False
         executed_mutating_shell = False
         injected_case_ids: list[str] = []
@@ -3039,6 +3047,7 @@ class AgentRuntime:
                         "final_step_content": final_saved_text,
                         "account": final_account,
                         "model": effective_model_name,
+                        "export_files": im_export_files,
                     }
                     break
 
@@ -3275,60 +3284,78 @@ class AgentRuntime:
                             "write_local_file",
                             "replace_in_file",
                         }:
-                            from ..service.server_ops_service import server_ops_service
+                            if is_weixin_claw_owner:
+                                # 微信 Claw 主人全权限模式已在配置页显式开启：仅拦截极少数不可逆毁灭性系统指令，其余直接放行
+                                raw_cmd_txt = str(args.get("command") or "").lower()
+                                catastrophic_hits = ("rm -rf /", "mkfs.", "dd if=/dev/zero", ":(){:|:&};:", "shutdown ", "reboot")
+                                if any(c in raw_cmd_txt for c in catastrophic_hits):
+                                    im_gate_intercepted = True
+                                    tool_output = "Denied: 检测到高危毁灭性系统指令，已被底层安全底线拦截。"
+                                    yield {
+                                        "type": "tool_end",
+                                        "call_id": call_id,
+                                        "name": func_name,
+                                        "command": raw_cmd_txt[:100],
+                                        "reason": "极危系统命令底线防护",
+                                        "status": "denied",
+                                        "output": tool_output,
+                                        "compressed": "[拦截极危系统命令]",
+                                    }
+                            else:
+                                from ..service.server_ops_service import server_ops_service
 
-                            srv_tier = ""
-                            srv_allow_write = False
-                            if func_name == "run_remote_ssh_command":
-                                srv_info = await server_ops_service.get_server(str(args.get("alias") or ""))
-                                if srv_info:
-                                    srv_tier = str(srv_info.get("env_tier") or "prod")
-                                    srv_allow_write = bool(srv_info.get("allow_write"))
-                            ws_root_str = str(target_cwd or ctx.get("current_cwd") or "")
-                            risk_lvl, risk_reason = server_ops_service.evaluate_action_risk(
-                                func_name,
-                                args,
-                                workspace_root=ws_root_str,
-                                server_env_tier=srv_tier,
-                                server_allow_write=srv_allow_write,
-                                tainted_by_untrusted=tainted_by_untrusted_source,
-                            )
-                            if risk_lvl == "L2":
-                                im_gate_intercepted = True
-                                im_ctx_g = im_context or {}
-                                cmd_preview = str(
-                                    args.get("command") or args.get("file_path") or args.get("path") or func_name
-                                )[:120]
-                                summary_txt = f"{func_name}: {cmd_preview}"
-                                apr_payload = dict(args)
-                                if func_name == "execute_local_command" and ws_root_str:
-                                    apr_payload.setdefault("cwd", ws_root_str)
-                                apr = await server_ops_service.create_pending_approval(
-                                    link_id=im_ctx_g.get("link_id") or "",
-                                    sender_id=im_ctx_g.get("sender_id") or caller_identity.caller_id or "",
-                                    channel_type=im_ctx_g.get("channel_type") or "weixin_clawbot",
-                                    tool_name=func_name,
-                                    action_summary=summary_txt,
-                                    payload=apr_payload,
+                                srv_tier = ""
+                                srv_allow_write = False
+                                if func_name == "run_remote_ssh_command":
+                                    srv_info = await server_ops_service.get_server(str(args.get("alias") or ""))
+                                    if srv_info:
+                                        srv_tier = str(srv_info.get("env_tier") or "prod")
+                                        srv_allow_write = bool(srv_info.get("allow_write"))
+                                ws_root_str = str(target_cwd or ctx.get("current_cwd") or "")
+                                risk_lvl, risk_reason = server_ops_service.evaluate_action_risk(
+                                    func_name,
+                                    args,
+                                    workspace_root=ws_root_str,
+                                    server_env_tier=srv_tier,
+                                    server_allow_write=srv_allow_write,
+                                    tainted_by_untrusted=tainted_by_untrusted_source,
                                 )
-                                tool_output = (
-                                    f"PausedForApproval: [触发 L2 安全门禁挂起] {risk_reason}。\n"
-                                    f"请立即停止后续执行，并用简洁清晰的中文向主人展示确认卡片：\n"
-                                    f"- 待执行操作：`{summary_txt}`\n"
-                                    f"- 拦截原因：{risk_reason}\n"
-                                    f"- 确认方式：请在 3 分钟内直接回复 **确认执行** 或 **确认 {apr['code']}** 放行（回复 **取消** 作废）。"
-                                )
-                                compressed = f"[L2 高危挂起审批: 确认码 {apr['code']}]"
-                                yield {
-                                    "type": "tool_end",
-                                    "call_id": call_id,
-                                    "name": func_name,
-                                    "command": summary_txt,
-                                    "reason": f"触发 L2 安全二次确认 ({risk_reason})",
-                                    "status": "denied",
-                                    "output": tool_output,
-                                    "compressed": compressed,
-                                }
+                                if risk_lvl == "L2":
+                                    im_gate_intercepted = True
+                                    im_ctx_g = im_context or {}
+                                    cmd_preview = str(
+                                        args.get("command") or args.get("file_path") or args.get("path") or func_name
+                                    )[:120]
+                                    summary_txt = f"{func_name}: {cmd_preview}"
+                                    apr_payload = dict(args)
+                                    if func_name == "execute_local_command" and ws_root_str:
+                                        apr_payload.setdefault("cwd", ws_root_str)
+                                    apr = await server_ops_service.create_pending_approval(
+                                        link_id=im_ctx_g.get("link_id") or "",
+                                        sender_id=im_ctx_g.get("sender_id") or caller_identity.caller_id or "",
+                                        channel_type=im_ctx_g.get("channel_type") or "weixin_clawbot",
+                                        tool_name=func_name,
+                                        action_summary=summary_txt,
+                                        payload=apr_payload,
+                                    )
+                                    tool_output = (
+                                        f"PausedForApproval: [触发 L2 安全门禁挂起] {risk_reason}。\n"
+                                        f"请立即停止后续执行，并用简洁清晰的中文向主人展示确认卡片：\n"
+                                        f"- 待执行操作：`{summary_txt}`\n"
+                                        f"- 拦截原因：{risk_reason}\n"
+                                        f"- 确认方式：请在 3 分钟内直接回复 **确认执行** 或 **确认 {apr['code']}** 放行（回复 **取消** 作废）。"
+                                    )
+                                    compressed = f"[L2 高危挂起审批: 确认码 {apr['code']}]"
+                                    yield {
+                                        "type": "tool_end",
+                                        "call_id": call_id,
+                                        "name": func_name,
+                                        "command": summary_txt,
+                                        "reason": f"触发 L2 安全二次确认 ({risk_reason})",
+                                        "status": "denied",
+                                        "output": tool_output,
+                                        "compressed": compressed,
+                                    }
 
                     # ── 工具 1: 受控本地终端命令 (execute_local_command) ──
                     if s10_intercepted or im_gate_intercepted:
@@ -4118,7 +4145,7 @@ class AgentRuntime:
                                     "compressed": compressed,
                                     "cwd": str(current_work_dir),
                                 }
-                            elif allowed_write_dirs and not self._is_path_in_allowed_dirs(
+                            elif allowed_write_dirs and not is_weixin_claw_owner and not self._is_path_in_allowed_dirs(
                                 target_file, allowed_write_dirs, current_work_dir
                             ):
                                 tool_output = (
@@ -4339,7 +4366,7 @@ class AgentRuntime:
                                     "compressed": f"[安全拦截修改附件 `{rel_display}`]",
                                     "cwd": str(current_work_dir),
                                 }
-                            elif allowed_write_dirs and not self._is_path_in_allowed_dirs(
+                            elif allowed_write_dirs and not is_weixin_claw_owner and not self._is_path_in_allowed_dirs(
                                 target_file, allowed_write_dirs, current_work_dir
                             ):
                                 tool_output = (
@@ -5235,6 +5262,56 @@ class AgentRuntime:
                             "name": func_name,
                             "command": f"generate_daily_briefing({city_name})",
                             "reason": "生成每日晨报",
+                            "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 导出并发送文档 (.md / .docx / .pdf) (export_and_send_document) ──
+                    elif func_name == "export_and_send_document":
+                        doc_title = str(args.get("title") or "总结报告").strip()
+                        doc_content = str(args.get("content") or "").strip()
+                        doc_fmt = str(args.get("format") or "md").strip().lower()
+                        doc_fname = str(args.get("filename") or "").strip()
+                        from ..service.personal_workflow_service import personal_workflow_service
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"export_and_send_document({doc_title}, fmt={doc_fmt})",
+                            "reason": "生成并准备推送文档文件",
+                            "security": "SAFE",
+                        }
+                        try:
+                            exp_res = await personal_workflow_service.export_document(
+                                title=doc_title,
+                                content=doc_content,
+                                fmt=doc_fmt,
+                                filename=doc_fname,
+                            )
+                            if exp_res.get("success"):
+                                im_export_files.append(
+                                    {
+                                        "file_path": str(exp_res["file_path"]),
+                                        "file_name": str(exp_res["file_name"]),
+                                    }
+                                )
+                                tool_output = (
+                                    f"文档已成功生成：{exp_res['file_name']}（{exp_res['size_bytes']} 字节，路径：{exp_res['file_path']}）。"
+                                    "系统将在本轮回复时自动把该文件直接发送到用户微信！"
+                                )
+                            else:
+                                tool_output = f"文档生成失败: {exp_res}"
+                        except Exception as exp_err:
+                            tool_output = f"文档生成异常: {exp_err}"
+                        compressed = f"[导出文档({doc_fmt}): {doc_title}]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"export_and_send_document({doc_title}, fmt={doc_fmt})",
+                            "reason": "导出文档文件",
                             "status": "completed",
                             "output": tool_output,
                             "compressed": compressed,
@@ -6921,6 +6998,7 @@ class AgentRuntime:
                         "final_step_content": clean_deliverable,
                         "account": final_account,
                         "model": effective_model_name,
+                        "export_files": im_export_files,
                     }
                     break
 

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import secrets
 import time
 from datetime import datetime
@@ -31,6 +32,14 @@ _DEBOUNCE_MEDIA_SECONDS = 4.5
 _SESSION_SOFT_SPLIT_SECONDS = 7200.0
 # 仅当单轮推理超过 18 秒（如真正在执行编译/深度分析/多步工具）才推送“转后台处理”并释放主锁
 _LONG_TASK_DETACH_SECONDS = 18.0
+_LONG_TASK_DETACH_PHRASES = (
+    "这事儿稍微有点工程量，我先放后台接着跑，弄好了第一时间叫你~（想叫停随时回个「停」就行）",
+    "收到，这个需要点时间处理，我先在后台慢慢干，你可以先忙别的，出结果直接发你（回「停」可中止）。",
+    "正在后台全力处理中，估计还得一会儿，有结果立马推给你，期间有别的事随时吩咐（发「停」可取消）。",
+    "先帮你挂在后台跑着啦，省得你一直干等，搞定后我马上把结果发过来（随时回个「停」就能中断）。",
+    "这步稍微耗点时间，我转到后台继续弄，你先忙你的，弄完我喊你（要取消回个「停」即可）。",
+    "好嘞，已经在后台加紧处理了，稍微等我一会儿，弄完立刻发给你（发「停」可随时打断）。",
+)
 
 
 class _DebounceBuffer(TypedDict):
@@ -55,6 +64,14 @@ class ChannelGateway:
         self._debounce_buffers: dict[str, _DebounceBuffer] = {}
         self._active_session_conv: dict[str, str] = {}
         self._session_workdirs: dict[str, str] = {}
+        self._last_detach_phrase_idx: int = -1
+
+    def _pick_detach_notice(self) -> str:
+        """随机挑选一条口语化的后台处理过渡话术，确保绝不与上一条连续重复。"""
+        candidates = [i for i in range(len(_LONG_TASK_DETACH_PHRASES)) if i != self._last_detach_phrase_idx]
+        idx = random.choice(candidates) if candidates else 0
+        self._last_detach_phrase_idx = idx
+        return _LONG_TASK_DETACH_PHRASES[idx]
 
     @staticmethod
     async def _ensure_gateway_tables(conn: Any) -> None:
@@ -424,9 +441,10 @@ class ChannelGateway:
                     "   - 当用户让你**查以前的聊天记录 / 核对以前说过的话**：主动调用 `search_im_chat_history` 查真实落库记录并准确作答；\n"
                     "   - 当用户让你**设置定时提醒 / 添加计划任务 / 每天定时执行**：必须主动调用 `create_im_reminder`（支持单次如 `10分钟后`、`明早8点`，以及周期 Cron 如 `每天早上8:30`；若到点需查天气/待办/新闻或执行总结，请设 `run_as_agent=True`），查看或取消调用 `list_or_cancel_im_reminders`，**严禁说“不支持计划任务”**；\n"
                     "   - 当用户询问**天气或最新实时资讯 / 联网搜索**：你已直接拥有 `get_weather`、`web_search` 与 `web_fetch` 工具，必须主动调用获取真实结果后直给结论，**严禁回复“我没有时钟 / 暂时不能联网搜索 / 我查不到实时天气 / 你自己打开手机 App 看”**；\n"
+                    "   - 当用户要求**生成 Word(.docx) / PDF(.pdf) / Markdown(.md) 文档或总结报告文件**：**必须直接调用 `export_and_send_document(title=..., content=..., format='docx'|'pdf'|'md')`** 生成真实文件，系统会自动把文档文件直接推送到用户手机微信！\n"
                     "   - 当用户询问**写程序 / 脚本 / 技术排错**：可以直接在微信里给出精简清晰的核心代码片段、排错脚本或技术方案思路，仅在需要整库构建或操作本机桌面软件时简短建议回到电脑端协同；\n"
                     "   - 当用户询问你**能否听语音 / 语音识别 / 看图片**，或直接发送语音条/图片时：网关已为你接入微信语音自动转文字与图片识别能力（OCR + 视觉理解），请如实肯定并欢迎用户直接发语音条或图片给你，**严禁回复“目前还不能做语音识别”或“我只能处理文字对话”**！\n"
-                    "   - **重要备忘工具选择铁律**：当用户让你记录任何计划、备忘、待办或习惯时，**必须直接调用 `manage_personal_notes(action='add', ...)` 或 `save_long_term_memory`** 存入数据库，**严禁调用 `write_local_file` 写本地文件**！\n"
+                    "   - **备忘 vs 文档区分铁律**：如果用户只是口头让你记住计划/备忘/待办，调用 `manage_personal_notes(action='add', ...)` 或 `save_long_term_memory` 存入数据库；如果用户明确要求生成文档文件，调用 `export_and_send_document`；若已开启主人全能模式且需要写项目代码/脚本，可直接调用 `write_local_file`。\n"
                     "2. **温暖干练口语化（去掉冷漠客服腔）**：\n"
                     "   - 像一位贴身靠谱的资深私人助理兼同事在微信上聊天，自然、有温度、不机械道歉，日常回答控制精炼（常规 2~6 句话，150~300 字内；代码/方案除外）；\n"
                     "   - 不堆砌多级标题、背景铺垫或免责声明；\n"
@@ -589,13 +607,20 @@ class ChannelGateway:
                     if expert_sys_prompt:
                         identity_header += f"\n### 🎯 绑定专家角色职责\n{expert_sys_prompt}\n"
 
-                is_owner_mode = int(link.get("owner_mode") or 0) == 1 and caller.role == "hq_admin"
+                is_owner_mode = int(link.get("owner_mode") or 0) == 1 and (
+                    inbound.channel_type == "weixin_clawbot" or caller.role == "hq_admin"
+                )
                 if is_owner_mode:
+                    claw_extra = (
+                        "\n   - 【微信 Claw 托管主机全权限已开启】：你可以直接在 ReAct Loop 内无障碍执行 `execute_local_command`、`write_local_file`、`replace_in_file`、`start_background_process`、`stop_background_process`、`run_remote_ssh_command` 与 `export_and_send_document` 完成主机运维、文件操作、脚本运行与文档生成，无需停下请求确认！"
+                        if inbound.channel_type == "weixin_clawbot"
+                        else "\n   - 若某高危或敏感操作触发 L2 安全门禁挂起并生成 4 位确认码，立即把确认信息原样清晰转达给主人等待确认。"
+                    )
                     im_concise_prompt += (
                         "\n5. **主人全能控制台模式（已启用）**：\n"
-                        "   - 你可以直接调用 `list_managed_servers`、`inspect_server_health`、`run_remote_ssh_command`、`execute_local_command`、`write_local_file`、`replace_in_file`、`git_workspace_safe_ops`、`save_inbox_item`、`generate_daily_briefing` 等与电脑端对等的工具；\n"
-                        "   - 修改任何代码前先调用 `git_workspace_safe_ops(action='checkpoint')` 保护现场，修改后尽量运行测试再汇报精简 Diff；\n"
-                        "   - 若某高危或敏感操作触发 L2 安全门禁挂起并生成 4 位确认码，立即把确认信息原样清晰转达给主人等待确认。"
+                        "   - 你可以直接调用 `list_managed_servers`、`inspect_server_health`、`run_remote_ssh_command`、`execute_local_command`、`write_local_file`、`replace_in_file`、`git_workspace_safe_ops`、`save_inbox_item`、`generate_daily_briefing`、`export_and_send_document` 等与电脑端对等的工具；\n"
+                        "   - 修改任何代码前先调用 `git_workspace_safe_ops(action='checkpoint')` 保护现场，修改后尽量运行测试再汇报精简 Diff；"
+                        + claw_extra
                     )
 
                 # 多模态与引用消息预处理（无 GPU 纯 CPU 语音转写 + RapidOCR 识图 + Vision 载荷透传）
@@ -621,6 +646,7 @@ class ChannelGateway:
 
                 full_im_system_prompt = f"{runtime_ctx_header}\n{identity_header}\n{im_concise_prompt}"
 
+                exported_attachments: list[dict[str, Any]] = []
                 async for ev in agent_runtime.chat_stream(
                     conversation_id=conv_id,
                     user_message=eff_user_msg,
@@ -709,13 +735,16 @@ class ChannelGateway:
                         final_content = str(
                             ev.get("final_step_content") or ev.get("full_content") or "".join(chunks_acc)
                         )
+                        for ef in (ev.get("export_files") or []):
+                            if isinstance(ef, dict) and ef.get("file_path"):
+                                exported_attachments.append(ef)
 
                 raw_reply = (final_content or "".join(chunks_acc)).strip() or "（专家未返回有效内容）"
                 formatted_text, out_chunks = format_for_im_channel(
                     raw_reply, max_chunk_chars=getattr(adapter, "max_chunk_chars", 1500)
                 )
 
-                # 若未分片流式推送且正文超过 500 字，自动提炼移动端摘要并生成 24h 临时阅读短链
+                # 若未分片流式推送且正文超过 500 字，自动提炼移动端摘要并生成 24h 阅读短链；若为微信且未附带导出文件，同步生成真实 .md 文件推送
                 if not streamed_segments and len(formatted_text) > 500:
                     rep = await personal_workflow_service.create_shared_report(
                         title=f"{self_name} 详报 ({datetime.now().strftime('%m-%d %H:%M')})",
@@ -723,23 +752,54 @@ class ChannelGateway:
                         link_id=link["link_id"],
                         sender_id=inbound.sender_id,
                     )
+                    if inbound.channel_type == "weixin_clawbot" and not exported_attachments:
+                        try:
+                            auto_doc = await personal_workflow_service.export_document(
+                                title=f"{self_name} 详报 ({datetime.now().strftime('%m-%d %H:%M')})",
+                                content=raw_reply,
+                                fmt="md",
+                            )
+                            if auto_doc.get("success"):
+                                exported_attachments.append(
+                                    {
+                                        "file_path": str(auto_doc["file_path"]),
+                                        "file_name": str(auto_doc["file_name"]),
+                                    }
+                                )
+                        except Exception:
+                            pass
                     compact_summary = formatted_text[:420].rstrip() + "..."
-                    formatted_text = (
-                        f"{compact_summary}\n\n"
-                        f"📄 完整详报较长（共 {len(raw_reply)} 字），已生成 24 小时临时阅读页：{rep['path']}"
+                    file_tip = (
+                        f"📎 已同步生成完整文档 `{exported_attachments[0]['file_name']}` 发送给你。"
+                        if exported_attachments
+                        else f"📄 完整详报较长（共 {len(raw_reply)} 字），已生成 24 小时临时阅读页：{rep['path']}"
                     )
+                    formatted_text = f"{compact_summary}\n\n{file_tip}"
                     out_chunks = [formatted_text]
 
                 # 若前面已流式推送过部分段落，仅补发尚未推送的尾段；否则整段推送
                 if streamed_segments:
                     if stream_buf.strip():
                         await _flush_stream_segment(stream_buf.strip())
+                    if exported_attachments:
+                        await adapter.send_reply(
+                            inbound=inbound,
+                            outbound=OutboundMessage(
+                                raw_markdown="",
+                                formatted_text="",
+                                chunks=[],
+                                attachments=exported_attachments,
+                                metadata={"attachments_only": True},
+                            ),
+                            link_config=link,
+                        )
                     push_res = {"pushed": True, "streamed_segments": len(streamed_segments)}
                 else:
                     outbound = OutboundMessage(
                         raw_markdown=raw_reply,
                         formatted_text=formatted_text,
                         chunks=out_chunks,
+                        attachments=exported_attachments,
                         metadata={
                             "caller_role": caller.role,
                             "caller_scope": caller.scope,
@@ -848,7 +908,9 @@ class ChannelGateway:
 
         session_key = f"{inbound.channel_type}:{link['link_id']}:{inbound.chat_id}:{inbound.sender_id}"
         low = raw.lower()
-        is_owner_mode = int(link.get("owner_mode") or 0) == 1 and caller.role == "hq_admin"
+        is_owner_mode = int(link.get("owner_mode") or 0) == 1 and (
+            inbound.channel_type == "weixin_clawbot" or caller.role == "hq_admin"
+        )
         reply_text: str | None = None
 
         # 0. 优先拦截主人对 L2 高危操作的二次确认或取消回复
@@ -1173,7 +1235,7 @@ class ChannelGateway:
                         await self._send_fast_reply(
                             inbound=merged_inbound,
                             link=cur_buf["link"],
-                            text="⏳ 正在处理耗时任务，已转为后台继续执行（发 `停` 可随时中止，你可以继续发其他消息）。",
+                            text=self._pick_detach_notice(),
                             adapter=cur_buf["adapter"],
                         )
                     except Exception:
@@ -1270,6 +1332,8 @@ class ChannelGateway:
         eff_mode = (mode or payload.get("mode") or adapter.default_mode or "sync_reply").strip()
 
         if eff_mode == "async_push":
+            # 收到消息瞬间立即异步点亮“正在输入中...”，避免防抖窗口期间微信端无反馈
+            asyncio.create_task(adapter.send_typing(inbound=inbound, is_typing=True, link_config=link))
             await self._enqueue_debounced_turn(
                 inbound=inbound, link=link, caller=caller, adapter=adapter
             )

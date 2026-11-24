@@ -147,6 +147,60 @@ async def ensure_clawbot_sidecar_running(
     return False, "已尝试启动本地微信桥接，但端口尚未就绪，请稍后点击刷新二维码"
 
 
+async def keepalive_clawbot_sidecar(bridge_url: str = "http://127.0.0.1:18791") -> None:
+    """定时巡检微信 ClawBot Sidecar 活性与长轮询健康度，若假死或掉线则自动重启恢复。"""
+    global _CLAWBOT_SIDECAR_PROC
+    from ..core.config import settings as _app_settings
+
+    clean_url = bridge_url.rstrip("/")
+    has_active_link = False
+    try:
+        async with db_manager.get_connection() as conn:
+            cur = await conn.execute(
+                "SELECT 1 FROM dialogue_channel_links WHERE channel_type = 'weixin_clawbot' AND status = 'active' LIMIT 1"
+            )
+            has_active_link = (await cur.fetchone()) is not None
+    except Exception:
+        pass
+
+    session_file = Path(_app_settings.db_path).parent / "weixin_clawbot_session.json"
+    if not has_active_link and not session_file.exists():
+        return
+
+    need_restart = False
+    try:
+        async with httpx.AsyncClient(timeout=3.5) as client:
+            resp = await client.get(f"{clean_url}/status")
+            if resp.status_code != 200:
+                need_restart = True
+            else:
+                st = resp.json()
+                logged_in = bool(st.get("logged_in"))
+                polling_updates = bool(st.get("polling_updates"))
+                poll_age = st.get("poll_age_sec")
+                if logged_in and (not polling_updates or (isinstance(poll_age, (int, float)) and poll_age > 90)):
+                    logger.warning(
+                        f"[WeixinClawbot] 检测到长轮询异常 (polling={polling_updates}, poll_age={poll_age}s)，准备自动自愈重启..."
+                    )
+                    need_restart = True
+    except Exception:
+        need_restart = True
+
+    if need_restart:
+        if _CLAWBOT_SIDECAR_PROC is not None and _CLAWBOT_SIDECAR_PROC.poll() is None:
+            try:
+                _CLAWBOT_SIDECAR_PROC.terminate()
+                _CLAWBOT_SIDECAR_PROC.wait(timeout=3)
+            except Exception:
+                try:
+                    _CLAWBOT_SIDECAR_PROC.kill()
+                except Exception:
+                    pass
+            _CLAWBOT_SIDECAR_PROC = None
+        ok, msg = await ensure_clawbot_sidecar_running(clean_url)
+        logger.info(f"[WeixinClawbot] 后台保活自愈完成: ok={ok}, msg={msg}")
+
+
 async def ensure_qr_binding_tables(conn: Any) -> None:
     """幂等初始化扫码绑定票据表与已绑定外部用户关系表。"""
     await conn.execute(

@@ -250,11 +250,32 @@ async def lifespan(app: FastAPI):
 
     asr_warmup_task = asyncio.create_task(_warmup_local_asr_model())
 
+    async def _clawbot_keepalive_loop() -> None:
+        from app.channels.qr_binding import keepalive_clawbot_sidecar
+
+        while True:
+            try:
+                await asyncio.sleep(45.0)
+                await keepalive_clawbot_sidecar()
+            except asyncio.CancelledError:
+                raise
+            except Exception as ka_err:
+                logger.debug(f"[WeixinClawbot] 保活巡检异常: {ka_err}")
+
+    clawbot_keepalive_task = asyncio.create_task(_clawbot_keepalive_loop())
+
     try:
         yield
     finally:
         logger.info("应用正在优雅关机，正在清理后台任务与常驻 MCP 进程池...")
-        for bg_task in (decay_task, scheduler_task, parent_watch_task, weixin_boot_task, asr_warmup_task):
+        for bg_task in (
+            decay_task,
+            scheduler_task,
+            parent_watch_task,
+            weixin_boot_task,
+            asr_warmup_task,
+            clawbot_keepalive_task,
+        ):
             if bg_task and not bg_task.done():
                 bg_task.cancel()
                 try:

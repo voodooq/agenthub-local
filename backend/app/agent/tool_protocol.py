@@ -1384,6 +1384,37 @@ class ToolProtocolAdapter:
                     "required": [],
                 },
             },
+            {
+                "name": "export_and_send_document",
+                "description": (
+                    "将总结报告、方案、分析内容生成真实可下载的本地文档（支持 .md / .docx / .pdf），"
+                    "并在微信等 IM 渠道中直接作为文件发送给用户。当用户要求生成 Word、PDF 或 Markdown 文档时必须调用。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "文档标题（如：力量训练总结报告）。",
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "文档完整正文内容（支持 Markdown 标题与列表语法）。",
+                        },
+                        "format": {
+                            "type": "string",
+                            "enum": ["md", "docx", "pdf"],
+                            "description": "导出格式：md（Markdown）、docx（Word 文档）或 pdf（PDF 文档）。",
+                            "default": "md",
+                        },
+                        "filename": {
+                            "type": "string",
+                            "description": "可选自定义文件名（如 力量训练总结报告.docx）。",
+                        },
+                    },
+                    "required": ["title", "content"],
+                },
+            },
         ]
 
     @staticmethod

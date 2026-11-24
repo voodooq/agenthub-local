@@ -380,6 +380,115 @@ class PersonalWorkflowService:
             return None
         return d
 
+    # ────────────────────────── 5. 导出真实可发送文档 (.md / .docx / .pdf) ──────────────────────────
+
+    @staticmethod
+    def _sanitize_doc_filename(name: str, ext: str) -> str:
+        clean = re.sub(r'[\\/:*?"<>|\r\n]+', "_", (name or "").strip()).strip("._ ")
+        if not clean:
+            clean = f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        if not clean.lower().endswith(f".{ext}"):
+            clean = f"{clean}.{ext}"
+        return clean
+
+    async def export_document(
+        self,
+        *,
+        title: str,
+        content: str,
+        fmt: str = "md",
+        filename: str = "",
+    ) -> dict[str, Any]:
+        """将报告或方案生成持久化文档（支持 md / docx / pdf）并返回物理路径。"""
+        from ..core.config import settings
+
+        norm_fmt = (fmt or "md").strip().lower().lstrip(".")
+        if norm_fmt == "word":
+            norm_fmt = "docx"
+        if norm_fmt not in ("md", "docx", "pdf"):
+            norm_fmt = "md"
+
+        out_dir = Path(settings.db_path).parent / "output"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_name = self._sanitize_doc_filename(filename or title or "document", norm_fmt)
+        out_path = out_dir / safe_name
+
+        def _render_sync() -> str:
+            text_body = (content or "").strip()
+            doc_title = (title or "文档报告").strip()
+
+            if norm_fmt == "md":
+                full_md = text_body if text_body.startswith("#") else f"# {doc_title}\n\n{text_body}"
+                out_path.write_text(full_md + "\n", encoding="utf-8")
+                return "md"
+
+            if norm_fmt == "docx":
+                from docx import Document  # type: ignore
+
+                doc = Document()
+                doc.add_heading(doc_title, level=1)
+                for raw_line in text_body.splitlines():
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    if line.startswith("### "):
+                        doc.add_heading(line[4:].strip(), level=3)
+                    elif line.startswith("## "):
+                        doc.add_heading(line[3:].strip(), level=2)
+                    elif line.startswith("# "):
+                        doc.add_heading(line[2:].strip(), level=1)
+                    elif line.startswith(("- ", "* ", "• ")):
+                        doc.add_paragraph(line[2:].strip(), style="List Bullet")
+                    else:
+                        doc.add_paragraph(line.replace("**", ""))
+                doc.save(str(out_path))
+                return "docx"
+
+            # pdf: 使用 fpdf2 并自动探测中文字体
+            from fpdf import FPDF  # type: ignore
+
+            pdf = FPDF()
+            pdf.set_auto_page_break(auto=True, margin=15)
+            pdf.add_page()
+            font_candidates = [
+                "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+                "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "C:/Windows/Fonts/msyh.ttc",
+                "C:/Windows/Fonts/simsun.ttc",
+            ]
+            font_path = next((p for p in font_candidates if Path(p).exists()), "")
+            font_family = "Helvetica"
+            if font_path:
+                pdf.add_font("ZHFont", "", font_path, uni=True)
+                font_family = "ZHFont"
+
+            pdf.set_font(font_family, size=15)
+            safe_title = doc_title if font_path else doc_title.encode("latin-1", "replace").decode("latin-1")
+            pdf.multi_cell(0, 9, safe_title)
+            pdf.ln(3)
+            pdf.set_font(font_family, size=10.5)
+            for raw_line in text_body.splitlines():
+                clean_line = raw_line.replace("**", "").strip()
+                if not clean_line:
+                    pdf.ln(3)
+                    continue
+                if not font_path:
+                    clean_line = clean_line.encode("latin-1", "replace").decode("latin-1")
+                pdf.multi_cell(0, 6.5, clean_line)
+            pdf.output(str(out_path))
+            return "pdf"
+
+        used_fmt = await asyncio.to_thread(_render_sync)
+        size_bytes = out_path.stat().st_size if out_path.exists() else 0
+        return {
+            "success": True,
+            "format": used_fmt,
+            "file_name": out_path.name,
+            "file_path": str(out_path),
+            "size_bytes": size_bytes,
+        }
+
 
 personal_workflow_service = PersonalWorkflowService()
 

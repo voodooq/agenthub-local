@@ -84,8 +84,14 @@ class WeixinClawbotAdapter(BaseChannelAdapter):
         bridge_secret = str(cfg.get("bridge_secret") or "").strip()
         req_headers = {"X-Bridge-Secret": bridge_secret} if bridge_secret else {}
 
+        files_payload = [
+            {"file_path": str(att["file_path"]), "file_name": str(att.get("file_name") or "")}
+            for att in (outbound.attachments or [])
+            if isinstance(att, dict) and att.get("file_path")
+        ]
+
         try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
+            async with httpx.AsyncClient(timeout=30.0) as client:
                 resp = await client.post(
                     f"{bridge_url}/send",
                     headers=req_headers,
@@ -94,6 +100,7 @@ class WeixinClawbotAdapter(BaseChannelAdapter):
                         "to_wxid": inbound.reply_context.get("to_wxid") or inbound.sender_id,
                         "chat_id": inbound.reply_context.get("chat_id") or inbound.chat_id,
                         "chunks": outbound.chunks or [outbound.formatted_text],
+                        "files": files_payload,
                     },
                 )
                 return {"pushed": resp.status_code < 400, "status_code": resp.status_code}

@@ -108,6 +108,9 @@ const state = {
   rx_count: 0,
   last_rx_text: '',
   last_forward_status: 0,
+  last_poll_ok_at: 0,
+  poll_errors: 0,
+  last_poll_error: '',
   context_tokens: new Map(), // user_id -> context_token
   typing_tickets: new Map(), // user_id -> { ticket, expiresAt }
   polling_qr: false,
@@ -479,6 +482,110 @@ async function sendIlinkTextMessage(toUserId, text) {
   return { ok: resp.ok, status: resp.status, body: raw.slice(0, 200) };
 }
 
+async function uploadAndSendIlinkFile(toUserId, filePath, customFileName = '') {
+  if (!state.bot_token || !toUserId || !filePath) {
+    return { ok: false, error: '未登录微信 ClawBot 或缺少文件路径/收件人' };
+  }
+  if (!fs.existsSync(filePath)) {
+    return { ok: false, error: `本地文件不存在: ${filePath}` };
+  }
+  const plainBuf = fs.readFileSync(filePath);
+  const fileName = customFileName || path.basename(filePath);
+  const baseUrl = (state.ilink_base_url || DEFAULT_ILINK_BASE).replace(/\/+$/, '');
+  const fileKey = crypto.randomBytes(16).toString('hex');
+  const aesKey = crypto.randomBytes(16);
+  const aesKeyHex = aesKey.toString('hex');
+  const aesKeyB64 = aesKey.toString('base64');
+  const rawSize = plainBuf.length;
+  const rawMd5 = crypto.createHash('md5').update(plainBuf).digest('hex');
+
+  const cipher = crypto.createCipheriv('aes-128-ecb', aesKey, null);
+  const encBuf = Buffer.concat([cipher.update(plainBuf), cipher.final()]);
+
+  try {
+    const upResp = await fetch(`${baseUrl}/ilink/bot/getuploadurl`, {
+      method: 'POST',
+      headers: buildIlinkHeaders(),
+      signal: AbortSignal.timeout(15_000),
+      body: JSON.stringify({
+        filekey: fileKey,
+        media_type: 3, // FILE
+        to_user_id: toUserId,
+        rawsize: rawSize,
+        rawfilemd5: rawMd5,
+        filesize: encBuf.length,
+        no_need_thumb: true,
+        aeskey: aesKeyHex,
+        base_info: { channel_version: '2.0.1' },
+      }),
+    });
+    if (!upResp.ok) {
+      return { ok: false, error: `getuploadurl HTTP ${upResp.status}` };
+    }
+    const upData = await upResp.json();
+    const uploadParam = String(upData.upload_param || '').trim();
+    if (!uploadParam) {
+      return { ok: false, error: 'getuploadurl 未返回 upload_param' };
+    }
+
+    const cdnUploadUrl = `${DEFAULT_ILINK_CDN_BASE}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(fileKey)}`;
+    const cdnResp = await fetch(cdnUploadUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/octet-stream' },
+      body: encBuf,
+      signal: AbortSignal.timeout(30_000),
+    });
+    if (!cdnResp.ok) {
+      return { ok: false, error: `CDN 上传失败 HTTP ${cdnResp.status}` };
+    }
+    const encryptedQueryParam = String(
+      cdnResp.headers.get('x-encrypted-param') || upData.download_param || uploadParam
+    ).trim();
+
+    const ctxToken = state.context_tokens.get(toUserId) || '';
+    const msgBody = {
+      msg: {
+        from_user_id: '',
+        to_user_id: toUserId,
+        client_id: `ah_file_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+        message_type: 2,
+        message_state: 2,
+        context_token: ctxToken,
+        item_list: [
+          {
+            type: 4,
+            file_item: {
+              media: {
+                encrypt_query_param: encryptedQueryParam,
+                aes_key: Buffer.from(aesKeyHex, 'utf8').toString('base64'),
+                encrypt_type: 1,
+              },
+              file_name: fileName,
+              len: String(rawSize),
+            },
+          },
+        ],
+      },
+      base_info: { channel_version: '2.0.1' },
+    };
+    const sendResp = await fetch(`${baseUrl}/ilink/bot/sendmessage`, {
+      method: 'POST',
+      headers: buildIlinkHeaders(),
+      body: JSON.stringify(msgBody),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const rawText = await sendResp.text();
+    if (!sendResp.ok) {
+      return { ok: false, status: sendResp.status, body: rawText.slice(0, 200), aes_b64: aesKeyB64 };
+    }
+    console.log(`[WeixinBridge] 已推送微信文件: ${fileName} (${rawSize} bytes) -> ${toUserId}`);
+    return { ok: true, status: sendResp.status, file_name: fileName, bytes: rawSize };
+  } catch (err) {
+    console.error('[WeixinBridge] 发送文件异常:', err?.message || err);
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
+
 async function startGetUpdatesLoop() {
   if (state.polling_updates || !state.bot_token) return;
   state.polling_updates = true;
@@ -490,15 +597,21 @@ async function startGetUpdatesLoop() {
       const resp = await fetch(`${baseUrl}/ilink/bot/getupdates`, {
         method: 'POST',
         headers: buildIlinkHeaders(),
+        signal: AbortSignal.timeout(45_000),
         body: JSON.stringify({
           get_updates_buf: state.get_updates_buf || '',
           base_info: { channel_version: '1.0.0' },
         }),
       });
       if (!resp.ok) {
+        state.poll_errors += 1;
+        state.last_poll_error = `HTTP ${resp.status}`;
         await new Promise((r) => setTimeout(r, 3000));
         continue;
       }
+      state.last_poll_ok_at = Date.now();
+      state.poll_errors = 0;
+      state.last_poll_error = '';
       const data = await resp.json();
       let needSave = false;
       if (typeof data.get_updates_buf === 'string' && data.get_updates_buf && data.get_updates_buf !== state.get_updates_buf) {
@@ -551,7 +664,9 @@ async function startGetUpdatesLoop() {
         savePersistedSession();
       }
     } catch (err) {
-      await new Promise((r) => setTimeout(r, 2500));
+      state.poll_errors += 1;
+      state.last_poll_error = String(err?.message || err);
+      await new Promise((r) => setTimeout(r, 2000));
     }
   }
   state.polling_updates = false;
@@ -619,6 +734,7 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://127.0.0.1:${PORT}`);
 
   if (req.method === 'GET' && url.pathname === '/status') {
+    const pollAgeSec = state.last_poll_ok_at ? Math.round((Date.now() - state.last_poll_ok_at) / 1000) : null;
     return sendJson(res, 200, {
       ok: true,
       bridge_online: true,
@@ -628,6 +744,11 @@ const server = http.createServer(async (req, res) => {
       wxid: state.wxid,
       qr_url: state.qr_url,
       ingress_configured: Boolean(state.ingress_url),
+      polling_updates: state.polling_updates,
+      last_poll_ok_at: state.last_poll_ok_at,
+      poll_age_sec: pollAgeSec,
+      poll_errors: state.poll_errors,
+      last_poll_error: state.last_poll_error,
       rx_count: state.rx_count,
       last_rx_text: state.last_rx_text,
       last_forward_status: state.last_forward_status,
@@ -704,7 +825,31 @@ const server = http.createServer(async (req, res) => {
       if (!chunk) continue;
       results.push(await sendIlinkTextMessage(toWxid, String(chunk)));
     }
-    return sendJson(res, 200, { ok: true, delivered_chunks: results.filter((r) => r.ok).length, results });
+    const files = Array.isArray(body.files) ? body.files : [];
+    const fileResults = [];
+    for (const f of files) {
+      if (!f || !f.file_path) continue;
+      fileResults.push(await uploadAndSendIlinkFile(toWxid, String(f.file_path), String(f.file_name || '')));
+    }
+    return sendJson(res, 200, {
+      ok: true,
+      delivered_chunks: results.filter((r) => r.ok).length,
+      delivered_files: fileResults.filter((r) => r.ok).length,
+      results,
+      file_results: fileResults,
+    });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/send-file') {
+    if (BRIDGE_SECRET && req.headers['x-bridge-secret'] !== BRIDGE_SECRET) {
+      return sendJson(res, 401, { ok: false, error: 'Unauthorized bridge secret' });
+    }
+    const body = await readJsonBody(req);
+    const toWxid = String(body.to_wxid || body.chat_id || state.wxid || '').trim();
+    const filePath = String(body.file_path || '').trim();
+    const fileName = String(body.file_name || '').trim();
+    const r = await uploadAndSendIlinkFile(toWxid, filePath, fileName);
+    return sendJson(res, r.ok ? 200 : 500, r);
   }
 
   if (req.method === 'POST' && url.pathname === '/config') {

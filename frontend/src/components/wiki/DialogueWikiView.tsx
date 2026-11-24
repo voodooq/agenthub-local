@@ -445,7 +445,7 @@ export function DialogueWikiView() {
           bound_scope: boundScope.trim(),
           memory_extract_enabled: memoryExtractEnabled,
           vector_train_enabled: vectorTrainEnabled,
-          owner_mode: boundRole === 'hq_admin' ? ownerMode : false,
+          owner_mode: selectedChannel === 'weixin_clawbot' || boundRole === 'hq_admin' ? ownerMode : false,
         }),
       });
       const json = await res.json();
@@ -543,7 +543,7 @@ export function DialogueWikiView() {
           bound_scope: editBoundScope.trim(),
           memory_extract_enabled: editMemoryExtract,
           vector_train_enabled: editVectorTrain,
-          owner_mode: editBoundRole === 'hq_admin' ? editOwnerMode : false,
+          owner_mode: editingLink.channel_type === 'weixin_clawbot' || editBoundRole === 'hq_admin' ? editOwnerMode : false,
         }),
       });
       const json = await res.json();
@@ -912,7 +912,7 @@ export function DialogueWikiView() {
               />
               <span>对话记录增量向量化训练（预留）</span>
             </label>
-            {boundRole === 'hq_admin' && (
+            {(selectedChannel === 'weixin_clawbot' || boundRole === 'hq_admin') && (
               <label className="flex items-center gap-2 cursor-pointer text-amber-400 font-medium">
                 <input
                   type="checkbox"
@@ -921,7 +921,11 @@ export function DialogueWikiView() {
                   className="rounded border-border accent-amber-500"
                 />
                 <Crown className="w-3.5 h-3.5" />
-                <span>开启主人全能模式（高危需二次确认）</span>
+                <span>
+                  {selectedChannel === 'weixin_clawbot'
+                    ? '开启微信 Claw 主人全权限模式（开放托管主机全量操控与自动生成文件，仅限本微信渠道）'
+                    : '开启主人全能模式（高危需二次确认）'}
+                </span>
               </label>
             )}
           </div>
@@ -1917,7 +1921,7 @@ export function DialogueWikiView() {
                   />
                   <span>对话记录增量向量化训练</span>
                 </label>
-                {editBoundRole === 'hq_admin' && (
+                {(editingLink.channel_type === 'weixin_clawbot' || editBoundRole === 'hq_admin') && (
                   <label className="flex items-center gap-2 cursor-pointer text-amber-400 font-medium">
                     <input
                       type="checkbox"
@@ -1926,7 +1930,11 @@ export function DialogueWikiView() {
                       className="rounded border-border accent-amber-500"
                     />
                     <Crown className="w-3.5 h-3.5" />
-                    <span>开启主人全能控制台（解锁运维与改代码，高危操作需微信二次确认）</span>
+                    <span>
+                      {editingLink.channel_type === 'weixin_clawbot'
+                        ? '开启微信 Claw 主人全权限模式（开放托管主机全量操控与免确认执行，仅限本微信渠道）'
+                        : '开启主人全能控制台（解锁运维与改代码，高危操作需微信二次确认）'}
+                    </span>
                   </label>
                 )}
               </div>
