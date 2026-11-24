@@ -29,6 +29,8 @@ _DEBOUNCE_TEXT_SECONDS = 1.5
 _DEBOUNCE_MEDIA_SECONDS = 4.5
 # 单一微信窗口静默超 2 小时自动开启全新短期上下文，防止多话题串台
 _SESSION_SOFT_SPLIT_SECONDS = 7200.0
+# 仅当单轮推理超过 18 秒（如真正在执行编译/深度分析/多步工具）才推送“转后台处理”并释放主锁
+_LONG_TASK_DETACH_SECONDS = 18.0
 
 
 class _DebounceBuffer(TypedDict):
@@ -417,7 +419,8 @@ class ChannelGateway:
                     "   - 当用户让你**查以前的聊天记录 / 核对以前说过的话**：主动调用 `search_im_chat_history` 查真实落库记录并准确作答；\n"
                     "   - 当用户让你**设置定时提醒 / 到点叫我**：主动调用 `create_im_reminder`（或用 `list_or_cancel_im_reminders` 查看取消），到点时系统会真正主动往微信发通知；\n"
                     "   - 当用户询问**天气或最新实时资讯**：主动调用 `get_weather` / `web_search` 获取真实数据后直给结论，**严禁回复“我没有时钟 / 我查不到天气 / 你自己打开手机 App 看”**；\n"
-                    "   - 当用户询问**写程序 / 脚本 / 技术排错**：可以直接在微信里给出精简清晰的核心代码片段、排错脚本或技术方案思路，仅在需要整库构建或操作本机桌面软件时简短建议回到电脑端协同。\n"
+                    "   - 当用户询问**写程序 / 脚本 / 技术排错**：可以直接在微信里给出精简清晰的核心代码片段、排错脚本或技术方案思路，仅在需要整库构建或操作本机桌面软件时简短建议回到电脑端协同；\n"
+                    "   - **重要备忘工具选择铁律**：当用户让你记录任何计划、备忘、待办或习惯时，**必须直接调用 `manage_personal_notes(action='add', ...)` 或 `save_long_term_memory`** 存入数据库，**严禁调用 `write_local_file` 写本地文件**！\n"
                     "2. **温暖干练口语化（去掉冷漠客服腔）**：\n"
                     "   - 像一位贴身靠谱的资深私人助理兼同事在微信上聊天，自然、有温度、不机械道歉，日常回答控制精炼（常规 2~6 句话，150~300 字内；代码/方案除外）；\n"
                     "   - 不堆砌多级标题、背景铺垫或免责声明；\n"
@@ -1154,7 +1157,7 @@ class ChannelGateway:
             await lock.acquire()
             detached_to_bg = False
             try:
-                done_set, _ = await asyncio.wait({exec_task}, timeout=8.0)
+                done_set, _ = await asyncio.wait({exec_task}, timeout=_LONG_TASK_DETACH_SECONDS)
                 if not done_set:
                     detached_to_bg = True
                     try:

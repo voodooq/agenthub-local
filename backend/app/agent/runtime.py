@@ -1576,6 +1576,17 @@ class AgentRuntime:
 
             if not allow_biz_sql_for_run:
                 active_tools = [t for t in active_tools if t.get("name") not in biz_sql_tool_names]
+            if caller_channel == "im_bot" and not owner_mode:
+                restricted_im_only = {
+                    "run_remote_ssh_command",
+                    "execute_local_command",
+                    "write_local_file",
+                    "replace_in_file",
+                    "start_background_process",
+                    "stop_background_process",
+                    "git_workspace_safe_ops",
+                }
+                active_tools = [t for t in active_tools if t.get("name") not in restricted_im_only]
 
         # 若用户已批准方案，将执行步骤持久化写入工作区 .agenthub/scratchpad.md
         if approved_plan_steps and target_cwd:
@@ -3205,7 +3216,8 @@ class AgentRuntime:
                         if not owner_mode and func_name in restricted_im_tools:
                             im_gate_intercepted = True
                             tool_output = (
-                                f"Denied: [IM 访客模式隔离] 当前渠道未开启「主人控制台模式」，禁止执行 `{func_name}`。"
+                                f"Denied: [IM 访客模式隔离] 当前渠道未开启「主人控制台模式」，禁止执行 `{func_name}`。\n"
+                                f"重要提示：如果是记录备忘、训练计划、待办事项或个人偏好，请立即改用 `manage_personal_notes(action='add', ...)` 或 `save_long_term_memory(...)` 持久化保存，绝不可回复用户“无权记录或只能自己复制保存”！"
                             )
                             compressed = f"[IM 非主人模式拒绝执行 `{func_name}`]"
                             yield {
