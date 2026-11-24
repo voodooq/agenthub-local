@@ -286,9 +286,26 @@ class ChannelGateway:
         self, *, link_id: str, channel_type: str, sender_id: str, chat_id: str
     ) -> str:
         """响应 /new 指令强制切换新短期对话 ID，保留历史库与长期记忆。"""
+        return await self._switch_session_conv_id(
+            link_id=link_id,
+            channel_type=channel_type,
+            sender_id=sender_id,
+            chat_id=chat_id,
+            new_conv_id=f"im_{secrets.token_hex(8)}",
+        )
+
+    async def _switch_session_conv_id(
+        self,
+        *,
+        link_id: str,
+        channel_type: str,
+        sender_id: str,
+        chat_id: str,
+        new_conv_id: str,
+    ) -> str:
+        """原子切换 IM 会话映射到指定对话 ID（用于 /new 重置或上下文超阈值自动分支 rollover）。"""
         session_key = f"{channel_type}:{link_id}:{chat_id}:{sender_id}"
         now_ts = time.time()
-        new_conv_id = f"im_{secrets.token_hex(8)}"
         async with db_manager.get_connection() as conn:
             await self._ensure_gateway_tables(conn)
             await conn.execute(
@@ -735,6 +752,20 @@ class ChannelGateway:
                                 stream_buf = ""
                                 if ready:
                                     await _flush_stream_segment(ready)
+                    elif ev_type == "conversation_rollover":
+                        new_cid = str(ev.get("new_conversation_id") or "").strip()
+                        if new_cid:
+                            await self._switch_session_conv_id(
+                                link_id=link["link_id"],
+                                channel_type=inbound.channel_type,
+                                sender_id=inbound.sender_id,
+                                chat_id=inbound.chat_id,
+                                new_conv_id=new_cid,
+                            )
+                            logger.info(
+                                f"[ChannelGateway] 上下文水位达 {ev.get('watermark_pct')}% 自动分支，"
+                                f"已将 IM 会话 {session_key} 切换至新会话 {new_cid}"
+                            )
                     elif ev_type == "done":
                         final_content = str(
                             ev.get("final_step_content") or ev.get("full_content") or "".join(chunks_acc)

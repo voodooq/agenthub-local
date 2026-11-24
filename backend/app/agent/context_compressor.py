@@ -749,6 +749,18 @@ class LocalContextCompressor:
             provider_info=provider_info,
         )
 
+        rollover_token_budget = int(int(policy.get("context_limit") or 0) * get_effective_rollover_ratio())
+        if rollover_token_budget > 0 and total_tokens >= rollover_token_budget:
+            # 已达到自动分支 (rollover) 水位阈值，跳过同会话分块坍缩，交给 Runtime 触发自动分支新会话
+            return {
+                "collapse_anchor_turn_id": anchor_turn,
+                "anchored_summary": summary_text,
+                "zone2_messages": active_msgs,
+                "collapsed_triggered": False,
+                "added_saved_tokens": 0,
+                "policy": policy,
+            }
+
         hit_turn_limit = len(completed_turns) >= int(policy["max_window_turns"])
         hit_cli_char_limit = is_cli_provider and active_chars >= cli_char_budget
         hit_token_limit = (total_tokens >= trigger_token_budget) or hit_cli_char_limit
