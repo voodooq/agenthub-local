@@ -7202,9 +7202,11 @@ class AgentRuntime:
                         yield {
                             "type": "done",
                             "full_content": (
-                                f"{accumulated_visible_text.strip()}\n\n{rollover_notice}".strip()
+                                accumulated_visible_text.strip()
+                                if caller_channel == "im_bot"
+                                else f"{accumulated_visible_text.strip()}\n\n{rollover_notice}".strip()
                             ),
-                            "final_step_content": rollover_notice,
+                            "final_step_content": "" if caller_channel == "im_bot" else rollover_notice,
                             "account": final_account,
                             "model": effective_model_name,
                         }

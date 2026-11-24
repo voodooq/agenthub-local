@@ -33,13 +33,34 @@ _SESSION_SOFT_SPLIT_SECONDS = 7200.0
 # 仅当单轮推理超过 18 秒（如真正在执行编译/深度分析/多步工具）才推送“转后台处理”并释放主锁
 _LONG_TASK_DETACH_SECONDS = 18.0
 _LONG_TASK_DETACH_PHRASES = (
-    "这事儿稍微有点工程量，我先放后台接着跑，弄好了第一时间叫你~（想叫停随时回个「停」就行）",
-    "收到，这个需要点时间处理，我先在后台慢慢干，你可以先忙别的，出结果直接发你（回「停」可中止）。",
-    "正在后台全力处理中，估计还得一会儿，有结果立马推给你，期间有别的事随时吩咐（发「停」可取消）。",
-    "先帮你挂在后台跑着啦，省得你一直干等，搞定后我马上把结果发过来（随时回个「停」就能中断）。",
-    "这步稍微耗点时间，我转到后台继续弄，你先忙你的，弄完我喊你（要取消回个「停」即可）。",
-    "好嘞，已经在后台加紧处理了，稍微等我一会儿，弄完立刻发给你（发「停」可随时打断）。",
+    "收到，正在为您处理中。由于涉及较多数据整理，我先在后台推进，完成后直接发您微信（随时发「停」可中止）。",
+    "任务已在后台加紧处理中，预计需要 1~2 分钟，整理完毕后第一时间将结果发您（随时发「停」可打断）。",
+    "收到，正在深度检索与排版中，我先在后台全力执行，您可以先忙别的，好了直接发您（随时发「停」可取消）。",
+    "已为您转入后台静默处理，完成后会第一时间推送到微信，请稍候（随时回复「停」可随时中断）。",
 )
+
+
+def _clean_im_system_artifacts(text: str) -> str:
+    """深度清洗可能泄露到微信聊天界面的后台系统交接标记、中间草稿与机器免责声称。"""
+    if not text:
+        return ""
+    import re as _re
+    t = text
+    # 剥离多层嵌套的交接摘要头部与正文
+    t = _re.sub(r"##\s*🔁\s*上下文水位接力交接摘要[\s\S]*?(?=\n##|\Z)", "", t)
+    # 剥离水位达标提示行
+    t = _re.sub(r"🔁\s*当前会话上下文水位已达[\s\S]*?继续执行。?", "", t)
+    # 剥离交接硬锚点与工作区标记
+    t = _re.sub(r"\*\*交接硬锚点\*\*:[^\n]+", "", t)
+    t = _re.sub(r"\[已折叠命令[\s\S]*?\]", "", t)
+    t = _re.sub(r"\[已更新工作草稿纸[\s\S]*?\]", "", t)
+    t = _re.sub(r"\[连续精读切片[\s\S]*?\]", "", t)
+    # 剥离自证清白口吻与机械免责
+    t = _re.sub(r"以上信息均来自本地知识库真实文档元数据[，,]\s*未编造[。.]?", "", t)
+    t = _re.sub(r"以上数据均来自真实文档[，,]\s*未编造[。.]?", "", t)
+    t = _re.sub(r"以上信息均来自本地知识库真实文档[，,]\s*未编造[。.]?", "", t)
+    t = _re.sub(r"如果您需要查看某份规程的具体章节内容[，,]?\s*可以告诉我[，,]?\s*我帮您进一步读取[。.]?", "", t)
+    return t.strip()
 
 
 class _DebounceBuffer(TypedDict):
@@ -453,26 +474,29 @@ class ChannelGateway:
                 has_tool_in_stream = False
                 final_content = ""
                 im_concise_prompt = (
-                    "### 💬 当前为手机微信私人助理与实时对话场景（高情商、靠谱、不推诿）\n"
-                    "1. **主动调用真实能力，严禁虚假拒答**：\n"
-                    "   - 当用户让你**记备忘 / 添加待办 / 查看备忘**：必须主动调用 `manage_personal_notes`（或 `save_long_term_memory`）持久化落库，并明确回复“已帮你记下”，**严禁说“我记不住 / 下次就忘了 / 建议你自己记在笔记里”**；\n"
+                    "### 💬 当前为手机微信私人助理专属场景（极简、干练、懂事、靠谱、不推诿）\n"
+                    "1. **身份定位与说话风格（彻底去掉客服腔与机器免责声明）**：\n"
+                    "   - 你是一位贴身靠谱、从容干练的高级随身秘书兼全能技术搭档；\n"
+                    "   - **【严禁过程思考与规划独白】微信端严禁输出任何心理活动、中间准备工作或规划碎碎念**！例如绝对禁止输出“我接下来需要定位这些文档的物理存储路径……”、“我先查一下第X个切片……”、“我已经拿到了XX份，接下来我要……”等。所有排查、定位、读取只在工具内部静默完成，微信只接收最终结论与交付结果；\n"
+                    "   - **【严禁自证清白与机器免责声明】严禁输出“以上信息均来自真实文档未编造”、“未编造”、“真实文档元数据”等机器防守性套话**，像真人私人秘书一样从容自信；\n"
+                    "   - **【严禁句末套话反问与机械推销】严禁在每句话末尾机械黏贴反问**（例如“需要我帮您记录到备忘录吗”、“需要设提醒吗”、“您方便哪种方式”等）；日常回答干脆利落，办完就汇报完结；\n"
+                    "   - **【严禁客服式三选一踢皮球】严禁动辄给出“您可以：1.直接粘贴 2.重新上传 3.提供链接”等机械选项**，若遇文件正在接收中或格式微瑕，主动温和引导，具备帮用户兜底排查的主人翁意识；\n"
+                    "   - 日常微信文字回答控制在 2~5 句话（100~250 字以内），语言洗练，符合手机窄屏阅读体验；\n"
+                    "\n2. **交付降维（大体量数据与明细清单一律走附件文档）**：\n"
+                    "   - 当统计或检索结果包含**超过 5 条的赛事规程、明细清单、日程安排、或者包含表格数据**时：**正文绝对禁止在微信里倾泻几十屏的 Markdown 长文本**！\n"
+                    "   - 正文只保留 3~5 句概要概括（例如说明共梳理了多少场赛事、核心时间跨度与分类统计），**必须直接调用 `export_and_send_document(title=..., content=..., format='docx'|'xlsx'|'pdf'|'md')`** 生成结构化排版的真实文档，系统会自动把文件直接推送到用户手机微信；\n"
+                    "\n3. **主动调用真实能力，严禁虚假拒答**：\n"
+                    "   - 当用户让你**记备忘 / 添加待办 / 查看备忘**：必须主动调用 `manage_personal_notes`（或 `save_long_term_memory`）持久化落库，并明确回复“已帮您记下”，严禁推脱；\n"
                     "   - 当用户让你**查以前的聊天记录 / 核对以前说过的话**：主动调用 `search_im_chat_history` 查真实落库记录并准确作答；\n"
-                    "   - 当用户让你**设置定时提醒 / 添加计划任务 / 每天定时执行**：必须主动调用 `create_im_reminder`（支持单次如 `10分钟后`、`明早8点`，以及周期 Cron 如 `每天早上8:30`；若到点需查天气/待办/新闻或执行总结，请设 `run_as_agent=True`），查看或取消调用 `list_or_cancel_im_reminders`，**严禁说“不支持计划任务”**；\n"
-                    "   - 当用户询问**天气或最新实时资讯 / 联网搜索**：你已直接拥有 `get_weather`、`web_search` 与 `web_fetch` 工具，必须主动调用获取真实结果后直给结论，**严禁回复“我没有时钟 / 暂时不能联网搜索 / 我查不到实时天气 / 你自己打开手机 App 看”**；\n"
-                    "   - 当用户要求**生成 Word(.docx) / PDF(.pdf) / Markdown(.md) 文档或总结报告文件**：**必须直接调用 `export_and_send_document(title=..., content=..., format='docx'|'pdf'|'md')`** 生成真实文件，系统会自动把文档文件直接推送到用户手机微信！\n"
-                    "   - 当用户要求**用语音回复 / 发语音给我 / 念给我听**：必须直接调用 `send_weixin_voice_bubble(text=...)` 合成微信原生 SILK 语音气泡发送！\n"
-                    "   - 当用户要求**把本地图片、视频或任意文件发到微信**：调用 `send_weixin_media(file_path=..., media_type='image'|'video'|'file')` 直接推送到用户微信。\n"
-                    "   - **绘制中文图片/海报/图表/PDF 铁律**：生成 PDF/Word/MD 文档请**优先直接调用 `export_and_send_document`**（内置中文字体与编码适配，严禁自己用 ReportLab 硬写导致缺字方块）；在 Linux 容器内用 Pillow/matplotlib 绘制含中文的图片时，**必须显式指定中文字体路径 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`**（可用 `fc-list :lang=zh` 兜底），严禁使用 `DejaVuSans.ttf` 或 `ImageFont.load_default()` 导致中文显示为方框！\n"
-                    "   - 当用户询问**写程序 / 脚本 / 技术排错**：可以直接在微信里给出精简清晰的核心代码片段、排错脚本或技术方案思路，仅在需要整库构建或操作本机桌面软件时简短建议回到电脑端协同；\n"
+                    "   - 当用户让你**设置定时提醒 / 周期提醒**：必须主动调用 `create_im_reminder` 处理；\n"
+                    "   - 当用户询问**实时天气 / 联网搜索资讯**：必须主动调用 `get_weather`、`web_search` 或 `web_fetch`；\n"
+                    "   - 当用户要求**用语音回复 / 发语音给我 / 念给我听**：调用 `send_weixin_voice_bubble(text=...)` 发送微信原生语音气泡；\n"
+                    "   - 当用户要求**发送本地图片、视频或文件到微信**：调用 `send_weixin_media(file_path=..., media_type='image'|'video'|'file')`；\n"
+                    "   - **绘制中文图片/海报/图表/PDF 铁律**：生成 PDF/Word/MD 文档优先调用 `export_and_send_document`；Linux 容器内绘图必须显式指定中文字体 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`；\n"
                     "   - 当用户询问你**能否听语音 / 语音识别 / 看图片**，或直接发送语音条/图片时：网关已为你接入微信语音自动转文字与图片识别能力（OCR + 视觉理解），请如实肯定并欢迎用户直接发语音条或图片给你，**严禁回复“目前还不能做语音识别”或“我只能处理文字对话”**！\n"
-                    "   - **备忘 vs 文档区分铁律**：如果用户只是口头让你记住计划/备忘/待办，调用 `manage_personal_notes(action='add', ...)` 或 `save_long_term_memory` 存入数据库；如果用户明确要求生成文档文件，调用 `export_and_send_document`；若已开启主人全能模式且需要写项目代码/脚本，可直接调用 `write_local_file`。\n"
-                    "2. **温暖干练口语化（去掉冷漠客服腔）**：\n"
-                    "   - 像一位贴身靠谱的资深私人助理兼同事在微信上聊天，自然、有温度、不机械道歉，日常回答控制精炼（常规 2~6 句话，150~300 字内；代码/方案除外）；\n"
-                    "   - 不堆砌多级标题、背景铺垫或免责声明；\n"
-                    "3. **静默查库、严禁泄露后台技术字眼**：\n"
-                    "   - 调用任何工具查询时保持静默，**严禁输出“我将读取……”“我先查一下……”“正在读取第 X 切片……”等中间过程旁白**；\n"
-                    "   - 引用规程或文档时只报名称，**严禁带 `.pdf`/`.docx`/`.xlsx` 扩展名、`doc_id`、`tool_ref`、切片号等内部字段**；\n"
-                    "4. **关键事实务必准确**：时间、日期、数字与统计口径务必核实清楚后再回复。"
+                    "   - **备忘 vs 文档区分**：口头随记计划/备忘调用 `manage_personal_notes`；明确要求导出文件调用 `export_and_send_document`；\n"
+                    "\n4. **静默查库与事实准确**：\n"
+                    "   - 调用工具时保持彻底静默，严禁向外吐露中间旁白；引用规程时只报正规名称，严禁泄露 `doc_id`、`tool_ref`、切片号与系统文件名；事实口径准确无误。"
                 )
 
                 async def _flush_stream_segment(seg_raw: str) -> None:
@@ -704,7 +728,8 @@ class ChannelGateway:
                     ):
                         ev_type = ev.get("type")
                         if ev_type in ("tool_start", "tool_end", "start"):
-                            # 进入工具执行或新 ReAct 步骤时清空上一中间步骤的过渡文本缓冲，绝不把工具前过渡语发到 IM
+                            # 一旦进入工具调用阶段，标记本轮为多步 Agent 任务，彻底关闭中间思考过程的流式外溢
+                            has_tool_in_stream = True
                             chunks_acc.clear()
                             stream_buf = ""
                         elif ev_type == "stream_reset":
@@ -714,8 +739,10 @@ class ChannelGateway:
                             piece = ev["content"]
                             chunks_acc.append(piece)
                             stream_buf += piece
-                            # 严防泄露 <tool_call>、后台技术标识与工具调用前过渡独白（如“我将读取/查询/检索...”）：
-                            # 只有确认无任何 `<` 标签、无代码块、无后台 ID/切片词且非工具前过渡独白时，才按段落实时流式推送
+                            # 若本轮已有工具执行，中间生成的文字均为思考规划，绝对不向微信下发半成品碎片
+                            if has_tool_in_stream:
+                                continue
+                            # 严防泄露 <tool_call>、后台技术标识与规划独白（如“我接下来需要定位/提取...”）：
                             low_buf = stream_buf.lower()
                             unsafe_tag = (
                                 "<" in stream_buf
@@ -740,6 +767,24 @@ class ChannelGateway:
                                         "正在检索",
                                         "切片",
                                         "当前会话上下文水位已达",
+                                        "接下来我",
+                                        "接下来需要",
+                                        "接下来将",
+                                        "接下来准备",
+                                        "接下来去",
+                                        "我需要先",
+                                        "我先定位",
+                                        "我已经拿到",
+                                        "已经获取到",
+                                        "定位物理",
+                                        "定位存储",
+                                        "批量提取",
+                                        "提取比赛",
+                                        "我先看一下",
+                                        "我先看看",
+                                        "我来查一下",
+                                        "我先找找",
+                                        "稍等我",
                                     )
                                 )
                                 or any(
@@ -798,9 +843,17 @@ class ChannelGateway:
                     ):
                         rollover_hops += 1
                         cur_conv_id = str(rollover_event["new_conversation_id"]).strip()
-                        cur_user_msg = str(rollover_event["continue_prompt"]).strip()
+                        base_continue = str(rollover_event["continue_prompt"]).strip()
+                        cur_user_msg = (
+                            f"{base_continue}\n\n"
+                            "【微信私人助理接力铁律】：当前任务仍在执行中，用户正在手机微信等待最终交付成果！\n"
+                            "请直接调用必要工具完成上述任务并导出交付物（如 Word/PDF/Excel 文档），完成后直接向用户汇报最终结果并推送文件。\n"
+                            "严禁向用户输出任何交接说明、水位提示，严禁反问‘有其他事吗’，请直接推进并交付！"
+                        )
                         cur_attachments = None
                         streamed_segments.clear()
+                        chunks_acc.clear()
+                        final_content = ""
                         logger.info(
                             f"[ChannelGateway] 触发自动分支接力续跑 (hop={rollover_hops}/{max_rollover_hops}, new_conv={cur_conv_id})"
                         )
@@ -808,11 +861,12 @@ class ChannelGateway:
                     break
 
                 raw_reply = (final_content or "".join(chunks_acc)).strip()
+                raw_reply = _clean_im_system_artifacts(raw_reply)
                 if not raw_reply:
                     raw_reply = (
-                        "已为你生成并发送，请查收。"
+                        "已为您整理完成并导出文档，请查收微信文件。"
                         if exported_attachments
-                        else "刚才处理时没有生成有效文字回复，你可以再跟我说一遍具体需求。"
+                        else "刚才处理时没有生成有效文字回复，您可以再跟我说一遍具体需求。"
                     )
                 formatted_text, out_chunks = format_for_im_channel(
                     raw_reply, max_chunk_chars=getattr(adapter, "max_chunk_chars", 1500)
