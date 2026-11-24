@@ -6,6 +6,7 @@ AgentHub Local v1.5.8 知识库生命周期管理核心 (KB Lifecycle Manager)
 3. 专家角色与知识库绑定路由管理；
 4. 检索命中率测试台 (Retrieval Playground) 执行。
 """
+import asyncio
 import json
 from pathlib import Path
 import time
