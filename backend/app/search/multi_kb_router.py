@@ -7,6 +7,7 @@ AgentHub Local v1.5.8 多知识库隔离检索路由与门控中心 (Multi-KB Re
 """
 import asyncio
 from datetime import datetime
+import json
 from pathlib import Path
 import re
 import sqlite3
@@ -776,8 +777,8 @@ class MultiKBRetrievalRouter:
         if not slices:
             return True, f"未找到 doc_id=`{doc_id_or_title}` 的文档切片。", []
 
-        s_idx = max(1, int(start_index or 1))
-        e_idx = max(s_idx, min(int(end_index or s_idx), s_idx + 11))  # 单次最多连续读取 12 片
+        s_idx = max(1, start_index or 1)
+        e_idx = max(s_idx, min(end_index or s_idx, s_idx + 11))  # 单次最多连续读取 12 片
         selected = [s for s in slices if s_idx <= s["slice_index"] <= e_idx]
         if not selected:
             return True, f"文档 `{slices[0]['title']}` (doc_id=`{slices[0]['doc_id']}`) 共 {len(slices)} 片，范围 {s_idx}~{e_idx} 无命中。", []
