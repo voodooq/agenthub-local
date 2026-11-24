@@ -37,15 +37,56 @@ async def _is_bridge_alive(bridge_url: str) -> bool:
         return False
 
 
+async def _resolve_local_clawbot_ingress_url() -> str:
+    """构造同机回环入站回调地址（避免重启或反代变化导致 Sidecar 无法投递给后端）。"""
+    from ..core.config import settings as _app_settings
+
+    async with db_manager.get_connection() as conn:
+        try:
+            cur = await conn.execute(
+                """
+                SELECT endpoint_token FROM dialogue_channel_links
+                WHERE channel_type = 'weixin_clawbot' AND status = 'active'
+                ORDER BY created_at DESC LIMIT 1
+                """
+            )
+            row = await cur.fetchone()
+            if row and row["endpoint_token"]:
+                tok = str(row["endpoint_token"]).strip()
+                return f"http://127.0.0.1:{int(_app_settings.port or 8686)}/api/v1/dialogue-wiki/ingress/weixin_clawbot/{tok}"
+        except Exception:
+            pass
+    return ""
+
+
+async def _sync_bridge_runtime_config(bridge_url: str, ingress_url: str, access_token: str) -> None:
+    """将当前最新的本机回调地址与 Access Token 热同步给正在运行的 Sidecar，并写回持久化文件。"""
+    if not ingress_url and not access_token:
+        return
+    try:
+        async with httpx.AsyncClient(timeout=2.5) as client:
+            await client.post(
+                f"{bridge_url.rstrip('/')}/config",
+                json={"ingress_url": ingress_url, "access_token": access_token},
+            )
+    except Exception:
+        pass
+
+
 async def ensure_clawbot_sidecar_running(
     bridge_url: str = "http://127.0.0.1:18791",
 ) -> tuple[bool, str]:
-    """检测本地微信 ClawBot Sidecar 是否在线；未启动时自动在后台静默拉起，免去用户手动敲命令。"""
+    """检测本地微信 ClawBot Sidecar 是否在线；未启动时自动在后台静默拉起，并同步最新 Token 与路由。"""
     global _CLAWBOT_SIDECAR_PROC
+    from ..core.config import settings as _app_settings
 
     clean_url = bridge_url.rstrip("/")
+    local_ingress = await _resolve_local_clawbot_ingress_url()
+    cur_access_token = _app_settings.access_token or ""
+
     if await _is_bridge_alive(clean_url):
-        return True, "本地微信 ClawBot 桥接服务已在运行"
+        await _sync_bridge_runtime_config(clean_url, local_ingress, cur_access_token)
+        return True, "本地微信 ClawBot 桥接服务已在运行（已同步最新令牌）"
 
     # 仅对本机 127.0.0.1 / localhost 自动拉起
     if "127.0.0.1" not in clean_url and "localhost" not in clean_url:
@@ -76,6 +117,13 @@ async def ensure_clawbot_sidecar_running(
     try:
         if _CLAWBOT_SIDECAR_PROC is None or _CLAWBOT_SIDECAR_PROC.poll() is not None:
             env = os.environ.copy()
+            # 将微信登录态持久化到 /app/data（宿主机挂载目录），防止重建容器后丢失扫码凭证
+            session_persist_path = Path(_app_settings.db_path).parent / "weixin_clawbot_session.json"
+            env["CLAWBOT_SESSION_FILE"] = str(session_persist_path)
+            if cur_access_token:
+                env["AGENTHUB_ACCESS_TOKEN"] = cur_access_token
+            if local_ingress:
+                env["AGENTHUB_INGRESS_URL"] = local_ingress
             creationflags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
             _CLAWBOT_SIDECAR_PROC = subprocess.Popen(
                 [node_bin, str(script_path)],
@@ -93,7 +141,8 @@ async def ensure_clawbot_sidecar_running(
     for _ in range(10):
         await asyncio.sleep(0.25)
         if await _is_bridge_alive(clean_url):
-            return True, "已自动拉起本地微信 ClawBot 桥接服务"
+            await _sync_bridge_runtime_config(clean_url, local_ingress, cur_access_token)
+            return True, "已自动拉起本地微信 ClawBot 桥接服务并同步运行配置"
 
     return False, "已尝试启动本地微信桥接，但端口尚未就绪，请稍后点击刷新二维码"
 
@@ -192,6 +241,12 @@ async def create_bind_ticket(
             try:
                 async with httpx.AsyncClient(timeout=4.0) as client:
                     from ..core.config import settings as _app_settings
+                    is_local_bridge = "127.0.0.1" in bridge_url or "localhost" in bridge_url
+                    sidecar_callback_base = (
+                        f"http://127.0.0.1:{int(_app_settings.port or 8686)}"
+                        if is_local_bridge
+                        else clean_base
+                    )
                     resp = await client.post(
                         f"{bridge_url}/qr/start",
                         json={
@@ -199,8 +254,8 @@ async def create_bind_ticket(
                             "ticket": ticket,
                             "endpoint_token": link["endpoint_token"],
                             "access_token": _app_settings.access_token or "",
-                            "claim_url": f"{clean_base}/api/v1/dialogue-wiki/bind/{ticket}/claim",
-                            "ingress_url": f"{clean_base}/api/v1/dialogue-wiki/ingress/weixin_clawbot/{link['endpoint_token']}",
+                            "claim_url": f"{sidecar_callback_base}/api/v1/dialogue-wiki/bind/{ticket}/claim",
+                            "ingress_url": f"{sidecar_callback_base}/api/v1/dialogue-wiki/ingress/weixin_clawbot/{link['endpoint_token']}",
                         },
                     )
                     if resp.status_code == 200:

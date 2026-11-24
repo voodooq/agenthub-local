@@ -18,7 +18,8 @@ import path from 'node:path';
 const PORT = Number(process.env.CLAWBOT_BRIDGE_PORT || 18791);
 const DEFAULT_ILINK_BASE = 'https://ilinkai.weixin.qq.com';
 const BRIDGE_SECRET = (process.env.CLAWBOT_BRIDGE_SECRET || '').trim();
-const SESSION_FILE = path.join(os.homedir(), '.agenthub', 'weixin_clawbot_session.json');
+const LEGACY_SESSION_FILE = path.join(os.homedir(), '.agenthub', 'weixin_clawbot_session.json');
+const SESSION_FILE = (process.env.CLAWBOT_SESSION_FILE || '').trim() || LEGACY_SESSION_FILE;
 
 function savePersistedSession() {
   try {
@@ -33,6 +34,8 @@ function savePersistedSession() {
           account_label: state.account_label,
           ingress_url: state.ingress_url,
           access_token: state.access_token,
+          get_updates_buf: state.get_updates_buf,
+          context_tokens: Object.fromEntries(state.context_tokens.entries()),
         },
         null,
         2
@@ -46,8 +49,12 @@ function savePersistedSession() {
 
 function loadPersistedSession() {
   try {
-    if (!fs.existsSync(SESSION_FILE)) return;
-    const saved = JSON.parse(fs.readFileSync(SESSION_FILE, 'utf8'));
+    let targetFile = SESSION_FILE;
+    if (!fs.existsSync(targetFile) && targetFile !== LEGACY_SESSION_FILE && fs.existsSync(LEGACY_SESSION_FILE)) {
+      targetFile = LEGACY_SESSION_FILE;
+    }
+    if (!fs.existsSync(targetFile)) return;
+    const saved = JSON.parse(fs.readFileSync(targetFile, 'utf8'));
     if (saved && saved.bot_token) {
       state.bot_token = String(saved.bot_token);
       state.ilink_base_url = String(saved.ilink_base_url || DEFAULT_ILINK_BASE);
@@ -55,8 +62,29 @@ function loadPersistedSession() {
       state.account_label = String(saved.account_label || state.wxid);
       if (saved.ingress_url) state.ingress_url = String(saved.ingress_url);
       if (saved.access_token) state.access_token = String(saved.access_token);
+      if (saved.get_updates_buf) state.get_updates_buf = String(saved.get_updates_buf);
+      if (saved.context_tokens && typeof saved.context_tokens === 'object') {
+        for (const [k, v] of Object.entries(saved.context_tokens)) {
+          if (k && v) state.context_tokens.set(String(k), String(v));
+        }
+      }
       state.logged_in = true;
       state.qr_status = 'confirmed';
+    }
+    // 环境变量中携带最新的服务端回环地址与临时 Access Token 时，覆盖旧持久化值
+    const envIngress = (process.env.AGENTHUB_INGRESS_URL || '').trim();
+    const envToken = (process.env.AGENTHUB_ACCESS_TOKEN || '').trim();
+    let changed = targetFile !== SESSION_FILE;
+    if (envIngress && envIngress !== state.ingress_url) {
+      state.ingress_url = envIngress;
+      changed = true;
+    }
+    if (envToken && envToken !== state.access_token) {
+      state.access_token = envToken;
+      changed = true;
+    }
+    if (changed && state.bot_token) {
+      savePersistedSession();
     }
   } catch {
     // 忽略读取异常
@@ -302,16 +330,19 @@ async function startGetUpdatesLoop() {
         continue;
       }
       const data = await resp.json();
-      if (typeof data.get_updates_buf === 'string' && data.get_updates_buf) {
+      let needSave = false;
+      if (typeof data.get_updates_buf === 'string' && data.get_updates_buf && data.get_updates_buf !== state.get_updates_buf) {
         state.get_updates_buf = data.get_updates_buf;
+        needSave = true;
       }
       const msgs = Array.isArray(data.msgs) ? data.msgs : [];
       for (const m of msgs) {
         const fromUser = String(m.from_user_id || '').trim();
         const extracted = extractMessagePayloadFromIlinkMsg(m);
         if (!fromUser || (!extracted.text && extracted.attachments.length === 0)) continue;
-        if (m.context_token) {
+        if (m.context_token && state.context_tokens.get(fromUser) !== String(m.context_token)) {
           state.context_tokens.set(fromUser, String(m.context_token));
+          needSave = true;
         }
         // 收到消息瞬间立即点亮手机微信顶部的“对方正在输入中...”
         sendIlinkTyping(fromUser, 1).catch(() => {});
@@ -345,6 +376,9 @@ async function startGetUpdatesLoop() {
             })
             .catch((e) => console.error('[WeixinBridge] 转发至 AgentHub 失败:', e));
         }
+      }
+      if (needSave) {
+        savePersistedSession();
       }
     } catch (err) {
       await new Promise((r) => setTimeout(r, 2500));
@@ -501,6 +535,29 @@ const server = http.createServer(async (req, res) => {
       results.push(await sendIlinkTextMessage(toWxid, String(chunk)));
     }
     return sendJson(res, 200, { ok: true, delivered_chunks: results.filter((r) => r.ok).length, results });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/config') {
+    if (BRIDGE_SECRET && req.headers['x-bridge-secret'] !== BRIDGE_SECRET) {
+      return sendJson(res, 401, { ok: false, error: 'Unauthorized bridge secret' });
+    }
+    const body = await readJsonBody(req);
+    if (body.ingress_url) {
+      state.ingress_url = String(body.ingress_url).trim();
+    }
+    if (body.access_token) {
+      state.access_token = String(body.access_token).trim();
+    }
+    savePersistedSession();
+    if (state.logged_in && state.bot_token && !state.polling_updates) {
+      startGetUpdatesLoop();
+    }
+    return sendJson(res, 200, {
+      ok: true,
+      logged_in: state.logged_in,
+      polling_updates: state.polling_updates,
+      ingress_configured: Boolean(state.ingress_url),
+    });
   }
 
   return sendJson(res, 404, { ok: false, error: 'Not Found' });
