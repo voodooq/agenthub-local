@@ -670,111 +670,142 @@ class ChannelGateway:
                 full_im_system_prompt = f"{runtime_ctx_header}\n{identity_header}\n{im_concise_prompt}"
 
                 exported_attachments: list[dict[str, Any]] = []
-                async for ev in agent_runtime.chat_stream(
-                    conversation_id=conv_id,
-                    user_message=eff_user_msg,
-                    model_name=im_model_name,
-                    thinking_level=im_thinking_level,
-                    context_rounds=12,
-                    attachments=media_attachments or None,
-                    system_override=full_im_system_prompt,
-                    scene_mode="agent",
-                    workspace_id=im_ws_id,
-                    agent_id=selected_expert_id,
-                    caller_channel="im_bot",
-                    endpoint_token=inbound.endpoint_token,
-                    im_context={
-                        "link_id": str(link["link_id"]),
-                        "channel_type": inbound.channel_type,
-                        "sender_id": inbound.sender_id,
-                        "chat_id": inbound.chat_id,
-                    },
-                    owner_mode=is_owner_mode,
-                ):
-                    ev_type = ev.get("type")
-                    if ev_type in ("tool_start", "tool_end", "start"):
-                        # 进入工具执行或新 ReAct 步骤时清空上一中间步骤的过渡文本缓冲，绝不把工具前过渡语发到 IM
-                        chunks_acc.clear()
-                        stream_buf = ""
-                    elif ev_type == "stream_reset":
-                        chunks_acc.clear()
-                        stream_buf = ""
-                    elif ev_type == "chunk" and isinstance(ev.get("content"), str):
-                        piece = ev["content"]
-                        chunks_acc.append(piece)
-                        stream_buf += piece
-                        # 严防泄露 <tool_call>、后台技术标识与工具调用前过渡独白（如“我将读取/查询/检索...”）：
-                        # 只有确认无任何 `<` 标签、无代码块、无后台 ID/切片词且非工具前过渡独白时，才按段落实时流式推送
-                        low_buf = stream_buf.lower()
-                        unsafe_tag = (
-                            "<" in stream_buf
-                            or "```" in stream_buf
-                            or any(
-                                p in stream_buf
-                                for p in (
-                                    "我将读取",
-                                    "我将查询",
-                                    "我将检索",
-                                    "我将为您查询",
-                                    "我将为您检索",
-                                    "我将为您在",
-                                    "我先帮您",
-                                    "我先查询",
-                                    "我先查一下",
-                                    "我先读取",
-                                    "正在读取",
-                                    "正在为您查询",
-                                    "正在为您检索",
-                                    "正在查询",
-                                    "正在检索",
-                                    "切片",
+                cur_conv_id = conv_id
+                cur_user_msg = eff_user_msg
+                cur_attachments = media_attachments or None
+                rollover_hops = 0
+                max_rollover_hops = 2
+
+                while True:
+                    rollover_event: dict[str, Any] | None = None
+                    chunks_acc.clear()
+                    stream_buf = ""
+                    final_content = ""
+                    async for ev in agent_runtime.chat_stream(
+                        conversation_id=cur_conv_id,
+                        user_message=cur_user_msg,
+                        model_name=im_model_name,
+                        thinking_level=im_thinking_level,
+                        context_rounds=12,
+                        attachments=cur_attachments,
+                        system_override=full_im_system_prompt,
+                        scene_mode="agent",
+                        workspace_id=im_ws_id,
+                        agent_id=selected_expert_id,
+                        caller_channel="im_bot",
+                        endpoint_token=inbound.endpoint_token,
+                        im_context={
+                            "link_id": str(link["link_id"]),
+                            "channel_type": inbound.channel_type,
+                            "sender_id": inbound.sender_id,
+                            "chat_id": inbound.chat_id,
+                        },
+                        owner_mode=is_owner_mode,
+                    ):
+                        ev_type = ev.get("type")
+                        if ev_type in ("tool_start", "tool_end", "start"):
+                            # 进入工具执行或新 ReAct 步骤时清空上一中间步骤的过渡文本缓冲，绝不把工具前过渡语发到 IM
+                            chunks_acc.clear()
+                            stream_buf = ""
+                        elif ev_type == "stream_reset":
+                            chunks_acc.clear()
+                            stream_buf = ""
+                        elif ev_type == "chunk" and isinstance(ev.get("content"), str):
+                            piece = ev["content"]
+                            chunks_acc.append(piece)
+                            stream_buf += piece
+                            # 严防泄露 <tool_call>、后台技术标识与工具调用前过渡独白（如“我将读取/查询/检索...”）：
+                            # 只有确认无任何 `<` 标签、无代码块、无后台 ID/切片词且非工具前过渡独白时，才按段落实时流式推送
+                            low_buf = stream_buf.lower()
+                            unsafe_tag = (
+                                "<" in stream_buf
+                                or "```" in stream_buf
+                                or any(
+                                    p in stream_buf
+                                    for p in (
+                                        "我将读取",
+                                        "我将查询",
+                                        "我将检索",
+                                        "我将为您查询",
+                                        "我将为您检索",
+                                        "我将为您在",
+                                        "我先帮您",
+                                        "我先查询",
+                                        "我先查一下",
+                                        "我先读取",
+                                        "正在读取",
+                                        "正在为您查询",
+                                        "正在为您检索",
+                                        "正在查询",
+                                        "正在检索",
+                                        "切片",
+                                        "当前会话上下文水位已达",
+                                    )
+                                )
+                                or any(
+                                    k in low_buf
+                                    for k in (
+                                        "tool_call",
+                                        "doc_id",
+                                        "tool_ref",
+                                        ".pdf",
+                                        ".docx",
+                                        ".xlsx",
+                                    )
                                 )
                             )
-                            or any(
-                                k in low_buf
-                                for k in (
-                                    "tool_call",
-                                    "doc_id",
-                                    "tool_ref",
-                                    ".pdf",
-                                    ".docx",
-                                    ".xlsx",
+                            if not unsafe_tag:
+                                if "\n\n" in stream_buf and len(stream_buf.strip()) >= 25:
+                                    parts = stream_buf.split("\n\n")
+                                    ready = "\n\n".join(parts[:-1]).strip()
+                                    stream_buf = parts[-1]
+                                    if ready:
+                                        await _flush_stream_segment(ready)
+                                elif len(stream_buf) >= 60 and stream_buf[-1] in ("。", "！", "？", "\n"):
+                                    ready = stream_buf.strip()
+                                    stream_buf = ""
+                                    if ready:
+                                        await _flush_stream_segment(ready)
+                        elif ev_type == "conversation_rollover":
+                            rollover_event = ev
+                            new_cid = str(ev.get("new_conversation_id") or "").strip()
+                            if new_cid:
+                                await self._switch_session_conv_id(
+                                    link_id=link["link_id"],
+                                    channel_type=inbound.channel_type,
+                                    sender_id=inbound.sender_id,
+                                    chat_id=inbound.chat_id,
+                                    new_conv_id=new_cid,
                                 )
+                                logger.info(
+                                    f"[ChannelGateway] 上下文水位达 {ev.get('watermark_pct')}% 自动分支，"
+                                    f"已将 IM 会话 {session_key} 切换至新会话 {new_cid}"
+                                )
+                        elif ev_type == "done":
+                            final_content = str(
+                                ev.get("final_step_content") or ev.get("full_content") or "".join(chunks_acc)
                             )
+                            for ef in (ev.get("export_files") or []):
+                                if isinstance(ef, dict) and ef.get("file_path"):
+                                    exported_attachments.append(ef)
+
+                    if (
+                        rollover_event
+                        and rollover_event.get("auto_continue")
+                        and str(rollover_event.get("new_conversation_id") or "").strip()
+                        and str(rollover_event.get("continue_prompt") or "").strip()
+                        and rollover_hops < max_rollover_hops
+                    ):
+                        rollover_hops += 1
+                        cur_conv_id = str(rollover_event["new_conversation_id"]).strip()
+                        cur_user_msg = str(rollover_event["continue_prompt"]).strip()
+                        cur_attachments = None
+                        streamed_segments.clear()
+                        logger.info(
+                            f"[ChannelGateway] 触发自动分支接力续跑 (hop={rollover_hops}/{max_rollover_hops}, new_conv={cur_conv_id})"
                         )
-                        if not unsafe_tag:
-                            if "\n\n" in stream_buf and len(stream_buf.strip()) >= 25:
-                                parts = stream_buf.split("\n\n")
-                                ready = "\n\n".join(parts[:-1]).strip()
-                                stream_buf = parts[-1]
-                                if ready:
-                                    await _flush_stream_segment(ready)
-                            elif len(stream_buf) >= 60 and stream_buf[-1] in ("。", "！", "？", "\n"):
-                                ready = stream_buf.strip()
-                                stream_buf = ""
-                                if ready:
-                                    await _flush_stream_segment(ready)
-                    elif ev_type == "conversation_rollover":
-                        new_cid = str(ev.get("new_conversation_id") or "").strip()
-                        if new_cid:
-                            await self._switch_session_conv_id(
-                                link_id=link["link_id"],
-                                channel_type=inbound.channel_type,
-                                sender_id=inbound.sender_id,
-                                chat_id=inbound.chat_id,
-                                new_conv_id=new_cid,
-                            )
-                            logger.info(
-                                f"[ChannelGateway] 上下文水位达 {ev.get('watermark_pct')}% 自动分支，"
-                                f"已将 IM 会话 {session_key} 切换至新会话 {new_cid}"
-                            )
-                    elif ev_type == "done":
-                        final_content = str(
-                            ev.get("final_step_content") or ev.get("full_content") or "".join(chunks_acc)
-                        )
-                        for ef in (ev.get("export_files") or []):
-                            if isinstance(ef, dict) and ef.get("file_path"):
-                                exported_attachments.append(ef)
+                        continue
+                    break
 
                 raw_reply = (final_content or "".join(chunks_acc)).strip()
                 if not raw_reply:

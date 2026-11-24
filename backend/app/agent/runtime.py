@@ -1487,20 +1487,36 @@ class AgentRuntime:
                     session_mounted_kbs=getattr(self, "session_mounted_kbs", None),
                 )
                 if kb_ok and isinstance(docs_meta, list) and len(docs_meta) > 0:
-                    kb_ver_summary = ", ".join(
-                        sorted(
-                            {
-                                f"{d.get('kb_name') or d.get('kb_id')}({d.get('version') or 'latest'})"
-                                for d in docs_meta
-                            }
-                        )
+                    from ..kb.storage import KBStorageManager
+
+                    kb_pairs = sorted(
+                        {
+                            (
+                                str(d.get("kb_id") or ""),
+                                str(d.get("kb_name") or d.get("kb_id") or ""),
+                                str(d.get("version") or "latest"),
+                            )
+                            for d in docs_meta
+                            if d.get("kb_id")
+                        }
                     )
+                    kb_ver_summary = ", ".join(f"{name}({ver})" for _, name, ver in kb_pairs)
+                    batch_hint = ""
+                    if len(docs_meta) >= 15 and (caller_channel != "im_bot" or owner_mode):
+                        db_paths = ", ".join(
+                            str(KBStorageManager.get_version_db_path(kid, ver)) for kid, _, ver in kb_pairs
+                        )
+                        batch_hint = (
+                            f"\n- **全库批量提取高效率路径**：当前文档较多（{len(docs_meta)} 份），若用户需要一次性汇总全部文档的时间/地点/明细并导出文档，"
+                            f"**切勿逐份调用 `read_kb_slices` 把全文塞爆上下文**！请直接用 Python 脚本读取知识库 SQLite（`{db_paths}`）中的 `hybrid_chunks` 表批量提取后调用 `export_and_send_document` 生成文件！"
+                        )
                     kb_anchor_prompt = (
                         "### 📚 知识库最新实时状态锚点（最高时效事实）\n"
                         f"- **当前已发布知识库最新文档总数**：共 **{len(docs_meta)}** 份文档（来源：{kb_ver_summary}）。\n"
                         "- **防旧记忆误导铁律**：若长期记忆、百科摘要或历史对话中曾出现过往旧数字（如“3场”等），**一律视为已过期数据**；"
                         "当用户询问数量统计、盘点清单或最新规程时，**必须直接调用 `list_kb_docs` 获取最新完整清单逐条核对统计**，"
                         "**严禁偷懒复用旧记忆数字，也严禁把 `search_cloud_wiki` 返回的 Top-N 切片数当成文档总数！**"
+                        f"{batch_hint}"
                     )
                     system_override = (
                         f"{kb_anchor_prompt}\n\n{system_override}" if system_override else kb_anchor_prompt

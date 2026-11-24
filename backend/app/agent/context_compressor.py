@@ -952,12 +952,47 @@ class LocalContextCompressor:
             if not raw_txt:
                 continue
             safe_txt, _ = MemoryPolicyGuard.sanitize_text(raw_txt)
+            # 跳过交接提示与套娃摘要本身，防止把无意义交接壳子当成执行轨迹
+            if any(
+                mk in safe_txt
+                for mk in (
+                    "🔁 当前会话上下文水位已达",
+                    "## 🔁 上下文水位接力交接摘要",
+                    "**交接硬锚点**",
+                )
+            ):
+                continue
             # 对单条过长内容做头尾采样，保留核心结论与报错
             if len(safe_txt) > 520:
                 safe_txt = f"{safe_txt[:320]} ... {safe_txt[-180:]}"
             trace_lines.append(f"[{role}] {safe_txt}")
 
-        safe_existing, _ = MemoryPolicyGuard.sanitize_text((existing_summary or "").strip())
+        raw_existing, _ = MemoryPolicyGuard.sanitize_text((existing_summary or "").strip())
+        # 清洗历史交接摘要，剥离重复套娃标题、锚点与建议废话，仅保留实质进展
+        cleaned_existing_lines: list[str] = []
+        for ex_line in raw_existing.splitlines():
+            s_line = ex_line.strip()
+            if not s_line:
+                continue
+            if any(
+                skip_p in s_line
+                for skip_p in (
+                    "## 🔁 上下文水位接力交接摘要",
+                    "> 本对话在同工作区自动接力创建",
+                    "### 1. 核心目标与环境",
+                    "### 2. 前序历史摘要",
+                    "### 3. 近期关键执行轨迹",
+                    "### 4. 接力下一步建议",
+                    "- **交接原因**:",
+                    "- **工作目录 (CWD)**:",
+                    "**交接硬锚点**:",
+                    "请结合上述工作目录",
+                )
+            ):
+                continue
+            if s_line not in cleaned_existing_lines:
+                cleaned_existing_lines.append(s_line)
+        safe_existing = "\n".join(cleaned_existing_lines)[:500]
         safe_scratchpad, _ = MemoryPolicyGuard.sanitize_text((active_loop_scratchpad or "").strip())
 
         hard_facts_lines: list[str] = [
