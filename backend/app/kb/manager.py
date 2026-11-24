@@ -320,15 +320,17 @@ class KBLifecycleManager:
                         """,
                         (m_id, m_name, p_type, json.dumps(cfg, ensure_ascii=False), m.get("authority_tier", 2), time.time()),
                     )
-                    cursor = await conn.execute("SELECT kb_id, chunk_count FROM knowledge_bases WHERE kb_id = ?", (kb_id,))
+                    cursor = await conn.execute("SELECT kb_id, chunk_count, active_version FROM knowledge_bases WHERE kb_id = ?", (kb_id,))
                     row = await cursor.fetchone()
                     existing_count = row["chunk_count"] if row else 0
                     is_created = bool(row)
+                    # NOTE: 使用当前激活版本而非硬编码 v1.0.0，避免增量训练版本递增后清洗到错误版本
+                    active_version = str(row["active_version"] or "v1.0.0") if row else "v1.0.0"
 
                 # 2. 清理独立库中不属于该挂载源的切片（防止把历史测试或其他目录的切片串入）
                 del_count, remaining, disk_sz = KBStorageManager.clean_invalid_chunks_for_kb(
                     kb_id=kb_id,
-                    version="v1.0.0",
+                    version=active_version,
                     valid_prefix=valid_prefix,
                     valid_subpath=valid_subpath,
                 )
@@ -341,8 +343,8 @@ class KBLifecycleManager:
                             (remaining, disk_sz, now, kb_id),
                         )
                         await conn.execute(
-                            "UPDATE kb_versions SET chunk_count = ?, disk_size_bytes = ? WHERE kb_id = ? AND version = 'v1.0.0'",
-                            (remaining, disk_sz, kb_id),
+                            "UPDATE kb_versions SET chunk_count = ?, disk_size_bytes = ? WHERE kb_id = ? AND version = ?",
+                            (remaining, disk_sz, kb_id, active_version),
                         )
                         await conn.commit()
                     existing_count = remaining

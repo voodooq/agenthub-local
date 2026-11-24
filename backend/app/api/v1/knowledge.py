@@ -588,7 +588,11 @@ async def run_incremental_sync(
                     if f_chunks:
                         mount_new_chunks.extend(f_chunks)
                         total_new_chunks += len(f_chunks)
-                    sync_mgr.update_sync_state(m["mount_id"], f_obj)
+                        # NOTE: 仅当文件成功切片时才更新水位线，避免解析失败的文件被误记为已同步，
+                        # 导致下次增量训练跳过该文件、知识库永久缺失对应内容
+                        sync_mgr.update_sync_state(m["mount_id"], f_obj)
+                    else:
+                        logger.debug(f"[KBSync] 文件切片为空，跳过水位线更新: {f_obj.title}")
                     processed_files += 1
                     done_pct = 12.0 + (78.0 * (processed_files / total_files) if total_files > 0 else 78.0)
                     _update_sync_progress(

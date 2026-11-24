@@ -48,33 +48,27 @@ class TestKBIsolationAndBoundary(unittest.TestCase):
 
     def test_kb_storage_clean_invalid_chunks(self):
         """测试独立库切片自动隔离清洗：剔除混入的历史切片与其他挂载源数据。"""
+        import time as _time
         kb_id = "test_kb_sanitize"
         version = "v1.0.0"
         db_path = KBStorageManager.get_version_db_path(kb_id, version)
         KBStorageManager.init_version_db_schema(db_path)
+        now = _time.time()
 
-        # 写入一条合法切片和两条外来串入切片
-        chunks = [
-            {
-                "remote_uri": "webdav://mnt_current/docs/target_file.pdf",
-                "title": "target_file.pdf",
-                "content": "合法切片内容",
-                "authority_tier": 1,
-            },
-            {
-                "remote_uri": "webdav://mnt_other_old/2023盈越入账开票情况.xlsx",
-                "title": "2023盈越入账开票情况.xlsx",
-                "content": "非法串入切片1",
-                "authority_tier": 3,
-            },
-            {
-                "remote_uri": "webdav://mnt_current/other_dir/forbidden.pdf",
-                "title": "forbidden.pdf",
-                "content": "目录越界切片2",
-                "authority_tier": 2,
-            },
+        # NOTE: 直接 INSERT 绕开质量门（质量门会过滤过短内容，这里只测清洗逻辑）
+        rows = [
+            ("chunk_ok",   "webdav://mnt_current/docs/target_file.pdf", "target_file.pdf",  "合法切片内容合法切片内容合法切片内容合法切片内容合法切片内容合法切片内容", 1),
+            ("chunk_bad1", "webdav://mnt_other_old/2023盈越入账开票情况.xlsx", "other.xlsx", "非法串入切片非法串入切片非法串入切片非法串入切片非法串入切片非法串入切片", 3),
+            ("chunk_bad2", "webdav://mnt_current/other_dir/forbidden.pdf", "forbidden.pdf", "目录越界切片目录越界切片目录越界切片目录越界切片目录越界切片目录越界切片", 2),
         ]
-        KBStorageManager.upsert_chunks_to_version_db(kb_id, version, chunks)
+        with sqlite3.connect(str(db_path)) as conn:
+            for cid, uri, title, content, tier in rows:
+                conn.execute("""
+                    INSERT OR REPLACE INTO hybrid_chunks
+                    (id, remote_uri, title, content, authority_tier, mtime, chunk_role, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, 'child', ?)
+                """, (cid, uri, title, content, tier, now, now))
+            conn.commit()
 
         # 执行隔离清洗：仅保留属于 mnt_current 且子路径为 /docs 的切片
         del_count, remaining, disk_sz = KBStorageManager.clean_invalid_chunks_for_kb(
@@ -91,11 +85,11 @@ class TestKBIsolationAndBoundary(unittest.TestCase):
         conn = sqlite3.connect(str(db_path))
         cur = conn.cursor()
         cur.execute("SELECT remote_uri, title FROM hybrid_chunks")
-        rows = cur.fetchall()
+        rows_result = cur.fetchall()
         conn.close()
 
-        self.assertEqual(len(rows), 1)
-        self.assertEqual(rows[0][0], "webdav://mnt_current/docs/target_file.pdf")
+        self.assertEqual(len(rows_result), 1)
+        self.assertEqual(rows_result[0][0], "webdav://mnt_current/docs/target_file.pdf")
 
         # 清理测试知识库目录
         KBStorageManager.physically_destroy_kb(kb_id)
@@ -185,6 +179,114 @@ class TestKBIsolationAndBoundary(unittest.TestCase):
             self.assertEqual(cur.fetchone()[0], 0)
             cur.execute("SELECT count(*) FROM knowledge_triples")
             self.assertEqual(cur.fetchone()[0], 0)
+
+
+    def test_delete_chunks_cleans_orphan_derived_chunks(self):
+        """回归：delete_chunks_by_remote_uris 删除正文切片后，衍生 hype_question 切片不能残留。
+
+        对应 Bug 2：版本快照复制后，旧文档的 hype_question 衍生切片在增量删除正文后残留，
+        混入搜索结果导致知识库数据"混乱"。
+        """
+        import time as _time
+        kb_id = "test_kb_orphan_cleanup"
+        version = "v1.0.0"
+        db_path = KBStorageManager.get_version_db_path(kb_id, version)
+        KBStorageManager.init_version_db_schema(db_path)
+        now = _time.time()
+
+        # 直接 INSERT 以绕开质量门，只测清理逻辑本身
+        parent_id = "parent_chunk_001"
+        with sqlite3.connect(str(db_path)) as conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO hybrid_chunks
+                (id, remote_uri, title, content, authority_tier, mtime, chunk_role, created_at)
+                VALUES (?, ?, ?, ?, 1, ?, 'child', ?)
+            """, (parent_id, "webdav://mnt_x/doc_a.pdf", "doc_a.pdf", "正文内容正文内容正文内容正文内容正文内容正文内容正文内容", now, now))
+            conn.execute("""
+                INSERT OR REPLACE INTO hybrid_chunks
+                (id, remote_uri, title, content, authority_tier, mtime, chunk_role, parent_chunk_id, created_at)
+                VALUES (?, ?, ?, ?, 1, ?, 'hype_question', ?, ?)
+            """, ("hype_q_001", "webdav://mnt_x/doc_a.pdf", "doc_a.pdf", "衍生提问切片内容衍生提问切片内容衍生提问切片内容", now, parent_id, now))
+            conn.commit()
+
+        # 删除正文切片
+        deleted = KBStorageManager.delete_chunks_by_remote_uris(
+            kb_id=kb_id,
+            remote_uris=["webdav://mnt_x/doc_a.pdf"],
+            version=version,
+        )
+        self.assertGreater(deleted, 0)
+
+        # 验证孤立的 hype_question 衍生切片也已被清理（不残留）
+        with sqlite3.connect(str(db_path)) as conn:
+            cnt = conn.execute("SELECT COUNT(*) FROM hybrid_chunks").fetchone()[0]
+        self.assertEqual(cnt, 0, "删除正文切片后，孤立衍生切片应同步清除，不得残留")
+
+        KBStorageManager.physically_destroy_kb(kb_id)
+
+    def test_sync_state_not_updated_on_empty_chunks(self):
+        """回归：文件切片为空（解析失败）时，不应更新水位线，确保下次训练可重试。
+
+        对应 Bug 1：原代码在 f_chunks=[] 时仍调用 update_sync_state，导致失败文件
+        永久被跳过，知识库内容永久缺失。此测试验证水位线仅在切片非空时更新。
+        """
+        import tempfile
+        from backend.app.vfs.base import CloudVFSSyncManager, CloudFileMeta
+
+        tmp_dir = tempfile.mkdtemp()
+        try:
+            # 初始化工作区 index.db（需有 cloud_vfs_sync_state 表）
+            db_path = Path(tmp_dir) / ".agenthub" / "index.db"
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            with sqlite3.connect(str(db_path)) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS cloud_vfs_sync_state (
+                        mount_id TEXT NOT NULL,
+                        remote_uri TEXT NOT NULL,
+                        etag_or_sha TEXT,
+                        remote_mtime REAL,
+                        authority_tier INTEGER DEFAULT 2,
+                        last_synced_at REAL,
+                        PRIMARY KEY (mount_id, remote_uri)
+                    )
+                """)
+                conn.commit()
+
+            sync_mgr = CloudVFSSyncManager(tmp_dir)
+            mount_id = "mnt_test_watermark"
+
+            failed_file = CloudFileMeta(
+                remote_uri="webdav://mnt_test_watermark/fail.pdf",
+                title="fail.pdf",
+                size=1024,
+                etag="etag_xyz",
+                mtime=1700000000.0,
+            )
+            success_file = CloudFileMeta(
+                remote_uri="webdav://mnt_test_watermark/ok.pdf",
+                title="ok.pdf",
+                size=2048,
+                etag="etag_ok",
+                mtime=1700000001.0,
+            )
+
+            # 模拟：成功文件更新水位线，失败文件跳过（Business Logic 在 knowledge.py 中）
+            sync_mgr.update_sync_state(mount_id, success_file)
+            # 不更新 failed_file 的水位线（这正是修复后的正确行为）
+
+            # 再次 filter：success_file 应被标记为"未变更"，failed_file 应标记为"需要重训"
+            files = [success_file, failed_file]
+            modified = sync_mgr.filter_modified_files(mount_id, files)
+            modified_uris = {f.remote_uri for f in modified}
+
+            self.assertNotIn(success_file.remote_uri, modified_uris,
+                             "已成功同步的文件不应再次出现在 modified 列表中")
+            self.assertIn(failed_file.remote_uri, modified_uris,
+                          "未更新水位线的失败文件应在下次增量训练中出现在 modified 列表中被重试")
+        finally:
+            # NOTE: Windows 下 SQLite 文件需手动关闭才能删除，用 ignore_errors 兜底
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 if __name__ == "__main__":

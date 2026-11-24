@@ -210,6 +210,21 @@ class KBStorageManager:
                     except Exception:
                         pass
 
+                # NOTE: 清理悬空衍生切片（hype_question/raptor_summary），防止版本快照复制后
+                # 旧衍生切片残留在新版本中混淆搜索结果，造成知识库数据"混乱"
+                try:
+                    cur.execute("""
+                        DELETE FROM hybrid_chunks
+                        WHERE chunk_role IN ('hype_question', 'raptor_summary')
+                          AND parent_chunk_id IS NOT NULL AND parent_chunk_id != ''
+                          AND parent_chunk_id NOT IN (SELECT id FROM hybrid_chunks)
+                    """)
+                    orphan_deleted = int(cur.rowcount or 0)
+                    if orphan_deleted > 0:
+                        logger.debug(f"[KBStorage] 清理悬空衍生切片 {orphan_deleted} 条 (kb={kb_id}, ver={version})")
+                except Exception:
+                    pass
+
                 # 统计最新正文切片数并更新 manifest.json
                 row_cnt = cur.execute(
                     "SELECT COUNT(*) FROM hybrid_chunks WHERE chunk_role IN ('parent', 'child') OR chunk_role IS NULL OR chunk_role = ''"
