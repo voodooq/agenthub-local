@@ -1774,7 +1774,30 @@ class AgentRuntime:
 
             from .policy_interceptor import add_workspace_whitelist, is_workspace_whitelisted
 
-            # 0. 检查是否在当前任务或沙盒工作区全放行白名单中
+            # 0. 仅针对已开启主人全权限的微信私人助理 (weixin_clawbot)：守住安全底线并免除 PC 端 20s 弹窗阻塞
+            if is_weixin_claw_owner:
+                raw_check_str = " ".join(
+                    str(t_args.get(k) or "")
+                    for k in ("command", "file_path", "path", "target_file")
+                ).lower()
+                catastrophic_cmds = ("rm -rf /", "mkfs.", "dd if=/dev/zero", ":(){:|:&};:", "shutdown ", "reboot")
+                protected_secrets = (".access_token", "weixin_clawbot_session.json", "id_rsa", "id_ed25519")
+                if any(c in raw_check_str for c in catastrophic_cmds) or any(
+                    s in raw_check_str for s in protected_secrets
+                ):
+                    if result_holder is not None:
+                        result_holder["allowed"] = False
+                        result_holder["guidance"] = "命中微信私人助理安全底线（禁止毁灭性系统指令或篡改核心凭证文件），已拒绝执行。"
+                        result_holder["is_timeout"] = False
+                    return
+                if result_holder is not None:
+                    result_holder["allowed"] = True
+                    result_holder["args"] = t_args
+                    result_holder["guidance"] = "微信 Claw 私人助理主人全权限模式直接放行（免 PC 端确认弹窗）"
+                    result_holder["is_timeout"] = False
+                return
+
+            # 1. 检查是否在当前任务或沙盒工作区全放行白名单中
             if t_name in policy_gate.session_whitelists or is_workspace_whitelisted(ws_id, t_name):
                 if result_holder is not None:
                     result_holder["allowed"] = True
