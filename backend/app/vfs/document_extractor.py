@@ -228,6 +228,21 @@ class DocumentStreamExtractor:
                     }
                     if extra_metadata:
                         item["metadata"] = dict(extra_metadata)
+
+                    # NOTE: 国标 PROV-O 证据链标准注入（模态自适应坐标与逐字证据）
+                    try:
+                        from ..kb.provenance import StandardizedProvenance
+                        prov = StandardizedProvenance.build_from_chunk(
+                            doc_title=filename,
+                            content=hc.content_text,
+                            remote_uri=remote_uri,
+                            section_path=hc.section_path,
+                            evidence_quote=hc.content_text[:200],
+                        )
+                        item["provenance"] = prov.to_compact_dict()
+                    except Exception:
+                        pass
+
                     out.append(item)
                 return out
         except Exception as e:
@@ -263,6 +278,23 @@ class DocumentStreamExtractor:
                 }
                 if extra_metadata:
                     item["metadata"] = dict(extra_metadata)
+
+                # NOTE: 国标 PROV-O 证据链标准注入（兜底切分同样保留逐字证据）
+                try:
+                    from ..kb.provenance import StandardizedProvenance
+                    prov = StandardizedProvenance.build_from_chunk(
+                        doc_title=filename,
+                        content=seg,
+                        remote_uri=remote_uri,
+                        section_path=item["section_path"],
+                        char_start=start,
+                        char_end=end,
+                        evidence_quote=seg[:200],
+                    )
+                    item["provenance"] = prov.to_compact_dict()
+                except Exception:
+                    pass
+
                 chunks.append(item)
                 part_idx += 1
             if end >= text_len:

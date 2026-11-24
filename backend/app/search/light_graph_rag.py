@@ -205,30 +205,49 @@ class LightGraphRAGEngine:
         return inserted
 
     def find_anchor_entities(self, seed: str, pod_id: str = "global") -> list[str]:
-        """定位图谱起点实体：双向包含匹配（实体包含提问词 或 提问句包含已知实体名）。"""
+        """定位图谱起点实体：长词优先子串扫描对齐 + 双向包含匹配。"""
         clean_seed = seed.strip()
         if not clean_seed:
             return []
 
-        with closing(self._get_connection()) as conn:
-            rows = conn.execute(
-                """
-                SELECT DISTINCT entity FROM (
-                    SELECT subject as entity FROM knowledge_triples 
-                    WHERE pod_id = ? AND (subject = ? OR subject LIKE '%' || ? || '%' OR (length(subject) >= 2 AND instr(?, subject) > 0))
-                    UNION
-                    SELECT object as entity FROM knowledge_triples 
-                    WHERE pod_id = ? AND (object = ? OR object LIKE '%' || ? || '%' OR (length(object) >= 2 AND instr(?, object) > 0))
-                )
-                ORDER BY length(entity) DESC
-                LIMIT 5;
-                """,
-                (pod_id, clean_seed, clean_seed, clean_seed, pod_id, clean_seed, clean_seed, clean_seed),
-            ).fetchall()
-            if rows:
-                return [r["entity"] for r in rows]
+        # 1. 接入受控词表：长词优先子串扫描 + 并集扩展（纯内存 < 0.5ms）
+        from ..kb.controlled_vocabulary import get_aligner
+        aligner = get_aligner(pod_id)
+        matched_prefs = aligner.scan_query_terms(clean_seed)
 
-        return [clean_seed]
+        # 候选实体池（初始包含原词及扫描到的标准首选词，双保险召回）
+        anchor_seeds = {clean_seed} | matched_prefs
+        candidate_anchors: set[str] = set(anchor_seeds)
+
+        with closing(self._get_connection()) as conn:
+            # 检查 review_status 列
+            has_review = False
+            try:
+                cols = [c[1] for c in conn.execute("PRAGMA table_info(knowledge_triples)").fetchall()]
+                has_review = "review_status" in cols
+            except Exception:
+                pass
+            review_filter = "AND review_status != 'REJECTED'" if has_review else ""
+
+            for s in anchor_seeds:
+                rows = conn.execute(
+                    f"""
+                    SELECT DISTINCT entity FROM (
+                        SELECT subject as entity FROM knowledge_triples 
+                        WHERE pod_id = ? {review_filter} AND (subject = ? OR subject LIKE '%' || ? || '%' OR (length(subject) >= 2 AND instr(?, subject) > 0))
+                        UNION
+                        SELECT object as entity FROM knowledge_triples 
+                        WHERE pod_id = ? {review_filter} AND (object = ? OR object LIKE '%' || ? || '%' OR (length(object) >= 2 AND instr(?, object) > 0))
+                    )
+                    ORDER BY length(entity) DESC
+                    LIMIT 5;
+                    """,
+                    (pod_id, s, s, s, pod_id, s, s, s),
+                ).fetchall()
+                for r in rows:
+                    candidate_anchors.add(r["entity"])
+
+        return sorted(list(candidate_anchors), key=lambda x: len(x), reverse=True)[:8]
 
     def query_subgraph(
         self,
@@ -260,6 +279,17 @@ class LightGraphRAGEngine:
         hops_limit = max(1, min(max_hops, 3))
         placeholders = ",".join("?" for _ in anchors)
 
+        # 检查是否具备 review_status 过滤字段
+        has_review = False
+        with closing(self._get_connection()) as conn:
+            try:
+                cols = [c[1] for c in conn.execute("PRAGMA table_info(knowledge_triples)").fetchall()]
+                has_review = "review_status" in cols
+            except Exception:
+                pass
+        review_filter_where = "AND review_status != 'REJECTED'" if has_review else ""
+        review_filter_join = "AND t.review_status != 'REJECTED'" if has_review else ""
+
         # 双向扩展：同时沿着 subject -> object 出边与 object -> subject 入边扩展
         # 使用 visited 字符串防止环路: '|' || next_node || '|'
         sql = f"""
@@ -271,7 +301,7 @@ class LightGraphRAGEngine:
                 1 AS hop,
                 '|' || subject || '|' || object || '|' AS visited
             FROM knowledge_triples
-            WHERE pod_id = ? AND (subject IN ({placeholders}) OR subject LIKE '%' || ? || '%')
+            WHERE pod_id = ? {review_filter_where} AND (subject IN ({placeholders}) OR subject LIKE '%' || ? || '%')
             
             UNION ALL
             
@@ -281,7 +311,7 @@ class LightGraphRAGEngine:
                 1 AS hop,
                 '|' || object || '|' || subject || '|' AS visited
             FROM knowledge_triples
-            WHERE pod_id = ? AND (object IN ({placeholders}) OR object LIKE '%' || ? || '%')
+            WHERE pod_id = ? {review_filter_where} AND (object IN ({placeholders}) OR object LIKE '%' || ? || '%')
             
             UNION ALL
             
@@ -293,11 +323,11 @@ class LightGraphRAGEngine:
                 g.visited || t.object || '|'
             FROM knowledge_triples t
             JOIN graph_cte g ON t.subject = g.cur_node
-            WHERE t.pod_id = ? 
+            WHERE t.pod_id = ? {review_filter_join}
               AND g.hop < {hops_limit}
               AND instr(g.visited, '|' || t.object || '|') = 0
         )
-        SELECT DISTINCT subject, predicate, object, source_uri, authority_tier, MIN(hop) as min_hop
+        SELECT subject, predicate, object, source_uri, authority_tier, MIN(hop) as min_hop
         FROM graph_cte
         GROUP BY subject, predicate, object, source_uri
         ORDER BY min_hop ASC, authority_tier ASC
@@ -307,13 +337,36 @@ class LightGraphRAGEngine:
         params = (
             [pod_id] + anchors + [clean_seed]
             + [pod_id] + anchors + [clean_seed]
-            + [pod_id, max_edges]
+            + [pod_id, max_edges * 2]
         )
 
         with closing(self._get_connection()) as conn:
             try:
                 rows = conn.execute(sql, params).fetchall()
-                return [dict(r) for r in rows]
+                # 聚合去重：按 (subject, predicate, object) 聚合多篇文档的来源，杜绝同事实被覆盖
+                aggregated: dict[tuple[str, str, str], dict[str, Any]] = {}
+                for r in rows:
+                    key = (r["subject"], r["predicate"], r["object"])
+                    if key not in aggregated:
+                        aggregated[key] = {
+                            "subject": r["subject"],
+                            "predicate": r["predicate"],
+                            "object": r["object"],
+                            "min_hop": r["min_hop"],
+                            "authority_tier": r["authority_tier"],
+                            "source_uris": [r["source_uri"]] if r["source_uri"] else [],
+                            "source_uri": r["source_uri"] or "",
+                        }
+                    else:
+                        existing = aggregated[key]
+                        if r["source_uri"] and r["source_uri"] not in existing["source_uris"]:
+                            existing["source_uris"].append(r["source_uri"])
+                        if r["min_hop"] < existing["min_hop"]:
+                            existing["min_hop"] = r["min_hop"]
+                        if r["authority_tier"] < existing["authority_tier"]:
+                            existing["authority_tier"] = r["authority_tier"]
+
+                return list(aggregated.values())[:max_edges]
             except Exception as e:
                 logger.warning(f"SQLite 递归 CTE 图谱查询异常: {e}")
                 return []

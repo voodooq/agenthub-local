@@ -364,6 +364,14 @@ class MultiKBRetrievalRouter:
 
                 keywords = all_search_terms
 
+                has_prov = False
+                try:
+                    cols = [col[1] for col in conn.execute("PRAGMA table_info(hybrid_chunks)").fetchall()]
+                    has_prov = "provenance_json" in cols
+                except Exception:
+                    pass
+                prov_col = ", c.provenance_json" if has_prov else ", '' as provenance_json"
+
                 rows: list[sqlite3.Row] = []
                 matched_ids: set[str] = set()
 
@@ -372,12 +380,12 @@ class MultiKBRetrievalRouter:
                 if fts_candidates:
                     fts_query_str = " OR ".join([f'"{k}"' for k in fts_candidates[:10]])
                     try:
-                        fts_sql = """
+                        fts_sql = f"""
                         SELECT c.id, c.remote_uri, c.title, c.content, c.authority_tier, c.mtime,
                                c.doc_year, c.effective_date, c.effective_ts, c.doc_priority_type,
                                c.topic_cluster_id, c.is_latest_in_cluster, c.chunk_role,
                                COALESCE(NULLIF(c.parent_chunk_id, ''), c.id) AS parent_chunk_id,
-                               c.embedding_blob, rank as fts_rank
+                               c.embedding_blob{prov_col}, rank as fts_rank
                         FROM hybrid_chunks_fts f
                         JOIN hybrid_chunks c ON f.rowid = c.rowid
                         WHERE hybrid_chunks_fts MATCH ?
@@ -400,7 +408,7 @@ class MultiKBRetrievalRouter:
                            doc_year, effective_date, effective_ts, doc_priority_type,
                            topic_cluster_id, is_latest_in_cluster, chunk_role,
                            COALESCE(NULLIF(parent_chunk_id, ''), id) AS parent_chunk_id,
-                           embedding_blob, NULL as fts_rank
+                           embedding_blob{prov_col}, NULL as fts_rank
                     FROM hybrid_chunks
                     WHERE ({" OR ".join(where_clauses)})
                       AND (chunk_role != 'parent' OR chunk_role IS NULL)
@@ -466,13 +474,25 @@ class MultiKBRetrievalRouter:
                     else:
                         role_boost = 1.0
 
+                    prov_raw = str(r["provenance_json"] or "") if has_prov else ""
+                    prov_obj = None
+                    if prov_raw:
+                        try:
+                            prov_obj = json.loads(prov_raw)
+                        except Exception:
+                            prov_obj = None
+                    from ..kb.provenance import format_citation_label
+                    citation_str = format_citation_label(prov_obj)
+
                     final_score = base_score * tier_bonus * priority_weight * role_boost
                     scored_list.append((final_score, {
                         "id": r["id"],
+                        "chunk_id": r["id"],
                         "kb_id": kb_id,
                         "kb_name": kb_name,
                         "version": version,
                         "remote_uri": r["remote_uri"],
+                        "source": r["title"],
                         "title": r["title"],
                         "content": r["content"],
                         "authority_tier": tier,
@@ -485,6 +505,10 @@ class MultiKBRetrievalRouter:
                         "is_latest_in_cluster": r["is_latest_in_cluster"],
                         "chunk_role": role,
                         "parent_chunk_id": r["parent_chunk_id"],
+                        "provenance_json": prov_raw,
+                        "provenance": prov_obj,
+                        "citation_label": citation_str,
+                        "score": round(final_score, 4),
                         "priority_weight": priority_weight,
                         "final_score": round(final_score, 4),
                         "cosine_similarity": round(cosine_sim, 4),

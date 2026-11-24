@@ -107,6 +107,10 @@ class SyncRequest(BaseModel):
         default=False,
         description="是否开启全力极速模式；默认 False 采用温和低占用模式，为其他业务预留充足 CPU 与 I/O 资源",
     )
+    compliance_mode: str = Field(
+        default="agile",
+        description="数据治理质量门禁模式: agile(敏捷极速放行，记录Warning) | strict(国标合规模式强阻断)",
+    )
 
 
 # 知识库增量训练实时进度追踪（内存态，毫秒级轮询读取）
@@ -404,6 +408,7 @@ async def run_incremental_sync(
     task_id: str | None = None,
     source_tag: str = "manual",
     turbo_mode: bool = False,
+    compliance_mode: str = "agile",
 ) -> dict[str, Any]:
     """执行挂载源增量同步（默认温和节流保护 CPU/I/O，仅在显式开启 turbo_mode 时全力并发）。"""
     eff_task_id = task_id or f"sync_{int(time.time() * 1000)}"
@@ -606,9 +611,6 @@ async def run_incremental_sync(
                         new_chunks=total_new_chunks,
                     )
 
-                if mount_new_chunks:
-                    await engine.upsert_chunks(mount_new_chunks)
-
             if mount_new_chunks:
                 affected_kb_ids.add(kb_id)
                 KBStorageManager.upsert_chunks_to_version_db(
@@ -617,25 +619,79 @@ async def run_incremental_sync(
                     chunks=mount_new_chunks,
                 )
 
-            if prev_ver:
-                if mount_new_chunks or mount_removed_cnt > 0:
-                    await _commit_incremental_version(
-                        kb_id=kb_id,
-                        new_ver=target_ver,
-                        prev_ver=prev_ver,
-                        new_chunks_cnt=len(mount_new_chunks),
-                        removed_chunks_cnt=mount_removed_cnt,
-                    )
-                else:
-                    # 若待更新文件均未产生有效切片且未删除任何切片，清理空副本保持原版本不动
-                    try:
-                        import shutil as _shutil
+                # ========================================================
+                # NOTE: 阶段 3 增量质量门禁质检 (Delta PySHACL + DFS拓扑环检测)
+                # ========================================================
+                try:
+                    from ...kb.quality_gate import KBQualityGateExecutor
 
-                        empty_dir = KBStorageManager.get_version_dir(kb_id, target_ver)
-                        if empty_dir.exists() and target_ver != prev_ver:
-                            _shutil.rmtree(empty_dir, ignore_errors=True)
-                    except Exception:
-                        pass
+                    triples_for_gate: list[dict[str, Any]] = []
+                    for c in mount_new_chunks:
+                        raw_c = c.get("content_text") or c.get("content") or ""
+                        prov_dict = c.get("provenance") or {}
+                        t_span = prov_dict.get("text_span") or raw_c[:200]
+                        triples_for_gate.append({
+                            "subject": c.get("title") or "未命名文档",
+                            "predicate": "属于",
+                            "object": c.get("section_path") or "正文",
+                            "text_span": t_span,
+                        })
+
+                    gate_res = KBQualityGateExecutor.validate_delta_batch(
+                        triples_for_gate, mode=compliance_mode
+                    )
+                    if compliance_mode == "strict" and not gate_res.passed:
+                        logger.warning(f"[QualityGate] 严格合规模式拦截版本发布: {gate_res.errors}")
+                        sync_warnings.extend(gate_res.errors)
+                        # 阻断版本提交，清理未通过门禁的 staging 目录
+                        try:
+                            import shutil as _shutil
+
+                            target_dir = KBStorageManager.get_version_dir(kb_id, target_ver)
+                            if target_dir.exists():
+                                _shutil.rmtree(target_dir, ignore_errors=True)
+                            if not prev_ver:
+                                # 首发构建被拦截：没有历史活跃版本，将状态置为 UNPUBLISHED，active_version 保持为空
+                                from ...repository.db import db_manager
+                                async with db_manager.get_connection() as conn:
+                                    await conn.execute(
+                                        "UPDATE knowledge_bases SET active_version = '', status = 'UNPUBLISHED' WHERE kb_id = ?",
+                                        (kb_id,),
+                                    )
+                                    await conn.commit()
+                        except Exception as clean_err:
+                            logger.debug(f"[QualityGate] 清理未发布版本目录异常: {clean_err}")
+                        continue
+                    if gate_res.warnings:
+                        sync_warnings.extend(gate_res.warnings[:3])
+                except Exception as gate_err:
+                    logger.debug(f"[QualityGate] 增量门禁执行跳过: {gate_err}")
+
+            if mount_new_chunks or mount_removed_cnt > 0:
+                # NOTE: 阶段 4 原子发布：只有在版本库写入且门禁通过后，才正式提交版本并同步至工作区引擎，
+                # 杜绝中途报错或门禁拦截在工作区主库留下未提交的脏切片数据
+                await _commit_incremental_version(
+                    kb_id=kb_id,
+                    new_ver=target_ver,
+                    prev_ver=prev_ver or "v0.0.0",
+                    new_chunks_cnt=len(mount_new_chunks),
+                    removed_chunks_cnt=mount_removed_cnt,
+                )
+                if mount_new_chunks:
+                    try:
+                        await engine.upsert_chunks(mount_new_chunks)
+                    except Exception as eng_err:
+                        logger.debug(f"[KBSync] 同步工作区引擎切片跳过: {eng_err}")
+            else:
+                # 若待更新文件均未产生有效切片且未删除任何切片，清理空副本保持原版本不动
+                try:
+                    import shutil as _shutil
+
+                    empty_dir = KBStorageManager.get_version_dir(kb_id, target_ver)
+                    if empty_dir.exists() and prev_ver and target_ver != prev_ver:
+                        _shutil.rmtree(empty_dir, ignore_errors=True)
+                except Exception:
+                    pass
 
         # 阶段 3：若有新增、变更或删除，轻量纳管主库并把重度图谱/口语增强移入后台异步执行，主流程立即完成
         if total_new_chunks > 0 or total_removed_chunks > 0 or affected_kb_ids:
@@ -699,6 +755,7 @@ async def trigger_sync(req: SyncRequest) -> dict[str, Any]:
         task_id=req.task_id,
         source_tag="manual",
         turbo_mode=req.turbo_mode,
+        compliance_mode=req.compliance_mode,
     )
 
 

@@ -49,9 +49,9 @@ class KBStorageManager:
 
     @staticmethod
     def _derive_doc_id(remote_uri: str, title: str) -> str:
-        """生成稳定的短文档标识，用于前后切片指针与文档级去重。"""
-        seed = (remote_uri or title or "doc").strip()
-        return hashlib.md5(seed.encode("utf-8")).hexdigest()[:12]
+        """生成全局稳定的短文档标识，统一委托给 provenance.compute_doc_id。"""
+        from .provenance import compute_doc_id
+        return compute_doc_id(remote_uri, title)
 
     @staticmethod
     def _is_meaningless_identifier(val: str) -> bool:
@@ -158,13 +158,16 @@ class KBStorageManager:
         remote_uris: list[str],
         version: str = "v1.0.0",
     ) -> int:
-        """按 remote_uri 批量清理已删除或待覆盖文件的旧切片、FTS 索引与图谱三元组，并刷新 manifest。"""
+        """按 remote_uri 批量清理已删除或待覆盖文件的旧切片、FTS 索引、三元组与结构化规则，并刷新 manifest。"""
         clean_uris = [str(u).strip() for u in (remote_uris or []) if str(u).strip()]
         if not clean_uris:
             return 0
         db_path = cls.get_version_db_path(kb_id, version)
         if not db_path.exists():
             return 0
+
+        from .provenance import compute_doc_id
+        clean_doc_ids = [compute_doc_id(u) for u in clean_uris]
 
         conn = sqlite3.connect(str(db_path))
         deleted_chunks = 0
@@ -183,29 +186,46 @@ class KBStorageManager:
                     clean_uris,
                 )
                 chunk_ids = [str(r[0]) for r in cur.fetchall() if r[0]]
-                if not chunk_ids:
-                    return 0
 
-                # 分批清理避免超过 SQLite 999 变量上限
-                for i in range(0, len(chunk_ids), 400):
-                    batch = chunk_ids[i : i + 400]
-                    q_marks = ",".join("?" for _ in batch)
-                    res_cur = cur.execute(
-                        f"DELETE FROM hybrid_chunks WHERE id IN ({q_marks})",
-                        batch,
-                    )
-                    deleted_chunks += int(res_cur.rowcount or 0)
+                # 1. 级联清理切片及关联三元组
+                if chunk_ids:
+                    for i in range(0, len(chunk_ids), 400):
+                        batch = chunk_ids[i : i + 400]
+                        q_marks = ",".join("?" for _ in batch)
+                        res_cur = cur.execute(
+                            f"DELETE FROM hybrid_chunks WHERE id IN ({q_marks})",
+                            batch,
+                        )
+                        deleted_chunks += int(res_cur.rowcount or 0)
+                        try:
+                            cur.execute(
+                                f"DELETE FROM hybrid_chunks_fts WHERE chunk_id IN ({q_marks})",
+                                batch,
+                            )
+                        except Exception:
+                            pass
+                        try:
+                            cur.execute(
+                                f"DELETE FROM knowledge_triples WHERE chunk_id IN ({q_marks})",
+                                batch,
+                            )
+                        except Exception:
+                            pass
+
+                # 2. 级联按稳定 doc_id 清理旧三元组与结构化规则（杜绝同文档修改后残留旧规则造成假冲突）
+                if clean_doc_ids:
+                    doc_placeholders = ",".join("?" for _ in clean_doc_ids)
                     try:
                         cur.execute(
-                            f"DELETE FROM hybrid_chunks_fts WHERE chunk_id IN ({q_marks})",
-                            batch,
+                            f"DELETE FROM knowledge_triples WHERE doc_id IN ({doc_placeholders})",
+                            clean_doc_ids,
                         )
                     except Exception:
                         pass
                     try:
                         cur.execute(
-                            f"DELETE FROM knowledge_triples WHERE chunk_id IN ({q_marks})",
-                            batch,
+                            f"DELETE FROM kb_structured_rules WHERE doc_id IN ({doc_placeholders})",
+                            clean_doc_ids,
                         )
                     except Exception:
                         pass
@@ -442,14 +462,16 @@ class KBStorageManager:
                     effective_ts = int(item.get("effective_ts") or 0)
                     is_latest = item.get("is_latest_in_cluster", 1)
                     skip_hype = int(item.get("skip_hype") or 0)
+                    prov_data = item.get("provenance")
+                    prov_json = json.dumps(prov_data, ensure_ascii=False) if isinstance(prov_data, dict) else (str(prov_data) if prov_data else "")
 
                     conn.execute(
                         """
                         INSERT OR REPLACE INTO hybrid_chunks (
                             id, remote_uri, title, content, authority_tier, mtime, etag, embedding_blob,
                             doc_year, effective_date, effective_ts, doc_priority_type, topic_cluster_id,
-                            is_latest_in_cluster, chunk_role, parent_chunk_id, section_path, skip_hype, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                            is_latest_in_cluster, chunk_role, parent_chunk_id, section_path, skip_hype, provenance_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             chunk_id,
@@ -470,27 +492,51 @@ class KBStorageManager:
                             parent_chunk_id,
                             section_p,
                             skip_hype,
+                            prov_json,
                             now,
                         ),
                     )
                     actual_written += 1
 
-                    # 提取并写入启发式知识三元组
+                    # 提取并写入启发式知识三元组（绑定 PROV-O 证据与受控词表归一化）
+                    from .controlled_vocabulary import get_aligner
+                    aligner = get_aligner(kb_id)
                     triples = LightGraphRAGEngine.extract_triples_from_text(
                         content, item["remote_uri"], authority_tier=tier, effective_time=mtime
                     )
                     for t in triples:
+                        # 主体与谓词通过受控词表归一化
+                        norm_pred, p_status, p_conf = aligner.align_concept(t.predicate)
+                        norm_sub, s_status, s_conf = aligner.align_concept(t.subject)
+                        alignment_status = "AUTO_ALIGNED" if p_status == "AUTO_ALIGNED" else p_status
+                        triple_conf = round(min(p_conf, s_conf), 4)
+
                         conn.execute(
                             """
                             INSERT INTO knowledge_triples (
-                                subject, predicate, object, chunk_id, confidence, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, 1.0, ?, ?)
-                            ON CONFLICT(subject, predicate, object)
+                                subject, predicate, object, chunk_id, doc_id, axiom_type,
+                                alignment_status, confidence, review_status, provenance_json,
+                                created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, 'FACT', ?, ?, 'AUTO_APPROVED', ?, ?, ?)
+                            ON CONFLICT(subject, predicate, object, doc_id)
                             DO UPDATE SET
-                                confidence = MIN(confidence + 0.1, 2.0),
+                                confidence = MIN(knowledge_triples.confidence + 0.1, 2.0),
+                                chunk_id = excluded.chunk_id,
+                                provenance_json = excluded.provenance_json,
                                 updated_at = excluded.created_at
                             """,
-                            (t.subject.strip(), t.predicate.strip(), t.object.strip(), chunk_id, now, now),
+                            (
+                                norm_sub.strip(),
+                                norm_pred.strip(),
+                                t.object.strip(),
+                                chunk_id,
+                                doc_id,
+                                alignment_status,
+                                triple_conf,
+                                prov_json,
+                                now,
+                                now,
+                            ),
                         )
 
                 # 族内最新版本定标（Cluster Head Refresh）：自动标记每个主题族最新生效时间戳为 is_latest_in_cluster=1
@@ -664,18 +710,19 @@ class KBStorageManager:
                     triples = LightGraphRAGEngine.extract_triples_from_text(
                         content, uri, authority_tier=tier, effective_time=mtime
                     )
+                    d_id = cls._derive_doc_id(uri, str(r["title"] or ""))
                     for t in triples:
                         # 幂等 Upsert：同一条关系在不同切片中再次印证，自动累加置信度与更新时间
                         cur.execute(
                             """
                             INSERT INTO knowledge_triples (
-                                subject, predicate, object, chunk_id, confidence, created_at, updated_at
-                            ) VALUES (?, ?, ?, ?, 1.0, ?, ?)
-                            ON CONFLICT(subject, predicate, object) DO UPDATE SET
-                                confidence = confidence + 1.0,
+                                subject, predicate, object, chunk_id, doc_id, confidence, created_at, updated_at
+                            ) VALUES (?, ?, ?, ?, ?, 1.0, ?, ?)
+                            ON CONFLICT(subject, predicate, object, doc_id) DO UPDATE SET
+                                confidence = knowledge_triples.confidence + 1.0,
                                 updated_at = excluded.updated_at
                             """,
-                            (t.subject, t.predicate, t.object, chunk_id, now, now),
+                            (t.subject, t.predicate, t.object, chunk_id, d_id, now, now),
                         )
                         if cur.rowcount > 0:
                             new_extracted_count += 1
@@ -842,6 +889,7 @@ class KBStorageManager:
                 etag            TEXT NOT NULL DEFAULT '',
                 embedding_blob  BLOB,
                 graph_extracted INTEGER NOT NULL DEFAULT 0,
+                provenance_json TEXT DEFAULT '',
                 created_at      REAL NOT NULL
             );
 
@@ -874,14 +922,19 @@ class KBStorageManager:
             END;
 
             CREATE TABLE IF NOT EXISTS knowledge_triples (
-                id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                subject     TEXT NOT NULL,
-                predicate   TEXT NOT NULL,
-                object      TEXT NOT NULL,
-                chunk_id    TEXT NOT NULL,
-                confidence  REAL NOT NULL DEFAULT 1.0,
-                created_at  REAL NOT NULL,
-                updated_at  REAL NOT NULL DEFAULT 0.0
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                subject          TEXT NOT NULL,
+                predicate        TEXT NOT NULL,
+                object           TEXT NOT NULL,
+                chunk_id         TEXT NOT NULL DEFAULT '',
+                doc_id           TEXT NOT NULL DEFAULT '',
+                axiom_type       TEXT NOT NULL DEFAULT 'FACT',
+                alignment_status TEXT NOT NULL DEFAULT 'AUTO_ALIGNED',
+                confidence       REAL NOT NULL DEFAULT 1.0,
+                review_status    TEXT NOT NULL DEFAULT 'AUTO_APPROVED',
+                provenance_json  TEXT NOT NULL DEFAULT '',
+                created_at       REAL NOT NULL,
+                updated_at       REAL NOT NULL DEFAULT 0.0
             );
 
             CREATE INDEX IF NOT EXISTS idx_kt_sub ON knowledge_triples(subject);
@@ -941,11 +994,17 @@ class KBStorageManager:
                 ("topic_cluster_id",     "TEXT NOT NULL DEFAULT ''"),
                 ("is_latest_in_cluster", "INTEGER NOT NULL DEFAULT 1"),
                 ("skip_hype",            "INTEGER NOT NULL DEFAULT 0"),
+                ("provenance_json",      "TEXT DEFAULT ''"),
             ]:
                 try:
                     conn.execute(f"ALTER TABLE hybrid_chunks ADD COLUMN {_col} {_col_def};")
                 except Exception:
                     pass
+
+            try:
+                conn.execute("ALTER TABLE knowledge_triples ADD COLUMN review_status TEXT DEFAULT 'AUTO_ALIGNED';")
+            except Exception:
+                pass
             try:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_parent ON hybrid_chunks(parent_chunk_id);")
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_hc_temporal_cluster ON hybrid_chunks(topic_cluster_id, effective_ts DESC);")
@@ -968,11 +1027,26 @@ class KBStorageManager:
             except Exception:
                 pass
 
-            # 建立三元组复合唯一约束，杜绝重复边，提升多切片印证时的置信度权重
+            # 补齐 knowledge_triples 的国标扩展字段
+            for _col, _col_def in [
+                ("doc_id", "TEXT NOT NULL DEFAULT ''"),
+                ("axiom_type", "TEXT NOT NULL DEFAULT 'FACT'"),
+                ("alignment_status", "TEXT NOT NULL DEFAULT 'AUTO_ALIGNED'"),
+                ("provenance_json", "TEXT NOT NULL DEFAULT ''"),
+            ]:
+                try:
+                    conn.execute(f"ALTER TABLE knowledge_triples ADD COLUMN {_col} {_col_def};")
+                except Exception:
+                    pass
+
+            # 建立三元组复合唯一约束 (subject, predicate, object, doc_id) 及多维索引
+            # 契约：同文档内严格去重，跨文档各自保留独立证据链，防止跨文档更新误删
             try:
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_kt_doc ON knowledge_triples(doc_id);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_kt_status ON knowledge_triples(review_status);")
                 conn.execute("""
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_kt_unique
-                ON knowledge_triples (subject, predicate, object);
+                ON knowledge_triples (subject, predicate, object, doc_id);
                 """)
             except Exception:
                 pass

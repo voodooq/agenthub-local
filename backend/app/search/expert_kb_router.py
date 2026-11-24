@@ -266,8 +266,27 @@ class ExpertKnowledgeRouter:
             tier_label = "正式规程(Tier 1)" if c.get("authority_tier") == 1 else "常规资料(Tier 2)"
             eff_str = f", 生效日期: {c.get('effective_date')}" if c.get('effective_date') else ""
             latest_badge = " [最新版]" if c.get("is_latest_in_cluster") == 1 else ""
+            
+            # NOTE: 对齐国标 PROV-O 证据链展示（物理坐标锚点与逐字证据片段）
+            loc_tag = ""
+            prov_json = c.get("provenance_json")
+            if prov_json:
+                try:
+                    p_dict = json.loads(prov_json) if isinstance(prov_json, str) else prov_json
+                    anc = p_dict.get("anchor", {})
+                    mod = anc.get("modality", "")
+                    if mod == "pdf" and anc.get("page_number"):
+                        loc_tag = f" [定位: PDF 第{anc['page_number']}页]"
+                    elif mod == "xlsx" and anc.get("sheet_name"):
+                        cell_info = f" {anc.get('cell_range')}" if anc.get("cell_range") else ""
+                        loc_tag = f" [定位: Excel '{anc['sheet_name']}'{cell_info}]"
+                    elif mod == "docx" and anc.get("paragraph_index"):
+                        loc_tag = f" [定位: Word 第{anc['paragraph_index']}段]"
+                except Exception:
+                    pass
+
             lines.append(
-                f"\n[{idx}] 来源: 【{c['kb_name']} {c['version']}】 - {c['title']}{latest_badge} ({tier_label}{eff_str})"
+                f"\n[{idx}] 来源: 【{c['kb_name']} {c['version']}】 - {c['title']}{latest_badge}{loc_tag} ({tier_label}{eff_str})"
             )
             lines.append(f"内容:\n{c['content']}")
 
