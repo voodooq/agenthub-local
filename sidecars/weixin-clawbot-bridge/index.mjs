@@ -543,6 +543,45 @@ async function uploadEncryptedBufferToIlinkCdn(toUserId, plainBuf, mediaType) {
   };
 }
 
+async function sendIlinkItemList(toUserId, itemList, logLabel) {
+  const baseUrl = (state.ilink_base_url || DEFAULT_ILINK_BASE).replace(/\/+$/, '');
+  const ctxToken = state.context_tokens.get(toUserId) || '';
+  const msgBody = {
+    msg: {
+      from_user_id: '',
+      to_user_id: toUserId,
+      client_id: `ah_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+      message_type: 2,
+      message_state: 2,
+      context_token: ctxToken,
+      item_list: itemList,
+    },
+    base_info: { channel_version: '2.0.1' },
+  };
+  const sendResp = await fetch(`${baseUrl}/ilink/bot/sendmessage`, {
+    method: 'POST',
+    headers: buildIlinkHeaders(),
+    body: JSON.stringify(msgBody),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const rawText = await sendResp.text();
+  let parsedResp = {};
+  try {
+    parsedResp = JSON.parse(rawText || '{}');
+  } catch {
+    parsedResp = {};
+  }
+  const bizErr =
+    (parsedResp.ret !== undefined && Number(parsedResp.ret) !== 0) ||
+    (parsedResp.errcode !== undefined && Number(parsedResp.errcode) !== 0);
+  if (!sendResp.ok || bizErr) {
+    console.error(`[WeixinBridge] ${logLabel}失败 HTTP=${sendResp.status} body=${rawText.slice(0, 300)}`);
+    return { ok: false, status: sendResp.status, body: rawText.slice(0, 300) };
+  }
+  console.log(`[WeixinBridge] ${logLabel}成功 -> ${toUserId} resp=${rawText.slice(0, 120)}`);
+  return { ok: true, status: sendResp.status, body: rawText.slice(0, 120) };
+}
+
 async function uploadAndSendIlinkFile(toUserId, filePath, customFileName = '') {
   if (!state.bot_token || !toUserId || !filePath) {
     return { ok: false, error: '未登录微信 ClawBot 或缺少文件路径/收件人' };
@@ -554,53 +593,67 @@ async function uploadAndSendIlinkFile(toUserId, filePath, customFileName = '') {
   const fileName = customFileName || path.basename(filePath);
 
   try {
-    const { baseUrl, rawSize, media } = await uploadEncryptedBufferToIlinkCdn(toUserId, plainBuf, 3);
-    const ctxToken = state.context_tokens.get(toUserId) || '';
-    const msgBody = {
-      msg: {
-        from_user_id: '',
-        to_user_id: toUserId,
-        client_id: `ah_file_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-        message_type: 2,
-        message_state: 2,
-        context_token: ctxToken,
-        item_list: [
-          {
-            type: 4,
-            file_item: {
-              media,
-              file_name: fileName,
-              len: String(rawSize),
-            },
-          },
-        ],
-      },
-      base_info: { channel_version: '2.0.1' },
-    };
-    const sendResp = await fetch(`${baseUrl}/ilink/bot/sendmessage`, {
-      method: 'POST',
-      headers: buildIlinkHeaders(),
-      body: JSON.stringify(msgBody),
-      signal: AbortSignal.timeout(15_000),
-    });
-    const rawText = await sendResp.text();
-    let parsedResp = {};
-    try {
-      parsedResp = JSON.parse(rawText || '{}');
-    } catch {
-      parsedResp = {};
-    }
-    const bizErr =
-      (parsedResp.ret !== undefined && Number(parsedResp.ret) !== 0) ||
-      (parsedResp.errcode !== undefined && Number(parsedResp.errcode) !== 0);
-    if (!sendResp.ok || bizErr) {
-      console.error(`[WeixinBridge] 发送微信文件失败 HTTP=${sendResp.status} body=${rawText.slice(0, 300)}`);
-      return { ok: false, status: sendResp.status, body: rawText.slice(0, 300) };
-    }
-    console.log(`[WeixinBridge] 已推送微信文件: ${fileName} (${rawSize} bytes) -> ${toUserId}`);
-    return { ok: true, status: sendResp.status, file_name: fileName, bytes: rawSize };
+    const { rawSize, media } = await uploadEncryptedBufferToIlinkCdn(toUserId, plainBuf, 3);
+    const res = await sendIlinkItemList(
+      toUserId,
+      [{ type: 4, file_item: { media, file_name: fileName, len: String(rawSize) } }],
+      `推送微信文件(${fileName}, ${rawSize}B)`
+    );
+    return { ...res, file_name: fileName, bytes: rawSize };
   } catch (err) {
     console.error('[WeixinBridge] 发送文件异常:', err?.message || err);
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
+
+async function uploadAndSendIlinkImage(toUserId, filePath) {
+  if (!state.bot_token || !toUserId || !filePath) {
+    return { ok: false, error: '未登录微信 ClawBot 或缺少图片路径/收件人' };
+  }
+  if (!fs.existsSync(filePath)) {
+    return { ok: false, error: `本地图片不存在: ${filePath}` };
+  }
+  const plainBuf = fs.readFileSync(filePath);
+  const fileName = path.basename(filePath);
+
+  try {
+    const { rawSize, media } = await uploadEncryptedBufferToIlinkCdn(toUserId, plainBuf, 1);
+    const res = await sendIlinkItemList(
+      toUserId,
+      [{ type: 2, image_item: { media, mid_size: rawSize } }],
+      `推送微信图片(${fileName}, ${rawSize}B)`
+    );
+    return { ...res, file_name: fileName, bytes: rawSize };
+  } catch (err) {
+    console.error('[WeixinBridge] 发送图片异常:', err?.message || err);
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
+
+async function uploadAndSendIlinkVideo(toUserId, filePath, playLengthMs = 0) {
+  if (!state.bot_token || !toUserId || !filePath) {
+    return { ok: false, error: '未登录微信 ClawBot 或缺少视频路径/收件人' };
+  }
+  if (!fs.existsSync(filePath)) {
+    return { ok: false, error: `本地视频不存在: ${filePath}` };
+  }
+  const plainBuf = fs.readFileSync(filePath);
+  const fileName = path.basename(filePath);
+
+  try {
+    const { rawSize, media } = await uploadEncryptedBufferToIlinkCdn(toUserId, plainBuf, 2);
+    const videoItem = { media, video_size: rawSize };
+    if (Number(playLengthMs) > 0) {
+      videoItem.play_length = Number(playLengthMs);
+    }
+    const res = await sendIlinkItemList(
+      toUserId,
+      [{ type: 5, video_item: videoItem }],
+      `推送微信视频(${fileName}, ${rawSize}B)`
+    );
+    return { ...res, file_name: fileName, bytes: rawSize };
+  } catch (err) {
+    console.error('[WeixinBridge] 发送视频异常:', err?.message || err);
     return { ok: false, error: String(err?.message || err) };
   }
 }
@@ -622,8 +675,7 @@ async function uploadAndSendIlinkVoice(
   const plainBuf = fs.readFileSync(filePath);
 
   try {
-    const { baseUrl, rawSize, media } = await uploadEncryptedBufferToIlinkCdn(toUserId, plainBuf, 4);
-    const ctxToken = state.context_tokens.get(toUserId) || '';
+    const { rawSize, media } = await uploadEncryptedBufferToIlinkCdn(toUserId, plainBuf, 4);
     const voiceItem = {
       media,
       encode_type: 6, // SILK v3
@@ -634,40 +686,12 @@ async function uploadAndSendIlinkVoice(
     if (transcriptText) {
       voiceItem.text = String(transcriptText).slice(0, 300);
     }
-    const msgBody = {
-      msg: {
-        from_user_id: '',
-        to_user_id: toUserId,
-        client_id: `ah_voice_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
-        message_type: 2,
-        message_state: 2,
-        context_token: ctxToken,
-        item_list: [{ type: 3, voice_item: voiceItem }],
-      },
-      base_info: { channel_version: '2.0.1' },
-    };
-    const sendResp = await fetch(`${baseUrl}/ilink/bot/sendmessage`, {
-      method: 'POST',
-      headers: buildIlinkHeaders(),
-      body: JSON.stringify(msgBody),
-      signal: AbortSignal.timeout(15_000),
-    });
-    const rawText = await sendResp.text();
-    let parsedResp = {};
-    try {
-      parsedResp = JSON.parse(rawText || '{}');
-    } catch {
-      parsedResp = {};
-    }
-    const bizErr =
-      (parsedResp.ret !== undefined && Number(parsedResp.ret) !== 0) ||
-      (parsedResp.errcode !== undefined && Number(parsedResp.errcode) !== 0);
-    if (!sendResp.ok || bizErr) {
-      console.error(`[WeixinBridge] 发送原生语音气泡失败 HTTP=${sendResp.status} body=${rawText.slice(0, 300)}`);
-      return { ok: false, status: sendResp.status, body: rawText.slice(0, 300) };
-    }
-    console.log(`[WeixinBridge] 已推送原生微信语音气泡: ${rawSize} bytes (${voiceItem.playtime}ms) -> ${toUserId} resp=${rawText.slice(0, 120)}`);
-    return { ok: true, status: sendResp.status, bytes: rawSize, playtime: voiceItem.playtime, body: rawText.slice(0, 120) };
+    const res = await sendIlinkItemList(
+      toUserId,
+      [{ type: 3, voice_item: voiceItem }],
+      `推送原生微信语音气泡(${rawSize}B, ${voiceItem.playtime}ms)`
+    );
+    return { ...res, bytes: rawSize, playtime: voiceItem.playtime };
   } catch (err) {
     console.error('[WeixinBridge] 发送原生语音气泡异常:', err?.message || err);
     return { ok: false, error: String(err?.message || err) };
@@ -934,15 +958,55 @@ const server = http.createServer(async (req, res) => {
         )
       );
     }
+    const images = Array.isArray(body.images) ? body.images : [];
+    const imageResults = [];
+    for (const im of images) {
+      if (!im || !im.file_path) continue;
+      imageResults.push(await uploadAndSendIlinkImage(toWxid, String(im.file_path)));
+    }
+    const videos = Array.isArray(body.videos) ? body.videos : [];
+    const videoResults = [];
+    for (const vd of videos) {
+      if (!vd || !vd.file_path) continue;
+      videoResults.push(await uploadAndSendIlinkVideo(toWxid, String(vd.file_path), Number(vd.play_length) || 0));
+    }
     return sendJson(res, 200, {
       ok: true,
       delivered_chunks: results.filter((r) => r.ok).length,
       delivered_files: fileResults.filter((r) => r.ok).length,
+      delivered_images: imageResults.filter((r) => r.ok).length,
+      delivered_videos: videoResults.filter((r) => r.ok).length,
       delivered_voices: voiceResults.filter((r) => r.ok).length,
       results,
       file_results: fileResults,
+      image_results: imageResults,
+      video_results: videoResults,
       voice_results: voiceResults,
     });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/send-image') {
+    if (BRIDGE_SECRET && req.headers['x-bridge-secret'] !== BRIDGE_SECRET) {
+      return sendJson(res, 401, { ok: false, error: 'Unauthorized bridge secret' });
+    }
+    const body = await readJsonBody(req);
+    const toWxid = String(body.to_wxid || body.chat_id || state.wxid || '').trim();
+    const r = await uploadAndSendIlinkImage(toWxid, String(body.file_path || '').trim());
+    return sendJson(res, r.ok ? 200 : 500, r);
+  }
+
+  if (req.method === 'POST' && url.pathname === '/send-video') {
+    if (BRIDGE_SECRET && req.headers['x-bridge-secret'] !== BRIDGE_SECRET) {
+      return sendJson(res, 401, { ok: false, error: 'Unauthorized bridge secret' });
+    }
+    const body = await readJsonBody(req);
+    const toWxid = String(body.to_wxid || body.chat_id || state.wxid || '').trim();
+    const r = await uploadAndSendIlinkVideo(
+      toWxid,
+      String(body.file_path || '').trim(),
+      Number(body.play_length) || 0
+    );
+    return sendJson(res, r.ok ? 200 : 500, r);
   }
 
   if (req.method === 'POST' && url.pathname === '/send-voice') {

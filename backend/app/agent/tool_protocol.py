@@ -1432,6 +1432,29 @@ class ToolProtocolAdapter:
                     "required": ["text"],
                 },
             },
+            {
+                "name": "send_weixin_media",
+                "description": (
+                    "将服务器或工作区中的本地图片（jpg/png/webp）、视频（mp4）或任意文件直接发送到用户微信。"
+                    "当用户需要查看截图、图表、生成图片、视频或获取本地任意文件时调用。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "file_path": {
+                            "type": "string",
+                            "description": "要发送的本地文件绝对或相对路径。",
+                        },
+                        "media_type": {
+                            "type": "string",
+                            "enum": ["image", "video", "file"],
+                            "description": "媒体类型：image（图片气泡）、video（视频气泡）或 file（文件气泡）。",
+                            "default": "file",
+                        },
+                    },
+                    "required": ["file_path"],
+                },
+            },
         ]
 
     @staticmethod

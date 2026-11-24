@@ -387,6 +387,7 @@ class AgentRuntime:
         "generate_daily_briefing",
         "export_and_send_document",
         "send_weixin_voice_bubble",
+        "send_weixin_media",
         "update_working_memory",
         "search_cloud_wiki",
         "read_cloud_wiki_section",
@@ -1563,6 +1564,7 @@ class AgentRuntime:
                 "generate_daily_briefing",
                 "export_and_send_document",
                 "send_weixin_voice_bubble",
+                "send_weixin_media",
                 "save_long_term_memory",
                 "search_memory_history",
                 "update_working_memory",
@@ -5361,6 +5363,47 @@ class AgentRuntime:
                             "status": "completed" if v_res.get("success") else "error",
                             "output": tool_output,
                             "compressed": compressed,
+                        }
+
+                    # ── 工具: 发送本地图片/视频/文件到微信 (send_weixin_media) ──
+                    elif func_name == "send_weixin_media":
+                        m_path_raw = str(args.get("file_path") or "").strip()
+                        m_kind = str(args.get("media_type") or "file").strip().lower()
+                        if m_kind not in ("image", "video", "file"):
+                            m_kind = "file"
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"send_weixin_media({m_kind}: {m_path_raw})",
+                            "reason": "发送本地图片/视频/文件到微信",
+                            "security": "SAFE",
+                        }
+                        resolved_m = Path(m_path_raw)
+                        if not resolved_m.is_absolute() and target_cwd:
+                            resolved_m = Path(target_cwd) / resolved_m
+                        if resolved_m.exists() and resolved_m.is_file():
+                            im_export_files.append(
+                                {
+                                    "kind": m_kind,
+                                    "file_path": str(resolved_m),
+                                    "file_name": resolved_m.name,
+                                }
+                            )
+                            tool_output = f"已加入微信出站{m_kind}发送队列：{resolved_m.name}，本轮回复时将推送到用户微信。"
+                            m_status = "completed"
+                        else:
+                            tool_output = f"目标文件不存在：{resolved_m}"
+                            m_status = "error"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"send_weixin_media({m_kind}: {m_path_raw})",
+                            "reason": "准备微信媒体发送",
+                            "status": m_status,
+                            "output": tool_output,
+                            "compressed": f"[微信{m_kind}: {resolved_m.name}]",
                         }
 
                     # ── 工具: Windows UI 自动化操作 (ui_action) ──

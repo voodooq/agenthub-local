@@ -87,7 +87,20 @@ class WeixinClawbotAdapter(BaseChannelAdapter):
         files_payload = [
             {"file_path": str(att["file_path"]), "file_name": str(att.get("file_name") or "")}
             for att in (outbound.attachments or [])
-            if isinstance(att, dict) and att.get("file_path") and att.get("kind") != "voice"
+            if isinstance(att, dict) and att.get("file_path") and att.get("kind") not in ("voice", "image", "video")
+        ]
+        images_payload = [
+            {"file_path": str(att["file_path"])}
+            for att in (outbound.attachments or [])
+            if isinstance(att, dict) and att.get("file_path") and att.get("kind") == "image"
+        ]
+        videos_payload = [
+            {
+                "file_path": str(att["file_path"]),
+                "play_length": int(att.get("play_length") or 0),
+            }
+            for att in (outbound.attachments or [])
+            if isinstance(att, dict) and att.get("file_path") and att.get("kind") == "video"
         ]
         voices_payload = [
             {
@@ -102,7 +115,7 @@ class WeixinClawbotAdapter(BaseChannelAdapter):
         ]
 
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=45.0) as client:
                 resp = await client.post(
                     f"{bridge_url}/send",
                     headers=req_headers,
@@ -112,6 +125,8 @@ class WeixinClawbotAdapter(BaseChannelAdapter):
                         "chat_id": inbound.reply_context.get("chat_id") or inbound.chat_id,
                         "chunks": outbound.chunks or [outbound.formatted_text],
                         "files": files_payload,
+                        "images": images_payload,
+                        "videos": videos_payload,
                         "voices": voices_payload,
                     },
                 )
@@ -130,12 +145,22 @@ class WeixinClawbotAdapter(BaseChannelAdapter):
                     f_res_list = resp_data.get("file_results") or []
                     if resp_data.get("delivered_files", 0) == 0:
                         logger.warning(f"[WeixinClawbot] 文件投递失败: status={resp.status_code}, detail={f_res_list or resp_data}")
+                if images_payload:
+                    i_res_list = resp_data.get("image_results") or []
+                    if resp_data.get("delivered_images", 0) == 0:
+                        logger.warning(f"[WeixinClawbot] 图片投递失败: status={resp.status_code}, detail={i_res_list or resp_data}")
+                if videos_payload:
+                    vd_res_list = resp_data.get("video_results") or []
+                    if resp_data.get("delivered_videos", 0) == 0:
+                        logger.warning(f"[WeixinClawbot] 视频投递失败: status={resp.status_code}, detail={vd_res_list or resp_data}")
                 return {
                     "pushed": resp.status_code < 400,
                     "status_code": resp.status_code,
                     "delivered_voices": resp_data.get("delivered_voices", 0),
                     "voice_results": resp_data.get("voice_results", []),
                     "delivered_files": resp_data.get("delivered_files", 0),
+                    "delivered_images": resp_data.get("delivered_images", 0),
+                    "delivered_videos": resp_data.get("delivered_videos", 0),
                 }
         except Exception as err:
             logger.debug(f"[WeixinClawbot] 本地 Sidecar 未运行或回推失败 ({bridge_url}): {err}")
