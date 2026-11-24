@@ -111,6 +111,17 @@ export function DialogueWikiView() {
   const [servers, setServers] = useState<Array<any>>([]);
   const [loadingServers, setLoadingServers] = useState<boolean>(false);
   const [inspectResult, setInspectResult] = useState<string>('');
+  // 微信计划任务 / 定时提醒管理弹窗状态
+  const [showTaskModal, setShowTaskModal] = useState<boolean>(false);
+  const [scheduledTasks, setScheduledTasks] = useState<Array<any>>([]);
+  const [loadingTasks, setLoadingTasks] = useState<boolean>(false);
+  const [taskMsg, setTaskMsg] = useState<string>('');
+  const [taskForm, setTaskForm] = useState({
+    link_id: '',
+    trigger_expr: '每天早上8:30',
+    content: '',
+    run_as_agent: true,
+  });
   const [srvForm, setSrvForm] = useState({
     alias: '',
     host: '',
@@ -216,6 +227,48 @@ export function DialogueWikiView() {
     });
     if (res.ok) {
       await loadServers();
+    }
+  };
+
+  const loadScheduledTasks = useCallback(async () => {
+    setLoadingTasks(true);
+    try {
+      const res = await apiFetch('/api/v1/personal-assistant/tasks');
+      if (res.ok) {
+        const json = await res.json();
+        setScheduledTasks(Array.isArray(json.data) ? json.data : []);
+      }
+    } finally {
+      setLoadingTasks(false);
+    }
+  }, []);
+
+  const handleCreateScheduledTask = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const targetLinkId = taskForm.link_id || links[0]?.link_id || '';
+    if (!targetLinkId || !taskForm.content.trim() || !taskForm.trigger_expr.trim()) return;
+    setTaskMsg('');
+    const res = await apiFetch('/api/v1/personal-assistant/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...taskForm, link_id: targetLinkId }),
+    });
+    const json = await res.json().catch(() => ({}));
+    if (res.ok && json.success) {
+      setTaskForm((p) => ({ ...p, content: '' }));
+      setTaskMsg(`已创建：${json.data?.schedule_desc || '成功'}`);
+      await loadScheduledTasks();
+    } else {
+      setTaskMsg(json?.detail || '创建计划任务失败');
+    }
+  };
+
+  const handleCancelScheduledTask = async (taskId: string) => {
+    const res = await apiFetch(`/api/v1/personal-assistant/tasks/${encodeURIComponent(taskId)}`, {
+      method: 'DELETE',
+    });
+    if (res.ok) {
+      await loadScheduledTasks();
     }
   };
 
@@ -685,6 +738,18 @@ export function DialogueWikiView() {
               </p>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowTaskModal(true);
+                  setTaskForm((p) => ({ ...p, link_id: p.link_id || links[0]?.link_id || '' }));
+                  loadScheduledTasks();
+                }}
+                className="px-3 py-1.5 rounded-lg text-xs border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-amber-400 flex items-center gap-1.5 transition-colors"
+              >
+                <Clock className="w-3.5 h-3.5" />
+                <span>计划任务</span>
+              </button>
               <button
                 type="button"
                 onClick={() => {
@@ -2042,6 +2107,111 @@ export function DialogueWikiView() {
                 保存托管服务器
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {showTaskModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-surface-100 border border-border rounded-2xl w-full max-w-2xl p-5 shadow-2xl space-y-4 max-h-[85vh] overflow-y-auto">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                <Clock className="w-4 h-4 text-amber-400" />
+                <span>微信计划任务与定时提醒（到点主动推送）</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowTaskModal(false)}
+                className="p-1 rounded-lg hover:bg-surface-200 text-muted-foreground"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {taskMsg && (
+              <div className="text-xs px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/30 text-amber-300">
+                {taskMsg}
+              </div>
+            )}
+
+            <form onSubmit={handleCreateScheduledTask} className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 text-xs bg-surface-200/40 p-3 rounded-xl border border-border">
+              <select
+                value={taskForm.link_id || links[0]?.link_id || ''}
+                onChange={(e) => setTaskForm((p) => ({ ...p, link_id: e.target.value }))}
+                className="px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground"
+              >
+                {links.length === 0 && <option value="">请先创建 IM 对接链接</option>}
+                {links.map((lk) => (
+                  <option key={lk.link_id} value={lk.link_id}>
+                    {lk.target_user_label || lk.expert_name}（{lk.channel_label}）
+                  </option>
+                ))}
+              </select>
+              <input
+                type="text"
+                required
+                placeholder="触发时间（如：每天早上8:30、30分钟后、30 8 * * *）"
+                value={taskForm.trigger_expr}
+                onChange={(e) => setTaskForm((p) => ({ ...p, trigger_expr: e.target.value }))}
+                className="px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground"
+              />
+              <input
+                type="text"
+                required
+                placeholder="任务或提醒内容（如：查询北京今日天气并总结待办发给我）"
+                value={taskForm.content}
+                onChange={(e) => setTaskForm((p) => ({ ...p, content: e.target.value }))}
+                className="px-2.5 py-1.5 rounded-lg bg-background border border-border text-foreground sm:col-span-2"
+              />
+              <label className="flex items-center gap-2 text-xs text-muted-foreground cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={taskForm.run_as_agent}
+                  onChange={(e) => setTaskForm((p) => ({ ...p, run_as_agent: e.target.checked }))}
+                  className="rounded border-border"
+                />
+                <span>到点由 AI 自动执行（查天气/联网搜索/巡检）后推送</span>
+              </label>
+              <button
+                type="submit"
+                disabled={links.length === 0}
+                className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 disabled:opacity-50 text-white font-medium justify-self-end"
+              >
+                添加计划任务
+              </button>
+            </form>
+
+            <div className="space-y-2">
+              {loadingTasks ? (
+                <div className="text-xs text-muted-foreground py-4 text-center">加载中...</div>
+              ) : scheduledTasks.length === 0 ? (
+                <div className="text-xs text-muted-foreground py-4 text-center">
+                  暂无活跃计划任务。你也可以直接在微信里对机器人说“每天早上8点发我北京天气”或发送 `/task 10分钟后 喝水`。
+                </div>
+              ) : (
+                scheduledTasks.map((tk) => (
+                  <div
+                    key={tk.id}
+                    className="flex items-center justify-between gap-2 p-2.5 rounded-xl border border-border bg-background/60 text-xs"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-medium text-foreground truncate">{tk.display_content}</div>
+                      <div className="text-[11px] text-muted-foreground mt-0.5">
+                        Cron: `{tk.cron_expr}` · 下次执行: {tk.next_run_at || '-'} ·{' '}
+                        {tk.run_as_agent ? 'AI 自动执行' : '纯文本提醒'} · {tk.one_shot ? '单次' : '周期'}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleCancelScheduledTask(tk.id)}
+                      className="px-2 py-1 rounded bg-rose-500/15 hover:bg-rose-500/25 text-rose-400 shrink-0"
+                    >
+                      取消
+                    </button>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       )}

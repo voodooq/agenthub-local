@@ -422,8 +422,8 @@ class ChannelGateway:
                     "1. **主动调用真实能力，严禁虚假拒答**：\n"
                     "   - 当用户让你**记备忘 / 添加待办 / 查看备忘**：必须主动调用 `manage_personal_notes`（或 `save_long_term_memory`）持久化落库，并明确回复“已帮你记下”，**严禁说“我记不住 / 下次就忘了 / 建议你自己记在笔记里”**；\n"
                     "   - 当用户让你**查以前的聊天记录 / 核对以前说过的话**：主动调用 `search_im_chat_history` 查真实落库记录并准确作答；\n"
-                    "   - 当用户让你**设置定时提醒 / 到点叫我**：主动调用 `create_im_reminder`（或用 `list_or_cancel_im_reminders` 查看取消），到点时系统会真正主动往微信发通知；\n"
-                    "   - 当用户询问**天气或最新实时资讯**：主动调用 `get_weather` / `web_search` 获取真实数据后直给结论，**严禁回复“我没有时钟 / 我查不到天气 / 你自己打开手机 App 看”**；\n"
+                    "   - 当用户让你**设置定时提醒 / 添加计划任务 / 每天定时执行**：必须主动调用 `create_im_reminder`（支持单次如 `10分钟后`、`明早8点`，以及周期 Cron 如 `每天早上8:30`；若到点需查天气/待办/新闻或执行总结，请设 `run_as_agent=True`），查看或取消调用 `list_or_cancel_im_reminders`，**严禁说“不支持计划任务”**；\n"
+                    "   - 当用户询问**天气或最新实时资讯 / 联网搜索**：你已直接拥有 `get_weather`、`web_search` 与 `web_fetch` 工具，必须主动调用获取真实结果后直给结论，**严禁回复“我没有时钟 / 暂时不能联网搜索 / 我查不到实时天气 / 你自己打开手机 App 看”**；\n"
                     "   - 当用户询问**写程序 / 脚本 / 技术排错**：可以直接在微信里给出精简清晰的核心代码片段、排错脚本或技术方案思路，仅在需要整库构建或操作本机桌面软件时简短建议回到电脑端协同；\n"
                     "   - 当用户询问你**能否听语音 / 语音识别 / 看图片**，或直接发送语音条/图片时：网关已为你接入微信语音自动转文字与图片识别能力（OCR + 视觉理解），请如实肯定并欢迎用户直接发语音条或图片给你，**严禁回复“目前还不能做语音识别”或“我只能处理文字对话”**！\n"
                     "   - **重要备忘工具选择铁律**：当用户让你记录任何计划、备忘、待办或习惯时，**必须直接调用 `manage_personal_notes(action='add', ...)` 或 `save_long_term_memory`** 存入数据库，**严禁调用 `write_local_file` 写本地文件**！\n"
@@ -943,30 +943,34 @@ class ChannelGateway:
                 )
                 reply_text = f"已添加待办：{saved['content']}"
 
-        # 5. /reminders -> 查看当前定时提醒；/remind <时间> <内容> -> 秒设提醒
-        elif reply_text is None and low in ("/reminders", "/remind"):
+        # 5. /reminders 或 /tasks -> 查看当前定时提醒与计划任务；/remind 或 /task <时间> <内容> -> 秒设提醒/计划任务
+        elif reply_text is None and low in ("/reminders", "/remind", "/tasks", "/task"):
             rems = await personal_assistant_service.list_im_reminders(
                 link_id=link["link_id"], target_user_id=inbound.sender_id
             )
             if not rems:
-                reply_text = "当前没有活跃定时提醒。示例：`/remind 10分钟后 喝水` 或 `/remind 每天早上8:30 发我日程`。"
+                reply_text = "当前没有活跃定时提醒/计划任务。示例：`/task 10分钟后 喝水` 或 `/task 每天早上8:30 发我北京天气和今日待办`。"
             else:
-                lines = [f"活跃定时提醒（{len(rems)} 条）："]
+                lines = [f"活跃定时提醒/计划任务（{len(rems)} 条）："]
                 for idx, r in enumerate(rems, 1):
                     lines.append(f"{idx}. {r['display_content']}（下次：{r.get('next_run_at') or '-'}）")
                 reply_text = "\n".join(lines)
 
-        elif reply_text is None and low.startswith("/remind "):
-            rest = raw[8:].strip()
+        elif reply_text is None and (low.startswith("/remind ") or low.startswith("/task ")):
+            rest = raw[8:].strip() if low.startswith("/remind ") else raw[6:].strip()
             parts = rest.split(None, 1)
             if len(parts) < 2:
-                reply_text = "格式：`/remind <时间> <内容>`，例如：`/remind 30分钟后 检查服务器`。"
+                reply_text = "格式：`/task <时间> <内容>`，例如：`/task 30分钟后 检查服务器` 或 `/task 每天早上8:30 发我北京天气和待办`。"
             else:
                 try:
                     ws_id = await self.ensure_im_link_workspace(
                         link_id=link["link_id"],
                         target_user_label=str(link.get("target_user_label") or ""),
                         expert_id=str(link.get("expert_id") or ""),
+                    )
+                    is_agent_task = any(
+                        kw in parts[1]
+                        for kw in ("天气", "简报", "晨报", "巡检", "汇总", "总结", "汇报", "新闻", "检查")
                     )
                     rem = await personal_assistant_service.create_im_reminder(
                         workspace_id=ws_id,
@@ -975,8 +979,10 @@ class ChannelGateway:
                         target_user_id=inbound.sender_id,
                         trigger_expr=parts[0],
                         content=parts[1],
+                        run_as_agent=is_agent_task,
                     )
-                    reply_text = f"已设置提醒「{rem['content']}」，将于 {rem['schedule_desc']} 微信通知你。"
+                    mode_tag = "（AI 自动执行并推送）" if is_agent_task else ""
+                    reply_text = f"已添加计划任务「{rem['content']}」{mode_tag}，将于 {rem['schedule_desc']} 微信通知你。"
                 except ValueError as ve:
                     reply_text = str(ve)
 
@@ -1043,7 +1049,7 @@ class ChannelGateway:
                 "常用零延迟快捷指令：\n"
                 "- `/memo 内容`：秒存备忘（发 `/memo` 查列表）\n"
                 "- `/todo 内容`：添加或查看待办\n"
-                "- `/remind 时间 内容`：设微信主动提醒（如 `/remind 10分钟后 喝水`）\n"
+                "- `/remind 时间 内容` 或 `/task 时间 内容`：添加微信计划任务/提醒（如 `/task 每天早上8:30 发我天气和待办`）\n"
                 "- `/brief [城市]`：生成今日天气+待办+服务器晨报\n"
                 "- `/inbox [链接或词]` 或直接转发文章链接：收入收藏箱/检索\n"
                 "- `/status [服务器]`：服务器一键体检（主人模式）\n"

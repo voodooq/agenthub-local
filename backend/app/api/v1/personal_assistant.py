@@ -14,10 +14,23 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import HTMLResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
+from ...channels.gateway import channel_gateway
+from ...repository.db import db_manager
+from ...service.personal_assistant_service import personal_assistant_service
 from ...service.personal_workflow_service import personal_workflow_service
 from ...service.server_ops_service import server_ops_service
 
 router = APIRouter(prefix="/personal-assistant", tags=["personal-assistant"])
+
+
+class IMScheduledTaskCreateRequest(BaseModel):
+    """创建微信/IM 计划任务与定时提醒请求。"""
+
+    link_id: str = Field(..., min_length=1, max_length=64, description="关联的 IM 对接链接 ID")
+    trigger_expr: str = Field(..., min_length=1, max_length=60, description="时间表达式（如 每天早上8:30、30分钟后、30 8 * * *）")
+    content: str = Field(..., min_length=1, max_length=500, description="提醒内容或让 AI 到点执行的指令")
+    run_as_agent: bool = Field(default=False, description="是否到点由 AI 执行联网/天气/汇总后再推送")
+    target_user_id: str = Field(default="", max_length=120, description="可选目标微信/IM 用户 ID，留空自动匹配最近联系人")
 
 
 class ServerAssetUpsertRequest(BaseModel):
@@ -87,6 +100,93 @@ async def list_pending_approvals(limit: int = Query(default=20, ge=1, le=100)) -
     """获取 L2 高危审批挂起/执行审计记录。"""
     items = await server_ops_service.list_pending_approvals(limit=limit)
     return {"success": True, "data": items}
+
+
+@router.get("/tasks")
+async def list_im_scheduled_tasks(link_id: str = Query(default="")) -> dict[str, Any]:
+    """列出所有活跃的微信/IM 计划任务与定时提醒。"""
+    clauses = ["status = 'active'", "(notify_channel != '' OR id LIKE 'rem_%')"]
+    params: list[Any] = []
+    if link_id.strip():
+        clauses.append("notify_link_id = ?")
+        params.append(link_id.strip())
+    sql = (
+        "SELECT id, name, cron_expr, prompt_template, next_run_at, notify_channel, "
+        "notify_link_id, notify_target_user_id, one_shot "
+        f"FROM scheduled_tasks WHERE {' AND '.join(clauses)} ORDER BY next_run_at ASC LIMIT 50"
+    )
+    async with db_manager.get_connection() as conn:
+        cur = await conn.execute(sql, tuple(params))
+        rows = await cur.fetchall()
+    items: list[dict[str, Any]] = []
+    for r in rows:
+        d = dict(r)
+        pt = str(d.get("prompt_template") or "")
+        d["run_as_agent"] = not pt.startswith("__IM_REMINDER__:")
+        d["display_content"] = pt.split(":", 1)[1].strip() if pt.startswith("__IM_REMINDER__:") else pt
+        items.append(d)
+    return {"success": True, "data": items}
+
+
+@router.post("/tasks")
+async def create_im_scheduled_task(payload: IMScheduledTaskCreateRequest) -> dict[str, Any]:
+    """在控制台为指定 IM 对接链接创建计划任务或定时提醒。"""
+    async with db_manager.get_connection() as conn:
+        cur = await conn.execute(
+            "SELECT link_id, expert_id, channel_type, target_user_label, target_user_id FROM dialogue_channel_links WHERE link_id = ? LIMIT 1",
+            (payload.link_id.strip(),),
+        )
+        link_row = await cur.fetchone()
+        if not link_row:
+            raise HTTPException(status_code=404, detail="未找到指定的 IM 对接链接")
+        link_info = dict(link_row)
+        target_uid = payload.target_user_id.strip() or str(link_info.get("target_user_id") or "").strip()
+        if not target_uid:
+            cur_sess = await conn.execute(
+                "SELECT sender_id FROM dialogue_channel_sessions WHERE link_id = ? ORDER BY updated_at DESC LIMIT 1",
+                (payload.link_id.strip(),),
+            )
+            sess_row = await cur_sess.fetchone()
+            if sess_row:
+                target_uid = str(sess_row["sender_id"] or "").strip()
+    if not target_uid:
+        raise HTTPException(
+            status_code=400,
+            detail="该链接尚未记录到收件人 ID，请先用微信给机器人发一条消息后再添加计划任务。",
+        )
+    ws_id = await channel_gateway.ensure_im_link_workspace(
+        link_id=str(link_info["link_id"]),
+        target_user_label=str(link_info.get("target_user_label") or ""),
+        expert_id=str(link_info.get("expert_id") or ""),
+    )
+    try:
+        created = await personal_assistant_service.create_im_reminder(
+            workspace_id=ws_id,
+            link_id=str(link_info["link_id"]),
+            channel_type=str(link_info["channel_type"]),
+            target_user_id=target_uid,
+            content=payload.content,
+            trigger_expr=payload.trigger_expr,
+            run_as_agent=payload.run_as_agent,
+        )
+        return {"success": True, "data": created}
+    except ValueError as ve:
+        raise HTTPException(status_code=400, detail=str(ve))
+
+
+@router.delete("/tasks/{task_id}")
+async def cancel_im_scheduled_task(task_id: str) -> dict[str, Any]:
+    """取消指定的 IM 计划任务。"""
+    async with db_manager.get_connection() as conn:
+        cur = await conn.execute("SELECT id FROM scheduled_tasks WHERE id = ? LIMIT 1", (task_id.strip(),))
+        if not await cur.fetchone():
+            raise HTTPException(status_code=404, detail="未找到目标计划任务")
+        await conn.execute(
+            "UPDATE scheduled_tasks SET status = 'paused', next_run_at = NULL WHERE id = ?",
+            (task_id.strip(),),
+        )
+        await conn.commit()
+    return {"success": True, "message": "已取消该计划任务"}
 
 
 @router.get("/inbox")

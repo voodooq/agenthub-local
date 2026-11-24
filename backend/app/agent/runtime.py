@@ -320,7 +320,8 @@ class AgentRuntime:
     _TASK_INTENT_KEYWORDS_RE = re.compile(
         r"(?:/[a-zA-Z0-9_-]+|\.(?:py|ts|tsx|js|jsx|json|md|csv|xlsx|sql|yaml|yml|sh|ps1|txt|pdf|png|jpg)\b|"
         r"分析|重构|修复|调试|排查|检查|创建|新建|生成|编写|写一个|修改|编辑|删除|清理|运行|执行|测试|验证|部署|构建|打包|"
-        r"读取|写入|搜索|检索|导出|汇总|统计|对比|整理|画图|渲染|优化|安装|配置|回滚|提炼|蒸馏|任务|代码|文件|目录|脚本|数据库|接口)",
+        r"读取|写入|搜索|检索|导出|汇总|统计|对比|整理|画图|渲染|优化|安装|配置|回滚|提炼|蒸馏|任务|代码|文件|目录|脚本|数据库|接口|"
+        r"天气|气温|下雨|预报|几点|提醒|计划|定时|每天|明早|今晚|记住|备忘|待办|记一下|记下来|帮我记|查一下|搜一下|联网)",
         re.IGNORECASE,
     )
 
@@ -1544,6 +1545,44 @@ class AgentRuntime:
         effective_allowed_tools = list(allowed_tools) if allowed_tools else None
         if effective_allowed_tools is not None and "read_tool_ref" not in effective_allowed_tools:
             effective_allowed_tools.append("read_tool_ref")
+        if caller_channel == "im_bot" and effective_allowed_tools is not None:
+            # 微信/IM 私人助理基础工具（联网查询、天气、备忘、历史检索、计划任务、收藏箱、记忆）
+            # 不受绑定专家旧 allowed_tools 列表遗漏影响，始终对 IM 渠道开放
+            im_core_tools = (
+                "get_weather",
+                "web_search",
+                "web_fetch",
+                "manage_personal_notes",
+                "search_im_chat_history",
+                "create_im_reminder",
+                "list_or_cancel_im_reminders",
+                "save_inbox_item",
+                "search_inbox_items",
+                "generate_daily_briefing",
+                "save_long_term_memory",
+                "search_memory_history",
+                "update_working_memory",
+            )
+            for im_t in im_core_tools:
+                if im_t not in effective_allowed_tools:
+                    effective_allowed_tools.append(im_t)
+            if owner_mode:
+                im_owner_tools = (
+                    "list_managed_servers",
+                    "inspect_server_health",
+                    "run_remote_ssh_command",
+                    "execute_local_command",
+                    "write_local_file",
+                    "replace_in_file",
+                    "git_workspace_safe_ops",
+                    "read_local_file",
+                    "list_directory",
+                    "find_files",
+                    "grep_search",
+                )
+                for ow_t in im_owner_tools:
+                    if ow_t not in effective_allowed_tools:
+                        effective_allowed_tools.append(ow_t)
         if allow_biz_sql_for_run and effective_allowed_tools is not None:
             for b_tool in biz_sql_tool_names:
                 if b_tool not in effective_allowed_tools:

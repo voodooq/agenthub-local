@@ -399,10 +399,10 @@ class WebTools:
         limit = max(1, min(10, int(max_results or 5)))
         results: list[dict[str, str]] = []
 
-        # 1. 主源：DuckDuckGo HTML 接口
+        # 1. 主源：DuckDuckGo HTML 接口（较短超时以便国内环境快速降级到 Bing）
         ddg_url = "https://html.duckduckgo.com/html/"
         try:
-            async with httpx.AsyncClient(**cls._build_client_kwargs(ddg_url, timeout=12.0)) as client:
+            async with httpx.AsyncClient(**cls._build_client_kwargs(ddg_url, timeout=6.0)) as client:
                 resp = await client.post(ddg_url, data={"q": q})
                 if resp.status_code == 200 and resp.text:
                     link_matches = list(
