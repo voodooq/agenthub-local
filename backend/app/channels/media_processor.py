@@ -515,16 +515,76 @@ class MediaProcessor:
                     return r.content
         return b""
 
+    @staticmethod
+    def _save_and_extract_file_sync(raw_bytes: bytes, filename: str, save_path: Path) -> str:
+        """将入站微信文档落盘到缓存目录并提取前段文本预览（支持 xlsx/docx/pdf/txt/md/csv）。"""
+        save_path.write_bytes(raw_bytes)
+        ext = Path(filename or "").suffix.lower()
+        preview = ""
+        try:
+            if ext in (".txt", ".md", ".csv", ".json", ".log", ".py", ".yaml", ".yml", ".xml", ".html"):
+                try:
+                    preview = raw_bytes.decode("utf-8-sig")
+                except UnicodeDecodeError:
+                    preview = raw_bytes.decode("gb18030", errors="replace")
+            elif ext == ".xlsx":
+                import openpyxl  # type: ignore
+
+                wb = openpyxl.load_workbook(str(save_path), read_only=True, data_only=True)
+                lines: list[str] = []
+                for sname in wb.sheetnames[:5]:
+                    ws = wb[sname]
+                    lines.append(f"### Sheet: {sname}")
+                    for r_idx, row in enumerate(ws.iter_rows(values_only=True)):
+                        if r_idx >= 80:
+                            lines.append("... (更多行已省略，请用 Python 脚本读取完整文件)")
+                            break
+                        vals = [str(c).strip() if c is not None else "" for c in row]
+                        if any(vals):
+                            lines.append(" | ".join(vals[:12]))
+                wb.close()
+                preview = "\n".join(lines)
+            elif ext == ".docx":
+                from docx import Document  # type: ignore
+
+                doc = Document(str(save_path))
+                paras = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+                preview = "\n".join(paras[:120])
+            elif ext == ".pdf":
+                from pypdf import PdfReader  # type: ignore
+
+                reader = PdfReader(str(save_path))
+                pages_txt = []
+                for p in reader.pages[:10]:
+                    t = (p.extract_text() or "").strip()
+                    if t:
+                        pages_txt.append(t)
+                preview = "\n\n".join(pages_txt)
+        except Exception as ext_err:
+            preview = f"(文本预览提取跳过: {ext_err})"
+
+        preview_clean = preview.strip()[:5000]
+        header = f"[收到用户发送的文件: `{filename}`（{len(raw_bytes)} 字节），本地已保存路径: `{save_path}`]"
+        if preview_clean:
+            return f"{header}\n文件内容预览：\n{preview_clean}"
+        return f"{header}\n（该格式暂未提取文本预览，若已开启主机全权限可直接用 Python 脚本读取上述本地路径分析。）"
+
     async def process_inbound_media(self, raw_payload: dict[str, Any] | None) -> dict[str, Any]:
-        """统一处理入站语音与图片附件，产出转写文本、OCR 文本与视觉载荷。"""
+        """统一处理入站语音、图片与文件附件，产出转写文本、OCR 文本、文件摘要与视觉载荷。"""
         payload = raw_payload or {}
         attachments = payload.get("attachments") or []
         transcripts: list[str] = []
         ocr_texts: list[str] = []
+        file_summaries: list[str] = []
         image_attachments: list[dict[str, Any]] = []
 
         if not isinstance(attachments, list):
-            return {"transcripts": transcripts, "ocr_texts": ocr_texts, "image_attachments": image_attachments}
+            return {
+                "transcripts": transcripts,
+                "ocr_texts": ocr_texts,
+                "file_summaries": file_summaries,
+                "image_attachments": image_attachments,
+            }
 
         for idx, att in enumerate(attachments):
             if not isinstance(att, dict):
@@ -561,9 +621,22 @@ class MediaProcessor:
                             }
                         )
 
+            elif kind == "file":
+                raw_bytes = await self._load_attachment_bytes(att)
+                if raw_bytes:
+                    import re as _re
+
+                    safe_fname = _re.sub(r'[\\/:*?"<>|\r\n]+', "_", fname).strip() or f"file_{idx}.bin"
+                    save_path = self.get_cache_dir() / f"in_{int(time.time())}_{safe_fname}"
+                    summary_txt = await asyncio.to_thread(
+                        self._save_and_extract_file_sync, raw_bytes, fname, save_path
+                    )
+                    file_summaries.append(summary_txt)
+
         return {
             "transcripts": transcripts,
             "ocr_texts": ocr_texts,
+            "file_summaries": file_summaries,
             "image_attachments": image_attachments,
         }
 

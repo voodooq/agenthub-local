@@ -328,6 +328,7 @@ function extractMessagePayloadFromIlinkMsg(msg) {
         mime_type: String(fl.mime_type || 'application/octet-stream'),
         name: String(fl.file_name || fl.name || 'wechat_file'),
         url: String(fl.url || fl.cdn_url || '').trim(),
+        base64: String(fl.base64 || fl.data || '').trim(),
       });
       result.msg_type = 'file';
       result.has_media = true;
@@ -363,7 +364,12 @@ async function extractAndHydrateIlinkMsg(msg) {
         directUrl: String(vc.url || vc.voice_url || vc.cdn_url || ''),
       });
     } else if (item.type === 4 || item.file_item) {
-      mediaSources.push(null);
+      const fl = item.file_item || item;
+      mediaSources.push({
+        mediaObj: fl.media || fl,
+        fallbackAesKey: String(fl.aeskey || fl.aes_key || ''),
+        directUrl: String(fl.url || fl.cdn_url || ''),
+      });
     }
   }
 
@@ -386,6 +392,11 @@ async function extractAndHydrateIlinkMsg(msg) {
         const meta = detectMediaMimeAndExt(dl.buffer, att.mime_type, att.name);
         att.mime_type = meta.mime;
         att.name = meta.name;
+      }
+    } else if (att.kind === 'file' && !att.base64) {
+      const dl = await downloadAndDecryptIlinkMedia(src.mediaObj, src.fallbackAesKey, src.directUrl);
+      if (dl) {
+        att.base64 = dl.base64;
       }
     }
   }

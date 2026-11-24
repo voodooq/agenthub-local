@@ -655,7 +655,9 @@ class ChannelGateway:
                     prompt_sections.append("[语音转写]: " + "\n".join(media_res["transcripts"]))
                 if media_res.get("ocr_texts"):
                     prompt_sections.append("[图片文字提取(OCR)]: " + "\n".join(media_res["ocr_texts"])[:1500])
-                if inbound.text and inbound.text not in ("[收到图片消息]", "[收到语音消息]", "[收到媒体附件]"):
+                if media_res.get("file_summaries"):
+                    prompt_sections.append("\n\n".join(media_res["file_summaries"]))
+                if inbound.text and inbound.text not in ("[收到图片消息]", "[收到语音消息]", "[收到媒体附件]", "[收到文件消息]"):
                     prompt_sections.append(inbound.text)
                 elif not prompt_sections:
                     prompt_sections.append(inbound.text)
