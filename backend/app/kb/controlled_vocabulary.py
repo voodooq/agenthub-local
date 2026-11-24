@@ -17,10 +17,13 @@ import difflib
 import json
 import os
 from pathlib import Path
+import re
 import time
 from typing import Any, Callable, Literal
 
-# 内置通用规程受控词表（遵循 GB/T 15237 / 10112 原则）
+TEMPLATES_DIR = Path(__file__).resolve().parent / "vocab_templates"
+
+# 内置兜底通用规程受控词表（当模板目录不可用时的静态安全保底）
 DEFAULT_SEED_VOCAB: dict[str, list[str]] = {
     "撤销报名": ["退赛", "取消报名", "撤赛", "放弃比赛"],
     "主办单位": ["主办方", "主办机构", "主办"],
@@ -38,13 +41,128 @@ DEFAULT_SEED_VOCAB: dict[str, list[str]] = {
 _ALIGNER_CACHE: dict[str, tuple[Any, float]] = {}
 
 
+def _merge_vocab_dict(target: dict[str, list[str]], source: dict[str, list[str]]) -> None:
+    """合并词表字典：同名首选词追加别名并集，不同名直接新增。"""
+    for pref, alts in source.items():
+        clean_pref = pref.strip()
+        if not clean_pref:
+            continue
+        if clean_pref not in target:
+            target[clean_pref] = []
+        existing_set = set(target[clean_pref])
+        for alt in alts or []:
+            clean_alt = alt.strip()
+            if clean_alt and clean_alt not in existing_set:
+                target[clean_pref].append(clean_alt)
+                existing_set.add(clean_alt)
+
+
+def resolve_vocab_hierarchy(raw_config: dict[str, Any]) -> tuple[dict[str, list[str]], float]:
+    """解析 Base + Domain Pack 继承链配置，生成合并后的受控词表及依赖模板的最大 mtime。
+
+    兼容两种配置形式：
+    1. 声明式继承字典：
+       {
+           "extends": ["base_sports_event", "sports/fencing"],
+           "terms": { "中国击剑协会": ["中剑协", "CFA"] },
+           "exclude": ["某词条"]
+       }
+    2. 传统平铺字典：
+       { "撤销报名": ["退赛", "取消报名"] }
+    """
+    merged: dict[str, list[str]] = {}
+    max_mtime = 0.0
+
+    # 判断是否为声明式继承格式
+    if isinstance(raw_config, dict) and ("extends" in raw_config or "terms" in raw_config):
+        extends = raw_config.get("extends", [])
+        if isinstance(extends, str):
+            extends = [extends]
+
+        # 依次加载继承的模板文件
+        for t_ref in extends:
+            clean_ref = str(t_ref).strip().replace("\\", "/")
+            if clean_ref.endswith(".json"):
+                clean_ref = clean_ref[:-5]
+            if not clean_ref:
+                continue
+            t_path = TEMPLATES_DIR / f"{clean_ref}.json"
+            if t_path.exists():
+                try:
+                    max_mtime = max(max_mtime, t_path.stat().st_mtime)
+                    with open(t_path, "r", encoding="utf-8") as f:
+                        t_data = json.load(f)
+                        if isinstance(t_data, dict):
+                            # 若模板本身也包含继承声明，递归解析
+                            if "extends" in t_data or "terms" in t_data:
+                                sub_v, sub_m = resolve_vocab_hierarchy(t_data)
+                                max_mtime = max(max_mtime, sub_m)
+                                _merge_vocab_dict(merged, sub_v)
+                            else:
+                                _merge_vocab_dict(merged, t_data)
+                except Exception:
+                    pass
+
+        # 合并本地 terms
+        local_terms = raw_config.get("terms", {})
+        if isinstance(local_terms, dict):
+            _merge_vocab_dict(merged, local_terms)
+
+        # 执行 exclude 排除
+        for ex in raw_config.get("exclude", []):
+            clean_ex = str(ex).strip()
+            if clean_ex in merged:
+                merged.pop(clean_ex, None)
+    elif isinstance(raw_config, dict):
+        # 传统平铺格式
+        _merge_vocab_dict(merged, raw_config)
+
+    # 若未加载出任何词条，回退到内置通用词表
+    if not merged:
+        merged = dict(DEFAULT_SEED_VOCAB)
+
+    return merged, max_mtime
+
+
+def create_preset_vocabulary(kb_id: str, preset: str = "equestrian") -> Path:
+    """为知识库根目录快速生成遵循 Base + Domain Pack 声明式继承的 seed_vocabulary.json 模板。"""
+    from .storage import KBStorageManager
+
+    kb_dir = KBStorageManager.get_kb_dir(kb_id)
+    target_path = kb_dir / "seed_vocabulary.json"
+
+    clean_p = preset.strip().lower()
+    if clean_p in ("equestrian", "fencing", "basketball", "rugby", "climbing"):
+        content = {
+            "extends": ["base_sports_event", f"sports/{clean_p}"],
+            "terms": {},
+            "exclude": [],
+        }
+    elif clean_p == "general":
+        content = {
+            "extends": ["general"],
+            "terms": {},
+            "exclude": [],
+        }
+    else:
+        content = {
+            "extends": ["base_sports_event"],
+            "terms": {},
+            "exclude": [],
+        }
+
+    with open(target_path, "w", encoding="utf-8") as f:
+        json.dump(content, f, ensure_ascii=False, indent=2)
+    return target_path
+
+
 def get_aligner(kb_id: str = "") -> "ControlledVocabularyAligner":
-    """按 kb_id 隔离获取领域受控词表对齐引擎（支持 seed_vocabulary.json mtime 热加载）。"""
+    """按 kb_id 隔离获取领域受控词表对齐引擎（支持 Base+DomainPack 继承链与 mtime 热加载）。"""
     from .storage import KBStorageManager
 
     clean_kb_id = (kb_id or "").strip()
     vocab_file: Path | None = None
-    mtime = 0.0
+    file_mtime = 0.0
 
     if clean_kb_id:
         kb_dir = KBStorageManager.get_kb_dir(clean_kb_id)
@@ -52,29 +170,36 @@ def get_aligner(kb_id: str = "") -> "ControlledVocabularyAligner":
         if cand_path.exists():
             vocab_file = cand_path
             try:
-                mtime = cand_path.stat().st_mtime
+                file_mtime = cand_path.stat().st_mtime
             except Exception:
-                mtime = 0.0
+                file_mtime = 0.0
+
+    # 1. 读取配置文件
+    raw_config: dict[str, Any] = {}
+    if vocab_file and vocab_file.exists():
+        try:
+            with open(vocab_file, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    raw_config = loaded
+        except Exception:
+            raw_config = {}
+    else:
+        # 无专属配置时，默认继承通用体育底座
+        raw_config = {"extends": ["base_sports_event"], "terms": {}, "exclude": []}
+
+    # 2. 解析继承链并计算依赖模板的最新 mtime
+    resolved_vocab, max_dep_mtime = resolve_vocab_hierarchy(raw_config)
+    eff_mtime = max(file_mtime, max_dep_mtime)
 
     cache_key = f"{clean_kb_id}:{vocab_file}"
     if cache_key in _ALIGNER_CACHE:
         cached_instance, cached_mtime = _ALIGNER_CACHE[cache_key]
-        if cached_mtime == mtime:
+        if cached_mtime == eff_mtime:
             return cached_instance
 
-    # 构建或重载词表
-    vocab_data = dict(DEFAULT_SEED_VOCAB)
-    if vocab_file and vocab_file.exists():
-        try:
-            with open(vocab_file, "r", encoding="utf-8") as f:
-                user_vocab = json.load(f)
-                if isinstance(user_vocab, dict):
-                    vocab_data.update(user_vocab)
-        except Exception:
-            pass
-
-    instance = ControlledVocabularyAligner(seed_vocab=vocab_data)
-    _ALIGNER_CACHE[cache_key] = (instance, mtime)
+    instance = ControlledVocabularyAligner(seed_vocab=resolved_vocab)
+    _ALIGNER_CACHE[cache_key] = (instance, eff_mtime)
     return instance
 
 
@@ -137,6 +262,8 @@ class ControlledVocabularyAligner:
         """对自然语言问句执行长词优先子串扫描，提取命中的标准首选词集合。
 
         纯内存扫描耗时 < 0.5ms，解决自然语言整句查表 miss 与分词未登录词切碎问题。
+        对纯 ASCII 英文缩写（如 DE, DNS, DSQ, RT, 7s, TOP 等）自动施加单词边界正则保护，
+        防止在英文单词中误伤（如 code 误撞 DE，hotel 误撞 EL）。
         """
         q = (query or "").strip().lower()
         if not q or not self._sorted_scan_terms:
@@ -144,9 +271,19 @@ class ControlledVocabularyAligner:
 
         matched_prefs: set[str] = set()
         for term, pref in self._sorted_scan_terms:
-            term_lower = term.lower()
-            if len(term_lower) >= 2 and term_lower in q:
-                matched_prefs.add(pref)
+            clean_term = term.strip()
+            if len(clean_term) < 2:
+                continue
+            term_lower = clean_term.lower()
+            if clean_term.isascii() and clean_term.isalnum():
+                # 纯 ASCII 缩写词：启用单词边界保护，严格防止嵌入单词中间触发
+                pattern = r"(?<![a-zA-Z0-9])" + re.escape(term_lower) + r"(?![a-zA-Z0-9])"
+                if re.search(pattern, q):
+                    matched_prefs.add(pref)
+            else:
+                # 中文与混合词条：直接子串包含
+                if term_lower in q:
+                    matched_prefs.add(pref)
         return matched_prefs
 
     def update_seed_vocab(self, new_vocab: dict[str, list[str]]) -> None:
