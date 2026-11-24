@@ -1476,6 +1476,37 @@ class AgentRuntime:
                     )
             except Exception as wiki_first_err:
                 logger.debug(f"[WikiFirst] Level 1 百科优先检索跳过: {wiki_first_err}")
+
+        # 实时知识库文档总数锚点：防止导入/更新 .ahkb 后模型仍复用长期记忆或历史摘要里的旧数字（如“只有3场”）
+        if active_scene == "agent" and not is_planning_phase and (agent_id or getattr(self, "session_mounted_kbs", None)):
+            try:
+                from ..search.multi_kb_router import MultiKBRetrievalRouter
+
+                kb_ok, _, docs_meta = await MultiKBRetrievalRouter.list_mounted_docs(
+                    expert_id=agent_id,
+                    session_mounted_kbs=getattr(self, "session_mounted_kbs", None),
+                )
+                if kb_ok and isinstance(docs_meta, list) and len(docs_meta) > 0:
+                    kb_ver_summary = ", ".join(
+                        sorted(
+                            {
+                                f"{d.get('kb_name') or d.get('kb_id')}({d.get('version') or 'latest'})"
+                                for d in docs_meta
+                            }
+                        )
+                    )
+                    kb_anchor_prompt = (
+                        "### 📚 知识库最新实时状态锚点（最高时效事实）\n"
+                        f"- **当前已发布知识库最新文档总数**：共 **{len(docs_meta)}** 份文档（来源：{kb_ver_summary}）。\n"
+                        "- **防旧记忆误导铁律**：若长期记忆、百科摘要或历史对话中曾出现过往旧数字（如“3场”等），**一律视为已过期数据**；"
+                        "当用户询问数量统计、盘点清单或最新规程时，**必须直接调用 `list_kb_docs` 获取最新完整清单逐条核对统计**，"
+                        "**严禁偷懒复用旧记忆数字，也严禁把 `search_cloud_wiki` 返回的 Top-N 切片数当成文档总数！**"
+                    )
+                    system_override = (
+                        f"{kb_anchor_prompt}\n\n{system_override}" if system_override else kb_anchor_prompt
+                    )
+            except Exception as kb_anchor_err:
+                logger.debug(f"[KBAnchor] 注入实时知识库锚点跳过: {kb_anchor_err}")
         if active_scene == "agent" and agent_id:
             try:
                 from ..repository.agent_repository import AgentProfileRepository
