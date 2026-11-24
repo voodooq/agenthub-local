@@ -426,6 +426,78 @@ class MediaProcessor:
         except Exception:
             return None
 
+    async def synthesize_weixin_silk_voice(
+        self,
+        text: str,
+        voice: str = "zh-CN-XiaoxiaoNeural",
+    ) -> dict[str, Any]:
+        """将文本合成为腾讯微信原生 SILK v3 语音文件，并返回精确播放时长(ms)。"""
+        clean = (text or "").strip()[:300]
+        if not clean:
+            return {"success": False, "error": "语音文本不能为空"}
+
+        cache_dir = self.get_cache_dir()
+        stem = f"vx_{int(time.time())}_{uuid.uuid4().hex[:8]}"
+        mp3_path = cache_dir / f"{stem}.mp3"
+        pcm_path = cache_dir / f"{stem}.pcm"
+        silk_path = cache_dir / f"{stem}.silk"
+
+        try:
+            import edge_tts  # type: ignore
+            import pilk  # type: ignore
+
+            comm = edge_tts.Communicate(clean, voice=voice)
+            await comm.save(str(mp3_path))
+            if not mp3_path.exists() or mp3_path.stat().st_size == 0:
+                return {"success": False, "error": "edge-tts 未生成有效音频"}
+
+            def _encode_silk_sync() -> int:
+                cmd = [
+                    "ffmpeg",
+                    "-y",
+                    "-i",
+                    str(mp3_path),
+                    "-f",
+                    "s16le",
+                    "-ar",
+                    "24000",
+                    "-ac",
+                    "1",
+                    str(pcm_path),
+                ]
+                proc = subprocess.run(cmd, capture_output=True, timeout=20)
+                if proc.returncode != 0 or not pcm_path.exists():
+                    raise RuntimeError(f"ffmpeg 转 PCM 失败: {proc.stderr.decode('utf-8', 'ignore')[:160]}")
+                pcm_bytes = pcm_path.stat().st_size
+                if pcm_bytes <= 0:
+                    raise RuntimeError("生成的 PCM 音频为空")
+                pilk.encode(str(pcm_path), str(silk_path), pcm_rate=24000, tencent=True)
+                if not silk_path.exists() or silk_path.stat().st_size == 0:
+                    raise RuntimeError("pilk 编码 SILK v3 失败")
+                return max(1000, int(pcm_bytes / 48))
+
+            playtime_ms = await asyncio.to_thread(_encode_silk_sync)
+            return {
+                "success": True,
+                "file_path": str(silk_path),
+                "file_name": silk_path.name,
+                "playtime_ms": playtime_ms,
+                "sample_rate": 24000,
+                "bits_per_sample": 16,
+                "text": clean,
+            }
+        except ImportError as imp_err:
+            return {"success": False, "error": f"缺少语音合成或 SILK 编码依赖 ({imp_err})，请重建 Docker 镜像安装 edge-tts 与 pilk"}
+        except Exception as err:
+            return {"success": False, "error": f"微信 SILK 语音合成失败: {err}"}
+        finally:
+            for tmp_p in (mp3_path, pcm_path):
+                if tmp_p.exists():
+                    try:
+                        tmp_p.unlink()
+                    except Exception:
+                        pass
+
     # ────────────────────────── 4. 统一入站多模态处理 & 7天 GC ──────────────────────────
 
     @staticmethod

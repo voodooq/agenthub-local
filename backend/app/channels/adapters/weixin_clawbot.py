@@ -87,7 +87,18 @@ class WeixinClawbotAdapter(BaseChannelAdapter):
         files_payload = [
             {"file_path": str(att["file_path"]), "file_name": str(att.get("file_name") or "")}
             for att in (outbound.attachments or [])
-            if isinstance(att, dict) and att.get("file_path")
+            if isinstance(att, dict) and att.get("file_path") and att.get("kind") != "voice"
+        ]
+        voices_payload = [
+            {
+                "file_path": str(att["file_path"]),
+                "playtime_ms": int(att.get("playtime_ms") or 2000),
+                "sample_rate": int(att.get("sample_rate") or 24000),
+                "bits_per_sample": int(att.get("bits_per_sample") or 16),
+                "text": str(att.get("text") or ""),
+            }
+            for att in (outbound.attachments or [])
+            if isinstance(att, dict) and att.get("file_path") and att.get("kind") == "voice"
         ]
 
         try:
@@ -101,6 +112,7 @@ class WeixinClawbotAdapter(BaseChannelAdapter):
                         "chat_id": inbound.reply_context.get("chat_id") or inbound.chat_id,
                         "chunks": outbound.chunks or [outbound.formatted_text],
                         "files": files_payload,
+                        "voices": voices_payload,
                     },
                 )
                 return {"pushed": resp.status_code < 400, "status_code": resp.status_code}

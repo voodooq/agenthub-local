@@ -65,6 +65,7 @@ class ChannelGateway:
         self._active_session_conv: dict[str, str] = {}
         self._session_workdirs: dict[str, str] = {}
         self._last_detach_phrase_idx: int = -1
+        self._voice_reply_sessions: set[str] = set()
 
     def _pick_detach_notice(self) -> str:
         """随机挑选一条口语化的后台处理过渡话术，确保绝不与上一条连续重复。"""
@@ -442,6 +443,7 @@ class ChannelGateway:
                     "   - 当用户让你**设置定时提醒 / 添加计划任务 / 每天定时执行**：必须主动调用 `create_im_reminder`（支持单次如 `10分钟后`、`明早8点`，以及周期 Cron 如 `每天早上8:30`；若到点需查天气/待办/新闻或执行总结，请设 `run_as_agent=True`），查看或取消调用 `list_or_cancel_im_reminders`，**严禁说“不支持计划任务”**；\n"
                     "   - 当用户询问**天气或最新实时资讯 / 联网搜索**：你已直接拥有 `get_weather`、`web_search` 与 `web_fetch` 工具，必须主动调用获取真实结果后直给结论，**严禁回复“我没有时钟 / 暂时不能联网搜索 / 我查不到实时天气 / 你自己打开手机 App 看”**；\n"
                     "   - 当用户要求**生成 Word(.docx) / PDF(.pdf) / Markdown(.md) 文档或总结报告文件**：**必须直接调用 `export_and_send_document(title=..., content=..., format='docx'|'pdf'|'md')`** 生成真实文件，系统会自动把文档文件直接推送到用户手机微信！\n"
+                    "   - 当用户要求**用语音回复 / 发语音给我 / 念给我听**：必须直接调用 `send_weixin_voice_bubble(text=...)` 合成微信原生 SILK 语音气泡发送！\n"
                     "   - 当用户询问**写程序 / 脚本 / 技术排错**：可以直接在微信里给出精简清晰的核心代码片段、排错脚本或技术方案思路，仅在需要整库构建或操作本机桌面软件时简短建议回到电脑端协同；\n"
                     "   - 当用户询问你**能否听语音 / 语音识别 / 看图片**，或直接发送语音条/图片时：网关已为你接入微信语音自动转文字与图片识别能力（OCR + 视觉理解），请如实肯定并欢迎用户直接发语音条或图片给你，**严禁回复“目前还不能做语音识别”或“我只能处理文字对话”**！\n"
                     "   - **备忘 vs 文档区分铁律**：如果用户只是口头让你记住计划/备忘/待办，调用 `manage_personal_notes(action='add', ...)` 或 `save_long_term_memory` 存入数据库；如果用户明确要求生成文档文件，调用 `export_and_send_document`；若已开启主人全能模式且需要写项目代码/脚本，可直接调用 `write_local_file`。\n"
@@ -743,6 +745,29 @@ class ChannelGateway:
                 formatted_text, out_chunks = format_for_im_channel(
                     raw_reply, max_chunk_chars=getattr(adapter, "max_chunk_chars", 1500)
                 )
+
+                # 若开启了自动语音气泡模式且尚未生成语音附件，则自动合成一条微信原生 SILK 语音气泡
+                if (
+                    inbound.channel_type == "weixin_clawbot"
+                    and session_key in self._voice_reply_sessions
+                    and not any(a.get("kind") == "voice" for a in exported_attachments)
+                ):
+                    try:
+                        v_auto = await media_processor.synthesize_weixin_silk_voice(formatted_text[:280])
+                        if v_auto.get("success"):
+                            exported_attachments.append(
+                                {
+                                    "kind": "voice",
+                                    "file_path": str(v_auto["file_path"]),
+                                    "file_name": str(v_auto["file_name"]),
+                                    "playtime_ms": int(v_auto["playtime_ms"]),
+                                    "sample_rate": int(v_auto["sample_rate"]),
+                                    "bits_per_sample": int(v_auto["bits_per_sample"]),
+                                    "text": str(v_auto["text"]),
+                                }
+                            )
+                    except Exception:
+                        pass
 
                 # 若未分片流式推送且正文超过 500 字，自动提炼移动端摘要并生成 24h 阅读短链；若为微信且未附带导出文件，同步生成真实 .md 文件推送
                 if not streamed_segments and len(formatted_text) > 500:
@@ -1105,7 +1130,19 @@ class ChannelGateway:
                         lines.append(f"{idx}. [{it['created_at_str']}] {it['title']}\n   {it['summary'][:90]}")
                     reply_text = "\n".join(lines)
 
-        # 10. /help -> 快捷指令清单
+        # 10. /voice on|off -> 开启或关闭自动微信原生语音气泡回复
+        elif reply_text is None and low in ("/voice", "/voice on", "/voice off"):
+            if low == "/voice on":
+                self._voice_reply_sessions.add(session_key)
+                reply_text = "已开启微信原生语音气泡自动回复模式，之后每条答复都会同步发你语音条（发 `/voice off` 关闭）。"
+            elif low == "/voice off":
+                self._voice_reply_sessions.discard(session_key)
+                reply_text = "已关闭自动语音气泡回复，恢复纯文字/按需语音。"
+            else:
+                st_str = "已开启" if session_key in self._voice_reply_sessions else "未开启"
+                reply_text = f"当前微信原生语音气泡自动回复：{st_str}。发送 `/voice on` 开启、`/voice off` 关闭。"
+
+        # 11. /help -> 快捷指令清单
         elif reply_text is None and low == "/help":
             reply_text = (
                 "常用零延迟快捷指令：\n"
@@ -1113,6 +1150,7 @@ class ChannelGateway:
                 "- `/todo 内容`：添加或查看待办\n"
                 "- `/remind 时间 内容` 或 `/task 时间 内容`：添加微信计划任务/提醒（如 `/task 每天早上8:30 发我天气和待办`）\n"
                 "- `/brief [城市]`：生成今日天气+待办+服务器晨报\n"
+                "- `/voice on` / `/voice off`：开启/关闭微信原生语音气泡自动回复\n"
                 "- `/inbox [链接或词]` 或直接转发文章链接：收入收藏箱/检索\n"
                 "- `/status [服务器]`：服务器一键体检（主人模式）\n"
                 "- `/cd 目录`：切换代码工作目录（主人模式）\n"

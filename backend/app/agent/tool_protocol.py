@@ -1415,6 +1415,23 @@ class ToolProtocolAdapter:
                     "required": ["title", "content"],
                 },
             },
+            {
+                "name": "send_weixin_voice_bubble",
+                "description": (
+                    "将中文或英文口语文本合成为微信原生 SILK 语音条气泡发送给用户。"
+                    "当用户要求“发语音给我”、“用语音回复我”或“念给我听”时必须调用。"
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": {
+                            "type": "string",
+                            "description": "要朗读并发送为微信语音气泡的简短口语文本（建议 10~200 字）。",
+                        },
+                    },
+                    "required": ["text"],
+                },
+            },
         ]
 
     @staticmethod

@@ -386,6 +386,7 @@ class AgentRuntime:
         "search_inbox_items",
         "generate_daily_briefing",
         "export_and_send_document",
+        "send_weixin_voice_bubble",
         "update_working_memory",
         "search_cloud_wiki",
         "read_cloud_wiki_section",
@@ -1561,6 +1562,7 @@ class AgentRuntime:
                 "search_inbox_items",
                 "generate_daily_briefing",
                 "export_and_send_document",
+                "send_weixin_voice_bubble",
                 "save_long_term_memory",
                 "search_memory_history",
                 "update_working_memory",
@@ -1654,7 +1656,7 @@ class AgentRuntime:
         biz_ontology_query_count = 0
         circuit_breaker_triggered = False
         produced_artifacts: list[str] = []
-        im_export_files: list[dict[str, str]] = []
+        im_export_files: list[dict[str, Any]] = []
         is_weixin_claw_owner = (
             caller_channel == "im_bot"
             and owner_mode
@@ -5313,6 +5315,50 @@ class AgentRuntime:
                             "command": f"export_and_send_document({doc_title}, fmt={doc_fmt})",
                             "reason": "导出文档文件",
                             "status": "completed",
+                            "output": tool_output,
+                            "compressed": compressed,
+                        }
+
+                    # ── 工具: 发送原生微信语音条气泡 (send_weixin_voice_bubble) ──
+                    elif func_name == "send_weixin_voice_bubble":
+                        voice_text = str(args.get("text") or "").strip()
+                        from ..channels.media_processor import media_processor
+
+                        yield {
+                            "type": "tool_start",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"send_weixin_voice_bubble({voice_text[:30]})",
+                            "reason": "合成微信原生 SILK 语音气泡",
+                            "security": "SAFE",
+                        }
+                        v_res = await media_processor.synthesize_weixin_silk_voice(voice_text)
+                        if v_res.get("success"):
+                            im_export_files.append(
+                                {
+                                    "kind": "voice",
+                                    "file_path": str(v_res["file_path"]),
+                                    "file_name": str(v_res["file_name"]),
+                                    "playtime_ms": int(v_res["playtime_ms"]),
+                                    "sample_rate": int(v_res["sample_rate"]),
+                                    "bits_per_sample": int(v_res["bits_per_sample"]),
+                                    "text": str(v_res["text"]),
+                                }
+                            )
+                            tool_output = (
+                                f"已成功合成微信原生 SILK 语音气泡（时长 {v_res['playtime_ms']}ms），"
+                                "将在本轮回复时直接以微信语音条形式发送给用户。"
+                            )
+                        else:
+                            tool_output = f"微信原生语音气泡合成失败: {v_res.get('error')}"
+                        compressed = "[微信原生语音气泡已合成]"
+                        yield {
+                            "type": "tool_end",
+                            "call_id": call_id,
+                            "name": func_name,
+                            "command": f"send_weixin_voice_bubble({voice_text[:30]})",
+                            "reason": "合成微信原生语音气泡",
+                            "status": "completed" if v_res.get("success") else "error",
                             "output": tool_output,
                             "compressed": compressed,
                         }

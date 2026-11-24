@@ -482,6 +482,67 @@ async function sendIlinkTextMessage(toUserId, text) {
   return { ok: resp.ok, status: resp.status, body: raw.slice(0, 200) };
 }
 
+async function uploadEncryptedBufferToIlinkCdn(toUserId, plainBuf, mediaType) {
+  const baseUrl = (state.ilink_base_url || DEFAULT_ILINK_BASE).replace(/\/+$/, '');
+  const fileKey = crypto.randomBytes(16).toString('hex');
+  const aesKey = crypto.randomBytes(16);
+  const aesKeyHex = aesKey.toString('hex');
+  const rawSize = plainBuf.length;
+  const rawMd5 = crypto.createHash('md5').update(plainBuf).digest('hex');
+
+  const cipher = crypto.createCipheriv('aes-128-ecb', aesKey, null);
+  const encBuf = Buffer.concat([cipher.update(plainBuf), cipher.final()]);
+
+  const upResp = await fetch(`${baseUrl}/ilink/bot/getuploadurl`, {
+    method: 'POST',
+    headers: buildIlinkHeaders(),
+    signal: AbortSignal.timeout(15_000),
+    body: JSON.stringify({
+      filekey: fileKey,
+      media_type: mediaType, // 1=IMAGE, 2=VIDEO, 3=FILE, 4=VOICE
+      to_user_id: toUserId,
+      rawsize: rawSize,
+      rawfilemd5: rawMd5,
+      filesize: encBuf.length,
+      no_need_thumb: true,
+      aeskey: aesKeyHex,
+      base_info: { channel_version: '2.0.1' },
+    }),
+  });
+  if (!upResp.ok) {
+    throw new Error(`getuploadurl HTTP ${upResp.status}`);
+  }
+  const upData = await upResp.json();
+  const uploadParam = String(upData.upload_param || '').trim();
+  if (!uploadParam) {
+    throw new Error('getuploadurl 未返回 upload_param');
+  }
+
+  const cdnUploadUrl = `${DEFAULT_ILINK_CDN_BASE}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(fileKey)}`;
+  const cdnResp = await fetch(cdnUploadUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/octet-stream' },
+    body: encBuf,
+    signal: AbortSignal.timeout(30_000),
+  });
+  if (!cdnResp.ok) {
+    throw new Error(`CDN 上传失败 HTTP ${cdnResp.status}`);
+  }
+  const encryptedQueryParam = String(
+    cdnResp.headers.get('x-encrypted-param') || upData.download_param || uploadParam
+  ).trim();
+
+  return {
+    baseUrl,
+    rawSize,
+    media: {
+      encrypt_query_param: encryptedQueryParam,
+      aes_key: Buffer.from(aesKeyHex, 'utf8').toString('base64'),
+      encrypt_type: 1,
+    },
+  };
+}
+
 async function uploadAndSendIlinkFile(toUserId, filePath, customFileName = '') {
   if (!state.bot_token || !toUserId || !filePath) {
     return { ok: false, error: '未登录微信 ClawBot 或缺少文件路径/收件人' };
@@ -491,57 +552,9 @@ async function uploadAndSendIlinkFile(toUserId, filePath, customFileName = '') {
   }
   const plainBuf = fs.readFileSync(filePath);
   const fileName = customFileName || path.basename(filePath);
-  const baseUrl = (state.ilink_base_url || DEFAULT_ILINK_BASE).replace(/\/+$/, '');
-  const fileKey = crypto.randomBytes(16).toString('hex');
-  const aesKey = crypto.randomBytes(16);
-  const aesKeyHex = aesKey.toString('hex');
-  const aesKeyB64 = aesKey.toString('base64');
-  const rawSize = plainBuf.length;
-  const rawMd5 = crypto.createHash('md5').update(plainBuf).digest('hex');
-
-  const cipher = crypto.createCipheriv('aes-128-ecb', aesKey, null);
-  const encBuf = Buffer.concat([cipher.update(plainBuf), cipher.final()]);
 
   try {
-    const upResp = await fetch(`${baseUrl}/ilink/bot/getuploadurl`, {
-      method: 'POST',
-      headers: buildIlinkHeaders(),
-      signal: AbortSignal.timeout(15_000),
-      body: JSON.stringify({
-        filekey: fileKey,
-        media_type: 3, // FILE
-        to_user_id: toUserId,
-        rawsize: rawSize,
-        rawfilemd5: rawMd5,
-        filesize: encBuf.length,
-        no_need_thumb: true,
-        aeskey: aesKeyHex,
-        base_info: { channel_version: '2.0.1' },
-      }),
-    });
-    if (!upResp.ok) {
-      return { ok: false, error: `getuploadurl HTTP ${upResp.status}` };
-    }
-    const upData = await upResp.json();
-    const uploadParam = String(upData.upload_param || '').trim();
-    if (!uploadParam) {
-      return { ok: false, error: 'getuploadurl 未返回 upload_param' };
-    }
-
-    const cdnUploadUrl = `${DEFAULT_ILINK_CDN_BASE}/upload?encrypted_query_param=${encodeURIComponent(uploadParam)}&filekey=${encodeURIComponent(fileKey)}`;
-    const cdnResp = await fetch(cdnUploadUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/octet-stream' },
-      body: encBuf,
-      signal: AbortSignal.timeout(30_000),
-    });
-    if (!cdnResp.ok) {
-      return { ok: false, error: `CDN 上传失败 HTTP ${cdnResp.status}` };
-    }
-    const encryptedQueryParam = String(
-      cdnResp.headers.get('x-encrypted-param') || upData.download_param || uploadParam
-    ).trim();
-
+    const { baseUrl, rawSize, media } = await uploadEncryptedBufferToIlinkCdn(toUserId, plainBuf, 3);
     const ctxToken = state.context_tokens.get(toUserId) || '';
     const msgBody = {
       msg: {
@@ -555,11 +568,7 @@ async function uploadAndSendIlinkFile(toUserId, filePath, customFileName = '') {
           {
             type: 4,
             file_item: {
-              media: {
-                encrypt_query_param: encryptedQueryParam,
-                aes_key: Buffer.from(aesKeyHex, 'utf8').toString('base64'),
-                encrypt_type: 1,
-              },
+              media,
               file_name: fileName,
               len: String(rawSize),
             },
@@ -576,12 +585,71 @@ async function uploadAndSendIlinkFile(toUserId, filePath, customFileName = '') {
     });
     const rawText = await sendResp.text();
     if (!sendResp.ok) {
-      return { ok: false, status: sendResp.status, body: rawText.slice(0, 200), aes_b64: aesKeyB64 };
+      return { ok: false, status: sendResp.status, body: rawText.slice(0, 200) };
     }
     console.log(`[WeixinBridge] 已推送微信文件: ${fileName} (${rawSize} bytes) -> ${toUserId}`);
     return { ok: true, status: sendResp.status, file_name: fileName, bytes: rawSize };
   } catch (err) {
     console.error('[WeixinBridge] 发送文件异常:', err?.message || err);
+    return { ok: false, error: String(err?.message || err) };
+  }
+}
+
+async function uploadAndSendIlinkVoice(
+  toUserId,
+  filePath,
+  playtimeMs = 2000,
+  sampleRate = 24000,
+  bitsPerSample = 16,
+  transcriptText = ''
+) {
+  if (!state.bot_token || !toUserId || !filePath) {
+    return { ok: false, error: '未登录微信 ClawBot 或缺少语音路径/收件人' };
+  }
+  if (!fs.existsSync(filePath)) {
+    return { ok: false, error: `本地语音文件不存在: ${filePath}` };
+  }
+  const plainBuf = fs.readFileSync(filePath);
+
+  try {
+    const { baseUrl, rawSize, media } = await uploadEncryptedBufferToIlinkCdn(toUserId, plainBuf, 4);
+    const ctxToken = state.context_tokens.get(toUserId) || '';
+    const voiceItem = {
+      media,
+      encode_type: 6, // SILK v3
+      bits_per_sample: Number(bitsPerSample) || 16,
+      sample_rate: Number(sampleRate) || 24000,
+      playtime: Math.max(1000, Number(playtimeMs) || 2000),
+    };
+    if (transcriptText) {
+      voiceItem.text = String(transcriptText).slice(0, 300);
+    }
+    const msgBody = {
+      msg: {
+        from_user_id: '',
+        to_user_id: toUserId,
+        client_id: `ah_voice_${Date.now()}_${crypto.randomBytes(3).toString('hex')}`,
+        message_type: 2,
+        message_state: 2,
+        context_token: ctxToken,
+        item_list: [{ type: 3, voice_item: voiceItem }],
+      },
+      base_info: { channel_version: '2.0.1' },
+    };
+    const sendResp = await fetch(`${baseUrl}/ilink/bot/sendmessage`, {
+      method: 'POST',
+      headers: buildIlinkHeaders(),
+      body: JSON.stringify(msgBody),
+      signal: AbortSignal.timeout(15_000),
+    });
+    const rawText = await sendResp.text();
+    if (!sendResp.ok) {
+      return { ok: false, status: sendResp.status, body: rawText.slice(0, 200) };
+    }
+    console.log(`[WeixinBridge] 已推送原生微信语音气泡: ${rawSize} bytes (${voiceItem.playtime}ms) -> ${toUserId}`);
+    return { ok: true, status: sendResp.status, bytes: rawSize, playtime: voiceItem.playtime };
+  } catch (err) {
+    console.error('[WeixinBridge] 发送原生语音气泡异常:', err?.message || err);
     return { ok: false, error: String(err?.message || err) };
   }
 }
@@ -831,13 +899,47 @@ const server = http.createServer(async (req, res) => {
       if (!f || !f.file_path) continue;
       fileResults.push(await uploadAndSendIlinkFile(toWxid, String(f.file_path), String(f.file_name || '')));
     }
+    const voices = Array.isArray(body.voices) ? body.voices : [];
+    const voiceResults = [];
+    for (const v of voices) {
+      if (!v || !v.file_path) continue;
+      voiceResults.push(
+        await uploadAndSendIlinkVoice(
+          toWxid,
+          String(v.file_path),
+          Number(v.playtime_ms) || 2000,
+          Number(v.sample_rate) || 24000,
+          Number(v.bits_per_sample) || 16,
+          String(v.text || '')
+        )
+      );
+    }
     return sendJson(res, 200, {
       ok: true,
       delivered_chunks: results.filter((r) => r.ok).length,
       delivered_files: fileResults.filter((r) => r.ok).length,
+      delivered_voices: voiceResults.filter((r) => r.ok).length,
       results,
       file_results: fileResults,
+      voice_results: voiceResults,
     });
+  }
+
+  if (req.method === 'POST' && url.pathname === '/send-voice') {
+    if (BRIDGE_SECRET && req.headers['x-bridge-secret'] !== BRIDGE_SECRET) {
+      return sendJson(res, 401, { ok: false, error: 'Unauthorized bridge secret' });
+    }
+    const body = await readJsonBody(req);
+    const toWxid = String(body.to_wxid || body.chat_id || state.wxid || '').trim();
+    const r = await uploadAndSendIlinkVoice(
+      toWxid,
+      String(body.file_path || '').trim(),
+      Number(body.playtime_ms) || 2000,
+      Number(body.sample_rate) || 24000,
+      Number(body.bits_per_sample) || 16,
+      String(body.text || '')
+    );
+    return sendJson(res, r.ok ? 200 : 500, r);
   }
 
   if (req.method === 'POST' && url.pathname === '/send-file') {
