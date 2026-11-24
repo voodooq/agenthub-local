@@ -71,7 +71,8 @@ export function LibraryView({ workspace, onOpenCanvas, onOpenCloudWiki }: Librar
   const [currentPath, setCurrentPath] = useState<string>('');
   // 视图模式：'grid' 卡片大图标模式 | 'table' 详细信息列表模式 | 'flat' 平铺总览模式
   const [viewMode, setViewMode] = useState<'grid' | 'table' | 'flat'>('grid');
-  const [scopeMode, setScopeMode] = useState<'all' | 'workspace'>('all');
+  // 默认严格锁定在当前沙盒工作区，防止跨工作区串台或暴露宿主机盘符根目录
+  const [scopeMode, setScopeMode] = useState<'all' | 'workspace'>('workspace');
 
   const fetchArtifacts = async (silent = false) => {
     if (!silent) setLoading(true);
@@ -204,15 +205,18 @@ export function LibraryView({ workspace, onOpenCanvas, onOpenCloudWiki }: Librar
     }
   };
 
-  // 标准化计算相对路径（统一使用 '/' 分隔符）
+  // 标准化计算相对路径（统一使用 '/' 分隔符，绝不将 Windows 盘符 E: 暴露为根文件夹）
   const getRelativePath = (fullPath: string): string => {
-    if (!workspace?.root_path) return fullPath.replace(/\\/g, '/');
     const normFull = fullPath.replace(/\\/g, '/');
-    const normRoot = workspace.root_path.replace(/\\/g, '/').replace(/\/+$/, '');
-    if (normFull.toLowerCase().startsWith(normRoot.toLowerCase())) {
-      return normFull.slice(normRoot.length).replace(/^\/+/, '');
+    if (workspace?.root_path) {
+      const normRoot = workspace.root_path.replace(/\\/g, '/').replace(/\/+$/, '');
+      if (normFull.toLowerCase().startsWith(normRoot.toLowerCase())) {
+        return normFull.slice(normRoot.length).replace(/^\/+/, '');
+      }
     }
-    return fullPath.replace(/\\/g, '/');
+    const stripped = normFull.replace(/^[a-zA-Z]:\/+/, '').replace(/^\/+/, '');
+    const parts = stripped.split('/').filter(Boolean);
+    return parts.length > 2 ? parts.slice(-2).join('/') : stripped;
   };
 
   // 格式化文件大小

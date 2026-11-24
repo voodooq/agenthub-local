@@ -192,7 +192,9 @@ class ArtifactRepository:
                                 stale_ids.append(r["id"])
                                 continue
                         except ValueError:
-                            pass
+                            # 严格沙盒隔离：若历史同步记录越界落在当前工作区物理根目录之外，自动清理
+                            stale_ids.append(r["id"])
+                            continue
 
                     existing_paths.add(os.path.normcase(str(resolved_fp)))
 
