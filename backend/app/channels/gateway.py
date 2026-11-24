@@ -398,12 +398,17 @@ class ChannelGateway:
                     if session_stats.get("first_msg_time_str")
                     else ""
                 )
+                from .media_processor import media_processor
+                from ..service.personal_workflow_service import personal_workflow_service
+
+                media_caps = media_processor.get_capabilities_status()
                 runtime_ctx_header = (
                     "### ⏱️ 当前实时时间与会话状态（最高基准事实）\n"
                     f"- **当前准确时间**：`{now_str}`\n"
                     f"{last_time_line}"
                     f"{first_time_line}"
                     f"{split_note}"
+                    f"- **多模态感知状态**：{media_caps['summary']}\n"
                     "- **记忆事实区分规则**：提示词中若出现过往记忆、用户画像或备忘档案，均是系统替你持久化保留的历史记忆，绝非用户刚贴出来的“系统环境信息”；请自然承接，不要反问用户为什么贴出这些信息。\n"
                 )
 
@@ -420,6 +425,7 @@ class ChannelGateway:
                     "   - 当用户让你**设置定时提醒 / 到点叫我**：主动调用 `create_im_reminder`（或用 `list_or_cancel_im_reminders` 查看取消），到点时系统会真正主动往微信发通知；\n"
                     "   - 当用户询问**天气或最新实时资讯**：主动调用 `get_weather` / `web_search` 获取真实数据后直给结论，**严禁回复“我没有时钟 / 我查不到天气 / 你自己打开手机 App 看”**；\n"
                     "   - 当用户询问**写程序 / 脚本 / 技术排错**：可以直接在微信里给出精简清晰的核心代码片段、排错脚本或技术方案思路，仅在需要整库构建或操作本机桌面软件时简短建议回到电脑端协同；\n"
+                    "   - 当用户询问你**能否听语音 / 语音识别 / 看图片**，或直接发送语音条/图片时：网关已为你接入微信语音自动转文字与图片识别能力（OCR + 视觉理解），请如实肯定并欢迎用户直接发语音条或图片给你，**严禁回复“目前还不能做语音识别”或“我只能处理文字对话”**！\n"
                     "   - **重要备忘工具选择铁律**：当用户让你记录任何计划、备忘、待办或习惯时，**必须直接调用 `manage_personal_notes(action='add', ...)` 或 `save_long_term_memory`** 存入数据库，**严禁调用 `write_local_file` 写本地文件**！\n"
                     "2. **温暖干练口语化（去掉冷漠客服腔）**：\n"
                     "   - 像一位贴身靠谱的资深私人助理兼同事在微信上聊天，自然、有温度、不机械道歉，日常回答控制精炼（常规 2~6 句话，150~300 字内；代码/方案除外）；\n"
@@ -593,9 +599,6 @@ class ChannelGateway:
                     )
 
                 # 多模态与引用消息预处理（无 GPU 纯 CPU 语音转写 + RapidOCR 识图 + Vision 载荷透传）
-                from .media_processor import media_processor
-                from ..service.personal_workflow_service import personal_workflow_service
-
                 media_res = await media_processor.process_inbound_media(inbound.raw_payload)
                 media_attachments = list(media_res.get("image_attachments") or [])
                 prompt_sections: list[str] = []

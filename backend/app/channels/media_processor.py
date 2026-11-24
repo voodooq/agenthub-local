@@ -10,10 +10,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import importlib.util
 import os
 import subprocess
 import time
 import uuid
+import wave
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +31,8 @@ class MediaProcessor:
     def __init__(self) -> None:
         # 严格单并发门控，禁止多语音/多图片同时拉起 ONNX 推理撑爆 CPU/内存
         self._cpu_infer_sem = asyncio.Semaphore(1)
+        self._download_lock = asyncio.Lock()
+        self._last_download_fail_ts: float = 0.0
         self._sherpa_recognizer: Any = None
         self._last_gc_ts: float = 0.0
 
@@ -39,42 +43,147 @@ class MediaProcessor:
         d.mkdir(parents=True, exist_ok=True)
         return d
 
+    @staticmethod
+    def get_sensevoice_model_dir() -> Path:
+        """获取离线 SenseVoice 模型存储目录（优先环境变量与 Docker 持久化 data 目录）。"""
+        env_dir = (os.getenv("SHERPA_SENSEVOICE_DIR") or "").strip()
+        if env_dir:
+            return Path(env_dir)
+        legacy_dir = Path.home() / ".agenthub" / "models" / "sensevoice-small-int8"
+        if (legacy_dir / "tokens.txt").exists() and (
+            (legacy_dir / "model.int8.onnx").exists() or (legacy_dir / "model.onnx").exists()
+        ):
+            return legacy_dir
+        return Path(settings.db_path).parent / "models" / "sensevoice-small-int8"
+
+    @staticmethod
+    def _is_sherpa_installed() -> bool:
+        """检测当前环境是否已安装 sherpa-onnx。"""
+        return importlib.util.find_spec("sherpa_onnx") is not None
+
+    def _has_local_sensevoice_model(self) -> bool:
+        """检测本地 SenseVoice 模型核心文件是否已落盘就绪。"""
+        model_dir = self.get_sensevoice_model_dir()
+        has_model = (model_dir / "model.int8.onnx").exists() or (model_dir / "model.onnx").exists()
+        return has_model and (model_dir / "tokens.txt").exists()
+
+    async def ensure_sensevoice_model(self, force: bool = False) -> bool:
+        """无 GPU 场景下自动拉取轻量 SenseVoice-Small (Int8) 离线语音模型到持久化目录。"""
+        if self._has_local_sensevoice_model():
+            return True
+        if not self._is_sherpa_installed():
+            return False
+        if (os.getenv("DISABLE_ASR_MODEL_AUTO_DOWNLOAD") or "").strip() == "1":
+            return False
+        if not force and self._last_download_fail_ts > 0 and (time.time() - self._last_download_fail_ts) < 300:
+            return False
+
+        async with self._download_lock:
+            if self._has_local_sensevoice_model():
+                return True
+
+            model_dir = self.get_sensevoice_model_dir()
+            model_dir.mkdir(parents=True, exist_ok=True)
+
+            base_mirrors: list[str] = []
+            custom_base = (os.getenv("SHERPA_SENSEVOICE_BASE_URL") or "").strip().rstrip("/")
+            if custom_base:
+                base_mirrors.append(custom_base)
+            base_mirrors.extend(
+                [
+                    "https://www.modelscope.cn/models/k2-fsa/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/master",
+                    "https://hf-mirror.com/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main",
+                    "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main",
+                ]
+            )
+
+            targets = [
+                ("tokens.txt", 1024),
+                ("model.int8.onnx", 50 * 1024 * 1024),
+            ]
+            for base_url in base_mirrors:
+                try:
+                    logger.info(f"[MediaProcessor] 正在自动拉取纯 CPU 语音识别模型 SenseVoice-Small (源: {base_url})...")
+                    all_ok = True
+                    async with httpx.AsyncClient(timeout=httpx.Timeout(180.0, connect=15.0), follow_redirects=True) as client:
+                        for fname, min_bytes in targets:
+                            dest_path = model_dir / fname
+                            if dest_path.exists() and dest_path.stat().st_size >= min_bytes:
+                                continue
+                            tmp_path = model_dir / f".{fname}.tmp"
+                            url = f"{base_url}/{fname}"
+                            async with client.stream("GET", url) as resp:
+                                if resp.status_code != 200:
+                                    all_ok = False
+                                    break
+                                with open(tmp_path, "wb") as fp:
+                                    async for chunk in resp.aiter_bytes(chunk_size=1024 * 256):
+                                        if chunk:
+                                            fp.write(chunk)
+                            if not tmp_path.exists() or tmp_path.stat().st_size < min_bytes:
+                                if tmp_path.exists():
+                                    tmp_path.unlink()
+                                all_ok = False
+                                break
+                            os.replace(tmp_path, dest_path)
+                    if all_ok and self._has_local_sensevoice_model():
+                        self._sherpa_recognizer = None
+                        self._last_download_fail_ts = 0.0
+                        logger.info(f"[MediaProcessor] SenseVoice-Small 离线模型下载就绪: {model_dir}")
+                        return True
+                except Exception as dl_err:
+                    logger.debug(f"[MediaProcessor] 从 {base_url} 拉取 SenseVoice 模型失败: {dl_err}")
+
+            self._last_download_fail_ts = time.time()
+            logger.warning("[MediaProcessor] 自动拉取 SenseVoice 模型失败，将先依赖微信原生转写或云端 ASR")
+            return False
+
     # ────────────────────────── 1. 音频转码与无 GPU 语音识别 ──────────────────────────
 
     @staticmethod
     def _convert_to_16k_wav(src_path: Path, wav_path: Path) -> bool:
-        """尝试使用 pilk（针对微信 silk）或 ffmpeg 将音频统一转为 16kHz 单声道 PCM WAV。"""
+        """通过魔数嗅探使用 pilk（微信 silk）或 ffmpeg 将音频统一转为 16kHz 单声道 PCM WAV。"""
         ext = src_path.suffix.lower()
         pcm_tmp: Path | None = None
         ffmpeg_input = src_path
+        header = b""
+        try:
+            with open(src_path, "rb") as fp:
+                header = fp.read(20)
+        except Exception:
+            pass
+
+        is_known_non_silk = header.startswith((b"RIFF", b"OggS", b"ID3", b"#!AMR", b"fLaC"))
+        looks_like_silk = (b"SILK_V3" in header) or (ext in (".silk", ".slk") and not is_known_non_silk)
 
         try:
-            if ext in (".silk", ".slk"):
+            if looks_like_silk:
                 try:
                     import pilk  # type: ignore
 
                     pcm_tmp = src_path.with_suffix(".pcm")
                     pilk.decode(str(src_path), str(pcm_tmp))
-                    cmd = [
-                        "ffmpeg",
-                        "-y",
-                        "-f",
-                        "s16le",
-                        "-ar",
-                        "24000",
-                        "-ac",
-                        "1",
-                        "-i",
-                        str(pcm_tmp),
-                        "-ar",
-                        "16000",
-                        "-ac",
-                        "1",
-                        str(wav_path),
-                    ]
-                    proc = subprocess.run(cmd, capture_output=True, timeout=20)
-                    if proc.returncode == 0 and wav_path.exists():
-                        return True
+                    if pcm_tmp.exists() and pcm_tmp.stat().st_size > 0:
+                        cmd = [
+                            "ffmpeg",
+                            "-y",
+                            "-f",
+                            "s16le",
+                            "-ar",
+                            "24000",
+                            "-ac",
+                            "1",
+                            "-i",
+                            str(pcm_tmp),
+                            "-ar",
+                            "16000",
+                            "-ac",
+                            "1",
+                            str(wav_path),
+                        ]
+                        proc = subprocess.run(cmd, capture_output=True, timeout=20)
+                        if proc.returncode == 0 and wav_path.exists():
+                            return True
                 except ImportError:
                     logger.debug("[MediaProcessor] 未安装 pilk，尝试直接调用 ffmpeg 解码 silk")
                 except Exception as p_err:
@@ -105,21 +214,16 @@ class MediaProcessor:
 
     def _get_sherpa_recognizer(self) -> Any:
         """懒加载纯 CPU sherpa-onnx SenseVoice-Small (Int8) 识别器（固定 2 线程）。"""
-        if self._sherpa_recognizer is not None:
-            return self._sherpa_recognizer if self._sherpa_recognizer is not False else None
+        if self._sherpa_recognizer is not None and self._sherpa_recognizer is not False:
+            return self._sherpa_recognizer
 
-        model_dir_str = (
-            os.getenv("SHERPA_SENSEVOICE_DIR")
-            or str(Path.home() / ".agenthub" / "models" / "sensevoice-small-int8")
-        ).strip()
-        model_dir = Path(model_dir_str)
+        model_dir = self.get_sensevoice_model_dir()
         model_file = model_dir / "model.int8.onnx"
         if not model_file.exists():
             model_file = model_dir / "model.onnx"
         tokens_file = model_dir / "tokens.txt"
 
         if not (model_file.exists() and tokens_file.exists()):
-            self._sherpa_recognizer = False
             return None
 
         try:
@@ -136,12 +240,10 @@ class MediaProcessor:
             return self._sherpa_recognizer
         except Exception as err:
             logger.debug(f"[MediaProcessor] sherpa-onnx 初始化跳过: {err}")
-            self._sherpa_recognizer = False
             return None
 
     def _run_sherpa_sync(self, wav_path: Path) -> str:
         """读取 16k WAV 并执行纯 CPU SenseVoice 离线识别。"""
-        import wave
         import numpy as np  # type: ignore
 
         rec = self._get_sherpa_recognizer()
@@ -173,7 +275,18 @@ class MediaProcessor:
         src_path.write_bytes(audio_bytes)
 
         eff_path = src_path
-        if safe_ext.lower() != ".wav":
+        need_convert = safe_ext.lower() != ".wav"
+        if not need_convert:
+            try:
+                with wave.open(str(src_path), "rb") as wf:
+                    if wf.getframerate() != 16000 or wf.getnchannels() != 1:
+                        need_convert = True
+                        wav_path = cache_dir / f"{stem}_16k.wav"
+            except Exception:
+                need_convert = True
+                wav_path = cache_dir / f"{stem}_16k.wav"
+
+        if need_convert:
             converted = await asyncio.to_thread(self._convert_to_16k_wav, src_path, wav_path)
             if converted:
                 eff_path = wav_path
@@ -196,7 +309,10 @@ class MediaProcessor:
             except Exception as cloud_err:
                 logger.debug(f"[MediaProcessor] 云端 ASR 调用失败，尝试本地 CPU 兜底: {cloud_err}")
 
-        # 轨道 B：本地纯 CPU sherpa-onnx SenseVoice (单并发 + 2 线程)
+        # 轨道 B：本地纯 CPU sherpa-onnx SenseVoice (单并发 + 2 线程，缺少模型时自动拉取一次)
+        if self._is_sherpa_installed() and not self._has_local_sensevoice_model():
+            await self.ensure_sensevoice_model()
+
         async with self._cpu_infer_sem:
             try:
                 txt = await asyncio.to_thread(self._run_sherpa_sync, eff_path)
@@ -205,10 +321,52 @@ class MediaProcessor:
             except Exception as local_err:
                 logger.debug(f"[MediaProcessor] 本地 sherpa-onnx 识别异常: {local_err}")
 
+        if not self._is_sherpa_installed():
+            hint = "当前容器尚未安装 sherpa-onnx 离线语音包（请重新 build Docker 镜像或配置 ASR_API_BASE_URL）。"
+        elif not self._has_local_sensevoice_model():
+            hint = f"SenseVoice 离线语音模型尚未落盘（目标目录：{self.get_sensevoice_model_dir()}，网络受限时可手动放入或配置 ASR_API_BASE_URL）。"
+        elif need_convert and eff_path == src_path:
+            hint = "微信语音格式转码 16kHz WAV 失败，请确认容器已安装 pilk 与 ffmpeg。"
+        else:
+            hint = "语音识别未能提取到清晰人声内容（可能是空白或时长过短）。"
+
         return {
             "success": False,
             "text": "",
-            "hint": "语音识别模型未就绪（可在 ~/.agenthub/models/sensevoice-small-int8 放置离线模型或配置 ASR_API_BASE_URL）。",
+            "hint": hint,
+        }
+
+    def get_capabilities_status(self) -> dict[str, Any]:
+        """如实返回当前运行环境的多模态识别能力状态，供 IM 网关注入系统提示词。"""
+        asr_base = (os.getenv("ASR_API_BASE_URL") or "").strip()
+        sherpa_installed = self._is_sherpa_installed()
+        model_ready = self._has_local_sensevoice_model()
+        ocr_ready = importlib.util.find_spec("rapidocr_onnxruntime") is not None
+
+        if asr_base:
+            voice_engine = "cloud_asr"
+            voice_ready = True
+            voice_desc = "已接入云端兼容 ASR 与本地转码"
+        elif sherpa_installed and model_ready:
+            voice_engine = "sherpa_onnx_ready"
+            voice_ready = True
+            voice_desc = "本地纯 CPU SenseVoice-Small 离线语音引擎已就绪"
+        elif sherpa_installed:
+            voice_engine = "sherpa_onnx_auto_download"
+            voice_ready = True
+            voice_desc = "本地纯 CPU SenseVoice 引擎已安装（首次接收语音时自动下载离线模型）"
+        else:
+            voice_engine = "wechat_native_only"
+            voice_ready = False
+            voice_desc = "支持接收微信自带转写文本；容器重建升级后即可启用离线语音引擎"
+
+        img_desc = "支持图片识别（RapidOCR 文字提取 + 多模态视觉分析）" if ocr_ready else "支持图片多模态视觉分析"
+        return {
+            "voice_ready": voice_ready,
+            "voice_engine": voice_engine,
+            "ocr_ready": ocr_ready,
+            "model_dir": str(self.get_sensevoice_model_dir()),
+            "summary": f"{voice_desc}；{img_desc}",
         }
 
     # ────────────────────────── 2. 无 GPU 图片文字 OCR 与 Vision 打包 ──────────────────────────

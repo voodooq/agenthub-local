@@ -231,11 +231,30 @@ async def lifespan(app: FastAPI):
 
     weixin_boot_task = asyncio.create_task(_auto_boot_weixin_sidecar())
 
+    # 后台静默预热无 GPU 纯 CPU 离线语音识别模型（仅在已安装 sherpa-onnx 且未配置云端 ASR 时按需拉取）
+    async def _warmup_local_asr_model() -> None:
+        try:
+            await asyncio.sleep(3.0)
+            if (os.getenv("ASR_API_BASE_URL") or "").strip():
+                return
+            if (os.getenv("DISABLE_ASR_MODEL_AUTO_DOWNLOAD") or "").strip() == "1":
+                return
+            from app.channels.media_processor import media_processor
+
+            if media_processor._is_sherpa_installed() and not media_processor._has_local_sensevoice_model():
+                await media_processor.ensure_sensevoice_model()
+        except asyncio.CancelledError:
+            raise
+        except Exception as asr_err:
+            logger.debug(f"[MediaProcessor] 启动预热本地 ASR 模型跳过: {asr_err}")
+
+    asr_warmup_task = asyncio.create_task(_warmup_local_asr_model())
+
     try:
         yield
     finally:
         logger.info("应用正在优雅关机，正在清理后台任务与常驻 MCP 进程池...")
-        for bg_task in (decay_task, scheduler_task, parent_watch_task, weixin_boot_task):
+        for bg_task in (decay_task, scheduler_task, parent_watch_task, weixin_boot_task, asr_warmup_task):
             if bg_task and not bg_task.done():
                 bg_task.cancel()
                 try:

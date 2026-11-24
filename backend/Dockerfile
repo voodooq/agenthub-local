@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# 安装无 GPU 纯 CPU 离线语音识别（sherpa-onnx SenseVoice）与微信 SILK 音频解码（pilk）
+RUN pip install --no-cache-dir "sherpa-onnx>=1.10.0" "pilk>=0.2.4" || true
 
 COPY . .
 

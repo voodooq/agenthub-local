@@ -17,6 +17,7 @@ import path from 'node:path';
 
 const PORT = Number(process.env.CLAWBOT_BRIDGE_PORT || 18791);
 const DEFAULT_ILINK_BASE = 'https://ilinkai.weixin.qq.com';
+const DEFAULT_ILINK_CDN_BASE = (process.env.ILINK_CDN_BASE_URL || 'https://novac2c.cdn.weixin.qq.com/c2c').replace(/\/+$/, '');
 const BRIDGE_SECRET = (process.env.CLAWBOT_BRIDGE_SECRET || '').trim();
 const LEGACY_SESSION_FILE = path.join(os.homedir(), '.agenthub', 'weixin_clawbot_session.json');
 const SESSION_FILE = (process.env.CLAWBOT_SESSION_FILE || '').trim() || LEGACY_SESSION_FILE;
@@ -149,6 +150,115 @@ function sendJson(res, statusCode, data) {
   res.end(JSON.stringify(data));
 }
 
+function parseIlinkAesKey(rawKey) {
+  const s = String(rawKey || '').trim();
+  if (!s) return null;
+  if (/^[0-9a-fA-F]{32}$/.test(s)) {
+    return Buffer.from(s, 'hex');
+  }
+  try {
+    const b1 = Buffer.from(s, 'base64');
+    if (b1.length === 16) return b1;
+    if (b1.length === 32) {
+      const ascii = b1.toString('utf8');
+      if (/^[0-9a-fA-F]{32}$/.test(ascii)) {
+        return Buffer.from(ascii, 'hex');
+      }
+    }
+  } catch {
+    // 忽略非法 Base64
+  }
+  return null;
+}
+
+function detectMediaMimeAndExt(buf, fallbackMime, fallbackName) {
+  if (!Buffer.isBuffer(buf) || buf.length < 4) {
+    return { mime: fallbackMime, name: fallbackName };
+  }
+  const head = buf.subarray(0, Math.min(buf.length, 16));
+  const headAscii = head.toString('latin1');
+  let mime = fallbackMime;
+  let ext = '';
+  if (headAscii.includes('#!SILK_V3')) {
+    mime = 'audio/silk';
+    ext = '.silk';
+  } else if (headAscii.startsWith('RIFF')) {
+    mime = 'audio/wav';
+    ext = '.wav';
+  } else if (headAscii.startsWith('#!AMR')) {
+    mime = 'audio/amr';
+    ext = '.amr';
+  } else if (headAscii.startsWith('OggS')) {
+    mime = 'audio/ogg';
+    ext = '.ogg';
+  } else if (headAscii.startsWith('ID3') || (buf[0] === 0xff && (buf[1] & 0xe0) === 0xe0)) {
+    mime = 'audio/mpeg';
+    ext = '.mp3';
+  } else if (buf[0] === 0x89 && buf[1] === 0x50 && buf[2] === 0x4e && buf[3] === 0x47) {
+    mime = 'image/png';
+    ext = '.png';
+  } else if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) {
+    mime = 'image/jpeg';
+    ext = '.jpg';
+  }
+  let name = fallbackName || 'media';
+  if (ext) {
+    const parsed = path.parse(name);
+    if (!parsed.ext || parsed.ext.toLowerCase() !== ext) {
+      name = `${parsed.name || 'wechat_media'}${ext}`;
+    }
+  }
+  return { mime, name };
+}
+
+async function downloadAndDecryptIlinkMedia(mediaObj, fallbackAesKey = '', directUrl = '') {
+  const eqp = String(
+    mediaObj?.encrypt_query_param || mediaObj?.encrypted_query_param || ''
+  ).trim();
+  let downloadUrl = '';
+  if (eqp) {
+    downloadUrl = `${DEFAULT_ILINK_CDN_BASE}/download?encrypted_query_param=${encodeURIComponent(eqp)}`;
+  } else {
+    downloadUrl = String(directUrl || mediaObj?.url || mediaObj?.cdn_url || '').trim();
+  }
+  if (!downloadUrl) return null;
+
+  try {
+    const resp = await fetch(downloadUrl, {
+      method: 'GET',
+      headers: buildIlinkHeaders(),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (!resp.ok) {
+      console.error(`[WeixinBridge] 下载 CDN 媒体失败 HTTP ${resp.status}`);
+      return null;
+    }
+    const rawBuf = Buffer.from(await resp.arrayBuffer());
+    if (!rawBuf.length) return null;
+
+    const rawKey = mediaObj?.aes_key || mediaObj?.aeskey || fallbackAesKey || '';
+    const keyBuf = parseIlinkAesKey(rawKey);
+    let plainBuf = rawBuf;
+    if (keyBuf) {
+      try {
+        const decipher = crypto.createDecipheriv('aes-128-ecb', keyBuf, null);
+        plainBuf = Buffer.concat([decipher.update(rawBuf), decipher.final()]);
+      } catch {
+        const decipherRaw = crypto.createDecipheriv('aes-128-ecb', keyBuf, null);
+        decipherRaw.setAutoPadding(false);
+        plainBuf = Buffer.concat([decipherRaw.update(rawBuf), decipherRaw.final()]);
+      }
+    }
+    return {
+      buffer: plainBuf,
+      base64: plainBuf.toString('base64'),
+    };
+  } catch (err) {
+    console.error('[WeixinBridge] 下载或解密媒体异常:', err?.message || err);
+    return null;
+  }
+}
+
 function extractMessagePayloadFromIlinkMsg(msg) {
   const result = {
     text: '',
@@ -223,6 +333,66 @@ function extractMessagePayloadFromIlinkMsg(msg) {
 
   result.text = textParts.filter(Boolean).join('\n').trim();
   return result;
+}
+
+async function extractAndHydrateIlinkMsg(msg) {
+  const payload = extractMessagePayloadFromIlinkMsg(msg);
+  if (!msg || !payload.has_media || payload.attachments.length === 0) {
+    return payload;
+  }
+
+  const items = Array.isArray(msg.item_list) ? msg.item_list : [];
+  const mediaSources = [];
+  for (const item of items) {
+    if (!item) continue;
+    if (item.type === 2 || item.image_item) {
+      const img = item.image_item || item;
+      mediaSources.push({
+        mediaObj: img.media || img,
+        fallbackAesKey: String(img.aeskey || img.aes_key || ''),
+        directUrl: String(img.url || img.pic_url || img.cdn_url || img.aeskey_url || ''),
+      });
+    } else if (item.type === 3 || item.voice_item) {
+      const vc = item.voice_item || item;
+      mediaSources.push({
+        mediaObj: vc.media || vc,
+        fallbackAesKey: String(vc.aeskey || vc.aes_key || ''),
+        directUrl: String(vc.url || vc.voice_url || vc.cdn_url || ''),
+      });
+    } else if (item.type === 4 || item.file_item) {
+      mediaSources.push(null);
+    }
+  }
+
+  for (let i = 0; i < payload.attachments.length; i += 1) {
+    const att = payload.attachments[i];
+    const src = mediaSources[i];
+    if (!att || !src) continue;
+    if (att.kind === 'image' && !att.base64) {
+      const dl = await downloadAndDecryptIlinkMedia(src.mediaObj, src.fallbackAesKey, src.directUrl);
+      if (dl) {
+        att.base64 = dl.base64;
+        const meta = detectMediaMimeAndExt(dl.buffer, att.mime_type, att.name);
+        att.mime_type = meta.mime;
+        att.name = meta.name;
+      }
+    } else if (att.kind === 'voice' && !att.text && !att.base64) {
+      const dl = await downloadAndDecryptIlinkMedia(src.mediaObj, src.fallbackAesKey, src.directUrl);
+      if (dl) {
+        att.base64 = dl.base64;
+        const meta = detectMediaMimeAndExt(dl.buffer, att.mime_type, att.name);
+        att.mime_type = meta.mime;
+        att.name = meta.name;
+      }
+    }
+  }
+
+  const hasText = Boolean(payload.text);
+  const b64Sizes = payload.attachments.map((a) => (a.base64 ? a.base64.length : 0));
+  console.log(
+    `[WeixinBridge] 收到媒体消息 type=${payload.msg_type} count=${payload.attachments.length} has_text=${hasText} b64_len=${b64Sizes.join(',')}`
+  );
+  return payload;
 }
 
 function extractTextFromIlinkMsg(msg) {
@@ -338,7 +508,7 @@ async function startGetUpdatesLoop() {
       const msgs = Array.isArray(data.msgs) ? data.msgs : [];
       for (const m of msgs) {
         const fromUser = String(m.from_user_id || '').trim();
-        const extracted = extractMessagePayloadFromIlinkMsg(m);
+        const extracted = await extractAndHydrateIlinkMsg(m);
         if (!fromUser || (!extracted.text && extracted.attachments.length === 0)) continue;
         if (m.context_token && state.context_tokens.get(fromUser) !== String(m.context_token)) {
           state.context_tokens.set(fromUser, String(m.context_token));
