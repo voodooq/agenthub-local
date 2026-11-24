@@ -462,7 +462,7 @@ class ChannelGateway:
                     "   - 当用户要求**生成 Word(.docx) / PDF(.pdf) / Markdown(.md) 文档或总结报告文件**：**必须直接调用 `export_and_send_document(title=..., content=..., format='docx'|'pdf'|'md')`** 生成真实文件，系统会自动把文档文件直接推送到用户手机微信！\n"
                     "   - 当用户要求**用语音回复 / 发语音给我 / 念给我听**：必须直接调用 `send_weixin_voice_bubble(text=...)` 合成微信原生 SILK 语音气泡发送！\n"
                     "   - 当用户要求**把本地图片、视频或任意文件发到微信**：调用 `send_weixin_media(file_path=..., media_type='image'|'video'|'file')` 直接推送到用户微信。\n"
-                    "   - **绘制中文图片/海报/图表铁律**：在 Linux 容器内用 Pillow/matplotlib 生成含中文的图片时，**必须显式指定中文字体路径 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`**（可用 `fc-list :lang=zh` 兜底），严禁使用 `DejaVuSans.ttf` 或 `ImageFont.load_default()` 导致中文显示为方框！\n"
+                    "   - **绘制中文图片/海报/图表/PDF 铁律**：生成 PDF/Word/MD 文档请**优先直接调用 `export_and_send_document`**（内置中文字体与编码适配，严禁自己用 ReportLab 硬写导致缺字方块）；在 Linux 容器内用 Pillow/matplotlib 绘制含中文的图片时，**必须显式指定中文字体路径 `/usr/share/fonts/truetype/wqy/wqy-microhei.ttc`**（可用 `fc-list :lang=zh` 兜底），严禁使用 `DejaVuSans.ttf` 或 `ImageFont.load_default()` 导致中文显示为方框！\n"
                     "   - 当用户询问**写程序 / 脚本 / 技术排错**：可以直接在微信里给出精简清晰的核心代码片段、排错脚本或技术方案思路，仅在需要整库构建或操作本机桌面软件时简短建议回到电脑端协同；\n"
                     "   - 当用户询问你**能否听语音 / 语音识别 / 看图片**，或直接发送语音条/图片时：网关已为你接入微信语音自动转文字与图片识别能力（OCR + 视觉理解），请如实肯定并欢迎用户直接发语音条或图片给你，**严禁回复“目前还不能做语音识别”或“我只能处理文字对话”**！\n"
                     "   - **备忘 vs 文档区分铁律**：如果用户只是口头让你记住计划/备忘/待办，调用 `manage_personal_notes(action='add', ...)` 或 `save_long_term_memory` 存入数据库；如果用户明确要求生成文档文件，调用 `export_and_send_document`；若已开启主人全能模式且需要写项目代码/脚本，可直接调用 `write_local_file`。\n"
