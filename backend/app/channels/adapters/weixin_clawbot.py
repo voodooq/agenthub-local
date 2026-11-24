@@ -115,7 +115,28 @@ class WeixinClawbotAdapter(BaseChannelAdapter):
                         "voices": voices_payload,
                     },
                 )
-                return {"pushed": resp.status_code < 400, "status_code": resp.status_code}
+                resp_data = {}
+                try:
+                    resp_data = resp.json()
+                except Exception:
+                    resp_data = {}
+                if voices_payload:
+                    v_res_list = resp_data.get("voice_results") or []
+                    if resp_data.get("delivered_voices", 0) > 0:
+                        logger.info(f"[WeixinClawbot] 原生语音气泡投递成功: {v_res_list}")
+                    else:
+                        logger.warning(f"[WeixinClawbot] 原生语音气泡投递失败: status={resp.status_code}, detail={v_res_list or resp_data}")
+                if files_payload:
+                    f_res_list = resp_data.get("file_results") or []
+                    if resp_data.get("delivered_files", 0) == 0:
+                        logger.warning(f"[WeixinClawbot] 文件投递失败: status={resp.status_code}, detail={f_res_list or resp_data}")
+                return {
+                    "pushed": resp.status_code < 400,
+                    "status_code": resp.status_code,
+                    "delivered_voices": resp_data.get("delivered_voices", 0),
+                    "voice_results": resp_data.get("voice_results", []),
+                    "delivered_files": resp_data.get("delivered_files", 0),
+                }
         except Exception as err:
             logger.debug(f"[WeixinClawbot] 本地 Sidecar 未运行或回推失败 ({bridge_url}): {err}")
             return {"pushed": False, "error": f"本地 ClawBot Sidecar 不可达 ({bridge_url})"}

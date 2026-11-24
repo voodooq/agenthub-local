@@ -584,8 +584,18 @@ async function uploadAndSendIlinkFile(toUserId, filePath, customFileName = '') {
       signal: AbortSignal.timeout(15_000),
     });
     const rawText = await sendResp.text();
-    if (!sendResp.ok) {
-      return { ok: false, status: sendResp.status, body: rawText.slice(0, 200) };
+    let parsedResp = {};
+    try {
+      parsedResp = JSON.parse(rawText || '{}');
+    } catch {
+      parsedResp = {};
+    }
+    const bizErr =
+      (parsedResp.ret !== undefined && Number(parsedResp.ret) !== 0) ||
+      (parsedResp.errcode !== undefined && Number(parsedResp.errcode) !== 0);
+    if (!sendResp.ok || bizErr) {
+      console.error(`[WeixinBridge] 发送微信文件失败 HTTP=${sendResp.status} body=${rawText.slice(0, 300)}`);
+      return { ok: false, status: sendResp.status, body: rawText.slice(0, 300) };
     }
     console.log(`[WeixinBridge] 已推送微信文件: ${fileName} (${rawSize} bytes) -> ${toUserId}`);
     return { ok: true, status: sendResp.status, file_name: fileName, bytes: rawSize };
@@ -643,11 +653,21 @@ async function uploadAndSendIlinkVoice(
       signal: AbortSignal.timeout(15_000),
     });
     const rawText = await sendResp.text();
-    if (!sendResp.ok) {
-      return { ok: false, status: sendResp.status, body: rawText.slice(0, 200) };
+    let parsedResp = {};
+    try {
+      parsedResp = JSON.parse(rawText || '{}');
+    } catch {
+      parsedResp = {};
     }
-    console.log(`[WeixinBridge] 已推送原生微信语音气泡: ${rawSize} bytes (${voiceItem.playtime}ms) -> ${toUserId}`);
-    return { ok: true, status: sendResp.status, bytes: rawSize, playtime: voiceItem.playtime };
+    const bizErr =
+      (parsedResp.ret !== undefined && Number(parsedResp.ret) !== 0) ||
+      (parsedResp.errcode !== undefined && Number(parsedResp.errcode) !== 0);
+    if (!sendResp.ok || bizErr) {
+      console.error(`[WeixinBridge] 发送原生语音气泡失败 HTTP=${sendResp.status} body=${rawText.slice(0, 300)}`);
+      return { ok: false, status: sendResp.status, body: rawText.slice(0, 300) };
+    }
+    console.log(`[WeixinBridge] 已推送原生微信语音气泡: ${rawSize} bytes (${voiceItem.playtime}ms) -> ${toUserId} resp=${rawText.slice(0, 120)}`);
+    return { ok: true, status: sendResp.status, bytes: rawSize, playtime: voiceItem.playtime, body: rawText.slice(0, 120) };
   } catch (err) {
     console.error('[WeixinBridge] 发送原生语音气泡异常:', err?.message || err);
     return { ok: false, error: String(err?.message || err) };

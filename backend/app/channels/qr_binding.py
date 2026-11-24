@@ -125,12 +125,14 @@ async def ensure_clawbot_sidecar_running(
             if local_ingress:
                 env["AGENTHUB_INGRESS_URL"] = local_ingress
             creationflags = 0x08000000 if sys.platform == "win32" else 0  # CREATE_NO_WINDOW
+            bridge_log_path = Path(_app_settings.db_path).parent / "weixin_clawbot_bridge.log"
+            bridge_log_fp = open(bridge_log_path, "a", encoding="utf-8")
             _CLAWBOT_SIDECAR_PROC = subprocess.Popen(
                 [node_bin, str(script_path)],
                 cwd=str(script_path.parent),
                 env=env,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stdout=bridge_log_fp,
+                stderr=subprocess.STDOUT,
                 creationflags=creationflags,
             )
             logger.info(f"[WeixinClawbot] 已自动在后台静默拉起本地 Sidecar (PID={_CLAWBOT_SIDECAR_PROC.pid})")

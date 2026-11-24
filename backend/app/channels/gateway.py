@@ -800,9 +800,10 @@ class ChannelGateway:
                         except Exception:
                             pass
                     compact_summary = formatted_text[:420].rstrip() + "..."
+                    doc_atts = [a for a in exported_attachments if a.get("kind") != "voice"]
                     file_tip = (
-                        f"📎 已同步生成完整文档 `{exported_attachments[0]['file_name']}` 发送给你。"
-                        if exported_attachments
+                        f"📎 已同步生成完整文档 `{doc_atts[0]['file_name']}` 发送给你。"
+                        if doc_atts
                         else f"📄 完整详报较长（共 {len(raw_reply)} 字），已生成 24 小时临时阅读页：{rep['path']}"
                     )
                     formatted_text = f"{compact_summary}\n\n{file_tip}"
