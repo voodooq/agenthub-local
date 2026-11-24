@@ -419,13 +419,25 @@ class PersonalWorkflowService:
 
             if norm_fmt == "md":
                 full_md = text_body if text_body.startswith("#") else f"# {doc_title}\n\n{text_body}"
-                out_path.write_text(full_md + "\n", encoding="utf-8")
+                # 使用带 BOM 的 utf-8-sig，防止手机微信/WPS 预览 .md 时误按 GBK 解码导致中文乱码
+                out_path.write_text(full_md + "\n", encoding="utf-8-sig")
                 return "md"
 
             if norm_fmt == "docx":
                 from docx import Document  # type: ignore
+                from docx.oxml.ns import qn  # type: ignore
 
                 doc = Document()
+                for style_name in ("Normal", "Heading 1", "Heading 2", "Heading 3", "List Bullet"):
+                    if style_name in doc.styles:
+                        st = doc.styles[style_name]
+                        st.font.name = "微软雅黑"
+                        r_pr = st._element.get_or_add_rPr()
+                        r_fonts = r_pr.get_or_add_rFonts()
+                        r_fonts.set(qn("w:ascii"), "Microsoft YaHei")
+                        r_fonts.set(qn("w:eastAsia"), "微软雅黑")
+                        r_fonts.set(qn("w:hAnsi"), "Microsoft YaHei")
+
                 doc.add_heading(doc_title, level=1)
                 for raw_line in text_body.splitlines():
                     line = raw_line.strip()
@@ -444,7 +456,7 @@ class PersonalWorkflowService:
                 doc.save(str(out_path))
                 return "docx"
 
-            # pdf: 使用 fpdf2 并自动探测中文字体
+            # pdf: 使用 fpdf2 并全路径动态探测系统中文字体
             from fpdf import FPDF  # type: ignore
 
             pdf = FPDF()
@@ -452,20 +464,46 @@ class PersonalWorkflowService:
             pdf.add_page()
             font_candidates = [
                 "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
+                "/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc",
                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
                 "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+                "/usr/share/fonts/truetype/droid/DroidSansFallbackFull.ttf",
                 "C:/Windows/Fonts/msyh.ttc",
+                "C:/Windows/Fonts/simhei.ttf",
                 "C:/Windows/Fonts/simsun.ttc",
             ]
             font_path = next((p for p in font_candidates if Path(p).exists()), "")
+            if not font_path:
+                for font_root in (Path("/usr/share/fonts"), Path(settings.db_path).parent / "fonts"):
+                    if font_root.exists():
+                        for fp in font_root.rglob("*"):
+                            if fp.suffix.lower() in (".ttf", ".ttc", ".otf"):
+                                if any(k in fp.name.lower() for k in ("wqy", "noto", "cjk", "han", "hei", "song", "yahei", "droid")):
+                                    font_path = str(fp)
+                                    break
+                    if font_path:
+                        break
+
             font_family = "Helvetica"
             if font_path:
-                pdf.add_font("ZHFont", "", font_path, uni=True)
-                font_family = "ZHFont"
+                try:
+                    pdf.add_font("ZHFont", "", font_path)
+                    font_family = "ZHFont"
+                except TypeError:
+                    pdf.add_font("ZHFont", "", font_path, uni=True)
+                    font_family = "ZHFont"
+                except Exception:
+                    font_path = ""
+
+            def _clean_pdf_text(s: str) -> str:
+                # 剔除普通中文字体不包含的高位 Emoji（U+10000 以上），防止 PDF 渲染出方框
+                cleaned = "".join(ch for ch in s if ord(ch) <= 0xFFFF)
+                if not font_path:
+                    return cleaned.encode("latin-1", "replace").decode("latin-1")
+                return cleaned
 
             pdf.set_font(font_family, size=15)
-            safe_title = doc_title if font_path else doc_title.encode("latin-1", "replace").decode("latin-1")
-            pdf.multi_cell(0, 9, safe_title)
+            pdf.multi_cell(0, 9, _clean_pdf_text(doc_title))
             pdf.ln(3)
             pdf.set_font(font_family, size=10.5)
             for raw_line in text_body.splitlines():
@@ -473,9 +511,7 @@ class PersonalWorkflowService:
                 if not clean_line:
                     pdf.ln(3)
                     continue
-                if not font_path:
-                    clean_line = clean_line.encode("latin-1", "replace").decode("latin-1")
-                pdf.multi_cell(0, 6.5, clean_line)
+                pdf.multi_cell(0, 6.5, _clean_pdf_text(clean_line))
             pdf.output(str(out_path))
             return "pdf"
 
