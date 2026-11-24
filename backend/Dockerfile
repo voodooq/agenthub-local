@@ -11,6 +11,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     ca-certificates \
     git \
+    g++ \
     ffmpeg \
     fonts-wqy-microhei \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
@@ -21,8 +22,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-# 安装无 GPU 纯 CPU 离线语音识别（sherpa-onnx SenseVoice）、微信 SILK 编解码（pilk）与轻量语音合成（edge-tts）
-RUN pip install --no-cache-dir "sherpa-onnx>=1.10.0" "pilk>=0.2.4" "edge-tts>=6.1.0" || true
+# 安装无 GPU 纯 CPU 离线语音识别（sherpa-onnx SenseVoice）与微信 SILK 编解码（pilk，独立安装互不阻塞）
+RUN pip install --no-cache-dir "sherpa-onnx>=1.10.0" || true
+RUN pip install --no-cache-dir "pilk>=0.2.4" || true
 
 COPY . .
 

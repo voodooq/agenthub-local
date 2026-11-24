@@ -741,7 +741,13 @@ class ChannelGateway:
                             if isinstance(ef, dict) and ef.get("file_path"):
                                 exported_attachments.append(ef)
 
-                raw_reply = (final_content or "".join(chunks_acc)).strip() or "（专家未返回有效内容）"
+                raw_reply = (final_content or "".join(chunks_acc)).strip()
+                if not raw_reply:
+                    raw_reply = (
+                        "已为你生成并发送，请查收。"
+                        if exported_attachments
+                        else "刚才处理时没有生成有效文字回复，你可以再跟我说一遍具体需求。"
+                    )
                 formatted_text, out_chunks = format_for_im_channel(
                     raw_reply, max_chunk_chars=getattr(adapter, "max_chunk_chars", 1500)
                 )
@@ -1130,12 +1136,13 @@ class ChannelGateway:
                         lines.append(f"{idx}. [{it['created_at_str']}] {it['title']}\n   {it['summary'][:90]}")
                     reply_text = "\n".join(lines)
 
-        # 10. /voice on|off -> 开启或关闭自动微信原生语音气泡回复
-        elif reply_text is None and low in ("/voice", "/voice on", "/voice off"):
-            if low == "/voice on":
+        # 10. /voice on|off -> 开启或关闭自动微信原生语音气泡回复（兼容后续附带说明文本）
+        elif reply_text is None and (low == "/voice" or low.startswith("/voice ")):
+            arg_v = low[6:].strip()
+            if arg_v.startswith(("on", "开", "启用")):
                 self._voice_reply_sessions.add(session_key)
                 reply_text = "已开启微信原生语音气泡自动回复模式，之后每条答复都会同步发你语音条（发 `/voice off` 关闭）。"
-            elif low == "/voice off":
+            elif arg_v.startswith(("off", "关", "停")):
                 self._voice_reply_sessions.discard(session_key)
                 reply_text = "已关闭自动语音气泡回复，恢复纯文字/按需语音。"
             else:
