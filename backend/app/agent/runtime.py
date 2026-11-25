@@ -5991,6 +5991,7 @@ class AgentRuntime:
                         q_biz = str(args.get("question") or "").strip()
                         ao_conv_id = str(args.get("conversation_id") or "").strip() or None
                         explicit_target_db = str(args.get("target_db") or "").strip() or None
+                        res_text = ""
                         try:
                             resolved_target_db = await resolve_agent_target_db(
                                 agent_id,
