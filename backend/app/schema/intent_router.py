@@ -241,6 +241,27 @@ async def route_query_intent(
     )
 
 
+_IMPERATIVE_PREFIX_RE = re.compile(
+    r"^(?:请问|那|要不|要不要我|要不要|是否需要为您|是否需要|是否|需要我为您|需要为您|需要我|需要|要顺便|顺便|想不想|可以为您|可以帮你|为您|帮你)\s*"
+)
+_TRAILING_QUESTION_RE = re.compile(r"[吗呢吧？?]+$")
+
+
+def _to_imperative_followup(text: str) -> str:
+    """将助手反问用户的疑问句（如“需要导出……吗？”）清洗为肯定祈使动作短语。"""
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return ""
+    # 循环剥离可能叠加的反问前缀（如“要顺便……” -> “核对……”）
+    for _ in range(2):
+        next_val = _IMPERATIVE_PREFIX_RE.sub("", cleaned).strip()
+        if next_val == cleaned:
+            break
+        cleaned = next_val
+    cleaned = _TRAILING_QUESTION_RE.sub("", cleaned).strip()
+    return cleaned
+
+
 def extract_followup_suggestions(raw_text: str) -> tuple[str, list[dict[str, Any]]]:
     """容错解析正文末尾的 <!-- FOLLOWUP_SUGGESTIONS: [...] -->，返回 (干净正文, 追问卡片列表)。"""
     if not raw_text:
@@ -272,15 +293,19 @@ def extract_followup_suggestions(raw_text: str) -> tuple[str, list[dict[str, Any
     if isinstance(parsed, list):
         for item in parsed[:3]:
             if isinstance(item, str) and item.strip():
-                label = item.strip()[:80]
-                suggestions.append({"label": label, "prompt": label, "force_live": False})
+                phrase = _to_imperative_followup(item)
+                if phrase:
+                    suggestions.append({"label": phrase[:80], "prompt": phrase, "force_live": False})
             elif isinstance(item, dict):
-                label = str(item.get("label") or item.get("prompt") or "").strip()[:80]
+                raw_label = str(item.get("label") or item.get("prompt") or "").strip()
+                raw_prompt = str(item.get("prompt") or raw_label).strip()
+                label = _to_imperative_followup(raw_label)[:80]
+                prompt = _to_imperative_followup(raw_prompt) or label
                 if label:
                     suggestions.append(
                         {
                             "label": label,
-                            "prompt": str(item.get("prompt") or label).strip(),
+                            "prompt": prompt,
                             "force_live": bool(item.get("force_live")),
                         }
                     )
@@ -357,15 +382,17 @@ def _normalize_followup_list(raw_items: Any, max_items: int = 3) -> list[dict[st
         if len(out) >= max_items:
             break
         if isinstance(item, str):
-            text = item.strip()
-            if not text:
+            phrase = _to_imperative_followup(item)
+            if not phrase:
                 continue
-            label = text[:32]
-            prompt = text
+            label = phrase[:32]
+            prompt = phrase
             force_live = False
         elif isinstance(item, dict):
-            label = str(item.get("label") or item.get("prompt") or "").strip()[:32]
-            prompt = str(item.get("prompt") or label).strip()
+            raw_label = str(item.get("label") or item.get("prompt") or "").strip()
+            raw_prompt = str(item.get("prompt") or raw_label).strip()
+            label = _to_imperative_followup(raw_label)[:32]
+            prompt = _to_imperative_followup(raw_prompt) or label
             force_live = bool(item.get("force_live"))
         else:
             continue
@@ -489,11 +516,12 @@ async def generate_smart_followups(
                 f"{role_hint}"
                 f"用户问题：{q[:300]}\n"
                 f"助手回复摘要：{reply[:1400]}\n\n"
-                "请站在用户视角，基于上面已经给出的回复，推断用户接下来最可能继续追问或核查的 3 个具体后续方向。\n"
+                "请站在用户视角，基于上面已经给出的回复，生成 3 个用户点击后可直接发送的下一步快捷指令。\n"
                 "要求：\n"
-                "1. 严格输出 JSON 数组，每个元素包含 `label`（10~20字短标题，如“查报名报项与截止时间”“查参赛资格限制”）和 `prompt`（可直接发给助手的完整清晰问题，务必带入具体赛事/实体名称，避免“它/这个”等模糊指代）；\n"
-                "2. 不要重复已经回答完的结论，要指向有价值的新信息、细项、限制或下一步操作；\n"
-                "3. 仅输出 JSON 数组，不要输出任何额外解释或 Markdown 围栏。"
+                "1. 严格输出 JSON 数组，每个元素包含 `label`（10~20字肯定句/祈使句动作短语，如“查看报名时间与报项要求”“核对参赛资格限制”“导出赛事明细 Excel”）和 `prompt`（以用户口吻下达的完整肯定祈使句指令，务必带入具体赛事/实体名称，避免“它/这个”等模糊指代）；\n"
+                "2. **严禁使用“需要……吗？”、“要顺便……吗？”、“是否……？”等疑问句或助手反问口吻**，必须全部写成干脆的肯定祈使句；\n"
+                "3. 不要重复已经回答完的结论，要指向有价值的新信息、细项、限制或下一步操作；\n"
+                "4. 仅输出 JSON 数组，不要输出任何额外解释或 Markdown 围栏。"
             )
             raw_out = await asyncio.wait_for(
                 light_llm_router.complete(

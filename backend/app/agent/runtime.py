@@ -1591,8 +1591,8 @@ class AgentRuntime:
         if not is_planning_phase and not swarm_role and caller_identity.channel != "im_bot":
             followup_hint = (
                 "\n\n### 输出末尾引导约定\n"
-                "在完整回答正文结束后的最后一行，附带 2~3 个自然、具体、用户最可能继续追问的下一步问题，严格采用如下单行 HTML 注释格式（禁止放在代码块中）：\n"
-                "<!-- FOLLOWUP_SUGGESTIONS: [\"下一步追问1\", \"下一步追问2\"] -->"
+                "在完整回答正文结束后的最后一行，附带 2~3 个站在用户视角下达的下一步快捷指令，必须使用简短的肯定句/祈使句动作短语（如“导出赛事明细 Excel”、“核对专业赛事场次分布”、“查看报名资格限制”），**严禁使用“需要……吗？”、“要顺便……吗？”、“是否……？”等反问句**，严格采用如下单行 HTML 注释格式（禁止放在代码块中）：\n"
+                "<!-- FOLLOWUP_SUGGESTIONS: [\"下一步指令1\", \"下一步指令2\"] -->"
             )
             system_override = f"{system_override}{followup_hint}" if system_override else followup_hint.strip()
 
