@@ -125,6 +125,14 @@ class LightLLMRouter:
         )
         return target
 
+    @classmethod
+    def is_cloud_target(cls, target: dict[str, Any] | None) -> bool:
+        """判定当前轻量节点是否为云端高速 HTTP 通道（非本地回环地址）。"""
+        if not target or target.get("mode") != "openai_http":
+            return False
+        base_url = str(target.get("base_url") or "").lower()
+        return not any(host in base_url for host in ("127.0.0.1", "localhost", "0.0.0.0", "::1"))
+
     async def complete(
         self,
         prompt: str,
@@ -132,6 +140,7 @@ class LightLLMRouter:
         system_prompt: str = "",
         temperature: float = 0.3,
         max_tokens: int = 512,
+        enable_thinking: bool = False,
     ) -> str | None:
         """执行轻量推理；仅直连 OpenAI 兼容 HTTP 节点，不抢占 Primary 或拉起 CLI。"""
         if accounts is None:
@@ -152,20 +161,27 @@ class LightLLMRouter:
             logger.warning(f"[LightLLMRouter] 节点 {target['source']} 未配置 base_url")
             return None
 
+        model_name = str(target.get("model") or "")
+        user_content = prompt
+        # 仅在模型名包含 qwen3 且关闭思考时追加 /no_think 软指令，避免影响其他模型
+        if not enable_thinking and "qwen3" in model_name.lower() and "/no_think" not in user_content:
+            user_content = f"{user_content.rstrip()}\n/no_think"
+
         messages = []
         if system_prompt:
             messages.append({"role": "system", "content": system_prompt})
-        messages.append({"role": "user", "content": prompt})
+        messages.append({"role": "user", "content": user_content})
 
-        payload = {
-            "model": target["model"],
+        payload: dict[str, Any] = {
+            "model": model_name,
             "messages": messages,
             "temperature": temperature,
-            "max_tokens": max(max_tokens, 512),
+            "max_tokens": max(64, int(max_tokens)),
             "stream": False,
-            # 关闭 Qwen3 等模型默认思考模式，避免无意义的 <think> 消耗 token 或被截断
-            "chat_template_kwargs": {"enable_thinking": False},
         }
+        if not enable_thinking:
+            # 关闭 Qwen3 等模型默认思考模式，避免无意义的 <think> 消耗 token 或被截断
+            payload["chat_template_kwargs"] = {"enable_thinking": False}
         headers = {"Authorization": f"Bearer {target['api_key']}"}
 
         try:

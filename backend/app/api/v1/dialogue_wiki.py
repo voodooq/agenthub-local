@@ -498,6 +498,12 @@ async def delete_dialogue_link(link_id: str) -> dict[str, Any]:
             (link_id,),
         )
         await conn.commit()
+    try:
+        from ...channels.qr_binding import stop_clawbot_sidecar_if_unlinked
+
+        await stop_clawbot_sidecar_if_unlinked()
+    except Exception:
+        pass
     return {"success": True, "message": "已移除该渠道对接链接"}
 
 

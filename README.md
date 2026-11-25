@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.5.5-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.7.0-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.5.5 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.7.0 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -375,7 +375,21 @@ docker compose exec backend bash
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.4.12（最新）— 专家防幻觉与严谨度体系、L2 拦截 15 秒倒计时自动封锁与单色扁平化设计
+### 🚀 v1.7.0（最新）— 国标知识库与百科底座、Auto Ontology 多库隔离路由、智能快捷引导与 ClawBot 治理
+- **Auto Ontology 多数据库隔离路由与可扩展配置（`auto_ontology_client.py` · `context_injector.py` · `query_assembler.py` · `SchemaGraphView.tsx`）**：
+  - 支持在发送 `/api/chat/completions` 请求时严格校验并透传 `target_db` 参数（支持预设 `fencinginfo` / `equestrianinfo` 及任意自定义扩展库名），严禁留空为 `None`；
+  - 专家数据结构上下文与 `[Schema Constraints]` 按所属业务库严格隔离，杜绝跨库表结构与业务口径污染；
+  - 前端「数据工作台 → 空间与网关设置」支持自由输入自定义 `target_db` 并提供一键快捷预设。
+- **全场景智能后续快捷引导与防闪烁持久化（`intent_router.py` · `runtime.py` · `message_repository.py` · `FollowupAndSnapshotBar.tsx`）**：
+  - 在 `messages` 表持久化 `followup_suggestions_json`，彻底修复流结束刷新后引导卡片“一晃就消失”的问题；
+  - 新增 `generate_smart_followups`（轻量模型优先 + 领域启发式零失败兜底），覆盖知识库检索、业务查数、代码排障与通用问答等全场景，输出完成后稳定展示可点击直发的快捷引导链接。
+- **国标知识库与词表分层继承重构（GB/T 36344/37722/15237/22239）**：
+  - 落地通用体育赛事底座与单项协会扩展包分层词表继承（Base + Domain Pack），支持检索侧中英文装饰标点无损兼容展开与 `entity_wiki_compiler` 同源分桶去重；
+  - `HyPE` 口语化增强支持 `qwen3` `/no_think`、前置低价值切片过滤、跨版本内容哈希零开销复用与 32 条批量向量化提速。
+- **微信 ClawBot Sidecar 生命周期精准治理（`main.py` · `qr_binding.py` · `dialogue_wiki.py`）**：
+  - 仅在数据库存在活跃 `weixin_clawbot` 对接链接时才自动拉起和保活本地桥接服务；删除全部绑定链接时自动停服并清理残留凭证文件，杜绝跨端抢占同 Bot 长轮询。
+
+### 🚀 v1.4.12 — 专家防幻觉与严谨度体系、L2 拦截 15 秒倒计时自动封锁与单色扁平化设计
 - **L2 高危敏感操作 15 秒倒计时自动封锁四键审批卡（`runtime.py` · `policy_interceptor.py` · `ApprovalCard.tsx`）**：
   - 彻底打通 L2 级敏感操作（跨目录越界写、物理删除、高危 Shell 指令）程序级硬挂起；
   - 呼出单色扁平化四键审批卡（批准本次 / 本任务白名单 / 改参另存为 / 拒绝并改道），并集成 15 秒平滑递减倒计时；

@@ -8,6 +8,7 @@ NVIDIA Auto Ontology 异步客户端与本地连接配置管理
 from __future__ import annotations
 
 import json
+import re
 import time
 from collections.abc import Awaitable, Callable
 from typing import Any
@@ -17,6 +18,40 @@ import httpx
 
 from ..core.logging_config import logger
 from ..repository.db import db_manager
+
+VALID_TARGET_DBS: tuple[str, ...] = ("fencinginfo", "equestrianinfo")
+_VALID_TARGET_DB_SET: frozenset[str] = frozenset(VALID_TARGET_DBS)
+_TARGET_DB_NAME_RE = re.compile(r"^[a-zA-Z][a-zA-Z0-9_-]{0,63}$")
+
+
+def normalize_target_db(raw: str | None) -> str | None:
+    """规范化并校验 target_db；支持任意合法数据库标识符，空值返回 None。"""
+    cleaned = (raw or "").strip()
+    if not cleaned:
+        return None
+    if not _TARGET_DB_NAME_RE.match(cleaned):
+        raise ValueError(
+            f"非法 target_db: {raw!r}，仅允许字母开头且包含字母、数字、下划线或连字符（最长 64 位）"
+        )
+    low = cleaned.lower()
+    if low in _VALID_TARGET_DB_SET:
+        return low
+    return cleaned
+
+
+def infer_target_db(text_hint: str | None = None, *, default: str | None = None) -> str | None:
+    """根据专家/空间/表前缀等文本线索推断所属业务库（equestrianinfo 或 fencinginfo）。"""
+    text = (text_hint or "").strip()
+    if not text:
+        return default
+    low = text.lower()
+    is_eq = any(k in low for k in ("equestrianinfo", "equestrian", "马术", "eq_"))
+    is_fe = any(k in low for k in ("fencinginfo", "fencing", "击剑", "fe_"))
+    if is_eq and not is_fe:
+        return "equestrianinfo"
+    if is_fe and not is_eq:
+        return "fencinginfo"
+    return default
 
 
 def parse_auto_ontology_rows(answer: dict[str, Any]) -> list[dict[str, Any]]:
@@ -99,10 +134,15 @@ async def _ensure_table(conn: Any) -> None:
             api_key TEXT NOT NULL DEFAULT '',
             timeout_seconds INTEGER NOT NULL DEFAULT 300,
             enabled INTEGER NOT NULL DEFAULT 1,
+            target_db TEXT NOT NULL DEFAULT '',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         );
         """
     )
+    try:
+        await conn.execute("ALTER TABLE auto_ontology_settings ADD COLUMN target_db TEXT NOT NULL DEFAULT '';")
+    except Exception:
+        pass
 
 
 async def get_auto_ontology_config(masked: bool = True) -> dict[str, Any]:
@@ -110,7 +150,7 @@ async def get_auto_ontology_config(masked: bool = True) -> dict[str, Any]:
     async with db_manager.get_connection() as conn:
         await _ensure_table(conn)
         cur = await conn.execute(
-            "SELECT base_url, api_key, timeout_seconds, enabled FROM auto_ontology_settings WHERE id = 1;"
+            "SELECT base_url, api_key, timeout_seconds, enabled, target_db FROM auto_ontology_settings WHERE id = 1;"
         )
         row = await cur.fetchone()
         if not row:
@@ -120,6 +160,7 @@ async def get_auto_ontology_config(masked: bool = True) -> dict[str, Any]:
                 "has_api_key": False,
                 "timeout_seconds": 300,
                 "enabled": False,
+                "target_db": "",
             }
         raw_key = str(row["api_key"] or "")
         return {
@@ -128,6 +169,7 @@ async def get_auto_ontology_config(masked: bool = True) -> dict[str, Any]:
             "has_api_key": bool(raw_key.strip()),
             "timeout_seconds": int(row["timeout_seconds"] or 300),
             "enabled": bool(row["enabled"]) and bool(str(row["base_url"] or "").strip()) and bool(raw_key.strip()),
+            "target_db": str(row["target_db"] or ""),
         }
 
 
@@ -137,17 +179,21 @@ async def save_auto_ontology_config(
     api_key: str | None = None,
     timeout_seconds: int = 300,
     enabled: bool = True,
+    target_db: str | None = None,
 ) -> dict[str, Any]:
     """保存或更新 Auto Ontology 连接配置（支持传空/掩码时保留原密钥）。"""
     clean_url = _normalize_base_url(base_url)
     timeout_val = max(15, min(900, int(timeout_seconds or 300)))
     enabled_int = 1 if enabled else 0
+    clean_target_db = normalize_target_db(target_db) or ""
 
     async with db_manager.get_connection() as conn:
         await _ensure_table(conn)
-        cur = await conn.execute("SELECT api_key FROM auto_ontology_settings WHERE id = 1;")
+        cur = await conn.execute("SELECT api_key, target_db FROM auto_ontology_settings WHERE id = 1;")
         existing = await cur.fetchone()
         prev_key = str(existing["api_key"] or "") if existing else ""
+        if target_db is None and existing:
+            clean_target_db = str(existing["target_db"] or "")
 
         incoming_key = (api_key or "").strip()
         # 若传入的是脱敏串（含 ...）或空字符串，则沿用已有密钥
@@ -158,16 +204,17 @@ async def save_auto_ontology_config(
 
         await conn.execute(
             """
-            INSERT INTO auto_ontology_settings (id, base_url, api_key, timeout_seconds, enabled, updated_at)
-            VALUES (1, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO auto_ontology_settings (id, base_url, api_key, timeout_seconds, enabled, target_db, updated_at)
+            VALUES (1, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
             ON CONFLICT(id) DO UPDATE SET
                 base_url = excluded.base_url,
                 api_key = excluded.api_key,
                 timeout_seconds = excluded.timeout_seconds,
                 enabled = excluded.enabled,
+                target_db = excluded.target_db,
                 updated_at = CURRENT_TIMESTAMP;
             """,
-            (clean_url, final_key, timeout_val, enabled_int),
+            (clean_url, final_key, timeout_val, enabled_int, clean_target_db),
         )
         await conn.commit()
 
@@ -180,21 +227,30 @@ class AutoOntologyClient:
     _TERMS_TTL_SECONDS = 600.0
     _terms_cache: dict[str, tuple[float, list[dict[str, Any]]]] = {}
 
-    def __init__(self, base_url: str, api_key: str, timeout_seconds: int = 300) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str,
+        timeout_seconds: int = 300,
+        target_db: str | None = None,
+    ) -> None:
         self.base_url = _normalize_base_url(base_url)
         self.api_key = (api_key or "").strip()
         self.timeout_seconds = max(15, min(900, int(timeout_seconds or 300)))
+        self.target_db: str | None = normalize_target_db(target_db)
 
     @classmethod
-    async def from_saved_config(cls) -> AutoOntologyClient | None:
+    async def from_saved_config(cls, target_db: str | None = None) -> AutoOntologyClient | None:
         """从持久化配置构建客户端；未启用或缺少参数时返回 None。"""
         cfg = await get_auto_ontology_config(masked=False)
         if not cfg["enabled"] or not cfg["base_url"] or not cfg["api_key"]:
             return None
+        resolved_db = normalize_target_db(target_db) or normalize_target_db(cfg.get("target_db"))
         return cls(
             base_url=cfg["base_url"],
             api_key=cfg["api_key"],
             timeout_seconds=cfg["timeout_seconds"],
+            target_db=resolved_db,
         )
 
     def _headers(self) -> dict[str, str]:
@@ -311,11 +367,21 @@ class AutoOntologyClient:
         self,
         question: str,
         conversation_id: str | None = None,
+        target_db: str | None = None,
         on_progress: Callable[[str], Awaitable[None]] | None = None,
     ) -> dict[str, Any]:
         """流式调用 POST /api/chat/completions，提取完整回答、SQL 与结构化结果行（支持进度心跳回调）。"""
+        effective_target_db = normalize_target_db(target_db) or self.target_db
+        if not effective_target_db:
+            raise ValueError(
+                "target_db 不能为空，必须显式指定为 fencinginfo 或 equestrianinfo，严禁留空以防跨库检索"
+            )
+
         url = f"{self.base_url}/api/chat/completions"
-        payload: dict[str, Any] = {"question": question.strip()}
+        payload: dict[str, Any] = {
+            "question": question.strip(),
+            "target_db": effective_target_db,
+        }
         if conversation_id:
             payload["conversation_id"] = conversation_id
 

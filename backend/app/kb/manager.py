@@ -211,7 +211,7 @@ class KBLifecycleManager:
     async def update_knowledge_base_domain(
         cls, kb_id: str, domain_type: str, rule_profile_json: str = ""
     ) -> bool:
-        """更新知识库的所属业务领域及自定义规则模板 JSON。"""
+        """更新知识库的所属业务领域及自定义规则模板 JSON，并同步联动领域词表。"""
         now = time.time()
         async with db_manager.get_connection() as conn:
             cur = await conn.execute(
@@ -223,7 +223,17 @@ class KBLifecycleManager:
                 (domain_type, rule_profile_json, now, kb_id),
             )
             await conn.commit()
-            return cur.rowcount > 0
+            updated = cur.rowcount > 0
+
+        if updated and domain_type:
+            try:
+                from .controlled_vocabulary import create_preset_vocabulary
+                create_preset_vocabulary(kb_id, preset=domain_type)
+                logger.info(f"成功为知识库 [{kb_id}] 同步领域预设词表: {domain_type}")
+            except Exception as err:
+                logger.warning(f"为知识库 [{kb_id}] 生成领域词表预设失败: {err}")
+
+        return updated
 
     @classmethod
     async def auto_adopt_mounted_kbs(cls, *, only_missing: bool = False) -> None:

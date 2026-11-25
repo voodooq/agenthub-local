@@ -21,6 +21,7 @@ class AutoOntologyConfigRequest(BaseModel):
     api_key: str | None = Field(default="", description="x-api-key API Token（留空或传掩码串则保留原密钥）")
     timeout_seconds: int = Field(default=300, ge=15, le=900)
     enabled: bool = Field(default=True)
+    target_db: str | None = Field(default=None, description="默认目标业务库名（fencinginfo / equestrianinfo）")
 
 
 class AutoOntologyTestRequest(BaseModel):
@@ -32,6 +33,7 @@ class AutoOntologyTestRequest(BaseModel):
 class AutoOntologyAskRequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     conversation_id: str | None = None
+    target_db: str | None = Field(default=None, description="目标业务库名（fencinginfo / equestrianinfo）")
 
 
 @router.get("/config")
@@ -44,12 +46,16 @@ async def get_ontology_config() -> dict[str, Any]:
 @router.put("/config")
 async def update_ontology_config(req: AutoOntologyConfigRequest) -> dict[str, Any]:
     """保存 Auto Ontology 连接地址与 API Token。"""
-    cfg = await save_auto_ontology_config(
-        base_url=req.base_url,
-        api_key=req.api_key,
-        timeout_seconds=req.timeout_seconds,
-        enabled=req.enabled,
-    )
+    try:
+        cfg = await save_auto_ontology_config(
+            base_url=req.base_url,
+            api_key=req.api_key,
+            timeout_seconds=req.timeout_seconds,
+            enabled=req.enabled,
+            target_db=req.target_db,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     return {"success": True, "data": cfg, "message": "Auto Ontology 配置已保存"}
 
 
@@ -109,12 +115,21 @@ async def list_ontology_terms(
 @router.post("/ask")
 async def ask_ontology_question(req: AutoOntologyAskRequest) -> dict[str, Any]:
     """通过 Auto Ontology 执行自然语言业务数据查询（返回文字回答、SQL 与结果行）。"""
-    client = await AutoOntologyClient.from_saved_config()
+    try:
+        client = await AutoOntologyClient.from_saved_config(target_db=req.target_db)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not client:
         raise HTTPException(status_code=400, detail="尚未启用或配置 Auto Ontology 连接")
     try:
-        res = await client.ask_question(question=req.question, conversation_id=req.conversation_id)
+        res = await client.ask_question(
+            question=req.question,
+            conversation_id=req.conversation_id,
+            target_db=req.target_db,
+        )
         return {"success": True, "data": res}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"业务数据查询失败: {str(e)}")
 

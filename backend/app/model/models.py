@@ -93,6 +93,7 @@ class MessageModel:
     compressed_content: str | None = None
     tool_calls_json: str | None = None
     tool_call_id: str | None = None
+    followup_suggestions_json: str | None = None
 
     @classmethod
     def from_row(cls, row: Any) -> "MessageModel":

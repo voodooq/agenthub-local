@@ -22,6 +22,7 @@ class CreateProfileRequest(BaseModel):
     profile_id: str | None = None
     description: str = ""
     domain_prefix: str = ""
+    target_db: str | None = None
     ontology_base_url: str = ""
     ontology_api_key: str = ""
     is_active: bool = True
@@ -31,6 +32,7 @@ class UpdateProfileRequest(BaseModel):
     name: str | None = None
     description: str | None = None
     domain_prefix: str | None = None
+    target_db: str | None = None
     ontology_base_url: str | None = None
     ontology_api_key: str | None = None
     is_active: bool | None = None
@@ -104,6 +106,7 @@ async def create_schema_profile(req: CreateProfileRequest) -> dict[str, Any]:
             profile_id=req.profile_id,
             description=req.description,
             domain_prefix=req.domain_prefix,
+            target_db=req.target_db,
             ontology_base_url=req.ontology_base_url,
             ontology_api_key=req.ontology_api_key,
             is_active=req.is_active,
@@ -125,15 +128,19 @@ async def get_schema_profile(profile_id: str) -> dict[str, Any]:
 @router.put("/profiles/{profile_id}")
 async def update_schema_profile(profile_id: str, req: UpdateProfileRequest) -> dict[str, Any]:
     """更新 Schema Profile 元信息与多库连接隔离配置。"""
-    profile = await SchemaProfileRepository.update_profile(
-        profile_id,
-        name=req.name,
-        description=req.description,
-        domain_prefix=req.domain_prefix,
-        ontology_base_url=req.ontology_base_url,
-        ontology_api_key=req.ontology_api_key,
-        is_active=req.is_active,
-    )
+    try:
+        profile = await SchemaProfileRepository.update_profile(
+            profile_id,
+            name=req.name,
+            description=req.description,
+            domain_prefix=req.domain_prefix,
+            target_db=req.target_db,
+            ontology_base_url=req.ontology_base_url,
+            ontology_api_key=req.ontology_api_key,
+            is_active=req.is_active,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     if not profile:
         raise HTTPException(status_code=404, detail="Schema Profile 不存在")
     return {"success": True, "data": profile}

@@ -165,8 +165,8 @@ async def keepalive_clawbot_sidecar(bridge_url: str = "http://127.0.0.1:18791") 
     except Exception:
         pass
 
-    session_file = Path(_app_settings.db_path).parent / "weixin_clawbot_session.json"
-    if not has_active_link and not session_file.exists():
+    # 仅在确实存在活跃的 weixin_clawbot 绑定链接时才执行保活重启，避免解绑后残留 session 抢占同 Bot 连接
+    if not has_active_link:
         return
 
     need_restart = False
@@ -201,6 +201,57 @@ async def keepalive_clawbot_sidecar(bridge_url: str = "http://127.0.0.1:18791") 
             _CLAWBOT_SIDECAR_PROC = None
         ok, msg = await ensure_clawbot_sidecar_running(clean_url)
         logger.info(f"[WeixinClawbot] 后台保活自愈完成: ok={ok}, msg={msg}")
+
+
+async def stop_clawbot_sidecar_if_unlinked(bridge_url: str = "http://127.0.0.1:18791") -> bool:
+    """当数据库中已无活跃的 weixin_clawbot 链接时，立即停止本地 Sidecar 并清理残留 session 文件。"""
+    global _CLAWBOT_SIDECAR_PROC
+    from ..core.config import settings as _app_settings
+
+    has_active_link = False
+    try:
+        async with db_manager.get_connection() as conn:
+            cur = await conn.execute(
+                "SELECT 1 FROM dialogue_channel_links WHERE channel_type = 'weixin_clawbot' AND status = 'active' LIMIT 1"
+            )
+            has_active_link = (await cur.fetchone()) is not None
+    except Exception:
+        return False
+
+    if has_active_link:
+        return False
+
+    # 1. 通知运行中的桥接先退出轮询（若支持），并终止本地拉起的子进程
+    try:
+        async with httpx.AsyncClient(timeout=1.5) as client:
+            await client.post(f"{bridge_url.rstrip('/')}/logout")
+    except Exception:
+        pass
+
+    if _CLAWBOT_SIDECAR_PROC is not None and _CLAWBOT_SIDECAR_PROC.poll() is None:
+        try:
+            _CLAWBOT_SIDECAR_PROC.terminate()
+            _CLAWBOT_SIDECAR_PROC.wait(timeout=3)
+        except Exception:
+            try:
+                _CLAWBOT_SIDECAR_PROC.kill()
+            except Exception:
+                pass
+    _CLAWBOT_SIDECAR_PROC = None
+
+    # 2. 清理本地残留的 session 凭证文件，防止下次重启或跨端抢占同一 Bot
+    for sess_path in (
+        Path(_app_settings.db_path).parent / "weixin_clawbot_session.json",
+        Path.home() / ".agenthub" / "weixin_clawbot_session.json",
+    ):
+        try:
+            if sess_path.exists():
+                sess_path.unlink()
+        except Exception:
+            pass
+
+    logger.info("[WeixinClawbot] 已无活跃 ClawBot 绑定链接，已停止本地 Sidecar 并清理残留凭证")
+    return True
 
 
 async def ensure_qr_binding_tables(conn: Any) -> None:

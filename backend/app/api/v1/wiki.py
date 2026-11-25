@@ -4,7 +4,7 @@ LLM Wiki REST API 路由模块
 """
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, cast
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
@@ -299,7 +299,10 @@ async def quick_save_to_wiki(req: QuickSaveWikiRequest) -> dict[str, Any]:
 
         compiled = await WikiIncrementalCompiler.ingest_and_compile(
             wiki_space_id=space["wiki_space_id"],
-            source_type=source_type,
+            source_type=cast(
+                Literal["kb_doc", "meeting_note", "chat_decision", "sql_snapshot", "data_snapshot", "camera_ocr"],
+                source_type,
+            ),
             raw_content=req.content,
             source_meta=source_meta,
             auto_publish=False,
@@ -320,4 +323,34 @@ async def quick_save_to_wiki(req: QuickSaveWikiRequest) -> dict[str, Any]:
     except Exception as e:
         logger.error(f"[WikiAPI] 一键存入沙盒 Wiki 异常: {e}")
         raise HTTPException(status_code=500, detail=f"存入 Wiki 失败: {e}")
+
+
+class CompileFromKBRequest(BaseModel):
+    """从已训练知识库自动发现高频实体并编纂为 Wiki Inbox 待审草稿。"""
+
+    max_entities: int = Field(default=15, ge=1, le=50, description="单次最多编纂实体词条数")
+    min_predicates: int = Field(default=3, ge=2, le=10, description="实体至少需包含的不同谓词种类数")
+
+
+@router.post("/compile-from-kb/{kb_id}")
+async def compile_entities_from_kb(
+    kb_id: str,
+    req: CompileFromKBRequest | None = None,
+) -> dict[str, Any]:
+    """扫描知识库活跃版本图谱与切片，自动生成实体百科草稿写入 Wiki Inbox。"""
+    from ...wiki.entity_wiki_compiler import EntityWikiCompiler
+
+    payload = req or CompileFromKBRequest()
+    try:
+        res = await EntityWikiCompiler.compile_kb_entities_to_inbox(
+            kb_id=kb_id,
+            max_entities=payload.max_entities,
+            min_predicates=payload.min_predicates,
+        )
+        return {"success": True, "data": res}
+    except ValueError as ve:
+        raise HTTPException(status_code=404, detail=str(ve))
+    except Exception as e:
+        logger.error(f"[WikiAPI] 从知识库 [{kb_id}] 编纂实体百科失败: {e}")
+        raise HTTPException(status_code=500, detail=f"实体百科编纂失败: {e}")
 

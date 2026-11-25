@@ -7,7 +7,7 @@ import json
 import uuid
 from typing import Any
 
-from ..sql.auto_ontology_client import mask_api_key
+from ..sql.auto_ontology_client import infer_target_db, mask_api_key, normalize_target_db
 from .db import db_manager
 
 VALID_CATEGORIES = {"CORE_MAIN", "DETAIL", "CONFIG", "LOG"}
@@ -29,17 +29,23 @@ class SchemaProfileRepository:
     @staticmethod
     def _serialize_profile(row: Any, masked: bool = True) -> dict[str, Any]:
         raw_key = str(row["ontology_api_key"] or "")
+        row_keys = row.keys()
+        raw_target_db = str(row["target_db"] or "") if "target_db" in row_keys else ""
+        resolved_target_db = raw_target_db or (
+            infer_target_db(f"{row['id']} {row['name']} {row['domain_prefix'] or ''}") or ""
+        )
         return {
             "id": str(row["id"]),
             "name": str(row["name"]),
             "description": str(row["description"] or ""),
             "domain_prefix": str(row["domain_prefix"] or ""),
+            "target_db": resolved_target_db,
             "ontology_base_url": str(row["ontology_base_url"] or ""),
             "ontology_api_key": mask_api_key(raw_key) if masked else raw_key,
             "has_ontology_api_key": bool(raw_key.strip()),
             "is_active": bool(row["is_active"]),
-            "entity_count": int(row["entity_count"]) if "entity_count" in row.keys() else 0,
-            "relation_count": int(row["relation_count"]) if "relation_count" in row.keys() else 0,
+            "entity_count": int(row["entity_count"]) if "entity_count" in row_keys else 0,
+            "relation_count": int(row["relation_count"]) if "relation_count" in row_keys else 0,
             "created_at": str(row["created_at"] or ""),
             "updated_at": str(row["updated_at"] or ""),
         }
@@ -85,6 +91,7 @@ class SchemaProfileRepository:
         profile_id: str | None = None,
         description: str = "",
         domain_prefix: str = "",
+        target_db: str | None = None,
         ontology_base_url: str = "",
         ontology_api_key: str = "",
         is_active: bool = True,
@@ -95,6 +102,11 @@ class SchemaProfileRepository:
             raise ValueError("数据结构空间名称不能为空")
 
         pid = _slugify_id(profile_id or clean_name, prefix="prof")
+        clean_target_db = (
+            normalize_target_db(target_db)
+            or infer_target_db(f"{pid} {clean_name} {domain_prefix}")
+            or ""
+        )
         async with db_manager.get_connection() as conn:
             cur = await conn.execute("SELECT id FROM schema_profiles WHERE id = ?", (pid,))
             if await cur.fetchone():
@@ -103,14 +115,15 @@ class SchemaProfileRepository:
             await conn.execute(
                 """
                 INSERT INTO schema_profiles (
-                    id, name, description, domain_prefix, ontology_base_url, ontology_api_key, is_active
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    id, name, description, domain_prefix, target_db, ontology_base_url, ontology_api_key, is_active
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     pid,
                     clean_name,
                     description.strip(),
                     domain_prefix.strip(),
+                    clean_target_db,
                     ontology_base_url.strip().rstrip("/"),
                     ontology_api_key.strip(),
                     1 if is_active else 0,
@@ -127,6 +140,7 @@ class SchemaProfileRepository:
         name: str | None = None,
         description: str | None = None,
         domain_prefix: str | None = None,
+        target_db: str | None = None,
         ontology_base_url: str | None = None,
         ontology_api_key: str | None = None,
         is_active: bool | None = None,
@@ -141,6 +155,12 @@ class SchemaProfileRepository:
             next_name = name.strip() if name is not None and name.strip() else str(existing["name"])
             next_desc = description.strip() if description is not None else str(existing["description"] or "")
             next_prefix = domain_prefix.strip() if domain_prefix is not None else str(existing["domain_prefix"] or "")
+            existing_db = str(existing["target_db"] or "") if "target_db" in existing.keys() else ""
+            next_target_db = (
+                (normalize_target_db(target_db) or "")
+                if target_db is not None
+                else existing_db
+            )
             next_url = (
                 ontology_base_url.strip().rstrip("/")
                 if ontology_base_url is not None
@@ -161,11 +181,11 @@ class SchemaProfileRepository:
             await conn.execute(
                 """
                 UPDATE schema_profiles
-                SET name = ?, description = ?, domain_prefix = ?, ontology_base_url = ?,
+                SET name = ?, description = ?, domain_prefix = ?, target_db = ?, ontology_base_url = ?,
                     ontology_api_key = ?, is_active = ?, updated_at = CURRENT_TIMESTAMP
                 WHERE id = ?
                 """,
-                (next_name, next_desc, next_prefix, next_url, next_key, next_active, profile_id),
+                (next_name, next_desc, next_prefix, next_target_db, next_url, next_key, next_active, profile_id),
             )
             await conn.commit()
         return await cls.get_profile(profile_id, masked=True)

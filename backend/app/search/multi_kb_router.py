@@ -24,8 +24,61 @@ from .intent_router import QueryIntentRouter
 from .rule_extractor import UniversalRuleExtractor, StructuredRuleExtractor
 
 
+# 装饰性标点正则（圆点变体、全半角括号与引号及其前后空白），严禁包含小数点(.)、星号(*)、百分比(%)和连字符(-)
+_DECORATIVE_PUNCT_RE = re.compile(r"\s*[·•・‧（）()\"“”]+\s*")
+
+
+def normalize_entity_key(text: str) -> str:
+    """折叠实体名中的装饰性标点与多余空白（保留 . * % - 等语义符号），用于去重分桶与兼容比对。"""
+    clean = _DECORATIVE_PUNCT_RE.sub("", (text or "").strip())
+    return re.sub(r"\s+", " ", clean).strip()
+
+
+def to_like_wildcard_pattern(term: str) -> str:
+    """查询侧 LIKE 通配展开：将装饰性标点及其前后空格折叠为 %，完整保留 . * % - 等语义符号。"""
+    raw = (term or "").strip()
+    if not raw:
+        return "%"
+    collapsed = _DECORATIVE_PUNCT_RE.sub("%", raw)
+    collapsed = re.sub(r"%+", "%", collapsed).strip("%")
+    return f"%{collapsed}%" if collapsed else f"%{raw}%"
+
+
 class MultiKBRetrievalRouter:
     """多知识库隔离检索与优先级路由调度器。"""
+
+    # 按 Embedding 模型分布差异配置 CRAG 阈值（默认基于 BGE-M3 实测分布校准）
+    CRAG_MODEL_THRESHOLDS: dict[str, dict[str, float]] = {
+        "bge-m3": {
+            "fallback_score": 0.48,
+            "fallback_cosine": 0.38,
+            "reject_cosine": 0.55,
+        },
+        "default": {
+            "fallback_score": 0.48,
+            "fallback_cosine": 0.38,
+            "reject_cosine": 0.55,
+        },
+    }
+
+    CRAG_FALLBACK_SCORE_THRESHOLD: float = 0.48
+    CRAG_FALLBACK_COSINE_THRESHOLD: float = 0.38
+    CRAG_REJECT_COSINE_THRESHOLD: float = 0.55
+
+    @classmethod
+    def _resolve_crag_thresholds(cls, targets: list[dict[str, Any]]) -> dict[str, float]:
+        """按知识库挂载的 Embedding 模型或单库覆盖配置解析 CRAG 阈值。"""
+        base = dict(cls.CRAG_MODEL_THRESHOLDS["default"])
+        for t in targets:
+            model_name = str(t.get("embedding_model") or "").lower()
+            for key, cfg in cls.CRAG_MODEL_THRESHOLDS.items():
+                if key != "default" and key in model_name:
+                    base.update(cfg)
+                    break
+            # 支持单库元数据按需覆盖阈值
+            if t.get("crag_reject_cosine") is not None:
+                base["reject_cosine"] = float(t["crag_reject_cosine"])
+        return base
 
     @classmethod
     async def resolve_target_kbs(
@@ -162,18 +215,83 @@ class MultiKBRetrievalRouter:
                     include_archived=include_archived,
                 )
                 all_candidates.extend(kb_chunks)
+
+                # 对比意图增强：若识别出多个独立实体（如“无锡”与“东安湖”），按实体分别补查 2 个专属切片，杜绝单实体霸占全部配额
+                contrast_entities = [e for e in cls._extract_specific_entities(query) if len(e) >= 2]
+                if len(contrast_entities) >= 2:
+                    for ce in contrast_entities[:3]:
+                        sub_chunks = await cls._search_single_index_db(
+                            db_path=db_path,
+                            query=f"{ce} 日期 地点 规程",
+                            top_k=2,
+                            kb_id=kb_id,
+                            kb_name=kb_name,
+                            version=ver,
+                            priority_weight=priority_weight * 0.98,
+                            include_archived=include_archived,
+                        )
+                        all_candidates.extend(sub_chunks)
             except Exception as e:
                 logger.warning(f"知识库 [{kb_name}] 检索异常: {e}")
 
-        if not all_candidates:
-            kb_names = "、".join([t["name"] for t in targets])
-            return True, f"在已挂载知识库【{kb_names}】中未检索到与「{query}」直接相关的规程切片。", []
+        # CRAG 一级评估：按挂载库 Embedding 模型解析阈值，统计初筛指标并按需触发纯向量降级扩召
+        crag_cfg = cls._resolve_crag_thresholds(targets)
+        max_score = max((float(c.get("final_score", 0.0)) for c in all_candidates), default=0.0)
+        max_cosine = max((float(c.get("cosine_similarity", 0.0)) for c in all_candidates), default=0.0)
+        max_hit_cnt = max((int(c.get("hit_cnt", 0)) for c in all_candidates), default=0)
+
+        need_l1_fallback = (not all_candidates) or (
+            max_score < crag_cfg["fallback_score"]
+            and max_cosine < crag_cfg["fallback_cosine"]
+            and max_hit_cnt == 0
+        )
+        if need_l1_fallback:
+            logger.info(
+                f"[CRAG-L1] 触发纯向量降级扩召: query='{query[:40]}', "
+                f"max_score={max_score:.4f}, max_cosine={max_cosine:.4f}, candidates={len(all_candidates)}"
+            )
+            seen_cand_ids = {str(c.get("id") or "") for c in all_candidates}
+            for target in targets:
+                kb_id = target["kb_id"]
+                ver = target["version"]
+                rank = target["priority_rank"]
+                kb_name = target["name"]
+                db_path = KBStorageManager.get_version_db_path(kb_id, ver)
+                if not db_path.exists():
+                    continue
+                priority_weight = max(0.8, 1.15 - 0.05 * (rank - 1))
+                vec_hits = await cls._vector_fallback_search(
+                    db_path=db_path,
+                    query=query,
+                    top_k=min(5, top_k),
+                    kb_id=kb_id,
+                    kb_name=kb_name,
+                    version=ver,
+                    priority_weight=priority_weight,
+                    include_archived=include_archived,
+                )
+                for vh in vec_hits:
+                    if str(vh.get("id") or "") not in seen_cand_ids:
+                        seen_cand_ids.add(str(vh.get("id") or ""))
+                        all_candidates.append(vh)
+
+            max_score = max((float(c.get("final_score", 0.0)) for c in all_candidates), default=0.0)
+            max_cosine = max((float(c.get("cosine_similarity", 0.0)) for c in all_candidates), default=0.0)
+
+        logger.info(
+            f"[RetrievalMetrics] query='{query[:40]}', candidates={len(all_candidates)}, "
+            f"max_score={max_score:.4f}, max_cosine={max_cosine:.4f}, max_hit_cnt={max_hit_cnt}"
+        )
 
         # 阶段一：时效重排 (TemporalReranker) 仲裁最新生效版
-        reranked_candidates = TemporalReranker.rerank_chunks(
-            chunks=all_candidates,
-            current_query=query,
-            now_dt=datetime.now(),
+        reranked_candidates = (
+            TemporalReranker.rerank_chunks(
+                chunks=all_candidates,
+                current_query=query,
+                now_dt=datetime.now(),
+            )
+            if all_candidates
+            else []
         )
 
         # 阶段二：Small-to-Big 上下文还原与去重
@@ -222,13 +340,7 @@ class MultiKBRetrievalRouter:
                 if len(final_top) >= top_k:
                     break
 
-        # 格式化输出供 LLM 证据链参考（动态注入当前系统真实时间与权威规则卡）
-        current_date_str = datetime.now().strftime("%Y年%m月%d日")
-        lines = [
-            f"> 💡 **[系统时效环境声明]**：当前系统运行时间为 **{current_date_str}**。如命中文档存在历史年份版本更迭，系统已根据最新生效日期完成优先级仲裁，请严格以最新规程为准。\n",
-        ]
-
-        # 阶段三：多维条件通用业务规则卡片匹配与置顶注入 (v1.6.0 Universal)
+        # 阶段三：多维条件通用业务规则卡片匹配 (v1.6.0 Universal)
         matched_rules: list[dict[str, Any]] = []
         for target in targets:
             kid = target["kb_id"]
@@ -249,6 +361,54 @@ class MultiKBRetrievalRouter:
                     )
                     matched_rules.extend(r_list)
 
+        # 阶段四：知识图谱精准实体事实卡片提取 (Knowledge Graph Triples)
+        all_triples: list[dict[str, Any]] = []
+        for target in targets:
+            kid = target["kb_id"]
+            ver = target["version"]
+            dbp = KBStorageManager.get_version_db_path(kid, ver)
+            if dbp.exists():
+                k_triples = cls._fetch_matching_triples(db_path=dbp, query=query, limit=6)
+                all_triples.extend(k_triples)
+
+        # CRAG 二级拒答裁决：必须在查完规则卡与三元组后进行最终判定，防止误杀纯图谱/规则命中
+        # 若关键词 0 命中且向量余弦低于 reject_cosine，即使乘以权威系数后 total_score 偏高仍判定为低置信度
+        is_low_confidence = (
+            not final_top
+            or (max_hit_cnt <= 1 and max_score < 1.05 and max_cosine < crag_cfg["reject_cosine"])
+        )
+        if is_low_confidence and not matched_rules and not all_triples:
+            kb_names = "、".join([t["name"] for t in targets])
+            logger.warning(
+                f"[CRAG-L2] 触发置信度拒答短路: query='{query[:40]}', "
+                f"max_score={max_score:.4f}, max_cosine={max_cosine:.4f}, "
+                f"reject_threshold={crag_cfg['reject_cosine']:.2f}, hit_cnt={max_hit_cnt}"
+            )
+            return (
+                True,
+                f"[CRAG_NO_EVIDENCE] 在已挂载知识库【{kb_names}】中未收录与「{query}」相关的规定或数据。"
+                "请直接如实告知用户当前知识库暂无相关内容，严禁脱离上下文自由发挥或编造。",
+                [],
+            )
+
+        # 格式化输出供 LLM 证据链参考（动态注入当前系统真实时间、引用编号与防越界约束）
+        current_date_str = datetime.now().strftime("%Y年%m月%d日")
+        available_refs: list[str] = []
+        if matched_rules:
+            available_refs.extend([f"[R{i}]" for i in range(1, len(matched_rules[:3]) + 1)])
+        if all_triples:
+            available_refs.extend([f"[T{i}]" for i in range(1, len(all_triples[:8]) + 1)])
+        if final_top:
+            available_refs.extend([f"[S{i}]" for i in range(1, len(final_top) + 1)])
+        refs_hint = "、".join(available_refs) if available_refs else "无"
+
+        lines = [
+            f"> 💡 **[系统时效环境声明]**：当前系统运行时间为 **{current_date_str}**。如命中文档存在历史年份版本更迭，系统已根据最新生效日期完成优先级仲裁，请严格以最新规程为准。",
+            f"> 📎 **[句级引用标注铁律]**：回答中的关键数字、日期、金额、标准及条款结论后，请标注对应来源编号（当前可用编号：{refs_hint}）。**严禁编造上下文中不存在的编号**，也不要在无实质信息的衔接句后堆砌编号。\n",
+        ]
+
+        unified_evidence: list[dict[str, Any]] = []
+
         if matched_rules:
             # 复合排序：多条件重合度得分 match_score 降序 + 生效日期降序 + 年份降序
             matched_rules.sort(
@@ -259,21 +419,55 @@ class MultiKBRetrievalRouter:
                 ),
                 reverse=True,
             )
-            rule_card_text = UniversalRuleExtractor.format_rules_for_prompt(matched_rules[:3])
+            top_rules = matched_rules[:3]
+            rule_card_text = UniversalRuleExtractor.format_rules_for_prompt(top_rules)
             if rule_card_text:
                 lines.append(rule_card_text)
+            for r_idx, r in enumerate(top_rules, start=1):
+                unified_evidence.append({
+                    "id": f"rule_{r_idx}",
+                    "citation_id": f"R{r_idx}",
+                    "evidence_type": "rule",
+                    "title": f"结构化规则卡 [{r.get('rule_category', 'rule')}]",
+                    "remote_uri": f"kb://rules/R{r_idx}",
+                    "content": str(r.get("rule_summary") or ""),
+                    "authority_tier": 1,
+                    "final_score": 1.0,
+                })
+
+        if all_triples:
+            triple_lines = [
+                "> 📌 **[知识图谱核心实体事实 (Knowledge Graph Triples)]**：",
+            ]
+            top_triples = all_triples[:8]
+            for t_idx, t in enumerate(top_triples, start=1):
+                triple_lines.append(f"> * [T{t_idx}] **{t['subject']}** ──【{t['predicate']}】──> `{t['object']}`")
+                unified_evidence.append({
+                    "id": f"triple_{t_idx}",
+                    "citation_id": f"T{t_idx}",
+                    "evidence_type": "triple",
+                    "title": f"知识图谱: {t['subject']}",
+                    "remote_uri": f"kb://triples/T{t_idx}",
+                    "content": f"{t['subject']} {t['predicate']} {t['object']}",
+                    "authority_tier": 1,
+                    "final_score": 1.0,
+                })
+            lines.append("\n".join(triple_lines) + "\n")
 
         lines.append(f"### 已挂载知识库证据检索结果 (关键词: {query}, 命中文档数: {len(final_top)}):")
         for idx, c in enumerate(final_top, start=1):
+            c["citation_id"] = f"S{idx}"
+            c["evidence_type"] = "chunk"
             tier_label = "正式规程(Tier 1)" if c.get("authority_tier") == 1 else "常规资料(Tier 2)"
             eff_str = f", 生效日期: {c.get('effective_date')}" if c.get('effective_date') else ""
             latest_badge = " [最新版]" if c.get("is_latest_in_cluster") == 1 else ""
             lines.append(
-                f"\n[{idx}] 来源: 【{c['kb_name']} {c['version']}】 - {c['title']}{latest_badge} ({tier_label}{eff_str}, 优先级权重: {c['priority_weight']:.2f})"
+                f"\n[S{idx}] 来源: 【{c['kb_name']} {c['version']}】 - {c['title']}{latest_badge} ({tier_label}{eff_str}, 优先级权重: {c['priority_weight']:.2f})"
             )
             lines.append(f"内容:\n{c['content']}")
 
-        return True, "\n".join(lines), final_top
+        # 统一证据池：正文切片在前，规则卡与图谱三元组同步封装，消除 Self-Critique 误报
+        return True, "\n".join(lines), final_top + unified_evidence
 
     @classmethod
     async def _search_single_index_db(
@@ -296,11 +490,14 @@ class MultiKBRetrievalRouter:
             "请帮我查", "请帮我", "请问一下", "请问", "我想查一下", "我想查询", "我想知道",
             "查询一下", "查询", "查一下", "看一下", "找一下", "检索一下", "检索",
             "了解一下", "分析一下", "汇总一下", "统计一下",
+            "请对比一下", "请对比", "对比一下", "对比",
         )
         stop_words = {
             "帮我", "给我", "我们", "你们", "他们", "一下", "一个", "一些", "这个", "那个",
             "关于", "以及", "并且", "的话", "怎么", "如何", "在哪里", "怎样", "能不能", "可以吗",
             "是多少", "是什么", "有哪些", "有什么", "谁可以", "请介绍", "讲讲", "怎么弄",
+            "它们", "各自", "分别", "哪天", "什么", "哪些", "为何", "为什么", "具体", "请问",
+            "对比", "规程", "要求", "规定",
             "的", "了", "在", "与", "和", "或", "等", "及", "至", "到", "吗", "呢", "吧", "呀",
         }
 
@@ -330,12 +527,19 @@ class MultiKBRetrievalRouter:
                 # 提取明确年份 (如 2024, 2025)
                 years = re.findall(r"\b(19\d\d|20\d\d)\b", clean_q)
 
-                keywords: list[str] = []
+                # 提取去虚词后的实质专有实体（地名、站名、马房、救护车等专用核心名词）
+                specific_entities = cls._extract_specific_entities(query)
+                keywords: list[str] = list(specific_entities)
+
                 for y in years:
                     if y not in keywords:
                         keywords.append(y)
 
                 # 提取去虚词后的实质短语
+                sports_category_words = (
+                    "场地障碍赛", "场地障碍", "盛装舞步", "三项赛", "耐力赛",
+                    "锦标赛", "公开赛", "挑战赛", "城市系列", "巡回赛", "联赛", "总决赛",
+                )
                 for t in raw_tokens:
                     sub = t
                     for sw in stop_words:
@@ -344,6 +548,17 @@ class MultiKBRetrievalRouter:
                         s_str = s.strip()
                         if len(s_str) >= 2 and s_str not in keywords:
                             keywords.append(s_str)
+                        # 识别专有赛事站次/地名（如无锡站 -> 无锡，东安湖站 -> 东安湖）
+                        if s_str.endswith("站") and len(s_str) > 2:
+                            base_ent = s_str[:-1]
+                            if base_ent not in keywords:
+                                keywords.append(base_ent)
+                        # 剥离复合项目词后提取核心实体
+                        for sc in sports_category_words:
+                            if sc in s_str and len(s_str) > len(sc):
+                                pure_ent = s_str.replace(sc, "").strip()
+                                if len(pure_ent) >= 2 and pure_ent not in keywords:
+                                    keywords.append(pure_ent)
 
                 # 按长词优先排序实体词（确保如「发票」、「发票明细」、「阿里云」排在前面）
                 keywords.sort(key=len, reverse=True)
@@ -371,13 +586,14 @@ class MultiKBRetrievalRouter:
                     has_prov = "provenance_json" in cols
                 except Exception:
                     pass
-                prov_col = ", c.provenance_json" if has_prov else ", '' as provenance_json"
+                prov_col_fts = ", c.provenance_json" if has_prov else ", '' as provenance_json"
+                prov_col_like = ", provenance_json" if has_prov else ", '' as provenance_json"
 
                 rows: list[sqlite3.Row] = []
                 matched_ids: set[str] = set()
 
-                # 2. 优先尝试 FTS5 全文索引匹配 (排除 chunk_role='parent' 直接召回)
-                fts_candidates = [k for k in keywords if len(k) >= 2]
+                # 2. 优先尝试 FTS5 全文索引匹配 (针对 trigram 分词器，必须过滤 len(k) >= 3)
+                fts_candidates = [k for k in keywords if len(k) >= 3]
                 if fts_candidates:
                     fts_query_str = " OR ".join([f'"{k}"' for k in fts_candidates[:10]])
                     try:
@@ -386,7 +602,7 @@ class MultiKBRetrievalRouter:
                                c.doc_year, c.effective_date, c.effective_ts, c.doc_priority_type,
                                c.topic_cluster_id, c.is_latest_in_cluster, c.chunk_role,
                                COALESCE(NULLIF(c.parent_chunk_id, ''), c.id) AS parent_chunk_id,
-                               c.embedding_blob{prov_col}, rank as fts_rank
+                               c.embedding_blob{prov_col_fts}, rank as fts_rank
                         FROM hybrid_chunks_fts f
                         JOIN hybrid_chunks c ON f.rowid = c.rowid
                         WHERE hybrid_chunks_fts MATCH ?
@@ -401,15 +617,40 @@ class MultiKBRetrievalRouter:
                     except Exception:
                         rows = []
 
-                # 3. 若 FTS5 召回量少，补充多关键词 LIKE 模糊匹配
-                if len(rows) < top_k * 2 and keywords:
+                # 3. 针对 2 字符短实体词 (trigram 致盲区：如“深圳”、“马房”、“无锡”) 强制执行精准 LIKE 召回
+                short_kws = [k for k in keywords if len(k) == 2]
+                if len(short_kws) >= 2:
+                    # 优先交叉精准匹配 (例如: 深圳 AND 马房)
+                    cross_clauses = ["content LIKE ?" for _ in short_kws[:3]]
+                    cross_sql = f"""
+                    SELECT id, remote_uri, title, content, authority_tier, mtime,
+                           doc_year, effective_date, effective_ts, doc_priority_type,
+                           topic_cluster_id, is_latest_in_cluster, chunk_role,
+                           COALESCE(NULLIF(parent_chunk_id, ''), id) AS parent_chunk_id,
+                           embedding_blob{prov_col_like}, -1.0 as fts_rank
+                    FROM hybrid_chunks
+                    WHERE ({" AND ".join(cross_clauses)})
+                      AND (chunk_role != 'parent' OR chunk_role IS NULL)
+                    LIMIT ?
+                    """
+                    cross_params = [to_like_wildcard_pattern(k) for k in short_kws[:3]] + [top_k * 2]
+                    try:
+                        for cr in conn.execute(cross_sql, cross_params).fetchall():
+                            if cr["id"] not in matched_ids:
+                                matched_ids.add(cr["id"])
+                                rows.append(cr)
+                    except Exception:
+                        pass
+
+                # 4. 补充多关键词 LIKE 模糊匹配（确保短词与泛词并存时不被 FTS 粗粒度结果阻断）
+                if (len(rows) < top_k * 2 or short_kws) and keywords:
                     where_clauses = ["(content LIKE ? OR title LIKE ?)" for _ in keywords[:6]]
                     like_sql = f"""
                     SELECT id, remote_uri, title, content, authority_tier, mtime,
                            doc_year, effective_date, effective_ts, doc_priority_type,
                            topic_cluster_id, is_latest_in_cluster, chunk_role,
                            COALESCE(NULLIF(parent_chunk_id, ''), id) AS parent_chunk_id,
-                           embedding_blob{prov_col}, NULL as fts_rank
+                           embedding_blob{prov_col_like}, NULL as fts_rank
                     FROM hybrid_chunks
                     WHERE ({" OR ".join(where_clauses)})
                       AND (chunk_role != 'parent' OR chunk_role IS NULL)
@@ -417,7 +658,8 @@ class MultiKBRetrievalRouter:
                     """
                     params: list[Any] = []
                     for k in keywords[:6]:
-                        params.extend([f"%{k}%", f"%{k}%"])
+                        pat = to_like_wildcard_pattern(k)
+                        params.extend([pat, pat])
                     params.append(top_k * 3)
                     cursor = conn.execute(like_sql, params)
                     more_rows = cursor.fetchall()
@@ -485,7 +727,17 @@ class MultiKBRetrievalRouter:
                     from ..kb.provenance import format_citation_label
                     citation_str = format_citation_label(prov_obj)
 
-                    final_score = base_score * tier_bonus * priority_weight * role_boost
+                    # 核心专有实体命中特异度加权 (如同时命中“深圳”+“马房”，优先置顶)
+                    entity_boost = 1.0
+                    if specific_entities:
+                        all_hit = all(se in content_str or se in title_str for se in specific_entities)
+                        any_hit = any(se in content_str or se in title_str for se in specific_entities)
+                        if all_hit and len(specific_entities) >= 2:
+                            entity_boost = 1.35
+                        elif any_hit:
+                            entity_boost = 1.15
+
+                    final_score = base_score * tier_bonus * priority_weight * role_boost * entity_boost
                     scored_list.append((final_score, {
                         "id": r["id"],
                         "chunk_id": r["id"],
@@ -513,6 +765,7 @@ class MultiKBRetrievalRouter:
                         "priority_weight": priority_weight,
                         "final_score": round(final_score, 4),
                         "cosine_similarity": round(cosine_sim, 4),
+                        "hit_cnt": hit_cnt,
                     }))
 
                 scored_list.sort(key=lambda x: x[0], reverse=True)
@@ -522,6 +775,116 @@ class MultiKBRetrievalRouter:
             return results
 
         return await asyncio.to_thread(_do_query)
+
+    @classmethod
+    async def _vector_fallback_search(
+        cls,
+        db_path: Path,
+        query: str,
+        top_k: int,
+        kb_id: str,
+        kb_name: str,
+        version: str,
+        priority_weight: float,
+        include_archived: bool = False,
+    ) -> list[dict[str, Any]]:
+        """CRAG 一级降级：不限实体与关键词，纯向量全库扫描扩召。"""
+        provider = await embedding_router.get_provider()
+        if not provider.is_available or provider.dimension <= 0:
+            return []
+        try:
+            q_vec = await provider.encode_query(query.strip())
+        except Exception:
+            return []
+        if q_vec is None:
+            return []
+
+        q_list = [float(x) for x in q_vec]
+        q_len = len(q_list)
+        if q_len <= 0:
+            return []
+
+        def _scan_vectors() -> list[dict[str, Any]]:
+            conn = sqlite3.connect(str(db_path))
+            conn.row_factory = sqlite3.Row
+            try:
+                cols = [col[1] for col in conn.execute("PRAGMA table_info(hybrid_chunks)").fetchall()]
+                prov_col = ", provenance_json" if "provenance_json" in cols else ", '' as provenance_json"
+                sql = f"""
+                SELECT id, remote_uri, title, content, authority_tier, mtime,
+                       doc_year, effective_date, effective_ts, doc_priority_type,
+                       topic_cluster_id, is_latest_in_cluster, chunk_role,
+                       COALESCE(NULLIF(parent_chunk_id, ''), id) AS parent_chunk_id,
+                       embedding_blob{prov_col}
+                FROM hybrid_chunks
+                WHERE embedding_blob IS NOT NULL
+                  AND (chunk_role != 'parent' OR chunk_role IS NULL)
+                """
+                rows = conn.execute(sql).fetchall()
+                from ..kb.embedding_codec import decode_embedding
+                from ..kb.provenance import format_citation_label
+
+                scored: list[tuple[float, dict[str, Any]]] = []
+                for r in rows:
+                    if not include_archived and (r["authority_tier"] or 2) >= 3:
+                        continue
+                    blob = r["embedding_blob"]
+                    if not blob:
+                        continue
+                    arr = decode_embedding(blob, q_len)
+                    if arr is None or len(arr) != q_len:
+                        continue
+                    cosine_sim = max(0.0, float(sum(float(a) * b for a, b in zip(arr, q_list))))
+                    tier = r["authority_tier"] or 2
+                    tier_bonus = 1.25 if tier == 1 else 1.0
+                    role = r["chunk_role"] or "child"
+                    role_boost = 1.25 if role == "wiki_page" else (1.15 if role == "hype_question" else 1.0)
+                    final_score = cosine_sim * tier_bonus * priority_weight * role_boost
+
+                    prov_raw = str(r["provenance_json"] or "")
+                    prov_obj = None
+                    if prov_raw:
+                        try:
+                            prov_obj = json.loads(prov_raw)
+                        except Exception:
+                            prov_obj = None
+
+                    scored.append((final_score, {
+                        "id": r["id"],
+                        "chunk_id": r["id"],
+                        "kb_id": kb_id,
+                        "kb_name": kb_name,
+                        "version": version,
+                        "remote_uri": r["remote_uri"],
+                        "source": r["title"],
+                        "title": r["title"],
+                        "content": r["content"],
+                        "authority_tier": tier,
+                        "mtime": r["mtime"],
+                        "doc_year": r["doc_year"],
+                        "effective_date": r["effective_date"],
+                        "effective_ts": r["effective_ts"],
+                        "doc_priority_type": r["doc_priority_type"],
+                        "topic_cluster_id": r["topic_cluster_id"],
+                        "is_latest_in_cluster": r["is_latest_in_cluster"],
+                        "chunk_role": role,
+                        "parent_chunk_id": r["parent_chunk_id"],
+                        "provenance_json": prov_raw,
+                        "provenance": prov_obj,
+                        "citation_label": format_citation_label(prov_obj),
+                        "score": round(final_score, 4),
+                        "priority_weight": priority_weight,
+                        "final_score": round(final_score, 4),
+                        "cosine_similarity": round(cosine_sim, 4),
+                        "hit_cnt": 0,
+                    }))
+
+                scored.sort(key=lambda x: x[0], reverse=True)
+                return [item[1] for item in scored[:top_k]]
+            finally:
+                conn.close()
+
+        return await asyncio.to_thread(_scan_vectors)
 
     @classmethod
     async def _fetch_cross_version_l2(
@@ -654,6 +1017,123 @@ class MultiKBRetrievalRouter:
                 conn.close()
 
         return await asyncio.to_thread(_query)
+
+    @classmethod
+    def _extract_specific_entities(cls, query: str) -> list[str]:
+        """从用户问句中剥离通用问答虚词与泛化分类词，精准提取跨行业核心实体（地名、部门、项目、财务要素等）。"""
+        func_words = [
+            "帮我查一下", "帮我查询", "请帮我查", "请对比一下", "请对比", "对比一下", "对比", "请问一下", "请问", "帮我", "一下",
+            "它们", "各自", "分别", "哪天", "哪一天", "什么", "具体", "如何", "怎么", "怎样", "是多少", "有哪些", "有什么", "需要什么",
+            "怎么办理", "如何申请", "可以吗", "能不能", "有限额吗", "有哪些明确要求", "有什么明确要求", "有哪些规定",
+            "一共有", "总共有", "总共", "一共", "共有", "多少", "几间", "几人", "几个", "几辆", "多少钱", "几天",
+            "举办", "举行", "时间", "日期", "场地", "地点", "规程", "规则", "制度", "规定", "要求", "标准", "费用",
+            "场地障碍赛", "场地障碍", "盛装舞步", "三项赛", "耐力赛", "锦标赛", "公开赛", "挑战赛", "城市系列", "巡回赛", "联赛", "总决赛",
+            "年度", "全国", "国际", "分级", "公司", "企业",
+            "的", "了", "在", "与", "和", "或", "等", "及", "至", "到", "吗", "呢", "吧", "呀", "间", "个", "套", "辆", "元", "块"
+        ]
+        sub = query
+        # 剥离明确年份 (如 2024年, 2025年)
+        sub = re.sub(r"\b(19\d\d|20\d\d)年?", " ", sub)
+
+        for fw in sorted(func_words, key=len, reverse=True):
+            sub = sub.replace(fw, " ")
+
+        clean_sub = re.sub(r"[^\w\u4e00-\u9fa5\s]", " ", sub)
+        tokens = [w.strip() for w in clean_sub.split() if len(w.strip()) >= 2]
+
+        entities: list[str] = []
+        for t in tokens:
+            if t.isdigit() or re.fullmatch(r"(19|20)\d\d", t):
+                continue
+            if t.upper() in ("CSI1", "CSI2", "CSI3", "CSI4", "CSI5", "FEI"):
+                continue
+            if t not in entities:
+                entities.append(t)
+            if t.endswith("站") and len(t) > 2:
+                base = t[:-1]
+                if base not in entities:
+                    entities.append(base)
+        return entities
+
+    @classmethod
+    def _fetch_matching_triples(
+        cls,
+        db_path: Path,
+        query: str,
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        """从独立知识库版本库中提取与查询高相关的结构化图谱三元组事实。"""
+        if not db_path.exists():
+            return []
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        try:
+            has_table = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='knowledge_triples'").fetchone()
+            if not has_table:
+                return []
+
+            entities = cls._extract_specific_entities(query)
+            if not entities:
+                return []
+
+            priority_preds = {
+                # 通用与时效/主体谓词
+                "时间", "日期", "生效日期", "截止日期", "地点", "主办单位", "承办单位", "责任部门",
+                # 体育赛事谓词
+                "比赛时间", "报名截止时间", "收费标准", "级别", "大奖赛级别", "参赛资格",
+                # 财务、报销与合同制度谓词
+                "金额", "合同金额", "限额", "报销标准", "补贴标准", "税率", "发票类型",
+                "审批人", "审批流程", "付款方式", "报销条件", "开户行", "账号",
+            }
+
+            all_triples: list[dict[str, Any]] = []
+            seen: set[tuple[str, str, str]] = set()
+
+            # 多实体分桶均衡查询：保证每个实体都能分得三元组配额（防单实体霸占）
+            limit_per_ent = max(2, limit // max(1, len(entities[:4])))
+            for ent in entities[:4]:
+                sql = f"""
+                    SELECT subject, predicate, object, alignment_status, axiom_type
+                    FROM knowledge_triples
+                    WHERE review_status != 'REJECTED'
+                      AND (subject LIKE ? OR object LIKE ?)
+                    LIMIT 30
+                """
+                pat_ent = to_like_wildcard_pattern(ent)
+                rows = conn.execute(sql, (pat_ent, pat_ent)).fetchall()
+                scored: list[tuple[float, dict[str, Any]]] = []
+                for r in rows:
+                    key = (r["subject"], r["predicate"], r["object"])
+                    if key in seen:
+                        continue
+                    score = 1.0
+                    if r["predicate"] in priority_preds:
+                        score += 3.0
+                    if any(
+                        p in r["predicate"]
+                        for p in (
+                            "时间", "日期", "地点", "费", "标准", "要求", "人数", "配备",
+                            "金额", "限额", "税", "发票", "审批", "流程", "比例", "期限",
+                            "生效", "截止", "条件", "方式", "职责", "部门",
+                        )
+                    ):
+                        score += 2.0
+                    if r["alignment_status"] in ("ALIGNED", "AUTO_ALIGNED"):
+                        score += 1.5
+                    scored.append((score, dict(r)))
+
+                scored.sort(key=lambda x: x[0], reverse=True)
+                for _, r in scored[:limit_per_ent]:
+                    key = (r["subject"], r["predicate"], r["object"])
+                    seen.add(key)
+                    all_triples.append(r)
+
+            return all_triples[:limit]
+        except Exception as e:
+            logger.debug(f"[GraphRAG] 提取图谱三元组异常: {e}")
+            return []
+        finally:
+            conn.close()
 
     @classmethod
     def _parse_slice_index_and_doc_id(cls, content: str, fallback_uri: str, fallback_title: str) -> tuple[int, int, str]:

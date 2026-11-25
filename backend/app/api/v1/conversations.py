@@ -24,6 +24,19 @@ from ...repository.workspace_repository import WorkspaceRepository
 router = APIRouter(prefix="/conversations", tags=["Conversations"])
 
 
+def _parse_followup_json(raw_json: str | None) -> list[dict[str, object]] | None:
+    """将数据库持久化存储的 followup_suggestions_json 安全反序列化为列表。"""
+    if not raw_json or not raw_json.strip():
+        return None
+    try:
+        parsed = json.loads(raw_json)
+        if isinstance(parsed, list) and parsed:
+            return [item for item in parsed if isinstance(item, dict) and item.get("label")]
+    except Exception:
+        pass
+    return None
+
+
 class AgentStateUpdateRequest(BaseModel):
     """更新会话的 Agent 状态（场景模式、无痕开关、工作草稿纸、CWD）"""
     scene_mode: str | None = None
@@ -328,6 +341,7 @@ async def get_conversation_messages(
             compressed_content=m.compressed_content,
             tool_calls_json=m.tool_calls_json,
             tool_call_id=m.tool_call_id,
+            followup_suggestions=_parse_followup_json(m.followup_suggestions_json),
             token_stats=(
                 turn_stats_map.get(m.turn_id or 1)
                 if last_model_idx_by_turn.get(m.turn_id or 1) == idx

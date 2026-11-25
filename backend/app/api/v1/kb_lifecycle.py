@@ -1095,8 +1095,10 @@ async def get_kb_oralized_results(
         conn.row_factory = sqlite3.Row
         cur = conn.cursor()
         try:
-            # 1. 统计总体数据
-            cur.execute("SELECT count(*) FROM hybrid_chunks WHERE chunk_role = 'parent'")
+            # 1. 统计总体数据（parent + 独立无父 child）
+            cur.execute(
+                "SELECT count(*) FROM hybrid_chunks WHERE (chunk_role = 'parent' OR (chunk_role = 'child' AND (parent_chunk_id IS NULL OR parent_chunk_id = '')))"
+            )
             total_parents = cur.fetchone()[0]
 
             cur.execute("SELECT count(*) FROM hybrid_chunks WHERE chunk_role = 'hype_question'")
@@ -1109,7 +1111,7 @@ async def get_kb_oralized_results(
             except Exception:
                 pass
 
-            # 2. 查询父切片
+            # 2. 查询父切片与独立切片
             kw_filter = f"%{keyword.strip()}%" if keyword and keyword.strip() else None
 
             if kw_filter:
@@ -1118,7 +1120,7 @@ async def get_kb_oralized_results(
                     SELECT DISTINCT p.id, p.title, p.section_path, p.content, p.remote_uri
                     FROM hybrid_chunks p
                     LEFT JOIN hybrid_chunks q ON q.parent_chunk_id = p.id AND q.chunk_role = 'hype_question'
-                    WHERE p.chunk_role = 'parent'
+                    WHERE (p.chunk_role = 'parent' OR (p.chunk_role = 'child' AND (p.parent_chunk_id IS NULL OR p.parent_chunk_id = '')))
                       AND (p.title LIKE ? OR p.section_path LIKE ? OR p.content LIKE ? OR q.content LIKE ?)
                     ORDER BY p.id ASC
                     """,
@@ -1129,7 +1131,7 @@ async def get_kb_oralized_results(
                     """
                     SELECT id, title, section_path, content, remote_uri
                     FROM hybrid_chunks
-                    WHERE chunk_role = 'parent'
+                    WHERE (chunk_role = 'parent' OR (chunk_role = 'child' AND (parent_chunk_id IS NULL OR parent_chunk_id = '')))
                     ORDER BY id ASC
                     """
                 )

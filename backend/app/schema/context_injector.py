@@ -6,24 +6,146 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from ..repository.db import db_manager
 from ..repository.schema_repository import SchemaProfileRepository
-from ..sql.auto_ontology_client import AutoOntologyClient
+from ..sql.auto_ontology_client import (
+    AutoOntologyClient,
+    get_auto_ontology_config,
+    infer_target_db,
+    normalize_target_db,
+)
 
 
-async def resolve_agent_ontology_client(agent_id: str | None) -> AutoOntologyClient | None:
-    """优先使用专家主绑定 Schema Profile 的独立网关配置，未配置则回退全局默认。"""
+async def _get_agent_name(agent_id: str | None) -> str:
+    """从 agent_profiles 查询数字专家名称，用于辅助识别所属业务库。"""
+    if not agent_id:
+        return ""
+    try:
+        async with db_manager.get_connection() as conn:
+            cur = await conn.execute("SELECT name FROM agent_profiles WHERE id = ?", (agent_id,))
+            row = await cur.fetchone()
+            return str(row["name"] or "") if row else ""
+    except Exception:
+        return ""
+
+
+def filter_entities_for_target_db(
+    entities: list[dict[str, Any]],
+    target_db: str | None,
+) -> list[dict[str, Any]]:
+    """按目标数据库隔离过滤实体列表，防止跨库表结构混入上下文。"""
+    norm_db = normalize_target_db(target_db)
+    if not norm_db:
+        return entities
+    if norm_db == "equestrianinfo":
+        return [e for e in entities if not str(e.get("table_name") or "").lower().startswith("fe_")]
+    if norm_db == "fencinginfo":
+        return [
+            e
+            for e in entities
+            if not str(e.get("table_name") or "").lower().startswith(("eq_", "equestrian_"))
+        ]
+    return entities
+
+
+def is_profile_compatible_with_target_db(
+    profile: dict[str, Any],
+    entities: list[dict[str, Any]] | None,
+    target_db: str | None,
+) -> bool:
+    """判断 Schema Profile 是否与目标业务库兼容，防止击剑与马术约束串库。"""
+    norm_db = normalize_target_db(target_db)
+    if not norm_db:
+        return True
+
+    prof_db = normalize_target_db(profile.get("target_db")) or infer_target_db(
+        f"{profile.get('id') or ''} {profile.get('name') or ''} {profile.get('domain_prefix') or ''}"
+    )
+    if prof_db and prof_db != norm_db:
+        return False
+
+    if entities:
+        tbls = [str(e.get("table_name") or "").lower() for e in entities if e.get("table_name")]
+        if tbls:
+            if norm_db == "equestrianinfo" and all(t.startswith("fe_") for t in tbls):
+                return False
+            if norm_db == "fencinginfo" and all(t.startswith(("eq_", "equestrian_")) for t in tbls):
+                return False
+    return True
+
+
+async def resolve_agent_target_db(
+    agent_id: str | None,
+    explicit_target_db: str | None = None,
+    profile: dict[str, Any] | None = None,
+    bindings: list[dict[str, Any]] | None = None,
+) -> str | None:
+    """解析数字专家对应的目标数据库（fencinginfo / equestrianinfo）。"""
+    # 1. 调用方显式指定时优先采用（含合法性校验，非法值直接抛 ValueError）
+    explicit = normalize_target_db(explicit_target_db)
+    if explicit:
+        return explicit
+
+    # 2. 若已传入特定 Profile，检查其显式 target_db 或名称推断
+    if profile:
+        prof_db = normalize_target_db(profile.get("target_db")) or infer_target_db(
+            f"{profile.get('id') or ''} {profile.get('name') or ''} {profile.get('domain_prefix') or ''}"
+        )
+        if prof_db:
+            return prof_db
+
+    # 3. 根据专家 ID 与专家名称推断（击剑赛事专家 -> fencinginfo，马术报名专家 -> equestrianinfo）
+    if agent_id:
+        agent_name = await _get_agent_name(agent_id)
+        by_agent = infer_target_db(f"{agent_id} {agent_name}")
+        if by_agent:
+            return by_agent
+
+        # 4. 检查专家绑定的 Schema Profile
+        agent_bindings = bindings if bindings is not None else await SchemaProfileRepository.get_agent_bindings(agent_id)
+        for b in agent_bindings:
+            prof = await SchemaProfileRepository.get_profile(b["profile_id"], masked=True)
+            if not prof:
+                continue
+            prof_db = normalize_target_db(prof.get("target_db")) or infer_target_db(
+                f"{prof.get('id') or ''} {prof.get('name') or ''} {prof.get('domain_prefix') or ''}"
+            )
+            if prof_db:
+                return prof_db
+
+    # 5. 回退全局持久化配置中的 target_db
+    try:
+        cfg = await get_auto_ontology_config(masked=True)
+        return normalize_target_db(cfg.get("target_db"))
+    except Exception:
+        return None
+
+
+async def resolve_agent_ontology_client(
+    agent_id: str | None,
+    target_db: str | None = None,
+) -> AutoOntologyClient | None:
+    """优先使用专家兼容 Schema Profile 的独立网关配置，未配置则回退全局默认，并绑定 target_db。"""
+    resolved_db = await resolve_agent_target_db(agent_id, explicit_target_db=target_db)
     if agent_id:
         bindings = await SchemaProfileRepository.get_agent_bindings(agent_id)
-        if bindings:
-            primary_id = bindings[0]["profile_id"]
+        for binding in bindings:
+            primary_id = binding["profile_id"]
             prof = await SchemaProfileRepository.get_profile(primary_id, masked=False)
-            if prof and prof.get("ontology_base_url") and prof.get("ontology_api_key"):
-                return AutoOntologyClient(
-                    base_url=str(prof["ontology_base_url"]),
-                    api_key=str(prof["ontology_api_key"]),
-                    timeout_seconds=120,
-                )
-    return await AutoOntologyClient.from_saved_config()
+            if not prof or not prof.get("ontology_base_url") or not prof.get("ontology_api_key"):
+                continue
+            if not is_profile_compatible_with_target_db(prof, None, resolved_db):
+                continue
+            profile_db = resolved_db or normalize_target_db(prof.get("target_db")) or infer_target_db(
+                f"{prof.get('id') or ''} {prof.get('name') or ''} {prof.get('domain_prefix') or ''}"
+            )
+            return AutoOntologyClient(
+                base_url=str(prof["ontology_base_url"]),
+                api_key=str(prof["ontology_api_key"]),
+                timeout_seconds=120,
+                target_db=profile_db,
+            )
+    return await AutoOntologyClient.from_saved_config(target_db=resolved_db)
 
 
 async def build_agent_schema_context(
@@ -38,12 +160,17 @@ async def build_agent_schema_context(
     if not bindings:
         return ""
 
+    agent_target_db = await resolve_agent_target_db(agent_id, bindings=bindings)
+
     q_low = (user_query or "").lower()
     sections: list[str] = [
         "========================= [数据结构图谱上下文 System Context] =========================",
         "在向 Auto Ontology 发起提问前，必须严格遵守以下绑定表范围、字段枚举口径与红线：",
     ]
+    if agent_target_db:
+        sections.append(f"- 当前专家专属目标数据库 (target_db): `{agent_target_db}`")
 
+    has_compatible_profile = False
     for binding in bindings:
         pid = binding["profile_id"]
         mounted = binding.get("mounted_entities", "*")
@@ -53,8 +180,22 @@ async def build_agent_schema_context(
             continue
 
         prof = graph["profile"]
-        entities = graph["entities"]
-        relations = graph["relations"]
+        raw_entities = graph["entities"]
+        if not is_profile_compatible_with_target_db(prof, raw_entities, agent_target_db):
+            continue
+
+        entities = filter_entities_for_target_db(raw_entities, agent_target_db)
+        if not entities and raw_entities:
+            continue
+
+        has_compatible_profile = True
+        allowed_entity_ids = {e["id"] for e in entities}
+        relations = [
+            r
+            for r in graph["relations"]
+            if r.get("source_entity_id") in allowed_entity_ids
+            and r.get("target_entity_id") in allowed_entity_ids
+        ]
         entity_map = {e["id"]: e["table_name"] for e in entities}
 
         # 表数较多时，优先展开与当前提问命中及 1-Hop 关联的实体字段详情，其余表仅列极简目录
@@ -116,6 +257,9 @@ async def build_agent_schema_context(
                 tgt_t = entity_map.get(r["target_entity_id"], r["target_entity_id"].split(".")[-1])
                 msg = r.get("warning_message") or r.get("filter_rule") or "高危关联，请谨慎校验！"
                 sections.append(f"- [红线 {idx}] `{src_t}` <-> `{tgt_t}` ({r['relation_type']}): {msg}")
+
+    if not has_compatible_profile:
+        return ""
 
     sections.append("=====================================================================================")
     joined = "\n".join(sections)
@@ -369,11 +513,14 @@ async def audit_sql_against_schema(
     bindings = await SchemaProfileRepository.get_agent_bindings(agent_id)
     if not bindings:
         return alerts
+    agent_target_db = await resolve_agent_target_db(agent_id, bindings=bindings)
     for binding in bindings:
         pid = binding["profile_id"]
         mounted = binding.get("mounted_entities", "*")
         graph = await SchemaProfileRepository.get_profile_graph(pid)
         if not graph:
+            continue
+        if not is_profile_compatible_with_target_db(graph["profile"], graph["entities"], agent_target_db):
             continue
         result = audit_sql_rules_for_graph(
             sql_code=sql,

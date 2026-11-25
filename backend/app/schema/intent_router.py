@@ -9,6 +9,7 @@ KB-First 三层智能意图路由器 & 流式追问尾块防闪烁解析器。
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import re
 from dataclasses import dataclass, field
@@ -338,4 +339,182 @@ class FollowupStreamBuffer:
         self._buf = ""
         self._suppressing = False
         return extract_followup_suggestions(remaining)
+
+
+_TRIVIAL_CHAT_RE = re.compile(
+    r"^(你好|您好|hi|hello|嗨|在吗|谢谢|多谢|感谢|好的|收到|明白|ok|okay|拜拜|再见)[！!。.,，?\s]*$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_followup_list(raw_items: Any, max_items: int = 3) -> list[dict[str, Any]]:
+    """将多种结构的候选追问规范化为 [{label, prompt, force_live}]。"""
+    if not isinstance(raw_items, list):
+        return []
+    out: list[dict[str, Any]] = []
+    seen_labels: set[str] = set()
+    for item in raw_items:
+        if len(out) >= max_items:
+            break
+        if isinstance(item, str):
+            text = item.strip()
+            if not text:
+                continue
+            label = text[:32]
+            prompt = text
+            force_live = False
+        elif isinstance(item, dict):
+            label = str(item.get("label") or item.get("prompt") or "").strip()[:32]
+            prompt = str(item.get("prompt") or label).strip()
+            force_live = bool(item.get("force_live"))
+        else:
+            continue
+        if not label or label in seen_labels:
+            continue
+        seen_labels.add(label)
+        out.append({"label": label, "prompt": prompt, "force_live": force_live})
+    return out
+
+
+def _heuristic_followups(
+    user_query: str,
+    assistant_reply: str,
+    *,
+    max_items: int = 3,
+) -> list[dict[str, Any]]:
+    """无轻量模型或超时时的上下文启发式追问兜底。"""
+    combined = f"{user_query}\n{assistant_reply[:1200]}"
+    low = combined.lower()
+
+    # 1. 赛事 / 竞赛规程 / 报名类场景（如马术、击剑、比赛规程）
+    if any(k in combined for k in ("规程", "比赛", "赛事", "总决赛", "站", "公开赛", "锦标赛", "冠军赛")):
+        return _normalize_followup_list(
+            [
+                {
+                    "label": "查询报名时间与报项要求",
+                    "prompt": f"针对刚才提到的赛事，请详细查询并列出它的报名时间、报项方式及具体报项要求。",
+                },
+                {
+                    "label": "查询比赛日程与赛制详情",
+                    "prompt": f"针对刚才提到的赛事，请详细查询比赛时间、比赛地点、组别设置及各项目赛制详情。",
+                },
+                {
+                    "label": "核对参赛资格与报名限制",
+                    "prompt": f"针对刚才提到的赛事，请核对运动员/骑手年龄、等级、注册资格及马匹/兼项等报名限制条件。",
+                },
+            ],
+            max_items=max_items,
+        )
+
+    # 2. 业务统计 / 数据查询类场景
+    if any(k in combined for k in ("统计", "人数", "多少", "报名费", "金额", "列表", "汇总", "select ", "sql")):
+        return _normalize_followup_list(
+            [
+                {
+                    "label": "按组别/省份拆分明细",
+                    "prompt": "请按组别或省份维度对刚才的统计结果做进一步拆分对比。",
+                },
+                {
+                    "label": "对比往期或同级别数据",
+                    "prompt": "请对比同期或上一届的相关数据变化趋势。",
+                },
+                {
+                    "label": "导出核对关键异常项",
+                    "prompt": "请检查刚才结果中是否存在未交费、待审核或异常边界数据并列出清单。",
+                },
+            ],
+            max_items=max_items,
+        )
+
+    # 3. 代码 / 报错 / 架构开发类场景
+    if any(k in low for k in ("def ", "class ", "pytest", "traceback", "报错", "修复", "api", "接口", "bug")):
+        return _normalize_followup_list(
+            [
+                {
+                    "label": "检查边界条件与异常处理",
+                    "prompt": "请进一步检查上述方案或代码在空值、并发或异常场景下的边界处理是否完备。",
+                },
+                {
+                    "label": "补充或运行自动化测试",
+                    "prompt": "请针对上述改动编写或补充单元测试，并验证是否全部通过。",
+                },
+                {
+                    "label": "查看上下游关联调用影响",
+                    "prompt": "请梳理这一改动涉及的上下游调用链路与潜在兼容风险。",
+                },
+            ],
+            max_items=max_items,
+        )
+
+    # 4. 通用知识问答 / 文档整理场景
+    return _normalize_followup_list(
+        [
+            {
+                "label": "展开说明关键细节与依据",
+                "prompt": "请对上述结论中的关键细节、依据来源或注意事项作进一步展开说明。",
+            },
+            {
+                "label": "梳理成结构化核对清单",
+                "prompt": "请把上述内容整理成一份清晰的可执行核对清单或对比表格。",
+            },
+            {
+                "label": "列出常见风险与避坑点",
+                "prompt": "结合上述内容，实际执行或操作中最容易踩坑的点有哪些？",
+            },
+        ],
+        max_items=max_items,
+    )
+
+
+async def generate_smart_followups(
+    user_query: str,
+    assistant_reply: str,
+    *,
+    agent_name: str = "",
+    max_items: int = 3,
+    use_light_llm: bool = True,
+) -> list[dict[str, Any]]:
+    """根据用户提问与 AI 回复自动生成 2~3 条可点击直发的快捷引导。"""
+    q = (user_query or "").strip()
+    reply = (assistant_reply or "").strip()
+    if len(reply) < 30 or (_TRIVIAL_CHAT_RE.match(q) and len(reply) < 120):
+        return []
+
+    if use_light_llm:
+        try:
+            from ..providers.light_llm_router import light_llm_router
+
+            role_hint = f"当前助手角色：{agent_name}\n" if agent_name else ""
+            prompt = (
+                f"{role_hint}"
+                f"用户问题：{q[:300]}\n"
+                f"助手回复摘要：{reply[:1400]}\n\n"
+                "请站在用户视角，基于上面已经给出的回复，推断用户接下来最可能继续追问或核查的 3 个具体后续方向。\n"
+                "要求：\n"
+                "1. 严格输出 JSON 数组，每个元素包含 `label`（10~20字短标题，如“查报名报项与截止时间”“查参赛资格限制”）和 `prompt`（可直接发给助手的完整清晰问题，务必带入具体赛事/实体名称，避免“它/这个”等模糊指代）；\n"
+                "2. 不要重复已经回答完的结论，要指向有价值的新信息、细项、限制或下一步操作；\n"
+                "3. 仅输出 JSON 数组，不要输出任何额外解释或 Markdown 围栏。"
+            )
+            raw_out = await asyncio.wait_for(
+                light_llm_router.complete(
+                    prompt=prompt,
+                    temperature=0.25,
+                    max_tokens=220,
+                    enable_thinking=False,
+                ),
+                timeout=4.5,
+            )
+            if raw_out:
+                cleaned = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_out.strip()).strip()
+                m = re.search(r"\[[\s\S]*\]", cleaned)
+                if m:
+                    cleaned = m.group(0)
+                parsed = json.loads(cleaned)
+                items = _normalize_followup_list(parsed, max_items=max_items)
+                if items:
+                    return items
+        except Exception:
+            pass
+
+    return _heuristic_followups(q, reply, max_items=max_items)
 

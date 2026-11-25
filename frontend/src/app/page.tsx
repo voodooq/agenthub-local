@@ -4043,6 +4043,16 @@ function DesktopWorkbench() {
                       .join('\n\n---\n\n');
                     const aggregatedToolEvents = allTurnMessages.flatMap((m) => m.tool_events || []);
                     const aggregatedFactRefs = allTurnMessages.flatMap((m) => m.fact_refs || []);
+                    const lastFollowupMsg = [...allTurnMessages]
+                      .reverse()
+                      .find((m) => m.suggestedFollowups && m.suggestedFollowups.length > 0);
+                    const aggregatedFollowups = lastFollowupMsg?.suggestedFollowups || [];
+                    const aggregatedClarificationHint = lastFollowupMsg?.clarificationHint || msg.clarificationHint || '';
+                    const aggregatedFollowupSuggestions =
+                      [...allTurnMessages]
+                        .reverse()
+                        .find((m) => m.followup_suggestions && m.followup_suggestions.length > 0)
+                        ?.followup_suggestions || msg.followup_suggestions;
                     const aggregatedMemoryRefs = allTurnMessages.flatMap((m) => m.memory_refs || []);
                     return (
                       <div
@@ -4592,7 +4602,7 @@ function DesktopWorkbench() {
                       {!isUser && !isProcessStep && !isCurrentStreamingMsg && (
                         <FollowupAndSnapshotBar
                           messageContent={msg.content || ''}
-                          suggestions={msg.followup_suggestions}
+                          suggestions={aggregatedFollowupSuggestions}
                           snapshotOffer={msg.stats_snapshot_offer}
                           disabled={isStreaming}
                           onSelectFollowup={(item) => {
@@ -4667,17 +4677,17 @@ function DesktopWorkbench() {
                           </div>
                         )}
 
-                      {/* 主动追问与延伸方向快捷胶囊 (SPEC-1.5.9) */}
-                      {!isUser && msg.suggestedFollowups && msg.suggestedFollowups.length > 0 && (
+                      {/* 主动追问与延伸方向快捷胶囊 (SPEC-1.5.9)：仅在最终回复输出完成后稳定展示，不在过程步晃动消失 */}
+                      {!isUser && !isProcessStep && !isCurrentStreamingMsg && aggregatedFollowups.length > 0 && (
                         <div className="w-full max-w-[92%] md:max-w-[85%] pt-1 pb-1 space-y-1.5 animate-fade-in">
-                          {msg.clarificationHint && (
+                          {aggregatedClarificationHint && (
                             <div className="text-[11px] text-zinc-500 dark:text-zinc-400 font-medium flex items-center gap-1.5">
                               <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                              <span>{msg.clarificationHint}</span>
+                              <span>{aggregatedClarificationHint}</span>
                             </div>
                           )}
                           <div className="flex flex-wrap gap-2">
-                            {msg.suggestedFollowups.map((item: string, fIdx: number) => (
+                            {aggregatedFollowups.map((item: string, fIdx: number) => (
                               <button
                                 key={fIdx}
                                 type="button"

@@ -27,8 +27,27 @@ class TextQualityGate:
     # 乱码替换符、Unicode 私有使用区 (PUA) 与非法控制字符
     _GARBAGE_RE = re.compile(r"[\ufffd\ue000-\uf8ff\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
+    # 现代汉语高频通用基础汉字表 (跨行业无偏置，用于拦截二进制流误解码产生的生僻字乱码)
+    _COMMON_CHINESE_CHARS = frozenset(
+        "的一是在不了有和人这中大为上个国我以要他时来用们生到作地于出就分对成会可主发年动同工也能下过子说产种面而方后多定行学法所民得经十三之进着等部度家电力里如水化高自二理起小物现实加量都两体制机当使点从业本去把性好应开它合还因由其些然前外天政四日那社义事平形相全表间样想向道命关白正气位元款项单据数额总计附注条第章程费标准核管制度"
+    )
+
     # 剥离元数据头正则 (例如: 【文档来源】xxx | 【生效年份】xxx \n)
     _METADATA_HEADER_RE = re.compile(r"^【[^】]+】[^\n]*\n?", re.MULTILINE)
+
+    @classmethod
+    def is_gibberish_chinese(cls, text: str) -> bool:
+        """判定中文文本是否为二进制流强行解码产生的全生僻字符乱码。
+
+        说明：仅当汉字数量 >= 20 时执行检测，避免误伤以英文缩写或数字为主的财务报表/外文表格。
+        """
+        body = cls._METADATA_HEADER_RE.sub("", text or "").strip()
+        han_chars = cls._HAN_RE.findall(body)
+        if len(han_chars) >= 20:
+            common_cnt = sum(1 for c in han_chars if c in cls._COMMON_CHINESE_CHARS)
+            if (common_cnt / len(han_chars)) < 0.12:
+                return True
+        return False
 
     @classmethod
     def evaluate(cls, text: str) -> dict[str, Any]:
@@ -98,6 +117,9 @@ class TextQualityGate:
         if valid_ratio < 0.65:
             return False, f"文档有效字符率不足 (有效比 {valid_ratio:.1%} < 65.0%)，存在大量未知扩展符号或受损编码"
 
+        if cls.is_gibberish_chinese(cleaned):
+            return False, "文档常用汉字密度过低，疑似旧版二进制文件误解码生成的生僻字乱码"
+
         return True, ""
 
     @classmethod
@@ -129,6 +151,9 @@ class TextQualityGate:
 
         if valid_ratio < 0.60:
             return False, f"切片有效字符比例偏低 (有效比 {valid_ratio:.1%} < 60%)"
+
+        if cls.is_gibberish_chinese(body):
+            return False, "切片常用汉字密度过低，疑似二进制解码残余乱码"
 
         return True, ""
 

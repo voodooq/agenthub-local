@@ -220,12 +220,14 @@ async def lifespan(app: FastAPI):
                         "SELECT 1 FROM dialogue_channel_links WHERE channel_type = 'weixin_clawbot' AND status = 'active' LIMIT 1"
                     )
                     has_clawbot_link = (await cur2.fetchone()) is not None
-            legacy_session_file = Path.home() / ".agenthub" / "weixin_clawbot_session.json"
-            data_session_file = Path(settings.db_path).parent / "weixin_clawbot_session.json"
-            if has_clawbot_link or data_session_file.exists() or legacy_session_file.exists():
+            # 仅当数据库中确实存在活跃的 weixin_clawbot 对接链接时才自动拉起 Sidecar，
+            # 防止用户已解绑后因本地残留 session 文件误拉起，从而抢占云端/Linux 同 Bot 的长轮询！
+            if has_clawbot_link:
                 from app.channels.qr_binding import ensure_clawbot_sidecar_running
                 ok_boot, msg_boot = await ensure_clawbot_sidecar_running()
                 logger.info(f"[WeixinClawbot] 启动自检自动拉起 Sidecar: ok={ok_boot}, msg={msg_boot}")
+            else:
+                logger.info("[WeixinClawbot] 未检测到活跃的微信 ClawBot 绑定链接，跳过自动拉起 Sidecar")
         except Exception as wx_boot_err:
             logger.debug(f"[WeixinClawbot] 启动自动拉起 Sidecar 跳过: {wx_boot_err}")
 

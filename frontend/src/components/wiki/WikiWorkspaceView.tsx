@@ -123,8 +123,57 @@ export function WikiWorkspaceView() {
   const [splitFilename, setSplitFilename] = useState('ontology_guide.md');
   const [splitContent, setSplitContent] = useState('');
   const [splittingImport, setSplittingImport] = useState(false);
+  const [showCompileModal, setShowCompileModal] = useState(false);
+  const [compileKbList, setCompileKbList] = useState<Array<{ kb_id: string; name: string; active_version?: string }>>([]);
+  const [selectedCompileKbId, setSelectedCompileKbId] = useState('');
+  const [compilingFromKb, setCompilingFromKb] = useState(false);
   const [deletingPage, setDeletingPage] = useState(false);
   const [toastMsg, setToastMsg] = useState<string | null>(null);
+
+  const handleOpenCompileModal = async () => {
+    setShowCompileModal(true);
+    try {
+      const res = await apiFetch('/api/v1/kb/bases');
+      if (res.ok) {
+        const json = await res.json();
+        const list = json.data || json.bases || [];
+        setCompileKbList(list);
+        if (list.length > 0 && !selectedCompileKbId) {
+          setSelectedCompileKbId(list[0].kb_id);
+        }
+      }
+    } catch {}
+  };
+
+  const handleCompileFromKb = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedCompileKbId) return;
+    setCompilingFromKb(true);
+    try {
+      const res = await apiFetch(`/api/v1/wiki/compile-from-kb/${encodeURIComponent(selectedCompileKbId)}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_entities: 15, min_predicates: 3 }),
+      });
+      if (res.ok) {
+        const json = await res.json();
+        const d = json.data || {};
+        setShowCompileModal(false);
+        await loadSpaces();
+        if (d.wiki_space_id) {
+          setActiveSpaceId(d.wiki_space_id);
+        }
+        showToast(`编纂完成：新建 ${d.created_inbox ?? 0} 条待审、更新 ${d.updated_inbox ?? 0} 条、跳过 ${d.skipped_unchanged ?? 0} 条`);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast(err.detail || '从知识库编纂词条失败');
+      }
+    } catch {
+      showToast('请求失败，请检查后端服务状态');
+    } finally {
+      setCompilingFromKb(false);
+    }
+  };
 
   const showToast = (msg: string) => {
     setToastMsg(msg);
@@ -501,6 +550,15 @@ export function WikiWorkspaceView() {
               {toastMsg}
             </span>
           )}
+          <button
+            type="button"
+            onClick={handleOpenCompileModal}
+            className="px-2.5 py-1 rounded-md border border-emerald-500/40 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 hover:bg-emerald-500/20 text-xs font-medium flex items-center gap-1 transition-colors"
+            title="从已训练知识库自动发现高频核心实体，生成结构化草稿写入 Inbox 待审"
+          >
+            <GitFork className="w-3.5 h-3.5" strokeWidth={1.75} />
+            <span>从知识库编纂</span>
+          </button>
           <button
             type="button"
             disabled={!activeSpaceId}
@@ -1144,6 +1202,51 @@ export function WikiWorkspaceView() {
                 className="px-3 py-1.5 rounded-md bg-slate-900 text-white dark:bg-zinc-100 dark:text-zinc-900 text-xs font-medium disabled:opacity-40"
               >
                 {splittingImport ? '正在拆解入库...' : '开始拆解并发布'}
+              </button>
+            </div>
+          </form>
+        </div>
+      )}
+
+      {showCompileModal && (
+        <div className="fixed inset-0 z-50 bg-black/40 flex items-center justify-center p-4">
+          <form
+            onSubmit={handleCompileFromKb}
+            className="w-full max-w-md rounded-xl border border-border bg-surface-card p-5 shadow-xl space-y-3"
+          >
+            <h3 className="text-sm font-semibold">从知识库自动编纂实体百科</h3>
+            <p className="text-[11px] text-text-tertiary leading-relaxed">
+              将自动抽取所选知识库中的高频实体（按「实体+年份」严格隔离），生成结构化草稿放入 <strong>Inbox 待审</strong>。只有经您在工作台审核批准后，词条才会反哺知识库并获得 1.25× 权威权重。
+            </p>
+            <div>
+              <label className="block text-[11px] text-text-secondary mb-1">选择目标知识库</label>
+              <select
+                value={selectedCompileKbId}
+                onChange={(e) => setSelectedCompileKbId(e.target.value)}
+                className="w-full px-3 py-2 text-xs rounded-md border border-border bg-surface-100 focus:outline-none"
+              >
+                {compileKbList.length === 0 && <option value="">暂无已训练知识库</option>}
+                {compileKbList.map((k) => (
+                  <option key={k.kb_id} value={k.kb_id}>
+                    {k.name} ({k.active_version || 'v1.0.0'})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowCompileModal(false)}
+                className="px-3 py-1.5 rounded-md border border-border text-xs"
+              >
+                取消
+              </button>
+              <button
+                type="submit"
+                disabled={compilingFromKb || !selectedCompileKbId}
+                className="px-3 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-medium disabled:opacity-40"
+              >
+                {compilingFromKb ? '正在编纂入 Inbox...' : '开始编纂'}
               </button>
             </div>
           </form>

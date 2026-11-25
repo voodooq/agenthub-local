@@ -90,6 +90,7 @@ export interface SchemaProfile {
   name: string;
   description: string;
   domain_prefix: string;
+  target_db?: string;
   ontology_base_url: string;
   ontology_api_key: string;
   has_ontology_api_key: boolean;
@@ -248,6 +249,7 @@ export function SchemaGraphView() {
   const [profName, setProfName] = useState('');
   const [profDesc, setProfDesc] = useState('');
   const [profPrefix, setProfPrefix] = useState('');
+  const [profTargetDb, setProfTargetDb] = useState('');
   const [profUrl, setProfUrl] = useState('');
   const [profApiKey, setProfApiKey] = useState('');
   const [testingGateway, setTestingGateway] = useState(false);
@@ -443,6 +445,7 @@ export function SchemaGraphView() {
         name: profName.trim(),
         description: profDesc.trim(),
         domain_prefix: profPrefix.trim(),
+        target_db: profTargetDb.trim(),
         ontology_base_url: profUrl.trim(),
         ontology_api_key: profApiKey.trim(),
       }),
@@ -760,6 +763,7 @@ export function SchemaGraphView() {
               setProfName('');
               setProfDesc('');
               setProfPrefix('');
+              setProfTargetDb('');
               setProfUrl('');
               setProfApiKey('');
               setShowProfileModal(true);
@@ -779,6 +783,7 @@ export function SchemaGraphView() {
                   setProfName(activeProfile.name);
                   setProfDesc(activeProfile.description);
                   setProfPrefix(activeProfile.domain_prefix);
+                  setProfTargetDb(activeProfile.target_db || '');
                   setProfUrl(activeProfile.ontology_base_url);
                   setProfApiKey(activeProfile.ontology_api_key);
                   setGatewayFeedback(null);
@@ -1429,6 +1434,43 @@ export function SchemaGraphView() {
                 >
                   {testingGateway ? '测试中...' : '连通性测试'}
                 </button>
+              </div>
+              <div className="space-y-1.5">
+                <input
+                  value={profTargetDb}
+                  onChange={(e) => setProfTargetDb(e.target.value)}
+                  placeholder="目标数据库名 target_db（可自由输入，留空按空间/专家自动识别）"
+                  className="w-full px-2.5 py-1.5 rounded-lg border border-border bg-background font-mono text-xs"
+                />
+                <div className="flex flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+                  <span>常用预设:</span>
+                  {[
+                    { id: 'fencinginfo', label: 'fencinginfo (击剑库)' },
+                    { id: 'equestrianinfo', label: 'equestrianinfo (马术库)' },
+                  ].map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      onClick={() => setProfTargetDb(preset.id)}
+                      className={`px-2 py-0.5 rounded border transition-colors ${
+                        profTargetDb === preset.id
+                          ? 'bg-emerald-500/15 border-emerald-500/50 text-emerald-500'
+                          : 'bg-background border-border hover:bg-surface-200'
+                      }`}
+                    >
+                      {preset.label}
+                    </button>
+                  ))}
+                  {profTargetDb && (
+                    <button
+                      type="button"
+                      onClick={() => setProfTargetDb('')}
+                      className="px-1.5 py-0.5 rounded border border-border hover:bg-surface-200 text-[10px]"
+                    >
+                      清空(自动识别)
+                    </button>
+                  )}
+                </div>
               </div>
               <input
                 value={profUrl}

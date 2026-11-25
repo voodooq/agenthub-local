@@ -39,6 +39,7 @@ class MessageResponse(BaseModel):
     compressed_content: str | None = None
     tool_calls_json: str | None = None
     tool_call_id: str | None = None
+    followup_suggestions: list[dict[str, Any]] | None = None
     token_stats: dict[str, Any] | None = None
 
 

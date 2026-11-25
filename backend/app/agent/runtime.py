@@ -1523,6 +1523,8 @@ class AgentRuntime:
                     )
             except Exception as kb_anchor_err:
                 logger.debug(f"[KBAnchor] 注入实时知识库锚点跳过: {kb_anchor_err}")
+        current_agent_name = ""
+        pending_clarification_followups: list[dict[str, Any]] = []
         if active_scene == "agent" and agent_id:
             try:
                 from ..repository.agent_repository import AgentProfileRepository
@@ -1534,6 +1536,8 @@ class AgentRuntime:
                 from ..schema.intent_router import route_query_intent
 
                 agent_row = await AgentProfileRepository.get_agent(agent_id)
+                if agent_row:
+                    current_agent_name = str(agent_row.get("name") or "")
                 if agent_row and int(agent_row.get("allow_biz_sql") or 0) == 1:
                     ao_client = await resolve_agent_ontology_client(agent_id)
                     if ao_client is not None:
@@ -2375,7 +2379,7 @@ class AgentRuntime:
             if agent_id and effective_user_message:
                 try:
                     from ..search.expert_kb_router import ExpertKnowledgeRouter
-                    from ..search.query_rewriter import MultiTurnQueryRewriter, ClarificationDetector
+                    from ..search.query_rewriter import ConversationalQueryRewriter, ClarificationDetector
 
                     # 提取纯粹的用户业务提问 (剥离蜂群点名与系统外包装饰词，确保检索召回精准度)
                     search_query = effective_user_message
@@ -2385,14 +2389,14 @@ class AgentRuntime:
                             search_query = "\n".join(m_query)
                         search_query = re.sub(r"@[a-zA-Z0-9_\-\u4e00-\u9fff]+", "", search_query).strip()
 
-                    # 多轮短问句槽位继承重写（消除“怎么报名”、“多少钱”等指代歧义）
+                    # 多轮指代消解（带首轮/完整句短路门控与话题切换防污染，退役旧正则拼句）
                     effective_search_query = search_query or effective_user_message
                     if conv_id:
                         recent_history = await MessageRepository.get_by_conversation(conv_id, limit=6, from_latest=True)
                         hist_dicts = [{"role": m.role, "content": m.content} for m in recent_history]
-                        effective_search_query = MultiTurnQueryRewriter.rewrite_query(
-                            current_query=effective_search_query,
-                            conversation_history=hist_dicts,
+                        effective_search_query = await ConversationalQueryRewriter.rewrite_query(
+                            query=effective_search_query,
+                            history_messages=hist_dicts,
                         )
 
                     has_kb, kb_prompt, citations, is_blocked = await ExpertKnowledgeRouter.search_for_expert(
@@ -2418,6 +2422,9 @@ class AgentRuntime:
                             ).strip()
                             for c in citations:
                                 retrieved_evidence_chunks.append({
+                                    "citation_id": c.get("citation_id", ""),
+                                    "evidence_type": c.get("evidence_type", "chunk"),
+                                    "title": c.get("title", ""),
                                     "source_uri": c.get("title") or c.get("remote_uri", "kb://expert"),
                                     "content_text": c.get("content", "")[:1200],
                                     "authority_tier": c.get("authority_tier", 1),
@@ -2425,17 +2432,17 @@ class AgentRuntime:
                                 })
                             logger.info(f"[AgentRuntime] 已为专家 {agent_id} 成功前置注入 {len(citations)} 条真实知识底座证据切片")
 
-                            # 宽泛宏观提问或多年份歧义检测
+                            # 宽泛宏观提问或多年份歧义检测（暂存至本轮最终交付时合并展示，不在过程步提前闪现）
                             clarification_res = ClarificationDetector.evaluate_clarification(
                                 query=search_query or effective_user_message,
                                 retrieved_chunks=citations,
                             )
-                            if clarification_res.needs_clarification:
-                                yield {
-                                    "type": "clarification",
-                                    "lead_hint": clarification_res.lead_hint,
-                                    "suggested_followups": clarification_res.suggested_followups,
-                                }
+                            if clarification_res.needs_clarification and clarification_res.suggested_followups:
+                                pending_clarification_followups = [
+                                    {"label": str(s).strip()[:32], "prompt": str(s).strip(), "force_live": False}
+                                    for s in clarification_res.suggested_followups[:3]
+                                    if str(s).strip()
+                                ]
                 except Exception as e:
                     logger.error(f"[AgentRuntime] 专家知识底座检索注入异常: {e}", exc_info=True)
 
@@ -3048,8 +3055,20 @@ class AgentRuntime:
                     except Exception as conf_err:
                         logger.debug(f"[AgentRuntime] 自然收尾置信度治理跳过: {conf_err}")
 
-                    from ..schema.intent_router import extract_followup_suggestions
+                    from ..schema.intent_router import (
+                        extract_followup_suggestions,
+                        generate_smart_followups,
+                    )
                     final_saved_text, parsed_followups = extract_followup_suggestions(final_saved_text or "")
+                    if not parsed_followups and not is_planning_phase and not swarm_role and caller_identity.channel != "im_bot":
+                        parsed_followups = await generate_smart_followups(
+                            effective_user_message,
+                            final_saved_text,
+                            agent_name=current_agent_name,
+                            max_items=3,
+                        )
+                    if not parsed_followups and pending_clarification_followups:
+                        parsed_followups = pending_clarification_followups[:3]
                     if matched_stats_snapshot and not round_biz_sql_records:
                         parsed_followups = [
                             {
@@ -3063,6 +3082,11 @@ class AgentRuntime:
                             ][:2],
                         ]
 
+                    followup_json_str = (
+                        json.dumps(parsed_followups[:3], ensure_ascii=False)
+                        if parsed_followups
+                        else None
+                    )
                     if final_saved_text:
                         await MessageRepository.save_message(
                             conversation_id=conv_id,
@@ -3071,6 +3095,7 @@ class AgentRuntime:
                             executed_by_account=final_account,
                             token_count=len(final_saved_text) // 3,
                             turn_id=current_turn_id,
+                            followup_suggestions_json=followup_json_str,
                         )
                         await ConversationRepository.touch(conv_id)
                         if conv_id and not active_incognito:
@@ -5956,16 +5981,39 @@ class AgentRuntime:
                         from ..repository.schema_repository import SchemaProfileRepository
                         from ..schema.context_injector import (
                             audit_sql_against_schema,
+                            is_profile_compatible_with_target_db,
                             resolve_agent_ontology_client,
+                            resolve_agent_target_db,
                         )
                         from ..schema.data_cleaner import DataResponseCleaner
                         from ..schema.query_assembler import QueryInstructionAssembler
 
                         q_biz = str(args.get("question") or "").strip()
                         ao_conv_id = str(args.get("conversation_id") or "").strip() or None
-                        client = await resolve_agent_ontology_client(agent_id)
-                        if not client:
+                        explicit_target_db = str(args.get("target_db") or "").strip() or None
+                        try:
+                            resolved_target_db = await resolve_agent_target_db(
+                                agent_id,
+                                explicit_target_db=explicit_target_db,
+                            )
+                            client = await resolve_agent_ontology_client(
+                                agent_id,
+                                target_db=resolved_target_db,
+                            )
+                        except ValueError as db_err:
+                            res_text = f"目标数据库参数校验失败: {db_err}"
+                            client = None
+                            resolved_target_db = None
+
+                        if res_text:
+                            pass
+                        elif not client:
                             res_text = "系统尚未配置或启用 Auto Ontology 业务数据连接，请在系统设置中配置服务器地址与 API Token。"
+                        elif not resolved_target_db:
+                            res_text = (
+                                "未能确定目标业务数据库 (target_db)，请显式指定 fencinginfo 或 equestrianinfo，"
+                                "或为当前数字专家绑定对应数据结构空间后重试。"
+                            )
                         elif not q_biz:
                             res_text = "查询问题不能为空。"
                         else:
@@ -5973,21 +6021,29 @@ class AgentRuntime:
                             if agent_id:
                                 try:
                                     bindings = await SchemaProfileRepository.get_agent_bindings(agent_id)
-                                    if bindings:
-                                        primary_b = bindings[0]
+                                    for primary_b in bindings:
                                         mounted = primary_b.get("mounted_entities", "*")
                                         sel_tables = mounted if isinstance(mounted, list) else None
                                         graph_ctx = await SchemaProfileRepository.get_profile_graph(
                                             primary_b["profile_id"],
                                             entity_filter=sel_tables,
                                         )
-                                        if graph_ctx:
-                                            assembled = QueryInstructionAssembler.assemble_instruction(
-                                                question=q_biz,
-                                                profile_context=graph_ctx,
-                                                selected_tables=sel_tables,
-                                            )
-                                            effective_question = assembled["assembled_prompt"]
+                                        if not graph_ctx:
+                                            continue
+                                        if not is_profile_compatible_with_target_db(
+                                            graph_ctx["profile"],
+                                            graph_ctx["entities"],
+                                            resolved_target_db,
+                                        ):
+                                            continue
+                                        assembled = QueryInstructionAssembler.assemble_instruction(
+                                            question=q_biz,
+                                            profile_context=graph_ctx,
+                                            selected_tables=sel_tables,
+                                            target_db=resolved_target_db,
+                                        )
+                                        effective_question = assembled["assembled_prompt"]
+                                        break
                                 except Exception as asm_err:
                                     logger.debug(f"[SchemaAssembler] 跳过指令拼装: {asm_err}")
                             try:
@@ -6002,6 +6058,7 @@ class AgentRuntime:
                                     client.ask_question(
                                         question=effective_question,
                                         conversation_id=ao_conv_id,
+                                        target_db=resolved_target_db,
                                         on_progress=_ao_progress,
                                     )
                                 )
@@ -6153,6 +6210,7 @@ class AgentRuntime:
                     elif func_name == "search_cloud_wiki":
                         from ..search.multi_kb_router import MultiKBRetrievalRouter
                         from ..tools.workspace_fts import search_cloud_wiki
+                        # 工具调用的 query 已由主模型完成语义提炼，直接检索，不再重复调轻量模型改写
                         q_str = str(args.get("query") or "").strip()
                         top_k_val = int(args.get("top_k") or 6)
                         pod_id_val = str(args.get("pod_id") or "global")
@@ -6170,6 +6228,9 @@ class AgentRuntime:
                             res_text = router_text
                             for rc in router_chunks:
                                 retrieved_evidence_chunks.append({
+                                    "citation_id": rc.get("citation_id", ""),
+                                    "evidence_type": rc.get("evidence_type", "chunk"),
+                                    "title": rc.get("title", ""),
                                     "source_uri": rc.get("remote_uri", f"kb://{q_str}"),
                                     "content_text": rc.get("content", "")[:1200],
                                     "authority_tier": rc.get("authority_tier", 1),
@@ -7081,8 +7142,20 @@ class AgentRuntime:
                     except Exception as conf_err:
                         logger.debug(f"[AgentRuntime] 置信度治理自审跳过: {conf_err}")
 
-                    from ..schema.intent_router import extract_followup_suggestions
+                    from ..schema.intent_router import (
+                        extract_followup_suggestions,
+                        generate_smart_followups,
+                    )
                     clean_deliverable, parsed_followups = extract_followup_suggestions(clean_deliverable or "")
+                    if not parsed_followups and not is_planning_phase and not swarm_role and caller_identity.channel != "im_bot":
+                        parsed_followups = await generate_smart_followups(
+                            effective_user_message,
+                            clean_deliverable,
+                            agent_name=current_agent_name,
+                            max_items=3,
+                        )
+                    if not parsed_followups and pending_clarification_followups:
+                        parsed_followups = pending_clarification_followups[:3]
                     if matched_stats_snapshot and not round_biz_sql_records:
                         parsed_followups = [
                             {
@@ -7096,6 +7169,11 @@ class AgentRuntime:
                             ][:2],
                         ]
 
+                    followup_json_str2 = (
+                        json.dumps(parsed_followups[:3], ensure_ascii=False)
+                        if parsed_followups
+                        else None
+                    )
                     await MessageRepository.save_message(
                         conversation_id=conv_id,
                         role="model",
@@ -7104,6 +7182,7 @@ class AgentRuntime:
                         token_count=len(clean_deliverable) // 3,
                         turn_id=current_turn_id,
                         tool_calls_json=None,
+                        followup_suggestions_json=followup_json_str2,
                     )
                     await ConversationRepository.touch(conv_id)
                     if conv_id and not active_incognito:

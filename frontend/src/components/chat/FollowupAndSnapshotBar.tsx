@@ -112,10 +112,10 @@ export function FollowupAndSnapshotBar({
       {hasSuggestions && suggestions && (
         <div className="space-y-2 pt-1">
           <div className="text-xs font-medium text-muted-foreground">
-            接下来我们可以继续看：
+            💡 接下来可以继续问（点击直接发送）：
           </div>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2.5">
-            {suggestions.slice(0, 3).map((item, idx) => (
+            {suggestions.slice(0, 4).map((item, idx) => (
               <button
                 key={`${item.label}-${idx}`}
                 type="button"

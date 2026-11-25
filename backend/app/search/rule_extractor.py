@@ -404,7 +404,7 @@ class UniversalRuleExtractor:
             category = r.get("rule_category", "rule")
             summary = r.get("rule_summary", "")
             score_badge = f" [匹配度:{r.get('match_score')}]" if "match_score" in r else ""
-            lines.append(f"• [规则卡 {idx}] [{category}]{score_badge} (生效版本/日期: {eff}): {summary}")
+            lines.append(f"• [R{idx}] [规则卡 {idx}] [{category}]{score_badge} (生效版本/日期: {eff}): {summary}")
 
         lines.append("=======================================================\n")
         return "\n".join(lines)

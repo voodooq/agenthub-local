@@ -88,6 +88,7 @@ class MessageRepository:
             compressed_content=data.get("compressed_content"),
             tool_calls_json=data.get("tool_calls_json"),
             tool_call_id=data.get("tool_call_id"),
+            followup_suggestions_json=data.get("followup_suggestions_json"),
         )
 
     @staticmethod
@@ -101,6 +102,7 @@ class MessageRepository:
         compressed_content: str | None = None,
         tool_calls_json: str | None = None,
         tool_call_id: str | None = None,
+        followup_suggestions_json: str | None = None,
     ) -> int:
         """
         持久化单条消息（支持双层循环 turn_id、历史命令折叠摘要与工具调用参数）
@@ -113,9 +115,9 @@ class MessageRepository:
                     INSERT INTO messages (
                         conversation_id, turn_id, role, content,
                         compressed_content, tool_calls_json, tool_call_id,
-                        executed_by_account, token_count
+                        followup_suggestions_json, executed_by_account, token_count
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         conversation_id,
@@ -125,6 +127,7 @@ class MessageRepository:
                         compressed_content,
                         tool_calls_json,
                         tool_call_id,
+                        followup_suggestions_json,
                         executed_by_account,
                         token_count,
                     ),

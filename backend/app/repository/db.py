@@ -122,6 +122,7 @@ class DatabaseManager:
             "compressed_content": "TEXT",
             "tool_calls_json": "TEXT",
             "tool_call_id": "TEXT",
+            "followup_suggestions_json": "TEXT",
         }
         for col, col_type in new_columns.items():
             if col not in columns:
@@ -299,6 +300,7 @@ class DatabaseManager:
                 compressed_content TEXT,
                 tool_calls_json TEXT,
                 tool_call_id TEXT,
+                followup_suggestions_json TEXT,
                 executed_by_account TEXT,
                 token_count INTEGER DEFAULT 0,
                 created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
@@ -1145,6 +1147,7 @@ class DatabaseManager:
                 name              TEXT NOT NULL,
                 description       TEXT DEFAULT '',
                 domain_prefix     TEXT DEFAULT '',
+                target_db         TEXT DEFAULT '',
                 ontology_base_url TEXT DEFAULT '',
                 ontology_api_key  TEXT DEFAULT '',
                 is_active         INTEGER DEFAULT 1,
@@ -1221,6 +1224,12 @@ class DatabaseManager:
                 (Path.home() / ".agenthub" / "wikis").mkdir(parents=True, exist_ok=True)
             except OSError as wiki_dir_err:
                 logger.warning(f"初始化物理 Wiki 根目录失败: {wiki_dir_err}")
+
+            # 兼容性平滑升级：schema_profiles 扩展 target_db 隔离字段
+            try:
+                await conn.execute("ALTER TABLE schema_profiles ADD COLUMN target_db TEXT DEFAULT '';")
+            except Exception:
+                pass
 
             # 兼容性平滑升级：knowledge_bases 扩展跨端 UUID、当前版本、内容 MD5 与领域规则模板与发布状态
             for col, col_def in [

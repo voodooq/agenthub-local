@@ -1017,6 +1017,10 @@ class ToolProtocolAdapter:
                             "type": "string",
                             "description": "清晰的自然语言业务数据查询问题（包含时间、赛事或组别条件）。",
                         },
+                        "target_db": {
+                            "type": "string",
+                            "description": "目标业务数据库名称（如 fencinginfo、equestrianinfo 或其他已对接的自定义库名；未传时按当前专家/空间自动路由）。",
+                        },
                         "conversation_id": {
                             "type": "string",
                             "description": "可选的多轮上下文会话 ID，用于连续追问同一业务指标。",

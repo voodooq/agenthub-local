@@ -133,3 +133,4 @@ class TestVocabTemplatesHierarchy:
         finally:
             shutil.rmtree(KBStorageManager.get_kb_dir(kb_fencing), ignore_errors=True)
             shutil.rmtree(KBStorageManager.get_kb_dir(kb_horse), ignore_errors=True)
+

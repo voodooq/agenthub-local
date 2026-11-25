@@ -10,6 +10,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from ..sql.auto_ontology_client import infer_target_db, normalize_target_db
+
 
 class AssembledQueryRequest(BaseModel):
     profile_id: str
@@ -191,12 +193,39 @@ class QueryInstructionAssembler:
         question: str,
         profile_context: dict[str, Any],
         selected_tables: list[str] | None = None,
+        target_db: str | None = None,
     ) -> dict[str, Any]:
         """根据问题、命中表与 1-Hop 图谱关系生成结构化指令文本与边界规则。"""
         q = (question or "").strip()
         profile_meta: dict[str, Any] = profile_context.get("profile") or {}
-        entities: list[dict[str, Any]] = profile_context.get("entities") or []
-        relations: list[dict[str, Any]] = profile_context.get("relations") or []
+        effective_db = (
+            normalize_target_db(target_db)
+            or normalize_target_db(profile_meta.get("target_db"))
+            or infer_target_db(
+                f"{profile_meta.get('id') or ''} {profile_meta.get('name') or ''} {profile_meta.get('domain_prefix') or ''}"
+            )
+        )
+        raw_entities: list[dict[str, Any]] = profile_context.get("entities") or []
+        if effective_db == "equestrianinfo":
+            entities = [e for e in raw_entities if not str(e.get("table_name") or "").lower().startswith("fe_")]
+        elif effective_db == "fencinginfo":
+            entities = [
+                e
+                for e in raw_entities
+                if not str(e.get("table_name") or "").lower().startswith(("eq_", "equestrian_"))
+            ]
+        else:
+            entities = raw_entities
+        allowed_entity_ids = {str(e.get("id") or "") for e in entities}
+        relations: list[dict[str, Any]] = [
+            r
+            for r in (profile_context.get("relations") or [])
+            if (not allowed_entity_ids)
+            or (
+                str(r.get("source_entity_id") or "") in allowed_entity_ids
+                and str(r.get("target_entity_id") or "") in allowed_entity_ids
+            )
+        ]
 
         allow_set = {t.strip() for t in selected_tables if t.strip()} if selected_tables else None
         candidate_entities = [
@@ -284,6 +313,8 @@ class QueryInstructionAssembler:
         )
 
         parts: list[str] = [q, "[Schema Constraints]"]
+        if effective_db:
+            parts.append(f"- 目标数据库: {effective_db}")
         if explicit_hit and target_tables:
             parts.append(f"- 表范围: {', '.join(target_tables)}")
         if join_lines:

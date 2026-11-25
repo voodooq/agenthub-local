@@ -282,6 +282,9 @@ export function splitSingleProcessDeliverable(
       fact_refs: undefined,
       memory_refs: undefined,
       token_stats: undefined,
+      suggestedFollowups: undefined,
+      clarificationHint: undefined,
+      followup_suggestions: undefined,
     },
     {
       ...msg,

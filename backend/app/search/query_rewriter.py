@@ -157,3 +157,130 @@ class ClarificationDetector:
 
         return ClarificationResult(needs_clarification=False)
 
+
+
+_REWRITE_SYSTEM_PROMPT = (
+    "你是检索问句指代消解助手。请结合最近几轮对话历史，判断【当前问句】是否包含指代词（如“它、这家、该站、那边”）或主语省略。\n"
+    "严格遵守以下规则：\n"
+    "1. 仅当【当前问句】明确依赖上文才能确定主语或对象时，才将省略的主语/实体补全，改写为一句独立、清晰、适合知识库检索的短句；\n"
+    "2. 【防话题污染铁律】如果【当前问句】本身已经语义完整，或者已经切换到了全新的话题（例如上文在聊马术，当前问句突然问发票抬头或报销标准），必须原样返回【当前问句】，严禁强行塞入上一轮的历史实体！\n"
+    "3. 直接输出最终检索问句本身，不要编号、不要引号、不要任何解释或多余标点。"
+)
+
+
+class ConversationalQueryRewriter:
+    """带短路门控与话题切换保护的多轮异步查询改写器。"""
+
+    # 通用语言学指代词与省略追问特征词（严格去领域化，不绑定特定行业词）
+    _COREF_MARKERS = (
+        "它", "它们", "他", "她", "这家", "那家", "该项", "该项目", "该制度", "该条款",
+        "这个", "那个", "那边", "那里", "上述", "前面", "刚才", "一样吗",
+        "还有吗", "怎么收费", "多少钱", "什么时候", "在哪", "流程是什么", "标准是多少",
+        "呢", "另外", "顺便",
+    )
+
+    @classmethod
+    def _extract_recent_turns(
+        cls, history_messages: list[Any] | None, max_messages: int = 6
+    ) -> list[tuple[str, str]]:
+        """提取最近 2~3 轮有效 user/assistant 对话文本。"""
+        if not history_messages:
+            return []
+
+        turns: list[tuple[str, str]] = []
+        for msg in history_messages:
+            if isinstance(msg, dict):
+                role = str(msg.get("role") or "").strip().lower()
+                content = msg.get("content")
+            else:
+                role = str(getattr(msg, "role", "") or "").strip().lower()
+                content = getattr(msg, "content", None)
+
+            if role not in ("user", "assistant"):
+                continue
+
+            if isinstance(content, list):
+                text_parts = [
+                    str(p.get("text") or "")
+                    for p in content
+                    if isinstance(p, dict) and p.get("type") == "text"
+                ]
+                text = " ".join(text_parts).strip()
+            else:
+                text = str(content or "").strip()
+
+            if text:
+                turns.append((role, text[:220]))
+
+        return turns[-max_messages:]
+
+    @classmethod
+    def should_rewrite(cls, query: str, history_messages: list[Any] | None) -> bool:
+        """短路门控：判断是否需要触发指代消解改写。"""
+        q = (query or "").strip()
+        if not q:
+            return False
+
+        turns = cls._extract_recent_turns(history_messages)
+        if len(turns) < 2:
+            return False
+
+        if len(q) < 18:
+            return True
+        if any(marker in q for marker in cls._COREF_MARKERS):
+            return True
+
+        return False
+
+    @classmethod
+    async def rewrite_query(
+        cls,
+        query: str,
+        history_messages: list[Any] | None,
+        accounts: list[dict[str, Any]] | None = None,
+    ) -> str:
+        """执行多轮指代消解；不满足门控条件或模型不可用时原样返回 query。"""
+        from ..providers.light_llm_router import light_llm_router
+
+        orig_q = (query or "").strip()
+        if not cls.should_rewrite(orig_q, history_messages):
+            return orig_q
+
+        turns = cls._extract_recent_turns(history_messages, max_messages=6)
+        history_lines = [
+            f"{'用户' if r == 'user' else '助手'}: {t}" for r, t in turns
+        ]
+        prompt = (
+            "【最近对话历史】\n"
+            + "\n".join(history_lines)
+            + f"\n\n【当前问句】\n{orig_q}\n\n请输出最终检索问句："
+        )
+
+        try:
+            raw = await light_llm_router.complete(
+                prompt=prompt,
+                accounts=accounts,
+                system_prompt=_REWRITE_SYSTEM_PROMPT,
+                temperature=0.0,
+                max_tokens=120,
+            )
+            if not raw or not raw.strip():
+                return orig_q
+
+            cleaned = re.sub(
+                r"<think>.*?(</think>|$)", "", raw, flags=re.DOTALL | re.IGNORECASE
+            ).strip()
+            cleaned = cleaned.splitlines()[0].strip().strip("\"'“”‘’") if cleaned else ""
+
+            if len(cleaned) < 2 or len(cleaned) > max(80, len(orig_q) * 4):
+                logger.info(f"[QueryRewrite] 输出异常回退原句: '{orig_q}'")
+                return orig_q
+
+            if cleaned != orig_q:
+                logger.info(f"[QueryRewrite] 原始问句='{orig_q}' -> 改写后='{cleaned}'")
+            else:
+                logger.info(f"[QueryRewrite] 话题完整或无需改写，保持原句='{orig_q}'")
+            return cleaned
+        except Exception as err:
+            logger.debug(f"[QueryRewrite] 指代消解跳过并回退原句: {err}")
+            return orig_q
