@@ -85,7 +85,7 @@ def get_app_override_dir(
     override = root / "app_override"
     if not (override / "version.json").is_file():
         return None
-    if not (override / "backend" / "main.py").is_file():
+    if not ((override / "backend" / "main.py").is_file() or (override / "backend" / "main.pyc").is_file()):
         return None
     if not (override / "frontend" / "out" / "index.html").is_file():
         return None

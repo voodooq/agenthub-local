@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.7.4-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.7.5-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.7.4 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.7.5 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -377,7 +377,12 @@ docker compose exec backend bash
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.7.4（最新）— 文档运维体系完善与热更分包验证版
+### 🚀 v1.7.5（最新）— 热更新后端自动编译 `.pyc` 字节码并剥离 `.py` 源码
+- **热更包安全编译交付（`updater_service.py` · `runtime_paths.py`）**：
+  - 客户端应用 4MB 轻量热更包至 `app_override/backend/` 后，自动使用当前运行时 `compileall(..., legacy=True)` 在原位编译生成同级 `.pyc` 字节码，校验通过后自动删除全部 `.py` 源文件并清理 `__pycache__`，与前端静态编译产物一致；
+  - 启动覆盖检测 `get_app_override_dir` 同步支持 `main.pyc` / `main.py` 双态识别。
+
+### 🚀 v1.7.4 — 文档运维体系完善与热更分包验证版
 - **7×24 保活指南归档（`docs/instabox_cloudflare_keepalive_guide.md` · `README.md`）**：
   - 新增 InstaBox 免费版 Cloudflare Workers 定时续租保活完整指引，并与路线图同步收口；
 - **分包热更新验证（`v1.7.3 -> v1.7.4`）**：

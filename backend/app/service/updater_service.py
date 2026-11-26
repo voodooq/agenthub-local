@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import asyncio
+import compileall
 import os
 import re
 import shutil
@@ -580,6 +581,11 @@ def _apply_frozen_hotpatch(archive_path: Path, app_root: Path) -> int:
         _write_file_inplace(src_root / "version.json", override_dir / "version.json")
         updated_files += 1
 
+        # 将 app_override/backend 编译为同级 .pyc 字节码并删除 .py 源文件（与前端静态构建保持一致）
+        backend_override_dir = override_dir / "backend"
+        if backend_override_dir.is_dir():
+            _compile_backend_to_pyc_and_strip_sources(backend_override_dir)
+
         # 增量同步新增内置技能到用户可写 skills/ 目录（已有技能跳过，不覆盖用户自定义）
         skills_src = src_root / "skills"
         if skills_src.is_dir():
@@ -594,6 +600,26 @@ def _apply_frozen_hotpatch(archive_path: Path, app_root: Path) -> int:
         return updated_files
     finally:
         shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def _compile_backend_to_pyc_and_strip_sources(backend_dir: Path) -> int:
+    """使用 legacy=True 在原位生成同级 .pyc 字节码，确认成功后再删除全部 .py 源文件。"""
+    ok = compileall.compile_dir(str(backend_dir), legacy=True, quiet=1, force=True)
+    if not ok or not (backend_dir / "main.pyc").is_file():
+        raise RuntimeError("后端字节码编译失败，未生成 main.pyc，已保留源码以确保可用")
+
+    removed = 0
+    for py_file in backend_dir.rglob("*.py"):
+        pyc_file = py_file.with_suffix(".pyc")
+        if pyc_file.is_file():
+            py_file.unlink()
+            removed += 1
+
+    # 清理可能残留的 __pycache__ 目录
+    for cache_dir in list(backend_dir.rglob("__pycache__")):
+        if cache_dir.is_dir():
+            shutil.rmtree(cache_dir, ignore_errors=True)
+    return removed
 
 
 def build_windows_hotpatch_restart_script(

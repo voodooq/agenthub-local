@@ -1,6 +1,6 @@
 [package]
 name = "agenthub-desktop"
-version = "1.7.4"
+version = "1.7.5"
 description = "AgentHub Local Cross-Platform Desktop"
 edition = "2021"
 
