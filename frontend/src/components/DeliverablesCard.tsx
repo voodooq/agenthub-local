@@ -69,8 +69,21 @@ export function DeliverablesCard({
 
   if (!filePaths || filePaths.length === 0) return null;
 
-  // 1. 优先过滤内部工具脚本与临时生成物
-  const cleanList = filePaths.filter((p) => !isIntermediateArtifact(p));
+  // 1. 优先按规范化物理路径去重，再过滤内部工具脚本与临时生成物
+  const dedupedPaths: string[] = [];
+  const seenKeys = new Set<string>();
+  for (const p of filePaths) {
+    const info = verifiedMap[p];
+    const key = String(info?.relPath || p)
+      .replace(/\\/g, '/')
+      .replace(/^\.\//, '')
+      .toLowerCase();
+    if (!seenKeys.has(key)) {
+      seenKeys.add(key);
+      dedupedPaths.push(p);
+    }
+  }
+  const cleanList = dedupedPaths.filter((p) => !isIntermediateArtifact(p));
 
   // 2. 如果存在表格、文档、图片等面向用户的业务交付物，强制屏蔽所有底层代码脚本，确保成果绝对聚焦
   const hasUserFacingDocs = cleanList.some((p) =>

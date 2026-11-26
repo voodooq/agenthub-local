@@ -977,6 +977,89 @@ class WikiStorageManager:
             "pages": created_pages,
         }
 
+    @staticmethod
+    def _demote_inner_h2_headings(body: str) -> str:
+        """将词条正文内部的非首行二级标题（## ）降级为三级标题（### ），避免再导入时被误拆解。"""
+        lines = body.splitlines()
+        out_lines: list[str] = []
+        in_fence = False
+        for line in lines:
+            stripped = line.lstrip()
+            if stripped.startswith(("```", "~~~")):
+                in_fence = not in_fence
+            if not in_fence and re.match(r"^##(?!#)\s+", line):
+                out_lines.append("### " + line[2:].lstrip())
+            else:
+                out_lines.append(line)
+        return "\n".join(out_lines).strip()
+
+    @classmethod
+    async def export_space_markdown(
+        cls,
+        *,
+        wiki_space_id: str,
+        include_inbox: bool = False,
+    ) -> dict[str, Any]:
+        """按空间导出汇总 Markdown，严格对齐 import_markdown_split 二级标题（## ）拆解导入格式。"""
+        space = await cls.get_space(wiki_space_id)
+        if not space:
+            raise ValueError(f"Wiki 空间不存在: {wiki_space_id}")
+
+        space_name = str(space.get("name") or wiki_space_id).strip()
+        space_desc = str(space.get("description") or "").strip()
+        status_filter = None if include_inbox else "published"
+        pages = await cls.list_pages(wiki_space_id, status=status_filter)
+
+        # 按分类路径与 slug/标题稳定排序，保证导出顺序一致
+        pages_sorted = sorted(
+            pages,
+            key=lambda p: (
+                str(p.get("category_path") or ""),
+                str(p.get("slug") or ""),
+                str(p.get("title") or ""),
+            ),
+        )
+
+        lines: list[str] = [f"# {space_name}"]
+        if space_desc:
+            lines.append(f"\n> {space_desc}")
+        lines.append(
+            f"\n> 导出自 AgentHub 百科空间 `{wiki_space_id}`，共 {len(pages_sorted)} 篇词条（严格兼容「导入拆解 .md」标准格式，每篇以 `## ` 二级标题分隔）。"
+        )
+
+        exported_count = 0
+        for p in pages_sorted:
+            detail = await cls.get_page_detail(p["page_id"])
+            if not detail:
+                continue
+            title = str(detail.get("title") or detail.get("slug") or "未命名词条").strip()
+            raw_md = str(detail.get("markdown_content") or "").strip()
+
+            # 若正文首行已是 ## 二级标题，剥离首行后用标准化 ## {title} 重建，防止重复标题或内嵌 ## 误拆
+            body_lines = raw_md.splitlines()
+            if body_lines and re.match(r"^##(?!#)\s+", body_lines[0]):
+                rest = "\n".join(body_lines[1:]).strip()
+            else:
+                rest = raw_md
+
+            clean_rest = cls._demote_inner_h2_headings(rest) if rest else ""
+            if clean_rest:
+                lines.append(f"\n## {title}\n\n{clean_rest}")
+            else:
+                lines.append(f"\n## {title}")
+            exported_count += 1
+
+        safe_stem = _sanitize_segment(space_name, wiki_space_id)[:60]
+        filename = f"{safe_stem}_wiki.md"
+        markdown_text = "\n".join(lines).rstrip() + "\n"
+        return {
+            "wiki_space_id": wiki_space_id,
+            "space_name": space_name,
+            "filename": filename,
+            "page_count": exported_count,
+            "markdown": markdown_text,
+        }
+
     @classmethod
     async def delete_page(
         cls,

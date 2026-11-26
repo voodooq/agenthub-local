@@ -4507,9 +4507,19 @@ function DesktopWorkbench() {
                             : [];
                           const verifiedMap: Record<string, any> = {};
                           const verifiedDeliverablePaths: string[] = [];
+                          const seenPhysicalKeys = new Set<string>();
                           for (const fp of deliverablePaths) {
                             const info = getVerifiedFile(fp);
                             if (info?.exists === true) {
+                              // 同一物理文件在正文中同时出现相对路径与绝对路径时，按规范化 relPath 严格去重
+                              const dedupKey = String(info.relPath || fp)
+                                .replace(/\\/g, '/')
+                                .replace(/^\.\//, '')
+                                .toLowerCase();
+                              if (seenPhysicalKeys.has(dedupKey)) {
+                                continue;
+                              }
+                              seenPhysicalKeys.add(dedupKey);
                               verifiedMap[fp] = info;
                               verifiedDeliverablePaths.push(fp);
                             }

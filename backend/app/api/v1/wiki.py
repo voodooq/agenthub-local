@@ -97,6 +97,22 @@ async def list_wiki_pages(
     return {"success": True, "data": pages}
 
 
+@router.get("/spaces/{space_id}/export-markdown")
+async def export_wiki_space_markdown(
+    space_id: str,
+    include_inbox: bool = Query(default=False, description="是否包含待审阅草稿词条"),
+) -> dict[str, Any]:
+    """按空间导出符合「导入拆解 .md」标准格式的汇总 Markdown 文档。"""
+    try:
+        res = await WikiStorageManager.export_space_markdown(
+            wiki_space_id=space_id,
+            include_inbox=include_inbox,
+        )
+        return {"success": True, "data": res}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
 @router.get("/spaces/{space_id}/preview")
 async def preview_wiki_page(
     space_id: str,

@@ -9,6 +9,7 @@ import {
   ChevronDown,
   ChevronRight,
   Clock,
+  Download,
   Edit3,
   Eye,
   FilePlus,
@@ -123,6 +124,7 @@ export function WikiWorkspaceView() {
   const [splitFilename, setSplitFilename] = useState('ontology_guide.md');
   const [splitContent, setSplitContent] = useState('');
   const [splittingImport, setSplittingImport] = useState(false);
+  const [exportingMd, setExportingMd] = useState(false);
   const [showCompileModal, setShowCompileModal] = useState(false);
   const [compileKbList, setCompileKbList] = useState<Array<{ kb_id: string; name: string; active_version?: string }>>([]);
   const [selectedCompileKbId, setSelectedCompileKbId] = useState('');
@@ -409,6 +411,36 @@ export function WikiWorkspaceView() {
     }
   };
 
+  const handleExportSpaceMarkdown = async () => {
+    if (!activeSpaceId || exportingMd) return;
+    setExportingMd(true);
+    try {
+      const res = await apiFetch(`/api/v1/wiki/spaces/${activeSpaceId}/export-markdown`);
+      const json = await res.json().catch(() => ({}));
+      if (!res.ok || !json.data) {
+        showToast(json.detail || '导出 Markdown 失败');
+        return;
+      }
+      const mdContent = String(json.data.markdown || '');
+      const filename = String(json.data.filename || `${activeSpaceId}_wiki.md`);
+      const pageCount = Number(json.data.page_count || 0);
+      const blob = new Blob([mdContent], { type: 'text/markdown;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      showToast(`已导出 ${pageCount} 篇词条至 ${filename}`);
+    } catch {
+      showToast('导出 Markdown 失败，请重试');
+    } finally {
+      setExportingMd(false);
+    }
+  };
+
   const handleDeleteSelectedPage = async () => {
     if (!selectedPage || deletingPage) return;
     const confirmed = window.confirm(`确定要删除词条「${selectedPage.title}」吗？删除后将移入回收站。`);
@@ -568,6 +600,16 @@ export function WikiWorkspaceView() {
           >
             <Upload className="w-3.5 h-3.5" strokeWidth={1.75} />
             <span>导入拆解 .md</span>
+          </button>
+          <button
+            type="button"
+            disabled={!activeSpaceId || exportingMd}
+            onClick={handleExportSpaceMarkdown}
+            className="px-2.5 py-1 rounded-md border border-border hover:bg-surface-200 text-xs flex items-center gap-1 disabled:opacity-40"
+            title="按当前空间导出符合「导入拆解 .md」标准格式的汇总 Markdown 文件"
+          >
+            <Download className="w-3.5 h-3.5" strokeWidth={1.75} />
+            <span>{exportingMd ? '导出中...' : '导出 .md'}</span>
           </button>
           <button
             type="button"

@@ -36,6 +36,32 @@ export function SchemaWarningCard({ warningText, defaultProfileId = '' }: Schema
   const [saving, setSaving] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [savedNotice, setSavedNotice] = useState(false);
+  const [precipitatedProfileName, setPrecipitatedProfileName] = useState('');
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!warningText.trim() || savedNotice) return;
+    apiFetch('/api/v1/profiles/check-warning-status', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        warning_text: warningText,
+        profile_id: defaultProfileId || undefined,
+      }),
+    })
+      .then(async (res) => {
+        if (!res.ok || cancelled) return;
+        const json = await res.json().catch(() => ({}));
+        if (!cancelled && json?.precipitated) {
+          setSavedNotice(true);
+          setPrecipitatedProfileName(String(json.profile_name || ''));
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [warningText, defaultProfileId, savedNotice]);
 
   useEffect(() => {
     if (!showModal) return;
@@ -160,9 +186,12 @@ export function SchemaWarningCard({ warningText, defaultProfileId = '' }: Schema
           <span>数据结构红线审计告警</span>
         </div>
         {savedNotice ? (
-          <span className="inline-flex items-center gap-1 text-[11px] text-emerald-500 font-medium">
+          <span
+            className="inline-flex items-center gap-1 text-[11px] text-emerald-500 font-medium"
+            title={precipitatedProfileName ? `已沉淀至「${precipitatedProfileName}」图谱红线` : '已沉淀至图谱红线'}
+          >
             <CheckCircle2 className="w-3.5 h-3.5" />
-            已沉淀至图谱红线
+            <span>已沉淀</span>
           </span>
         ) : (
           <button

@@ -3,6 +3,7 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -465,5 +466,91 @@ async def audit_and_clean_schema_query(req: AuditAndCleanRequest) -> dict[str, A
         "has_hard_block": audit_res["has_hard_block"],
         "warnings": audit_res["warnings"],
         "cleaned_data": cleaned_res,
+    }
+
+
+class CheckWarningStatusRequest(BaseModel):
+    warning_text: str = Field(..., min_length=1)
+    profile_id: str | None = None
+
+
+def is_warning_already_precipitated(
+    warning_text: str,
+    profile_graphs: list[dict[str, Any]],
+) -> tuple[bool, str]:
+    """判断告警内容是否已沉淀在 Schema Profile 的全局口径或红线关系中。"""
+    raw = (warning_text or "").strip()
+    if not raw:
+        return False, ""
+
+    # 剥离合并计数后缀、列表前缀及 [R00x xxx] 标签，提炼核心语义文本
+    core = re.sub(r"（本轮同类提醒共合并\s*\d+\s*次）$", "", raw).strip()
+    core = re.sub(r"^-\s*", "", core).strip()
+    core_no_tag = re.sub(r"^\[R\d{3}[^\]]*\]\s*", "", core).strip()
+    tables = [
+        t.lower()
+        for t in re.findall(r"`([a-zA-Z0-9_]+)`", core)
+        if "_" in t and t.lower() not in {"pay_fee", "create_time", "pay_start_time", "pid"}
+    ]
+
+    for graph in profile_graphs:
+        prof = graph.get("profile") or {}
+        prof_name = str(prof.get("name") or prof.get("id") or "")
+        desc = str(prof.get("description") or "")
+        if desc and (core in desc or (core_no_tag and len(core_no_tag) >= 8 and core_no_tag in desc)):
+            return True, prof_name
+
+        entities = graph.get("entities") or []
+        entity_map = {
+            str(e.get("id") or ""): str(e.get("table_name") or "").lower()
+            for e in entities
+            if e.get("table_name")
+        }
+        for rel in graph.get("relations") or []:
+            is_warn_rel = bool(rel.get("is_warning")) or rel.get("relation_type") == "DO_NOT_JOIN"
+            if not is_warn_rel:
+                continue
+            src_t = entity_map.get(
+                str(rel.get("source_entity_id") or ""),
+                str(rel.get("source_entity_id") or "").split(".")[-1].lower(),
+            )
+            tgt_t = entity_map.get(
+                str(rel.get("target_entity_id") or ""),
+                str(rel.get("target_entity_id") or "").split(".")[-1].lower(),
+            )
+            warn_msg = str(rel.get("warning_message") or rel.get("filter_rule") or "").strip()
+
+            # 1) 关系告警消息正文已完整包含在当前告警或反向包含
+            if warn_msg and (warn_msg in core or core_no_tag in warn_msg):
+                return True, prof_name
+
+            # 2) 告警提及的两个表已在该 Profile 中标记为红线关系
+            if len(tables) >= 2 and {tables[0], tables[1]} == {src_t, tgt_t}:
+                return True, prof_name
+
+    return False, ""
+
+
+@router.post("/profiles/check-warning-status")
+async def check_warning_precipitated_status(req: CheckWarningStatusRequest) -> dict[str, Any]:
+    """检查结构红线告警是否已沉淀至任意/指定 Schema Profile 中，避免前端重复引导点击。"""
+    target_ids: list[str] = []
+    if req.profile_id and req.profile_id.strip():
+        target_ids.append(req.profile_id.strip())
+    else:
+        all_profiles = await SchemaProfileRepository.list_profiles(masked=True)
+        target_ids = [str(p["id"]) for p in all_profiles if p.get("is_active", True)]
+
+    graphs: list[dict[str, Any]] = []
+    for pid in target_ids:
+        g = await SchemaProfileRepository.get_profile_graph(pid)
+        if g:
+            graphs.append(g)
+
+    precipitated, prof_name = is_warning_already_precipitated(req.warning_text, graphs)
+    return {
+        "success": True,
+        "precipitated": precipitated,
+        "profile_name": prof_name,
     }
 

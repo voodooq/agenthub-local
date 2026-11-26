@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.7.1-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.7.2-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.7.1 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.7.2 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -375,7 +375,17 @@ docker compose exec backend bash
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.7.1（最新）— 业务查数热修复与肯定祈使快捷引导体验升级
+### 🚀 v1.7.2（最新）— 百科空间标准导出、红线已沉淀自动识别与成果文件物理去重
+- **百科工作台按空间导出 `.md`（`storage_manager.py` · `wiki.py` · `WikiWorkspaceView.tsx`）**：
+  - 新增 `GET /api/v1/wiki/spaces/{space_id}/export-markdown` 与工具栏「导出 .md」按钮，严格对齐「导入拆解 .md」二级标题（`## `）标准格式，自动降级词条内部二级子标题并保护代码块，支持导出后 1:1 无损往返导入。
+- **数据结构红线审计告警已沉淀状态自动识别（`schema_profiles.py` · `SchemaWarningCard.tsx`）**：
+  - 新增 `POST /api/v1/profiles/check-warning-status` 接口，自动核对全局口径与图谱红线关系；已沉淀规则直接展示 `✓ 已沉淀` 徽章，未沉淀时才显示 `+ 沉淀为 Profile 红线` 按钮。
+- **成果文件卡片物理路径去重（`page.tsx` · `DeliverablesCard.tsx`）**：
+  - 按规范化工作区相对路径 (`relPath`) 严格去重，彻底解决正文中同时出现相对路径与绝对路径时重复显示两个相同文件卡片的问题。
+- **溯源与审计编号速查手册（`docs/citation_and_audit_codes_reference.md`）**：
+  - 整理 `[S1]` / `[T1]` / `[R1]` 句级引用编号及 `R000` ~ `R007` / `P001` ~ `P003` 审计编号对照说明。
+
+### 🚀 v1.7.1 — 业务查数热修复与肯定祈使快捷引导体验升级
 - **业务查数稳定性修复（`runtime.py`）**：
   - 修复 `query_biz_data_via_ontology` 执行前未初始化 `res_text` 导致的 `UnboundLocalError` 运行时异常。
 - **快捷引导卡片交互优化（`intent_router.py` · `runtime.py`）**：
