@@ -5,7 +5,8 @@
 from __future__ import annotations
 
 import asyncio
-import compileall
+import importlib.util
+import marshal
 import os
 import re
 import shutil
@@ -603,13 +604,29 @@ def _apply_frozen_hotpatch(archive_path: Path, app_root: Path) -> int:
 
 
 def _compile_backend_to_pyc_and_strip_sources(backend_dir: Path) -> int:
-    """使用 legacy=True 在原位生成同级 .pyc 字节码，确认成功后再删除全部 .py 源文件。"""
-    ok = compileall.compile_dir(str(backend_dir), legacy=True, quiet=1, force=True)
-    if not ok or not (backend_dir / "main.pyc").is_file():
+    """使用内置 compile + marshal 生成 PEP 552 同级 .pyc 字节码（不依赖 compileall），确认成功后再删除全部 .py 源文件。"""
+    py_files = list(backend_dir.rglob("*.py"))
+    magic_number = importlib.util.MAGIC_NUMBER
+    bitfield = (0).to_bytes(4, "little")
+
+    for py_file in py_files:
+        source_bytes = py_file.read_bytes()
+        st = py_file.stat()
+        code = compile(source_bytes, str(py_file), "exec", dont_inherit=True)
+        pyc_bytes = (
+            magic_number
+            + bitfield
+            + (int(st.st_mtime) & 0xFFFFFFFF).to_bytes(4, "little")
+            + (st.st_size & 0xFFFFFFFF).to_bytes(4, "little")
+            + marshal.dumps(code)
+        )
+        py_file.with_suffix(".pyc").write_bytes(pyc_bytes)
+
+    if not (backend_dir / "main.pyc").is_file():
         raise RuntimeError("后端字节码编译失败，未生成 main.pyc，已保留源码以确保可用")
 
     removed = 0
-    for py_file in backend_dir.rglob("*.py"):
+    for py_file in py_files:
         pyc_file = py_file.with_suffix(".pyc")
         if pyc_file.is_file():
             py_file.unlink()

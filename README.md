@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.7.5-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.7.6-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.7.5 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.7.6 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -377,7 +377,11 @@ docker compose exec backend bash
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.7.5（最新）— 热更新后端自动编译 `.pyc` 字节码并剥离 `.py` 源码
+### 🚀 v1.7.6（最新）— 热更新字节码零额外依赖内置编译（修复旧 EXE 缺失 `compileall` 报错）
+- **零外部标准库依赖的 `.pyc` 原位编译（`updater_service.py`）**：
+  - 针对旧版 PyInstaller 冻结 EXE 未静态打包 `compileall` 导致热更重启时报 `ModuleNotFoundError: No module named 'compileall'` 的问题，重构 `_compile_backend_to_pyc_and_strip_sources`，改用 Python 内建 `compile()` + `marshal.dumps()` + `importlib.util.MAGIC_NUMBER` 直接生成标准 PEP 552 同级 `.pyc` 字节码并删除全部 `.py` 源码，彻底兼容所有历史版本桌面基础壳。
+
+### 🚀 v1.7.5 — 热更新后端自动编译 `.pyc` 字节码并剥离 `.py` 源码
 - **热更包安全编译交付（`updater_service.py` · `runtime_paths.py`）**：
   - 客户端应用 4MB 轻量热更包至 `app_override/backend/` 后，自动使用当前运行时 `compileall(..., legacy=True)` 在原位编译生成同级 `.pyc` 字节码，校验通过后自动删除全部 `.py` 源文件并清理 `__pycache__`，与前端静态编译产物一致；
   - 启动覆盖检测 `get_app_override_dir` 同步支持 `main.pyc` / `main.py` 双态识别。
