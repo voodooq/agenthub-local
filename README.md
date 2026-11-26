@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.7.2-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.7.3-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.7.2 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.7.3 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -375,7 +375,13 @@ docker compose exec backend bash
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.7.2（最新）— 百科空间标准导出、红线已沉淀自动识别与成果文件物理去重
+### 🚀 v1.7.3（最新）— Windows & macOS「基础壳 + 4MB 轻量热更包」分离升级架构
+- **跨平台热更覆盖目录 (`app_override/`) 与版本防降级保护（`runtime_paths.py` · `desktop_app.py` · `config.py` · `main.py`）**：
+  - 桌面端启动时优先从可写目录 `app_override/` 加载最新 `backend/`、`frontend/out/`、`skills/` 与 `version.json`，并自动比对内置版本防止重装高版本基础壳后被旧热更目录覆盖。
+- **Windows EXE 与 macOS `.app` 优先下载 ~4MB 轻量更新包并自动重启（`updater_service.py`）**：
+  - `select_release_asset` 在冻结桌面模式下优先选取 `*-portable.zip`（约 4MB）原地热更新至 `app_override/`，老版本首次升级新版基础壳后，后续所有迭代均无需再下载 100MB+ 全量包（macOS 亦支持自动重启生效，无需手动拖拽 `.dmg`）。
+
+### 🚀 v1.7.2 — 百科空间标准导出、红线已沉淀自动识别与成果文件物理去重
 - **百科工作台按空间导出 `.md`（`storage_manager.py` · `wiki.py` · `WikiWorkspaceView.tsx`）**：
   - 新增 `GET /api/v1/wiki/spaces/{space_id}/export-markdown` 与工具栏「导出 .md」按钮，严格对齐「导入拆解 .md」二级标题（`## `）标准格式，自动降级词条内部二级子标题并保护代码块，支持导出后 1:1 无损往返导入。
 - **数据结构红线审计告警已沉淀状态自动识别（`schema_profiles.py` · `SchemaWarningCard.tsx`）**：

@@ -8,8 +8,10 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -53,6 +55,56 @@ def get_bundle_root() -> Path:
         return exe_dir
 
     return _SOURCE_REPO_ROOT
+
+
+def _parse_simple_semver(ver: str) -> tuple[int, int, int]:
+    """解析基础三段版本号，用于判断外部热更包是否不低于内置基础包版本。"""
+    nums = re.findall(r"\d+", ver or "")
+    parts = [int(n) for n in nums[:3]]
+    while len(parts) < 3:
+        parts.append(0)
+    return (parts[0], parts[1], parts[2])
+
+
+def _read_version_str(version_file: Path) -> str:
+    if not version_file.is_file():
+        return ""
+    try:
+        data = json.loads(version_file.read_text(encoding="utf-8"))
+        return str(data.get("version") or "").strip().lstrip("vV")
+    except (OSError, json.JSONDecodeError, TypeError, ValueError):
+        return ""
+
+
+def get_app_override_dir(
+    writable_root: Path | None = None,
+    bundle_root: Path | None = None,
+) -> Path | None:
+    """获取外部热更覆盖目录（app_override）；仅当其完整有效且版本不低于内置包时生效。"""
+    root = writable_root or get_writable_app_root()
+    override = root / "app_override"
+    if not (override / "version.json").is_file():
+        return None
+    if not (override / "backend" / "main.py").is_file():
+        return None
+    if not (override / "frontend" / "out" / "index.html").is_file():
+        return None
+
+    override_ver = _read_version_str(override / "version.json")
+    if not override_ver:
+        return None
+
+    bundled = bundle_root or get_bundle_root()
+    bundled_ver = _read_version_str(bundled / "version.json")
+    if bundled_ver and _parse_simple_semver(override_ver) < _parse_simple_semver(bundled_ver):
+        # 若用户重新安装了更高版本的基础壳，自动忽略过时的旧热更目录
+        return None
+    return override.resolve()
+
+
+def get_effective_app_root() -> Path:
+    """返回当前生效的应用代码与前端静态资源根目录（优先外部热更包，回退内置包）。"""
+    return get_app_override_dir() or get_bundle_root()
 
 
 def get_fallback_user_data_dir(

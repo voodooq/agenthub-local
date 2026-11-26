@@ -24,9 +24,24 @@ _BACKEND_DIR = BASE_DIR / "backend"
 if _BACKEND_DIR.is_dir() and str(_BACKEND_DIR) not in sys.path:
     sys.path.insert(0, str(_BACKEND_DIR))
 
-from backend.main import app, find_free_port
-from backend.app.core.config import settings
-from backend.app.core.logging_config import logger
+# 若存在版本不低于内置基础包的外部 4MB 热更目录（app_override），重置模块缓存并优先加载之
+from backend.app.core.runtime_paths import get_app_override_dir  # noqa: E402
+
+_APP_OVERRIDE_DIR = get_app_override_dir()
+if _APP_OVERRIDE_DIR is not None:
+    for _mod_name in [k for k in list(sys.modules.keys()) if k == "backend" or k.startswith("backend.")]:
+        sys.modules.pop(_mod_name, None)
+    _override_backend = _APP_OVERRIDE_DIR / "backend"
+    if _override_backend.is_dir():
+        sys.path.insert(0, str(_override_backend))
+    sys.path.insert(0, str(_APP_OVERRIDE_DIR))
+    EFFECTIVE_BASE_DIR = _APP_OVERRIDE_DIR
+else:
+    EFFECTIVE_BASE_DIR = BASE_DIR
+
+from backend.main import app, find_free_port  # noqa: E402
+from backend.app.core.config import settings  # noqa: E402
+from backend.app.core.logging_config import logger  # noqa: E402
 
 
 def start_backend_server(port: int):
@@ -172,7 +187,9 @@ def main():
 
     def on_shown():
         # 窗体就绪后绑定原生透明 Logo 图标到 Windows 标题栏与任务栏
-        icon_file = BASE_DIR / "assets" / "app_icon.ico"
+        icon_file = EFFECTIVE_BASE_DIR / "assets" / "app_icon.ico"
+        if not icon_file.is_file():
+            icon_file = BASE_DIR / "assets" / "app_icon.ico"
         _apply_windows_window_icon(icon_file)
 
     if window:

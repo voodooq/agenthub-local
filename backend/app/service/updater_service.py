@@ -278,8 +278,13 @@ def select_release_asset(
     assets: list[dict[str, Any]],
     install_mode: str,
     platform_str: str | None = None,
+    prefer_hotpatch: bool = True,
 ) -> dict[str, Any] | None:
-    """根据当前运行形态与宿主机架构，从 GitHub Release assets 中选择最佳安装包。"""
+    """根据当前运行形态与宿主机架构，从 GitHub Release assets 中选择最佳安装包。
+
+    NOTE: 在 windows_exe / macos_app 模式下，优先选择 ~4MB 的跨平台轻量更新包 (*-portable.zip)
+    原地热更新至 app_override/，仅当不存在轻量更新包或显式禁用时回退完整安装包 (.exe / .dmg)。
+    """
     if not assets:
         return None
 
@@ -304,14 +309,22 @@ def select_release_asset(
 
         score = -1
         if install_mode == "windows_exe":
-            if lower.endswith(".exe"):
+            if prefer_hotpatch and "portable" in lower and lower.endswith(".zip"):
+                score = 150
+            elif prefer_hotpatch and "portable" in lower and lower.endswith(".tar.gz"):
+                score = 145
+            elif lower.endswith(".exe"):
                 score = 100
                 if "windows" in lower or "win" in lower:
                     score += 30
                 if arch_hint in lower:
                     score += 10
         elif install_mode == "macos_app":
-            if lower.endswith(".dmg"):
+            if prefer_hotpatch and "portable" in lower and lower.endswith(".zip"):
+                score = 150
+            elif prefer_hotpatch and "portable" in lower and lower.endswith(".tar.gz"):
+                score = 145
+            elif lower.endswith(".dmg"):
                 score = 100
                 if "macos" in lower or "mac" in lower or "darwin" in lower:
                     score += 30
@@ -533,6 +546,115 @@ def _apply_docker_archive(archive_path: Path, app_root: Path) -> int:
         shutil.rmtree(staging_dir, ignore_errors=True)
 
     return updated_files
+
+
+def _apply_frozen_hotpatch(archive_path: Path, app_root: Path) -> int:
+    """将 4MB 轻量更新包安全写入 app_override/ 目录，供 Windows EXE 与 macOS .app 热加载，绝不触碰用户数据。"""
+    staging_dir = app_root / "data" / "updates" / f"hotpatch_staging_{int(time.time())}"
+    override_dir = app_root / "app_override"
+    updated_files = 0
+    try:
+        src_root = _extract_archive_safely(archive_path, staging_dir)
+        if not (src_root / "backend" / "main.py").is_file():
+            raise ValueError("热更新包缺少核心后端入口 backend/main.py")
+        if not (src_root / "frontend" / "out" / "index.html").is_file():
+            raise ValueError("热更新包缺少静态前端入口 frontend/out/index.html")
+        if not (src_root / "version.json").is_file():
+            raise ValueError("热更新包缺少版本清单 version.json")
+
+        override_dir.mkdir(parents=True, exist_ok=True)
+        for sub_name in ("backend", "frontend", "skills", "assets"):
+            src_sub = src_root / sub_name
+            if not src_sub.is_dir():
+                continue
+            dst_sub = override_dir / sub_name
+            if dst_sub.exists():
+                shutil.rmtree(dst_sub, ignore_errors=True)
+            updated_files += _sync_directory_tree(
+                src_sub,
+                dst_sub,
+                skip_top_dirs=frozenset({"__pycache__", "data", "tests"}),
+                skip_if_exists_files=frozenset(),
+            )
+
+        _write_file_inplace(src_root / "version.json", override_dir / "version.json")
+        updated_files += 1
+
+        # 增量同步新增内置技能到用户可写 skills/ 目录（已有技能跳过，不覆盖用户自定义）
+        skills_src = src_root / "skills"
+        if skills_src.is_dir():
+            user_skills = app_root / "skills"
+            user_skills.mkdir(parents=True, exist_ok=True)
+            for item in skills_src.iterdir():
+                if not item.is_dir():
+                    continue
+                target_skill = user_skills / item.name
+                if not target_skill.exists():
+                    shutil.copytree(item, target_skill, ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        return updated_files
+    finally:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+
+
+def build_windows_hotpatch_restart_script(
+    *,
+    target_exe: Path,
+    wait_pids: list[int],
+) -> str:
+    """生成 Windows 热更新后等待旧 EXE 释放再重新拉起的静默 PowerShell 脚本。"""
+    exe_str = str(target_exe).replace("'", "''")
+    work_dir = str(target_exe.parent).replace("'", "''")
+    pids_literal = ", ".join(str(int(p)) for p in wait_pids if int(p) > 0) or "0"
+    return f"""$ErrorActionPreference = 'SilentlyContinue'
+$TargetExe = '{exe_str}'
+$WorkDir = '{work_dir}'
+$WaitPids = @({pids_literal})
+foreach ($pidVal in $WaitPids) {{
+    if ($pidVal -le 0) {{ continue }}
+    for ($i = 0; $i -lt 50; $i++) {{
+        $proc = Get-Process -Id $pidVal -ErrorAction SilentlyContinue
+        if (-not $proc) {{ break }}
+        Start-Sleep -Milliseconds 250
+    }}
+}}
+Get-ChildItem Env: | Where-Object {{
+    $_.Name -like '_PYI_*' -or $_.Name -in @('_MEIPASS2', 'DESKTOP_PARENT_PID', 'TAURI_PARENT_PID', 'PYTHONHOME', 'PYTHONPATH')
+}} | ForEach-Object {{
+    Remove-Item "Env:\\$($_.Name)" -ErrorAction SilentlyContinue
+}}
+$env:PYINSTALLER_RESET_ENVIRONMENT = '1'
+if (Test-Path -LiteralPath $TargetExe) {{
+    Start-Process -FilePath $TargetExe -WorkingDirectory $WorkDir -WindowStyle Normal
+}}
+"""
+
+
+def build_macos_hotpatch_restart_script(
+    *,
+    target_exec: Path,
+    wait_pid: int,
+) -> str:
+    """生成 macOS 热更新后等待旧 .app 退出再重新拉起的 Shell 脚本。"""
+    app_bundle: Path | None = None
+    for parent in target_exec.parents:
+        if parent.name.endswith(".app"):
+            app_bundle = parent
+            break
+    launch_cmd = f'open -n "{app_bundle.as_posix()}"' if app_bundle else f'"{target_exec.as_posix()}" &'
+    return f"""#!/bin/sh
+WAIT_PID={int(wait_pid)}
+i=0
+while [ "$i" -lt 50 ]; do
+  if ! kill -0 "$WAIT_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.25
+  i=$((i + 1))
+done
+unset _MEIPASS2 DESKTOP_PARENT_PID TAURI_PARENT_PID PYTHONHOME PYTHONPATH
+export PYINSTALLER_RESET_ENVIRONMENT=1
+{launch_cmd}
+"""
 
 
 def build_windows_exe_update_script(
@@ -1220,6 +1342,63 @@ class AutoUpdaterService:
         self._state["status"] = "applying"
         self._state["install_mode"] = install_mode
         app_root = get_writable_app_root()
+        is_hotpatch_archive = downloaded_path.name.lower().endswith((".zip", ".tar.gz"))
+
+        # Windows / macOS 冻结态下载轻量便携更新包（~4MB）时，直接写入 app_override/ 并重启，无需重新下载 100MB+ 整包
+        if install_mode in ("windows_exe", "macos_app") and is_hotpatch_archive:
+            try:
+                updated_files = await asyncio.to_thread(_apply_frozen_hotpatch, downloaded_path, app_root)
+            except Exception as exc:
+                self._state["status"] = "downloaded"
+                self._state["error_message"] = str(exc)
+                raise ValueError(str(exc)) from exc
+
+            target_exec = Path(sys.executable).resolve()
+            if install_mode == "windows_exe":
+                wait_pids = [os.getpid()]
+                parent_pid_raw = os.environ.get("DESKTOP_PARENT_PID", "").strip()
+                if parent_pid_raw.isdigit():
+                    wait_pids.append(int(parent_pid_raw))
+                script_path = self.get_updates_dir() / "restart_hotpatch.ps1"
+                script_path.write_text(
+                    build_windows_hotpatch_restart_script(target_exe=target_exec, wait_pids=wait_pids),
+                    encoding="utf-8-sig",
+                )
+                if trigger_exit:
+                    self._spawn_detached_command(
+                        [
+                            "powershell.exe",
+                            "-NoProfile",
+                            "-ExecutionPolicy",
+                            "Bypass",
+                            "-WindowStyle",
+                            "Hidden",
+                            "-File",
+                            str(script_path),
+                        ],
+                        cwd=target_exec.parent,
+                    )
+                    asyncio.create_task(self._delayed_exit(0.6))
+            else:
+                script_path = self.get_updates_dir() / "restart_hotpatch.sh"
+                script_path.write_text(
+                    build_macos_hotpatch_restart_script(target_exec=target_exec, wait_pid=os.getpid()),
+                    encoding="utf-8",
+                )
+                os.chmod(script_path, 0o755)
+                if trigger_exit:
+                    self._spawn_detached_command(["/bin/sh", str(script_path)], cwd=app_root)
+                    asyncio.create_task(self._delayed_exit(0.6))
+
+            return {
+                "status": "restarting",
+                "install_mode": install_mode,
+                "update_kind": "hotpatch",
+                "target_version": self._state.get("latest_version"),
+                "updated_files": updated_files,
+                "script_path": str(script_path),
+                "message": f"已完成轻量热更包 {updated_files} 个核心文件升级，客户端正在重启加载新版本...",
+            }
 
         if install_mode == "windows_exe":
             target_exe = Path(sys.executable).resolve()

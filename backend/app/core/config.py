@@ -11,7 +11,7 @@ import secrets
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from .runtime_paths import get_bundle_root, get_writable_app_root
+from .runtime_paths import get_bundle_root, get_effective_app_root, get_writable_app_root
 
 logger = logging.getLogger("agenthub")
 
@@ -84,8 +84,10 @@ def load_version_metadata(candidates: list[Path] | None = None) -> tuple[str, st
     if candidates is not None:
         search_paths = list(candidates)
     else:
+        effective_root = get_effective_app_root()
         bundle_root = get_bundle_root()
         search_paths = [
+            effective_root / "version.json",
             bundle_root / "version.json",
             Path(__file__).resolve().parent.parent.parent.parent / "version.json",
             Path(__file__).resolve().parent / "version.json",

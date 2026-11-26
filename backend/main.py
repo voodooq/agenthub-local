@@ -26,7 +26,7 @@ import psutil
 
 from app.core.config import settings
 from app.core.logging_config import setup_logging, logger
-from app.core.runtime_paths import get_bundle_root, get_writable_app_root
+from app.core.runtime_paths import get_bundle_root, get_effective_app_root, get_writable_app_root
 from app.repository.db import db_manager
 from app.core.proxy_helper import apply_system_proxy_to_process
 from app.api.router import api_router
@@ -324,9 +324,12 @@ app.include_router(api_router)
 
 # 挂载 Next.js 静态导出资源目录 (实现免 Node.js 运行)
 base_dir = Path(__file__).resolve().parent
+effective_root = get_effective_app_root()
 bundle_root = get_bundle_root()
 writable_root = get_writable_app_root()
 candidates = [
+    effective_root / "frontend" / "out",
+    effective_root / "static",
     bundle_root / "static",
     bundle_root / "frontend" / "out",
     writable_root / "static",
