@@ -50,7 +50,7 @@ def get_wikis_root_dir() -> Path:
 
 def _sanitize_segment(raw: str, fallback: str = "未分类") -> str:
     """清洗单级目录或文件名，阻断路径穿越与非法字符。"""
-    cleaned = _INVALID_PATH_CHARS_RE.sub("_", str(raw or "").strip())
+    cleaned = _INVALID_PATH_CHARS_RE.sub("_", (raw or "").strip())
     cleaned = cleaned.replace("..", "_").strip(". ")
     return cleaned or fallback
 
@@ -136,7 +136,7 @@ class WikiStorageManager:
         slug: str,
     ) -> tuple[str, Path]:
         """根据分类目录与 slug 生成经过安全校验的相对与绝对路径。"""
-        raw_parts = [p for p in re.split(r"[/\\]+", str(category_path or "未分类")) if p.strip()]
+        raw_parts = [p for p in re.split(r"[/\\]+", category_path or "未分类") if p.strip()]
         safe_parts = [_sanitize_segment(p, fallback="未分类") for p in raw_parts] or ["未分类"]
         safe_slug = _sanitize_segment(slug, fallback=f"page_{uuid.uuid4().hex[:8]}")
         rel_path = Path(*safe_parts) / f"{safe_slug}.md"
@@ -171,7 +171,7 @@ class WikiStorageManager:
                     wiki_space_id, name, description, root_dir_path, default_kb_id, auto_ingest_chat
                 ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (space_id, clean_name, description.strip(), str(space_root), default_kb_id.strip(), int(auto_ingest_chat)),
+                (space_id, clean_name, description.strip(), str(space_root), default_kb_id.strip(), auto_ingest_chat),
             )
             await conn.commit()
 
@@ -496,7 +496,7 @@ class WikiStorageManager:
                 if not body:
                     continue
 
-                candidate_slugs = [s for s in all_slugs if s != own_slug]
+                candidate_slugs: list[str] = [str(s) for s in all_slugs if s != own_slug]
                 stitched_body = cls._stitch_body_links(body, candidate_slugs)
 
                 if stitched_body != body:
@@ -760,7 +760,7 @@ class WikiStorageManager:
                 if vectors is not None and len(vectors) > 0:
                     embedding_blob = _to_float32_bytes(vectors[0])
                     emb_model = getattr(provider, "model_name", emb_model)
-                    emb_dim = int(provider.dimension)
+                    emb_dim = provider.dimension
             except Exception as err:
                 logger.warning(f"[WikiSync] 计算 wiki_page 向量失败，降级为全文检索: {err}")
 
