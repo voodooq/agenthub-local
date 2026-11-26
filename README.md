@@ -1,7 +1,7 @@
 # AgentHub Local (本地多源算力中心与自主智能体工作台)
 
 <p align="center">
-  <img src="https://img.shields.io/badge/Version-v1.7.3-emerald?style=flat-square" alt="Version" />
+  <img src="https://img.shields.io/badge/Version-v1.7.4-emerald?style=flat-square" alt="Version" />
   <img src="https://img.shields.io/badge/Edition-Strata%20Edition-indigo?style=flat-square" alt="Edition" />
   <img src="https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&style=flat-square" alt="Python Version" />
   <img src="https://img.shields.io/badge/FastAPI-0.111%2B-009688?logo=fastapi&style=flat-square" alt="FastAPI" />
@@ -13,7 +13,7 @@
 </p>
 
 > **数据与算力彻底解耦，告别单一模型绑定**：
-> AgentHub Local（`v1.7.3 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
+> AgentHub Local（`v1.7.4 · Strata Edition`）是专为极客与研发团队打造的**本地优先（Local-First）全场景智能体底座**。
 > 所有会话历史、上下文快照、工作草稿、专属技能规程与长期记忆 100% 存留于本地原生 SQLite 数据库（WAL 并发模式 + FTS5 trigram 倒排全文检索）。无论接入本地私有大模型（Ollama、vLLM、llama.cpp），还是外部商业与开源 API（DeepSeek、Claude、OpenAI、Google AI、Antigravity CLI），均充当无状态算力执行节点，零数据外泄，实现真正的个人私有化 AI 智能枢纽。
 
 ---
@@ -371,11 +371,19 @@ docker compose restart
 docker compose exec backend bash
 ```
 
+> **InstaBox 免费版 7×24 保活指南**：若部署在 InstaBox 免费沙盒主机上，可配合 Cloudflare Workers 定时续租方案实现零成本防休眠挂机，详见 [InstaBox 免费版保活指南](docs/instabox_cloudflare_keepalive_guide.md)。
+
 ---
 
 ## 🧭 版本演进总览
 
-### 🚀 v1.7.3（最新）— Windows & macOS「基础壳 + 4MB 轻量热更包」分离升级架构
+### 🚀 v1.7.4（最新）— 文档运维体系完善与热更分包验证版
+- **7×24 保活指南归档（`docs/instabox_cloudflare_keepalive_guide.md` · `README.md`）**：
+  - 新增 InstaBox 免费版 Cloudflare Workers 定时续租保活完整指引，并与路线图同步收口；
+- **分包热更新验证（`v1.7.3 -> v1.7.4`）**：
+  - 供 Windows / macOS `v1.7.3` 基础壳通过面板验证 4MB 轻量便携更新包自动热更与重启生效。
+
+### 🚀 v1.7.3 — Windows & macOS「基础壳 + 4MB 轻量热更包」分离升级架构
 - **跨平台热更覆盖目录 (`app_override/`) 与版本防降级保护（`runtime_paths.py` · `desktop_app.py` · `config.py` · `main.py`）**：
   - 桌面端启动时优先从可写目录 `app_override/` 加载最新 `backend/`、`frontend/out/`、`skills/` 与 `version.json`，并自动比对内置版本防止重装高版本基础壳后被旧热更目录覆盖。
 - **Windows EXE 与 macOS `.app` 优先下载 ~4MB 轻量更新包并自动重启（`updater_service.py`）**：
